@@ -94,6 +94,63 @@ pub fn n_cast() -> [] int {
     return 15;
 }
 
+// Statement nodes (src/stmt.cho). A SELECT's children are its clauses, in order, each a node of its own kind.
+pub fn n_select() -> [] int {
+    return 16;
+}
+
+pub fn n_items() -> [] int {
+    return 17;
+}
+
+pub fn n_item() -> [] int {
+    return 18;
+}
+
+pub fn n_star() -> [] int {
+    return 19;
+}
+
+pub fn n_from() -> [] int {
+    return 20;
+}
+
+pub fn n_table() -> [] int {
+    return 21;
+}
+
+pub fn n_join() -> [] int {
+    return 22;
+}
+
+pub fn n_where() -> [] int {
+    return 23;
+}
+
+pub fn n_group() -> [] int {
+    return 24;
+}
+
+pub fn n_having() -> [] int {
+    return 25;
+}
+
+pub fn n_orderby() -> [] int {
+    return 26;
+}
+
+pub fn n_order() -> [] int {
+    return 27;
+}
+
+pub fn n_limit() -> [] int {
+    return 28;
+}
+
+pub fn n_offset() -> [] int {
+    return 29;
+}
+
 // The ways a parse is refused: `expr` answers `0 - code`, and `st[3]` is the token index it stopped at.
 pub fn e_syntax() -> [] int {
     return 1;
@@ -127,6 +184,18 @@ pub fn e_subquery() -> [] int {
     return 8;
 }
 
+pub fn e_set_operation() -> [] int {
+    return 9;
+}
+
+pub fn e_unsupported_join() -> [] int {
+    return 10;
+}
+
+pub fn e_unsupported_statement() -> [] int {
+    return 11;
+}
+
 pub fn error_name(code: int) -> [] &static [byte] {
     if code == 1 {
         return "syntax";
@@ -148,6 +217,15 @@ pub fn error_name(code: int) -> [] &static [byte] {
     }
     if code == 7 {
         return "too-big";
+    }
+    if code == 9 {
+        return "set-operation";
+    }
+    if code == 10 {
+        return "unsupported-join";
+    }
+    if code == 11 {
+        return "unsupported-statement";
     }
     return "subquery";
 }
@@ -433,7 +511,7 @@ fn lower(c: int) -> [] int {
 }
 
 // Is the text at `start`, `length` bytes, equal to `lit` (lower case) ignoring ASCII case?
-fn word_is[&s](sql: &s [byte], start: int, length: int, lit: &static [byte]) -> [] bool {
+pub fn word_is[&s](sql: &s [byte], start: int, length: int, lit: &static [byte]) -> [] bool {
     if length != len(lit) {
         return false;
     }
@@ -459,7 +537,7 @@ fn word_at[&s](sql: &s [byte], start: int, length: int, words: &static [byte], a
     return true;
 }
 
-fn is_reserved[&s](sql: &s [byte], start: int, length: int) -> [] bool {
+pub fn is_reserved[&s](sql: &s [byte], start: int, length: int) -> [] bool {
     let words = reserved_words();
     var i = 0;
     var ws = 0;
@@ -475,20 +553,20 @@ fn is_reserved[&s](sql: &s [byte], start: int, length: int) -> [] bool {
     return false;
 }
 
-fn tkind[&t](toks: &t [int], i: int) -> [] int {
+pub fn tkind[&t](toks: &t [int], i: int) -> [] int {
     return toks[4 * i];
 }
 
-fn tstart[&t](toks: &t [int], i: int) -> [] int {
+pub fn tstart[&t](toks: &t [int], i: int) -> [] int {
     return toks[4 * i + 1];
 }
 
-fn tlen[&t](toks: &t [int], i: int) -> [] int {
+pub fn tlen[&t](toks: &t [int], i: int) -> [] int {
     return toks[4 * i + 2];
 }
 
 // Is token `i` (before `end`) the unquoted word `lit`?
-fn kw[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, lit: &static [byte]) -> [] bool {
+pub fn kw[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, lit: &static [byte]) -> [] bool {
     if i >= end {
         return false;
     }
@@ -499,7 +577,7 @@ fn kw[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, lit: &static [by
 }
 
 // Is token `i` (before `end`) the punctuation byte `c`?
-fn punct[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, c: int) -> [] bool {
+pub fn punct[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, c: int) -> [] bool {
     if i >= end {
         return false;
     }
@@ -510,7 +588,7 @@ fn punct[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, c: int) -> []
 }
 
 // Is token `i` (before `end`) the operator `lit`?
-fn opr[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, lit: &static [byte]) -> [] bool {
+pub fn opr[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, lit: &static [byte]) -> [] bool {
     if i >= end {
         return false;
     }
@@ -525,7 +603,7 @@ fn starts_query[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int) -> [] 
     return kw(sql, toks, i, end, "select") || kw(sql, toks, i, end, "with") || kw(sql, toks, i, end, "values");
 }
 
-fn fail[&x](st: &!x [int], pos: int, code: int) -> [] int {
+pub fn fail[&x](st: &!x [int], pos: int, code: int) -> [] int {
     st[3] = pos;
     return 0 - code;
 }
@@ -738,6 +816,21 @@ fn new_node[&n, &k, &x](nodes: &!n [int], kids: &!k [int], st: &!x [int], kind: 
     return id;
 }
 
+// A node whose children are `tmp[0 .. count]`, copied into the children array: how src/stmt.cho builds a list or a clause.
+pub fn mk[&n, &k, &t, &x](nodes: &!n [int], kids: &!k [int], st: &!x [int], kind: int, data: int, tmp: &t [int], count: int, ex: int, ey: int) -> [] int {
+    if st[1] + count > len(kids) {
+        return 0 - e_too_big();
+    }
+    let first = st[1];
+    var i = 0;
+    while i < count {
+        kids[first + i] = tmp[i];
+        i = i + 1;
+    }
+    st[1] = first + count;
+    return new_node(nodes, kids, st, kind, data, first, count, ex, ey);
+}
+
 fn vpush[&v, &x](vs: &!v [int], st: &!x [int], id: int) -> [] int {
     if st[4] >= len(vs) {
         return 0 - e_nested_too_deep();
@@ -864,6 +957,13 @@ fn has_frame[&o, &x](os: &o [int], st: &x [int]) -> [] bool {
 
 // A name: `a` or `a.b`, as a COL leaf. Answers the token after it.
 fn colref[&s, &t, &n, &k, &v, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], st: &!x [int]) -> [] int {
+    // PostgreSQL reads `nulls` before `first` or `last` (and `format` before `json`) as one different token, never a name
+    if kw(sql, toks, pos, end, "nulls") && (kw(sql, toks, pos + 1, end, "first") || kw(sql, toks, pos + 1, end, "last")) {
+        return fail(st, pos, e_unknown_construct());
+    }
+    if kw(sql, toks, pos, end, "format") && kw(sql, toks, pos + 1, end, "json") {
+        return fail(st, pos, e_unknown_construct());
+    }
     var second = 0 - 1;
     var next = pos + 1;
     if punct(sql, toks, pos + 1, end, '.') {
@@ -1332,7 +1432,7 @@ fn put_int[&o](out: &!o [byte], at: int, v: int) -> [] int {
 }
 
 // A name token as an always-quoted identifier: an unquoted name is folded to lower case, a quoted one is kept as written.
-fn put_name[&s, &t, &o](out: &!o [byte], at: int, sql: &s [byte], toks: &t [int], tok: int) -> [] int {
+pub fn put_name[&s, &t, &o](out: &!o [byte], at: int, sql: &s [byte], toks: &t [int], tok: int) -> [] int {
     var p = put_byte(out, at, '"');
     p = put_text(out, p, sql, tstart(toks, tok), tlen(toks, tok), tkind(toks, tok) == lex.t_ident());
     return put_byte(out, p, '"');
@@ -1387,6 +1487,52 @@ fn emit_open[&s, &t, &n, &o](out: &!o [byte], at: int, sql: &s [byte], toks: &t 
     if kind == n_cast() {
         return put_lit(out, p, "cast(");
     }
+    if kind == n_select() {
+        p = put_lit(out, p, "select ");
+        if data == 1 {
+            p = put_lit(out, p, "distinct ");
+        }
+        return p;
+    }
+    if kind == n_star() {
+        if data < 0 {
+            return put_byte(out, p, '*');
+        }
+        p = put_name(out, p, sql, toks, data);
+        return put_lit(out, p, ".*");
+    }
+    if kind == n_table() {
+        p = put_name(out, p, sql, toks, data);
+        if nodes[6 * node + 4] >= 0 {
+            p = put_lit(out, p, " as ");
+            p = put_name(out, p, sql, toks, nodes[6 * node + 4]);
+        }
+        return p;
+    }
+    if kind == n_from() {
+        return put_lit(out, p, "from ");
+    }
+    if kind == n_where() {
+        return put_lit(out, p, "where ");
+    }
+    if kind == n_group() {
+        return put_lit(out, p, "group by ");
+    }
+    if kind == n_having() {
+        return put_lit(out, p, "having ");
+    }
+    if kind == n_orderby() {
+        return put_lit(out, p, "order by ");
+    }
+    if kind == n_limit() {
+        return put_lit(out, p, "limit ");
+    }
+    if kind == n_offset() {
+        return put_lit(out, p, "offset ");
+    }
+    if kind == n_items() || kind == n_item() || kind == n_order() || kind == n_join() {
+        return p;
+    }
     return put_byte(out, p, '(');
 }
 
@@ -1398,6 +1544,18 @@ fn emit_sep[&o, &n](out: &!o [byte], at: int, nodes: &n [int], node: int, k: int
         p = put_byte(out, p, ' ');
         p = put_lit(out, p, op_text(data));
         return put_byte(out, p, ' ');
+    }
+    if kind == n_select() {
+        return put_byte(out, p, ' ');
+    }
+    if kind == n_join() {
+        if k == 1 {
+            if data == 1 {
+                return put_lit(out, p, " left join ");
+            }
+            return put_lit(out, p, " inner join ");
+        }
+        return put_lit(out, p, " on ");
     }
     if kind == n_between() {
         if k == 1 {
@@ -1425,11 +1583,30 @@ fn emit_sep[&o, &n](out: &!o [byte], at: int, nodes: &n [int], node: int, k: int
     return put_lit(out, p, ", ");
 }
 
-fn emit_close[&o, &n](out: &!o [byte], at: int, nodes: &n [int], node: int) -> [] int {
+fn emit_close[&s, &t, &o, &n](out: &!o [byte], at: int, sql: &s [byte], toks: &t [int], nodes: &n [int], node: int) -> [] int {
     let kind = nodes[6 * node];
     let data = nodes[6 * node + 1];
     var p = at;
     if kind >= n_num() && kind <= n_col() {
+        return p;
+    }
+    if kind == n_item() {
+        if data >= 0 {
+            p = put_lit(out, p, " as ");
+            return put_name(out, p, sql, toks, data);
+        }
+        return p;
+    }
+    if kind == n_order() {
+        if data == 1 {
+            return put_lit(out, p, " asc");
+        }
+        if data == 2 {
+            return put_lit(out, p, " desc");
+        }
+        return p;
+    }
+    if kind >= n_select() {
         return p;
     }
     if kind == n_isnull() {
@@ -1488,7 +1665,7 @@ pub fn render[&s, &t, &n, &k, &r, &o](sql: &s [byte], toks: &t [int], nodes: &n 
                 rs[2 * sp + 1] = 0;
                 sp = sp + 1;
             } else {
-                p = emit_close(out, p, nodes, node);
+                p = emit_close(out, p, sql, toks, nodes, node);
                 sp = sp - 1;
             }
         }

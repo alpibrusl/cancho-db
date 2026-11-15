@@ -1,0 +1,436 @@
+module cdb.stmt;
+
+import cdb.lex;
+import cdb.parse;
+
+// The statement parser (docs/m1-lowering.md sections 2 and 7: slice P1b-2), sans-io, over the expression parser of
+// src/parse.cho: tokens in, a tree in the same caller arrays, rendered by `parse.render`.
+//
+// This slice reads a SELECT:
+//
+//     SELECT [DISTINCT] item [, item]... [FROM source [, source]...] [WHERE e] [GROUP BY e, ...] [HAVING e]
+//            [ORDER BY e [ASC|DESC], ...] [LIMIT e] [OFFSET e]
+//
+//     item   = * | t.* | e [[AS] name]
+//     source = t [[AS] name] { [INNER] JOIN t [[AS] name] ON e | LEFT [OUTER] JOIN t [[AS] name] ON e }
+//
+// Everything else is refused with a tag, never passed through: set operations (`set-operation`), the other joins and `USING`
+// (`unsupported-join`), schema-qualified tables, `NULLS FIRST`, `FOR UPDATE`, `OFFSET` before `LIMIT` and the like
+// (`syntax`, `unknown-construct`). A sub-select anywhere is `subquery`, from the expression parser.
+//
+// The tree: a SELECT's children are its clauses in order (ITEMS, FROM, WHERE, GROUP, HAVING, ORDERBY, LIMIT, OFFSET: only
+// the ones present), each a node of its own kind; see `parse.cho` for the node layout.
+
+fn is_name_tok[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int) -> [] bool {
+    if i >= end {
+        return false;
+    }
+    let k = parse.tkind(toks, i);
+    if k == lex.t_quoted() {
+        return true;
+    }
+    if k != lex.t_ident() {
+        return false;
+    }
+    return !parse.is_reserved(sql, parse.tstart(toks, i), parse.tlen(toks, i));
+}
+
+// PostgreSQL's non-reserved words that may not be a bare select-list label (`pg_get_keywords()`, `barelabel` false): after an
+// expression they continue it (`1 day`, `x filter (...)`, `f() over (...)`), so `select a day` is a syntax error there.
+fn bare_label_ok[&s, &t](sql: &s [byte], toks: &t [int], i: int) -> [] bool {
+    if parse.tkind(toks, i) != lex.t_ident() {
+        return true;
+    }
+    let a = parse.tstart(toks, i);
+    let n = parse.tlen(toks, i);
+    return !(parse.word_is(sql, a, n, "day") || parse.word_is(sql, a, n, "filter") || parse.word_is(sql, a, n, "hour") || parse.word_is(sql, a, n, "minute") || parse.word_is(sql, a, n, "month") || parse.word_is(sql, a, n, "over") || parse.word_is(sql, a, n, "second") || parse.word_is(sql, a, n, "varying") || parse.word_is(sql, a, n, "within") || parse.word_is(sql, a, n, "without") || parse.word_is(sql, a, n, "year"));
+}
+
+// An optional `[AS] name` at `pos`. Answers the token index of the name or -1 in st[9], and the position after it.
+fn alias[&s, &t, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, select_item: bool, st: &!x [int]) -> [] int {
+    st[9] = 0 - 1;
+    var p = pos;
+    if parse.kw(sql, toks, p, end, "as") {
+        p = p + 1;
+        if p >= end {
+            return parse.fail(st, p, parse.e_syntax());
+        }
+        if parse.tkind(toks, p) == lex.t_ident() && parse.is_reserved(sql, parse.tstart(toks, p), parse.tlen(toks, p)) {
+            return parse.fail(st, p, parse.e_reserved_word());
+        }
+        if !is_name_tok(sql, toks, p, end) {
+            return parse.fail(st, p, parse.e_syntax());
+        }
+        st[9] = p;
+        return p + 1;
+    }
+    if is_name_tok(sql, toks, p, end) && (!select_item || bare_label_ok(sql, toks, p)) {
+        st[9] = p;
+        return p + 1;
+    }
+    return p;
+}
+
+// Appends `id` to the staging array.
+fn stage[&t, &x](tmp: &!t [int], st: &!x [int], id: int) -> [] int {
+    if st[10] >= len(tmp) {
+        return 0 - parse.e_too_big();
+    }
+    tmp[st[10]] = id;
+    st[10] = st[10] + 1;
+    return 0;
+}
+
+// A table reference `name [[AS] alias]`, as a TABLE leaf, staged. Answers the position after it.
+fn table_ref[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    if pos >= end {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    if parse.punct(sql, toks, pos, end, '(') {
+        if parse.kw(sql, toks, pos + 1, end, "select") || parse.kw(sql, toks, pos + 1, end, "with") || parse.kw(sql, toks, pos + 1, end, "values") {
+            return parse.fail(st, pos + 1, parse.e_subquery());
+        }
+        return parse.fail(st, pos, parse.e_unknown_construct());
+    }
+    if parse.tkind(toks, pos) == lex.t_ident() && parse.is_reserved(sql, parse.tstart(toks, pos), parse.tlen(toks, pos)) {
+        return parse.fail(st, pos, parse.e_reserved_word());
+    }
+    if !is_name_tok(sql, toks, pos, end) {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    if parse.punct(sql, toks, pos + 1, end, '.') || parse.punct(sql, toks, pos + 1, end, '(') {
+        return parse.fail(st, pos + 1, parse.e_unknown_construct());
+    }
+    let q = alias(sql, toks, pos + 1, end, false, st);
+    if q < 0 {
+        return q;
+    }
+    let id = parse.mk(nodes, kids, st, parse.n_table(), pos, tmp, 0, st[9], 0 - 1);
+    if id < 0 {
+        return parse.fail(st, pos, 0 - id);
+    }
+    let r = stage(tmp, st, id);
+    if r < 0 {
+        return parse.fail(st, pos, 0 - r);
+    }
+    return q;
+}
+
+// One expression, staged. Answers the position after it.
+fn expr_item[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    let q = parse.expr(sql, toks, pos, end, nodes, kids, vs, os, st);
+    if q < 0 {
+        return q;
+    }
+    let r = stage(tmp, st, st[2]);
+    if r < 0 {
+        return parse.fail(st, pos, 0 - r);
+    }
+    return q;
+}
+
+// Closes the staged items into a node of `kind` (children: the staged ids), clears the staging area, and stages that node's
+// id for the caller's list `clauses` below the mark `mark`.
+fn close_list[&n, &k, &g, &x](nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int], kind: int, mark: int, data: int) -> [] int {
+    let id = parse.mk(nodes, kids, st, kind, data, tmp[mark..st[10]], st[10] - mark, 0 - 1, 0 - 1);
+    st[10] = mark;
+    return id;
+}
+
+// Parses the SELECT in tokens [from, end). On success st[2] is the root and the answer is `end`; otherwise `0 - code`, with
+// st[3] the token. `tmp` stages children while lists are built; `clauses` collects a SELECT's own children. `st` is the state
+// `parse.reset` made, and at least 12 ints.
+pub fn select[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], st: &!x [int]) -> [] int {
+    if !parse.kw(sql, toks, from, end, "select") {
+        return parse.fail(st, from, parse.e_unsupported_statement());
+    }
+    st[10] = 0;
+    st[11] = 0;
+    var pos = from + 1;
+    var distinct = 0;
+    if parse.kw(sql, toks, pos, end, "distinct") {
+        distinct = 1;
+        pos = pos + 1;
+    }
+    // the items
+    var more = true;
+    while more {
+        if pos >= end {
+            return parse.fail(st, pos, parse.e_syntax());
+        }
+        if parse.opr(sql, toks, pos, end, "*") {
+            let id = parse.mk(nodes, kids, st, parse.n_star(), 0 - 1, tmp, 0, 0 - 1, 0 - 1);
+            if id < 0 {
+                return parse.fail(st, pos, 0 - id);
+            }
+            let r = stage(tmp, st, id);
+            if r < 0 {
+                return parse.fail(st, pos, 0 - r);
+            }
+            pos = pos + 1;
+        } else if is_name_tok(sql, toks, pos, end) && parse.punct(sql, toks, pos + 1, end, '.') && parse.opr(sql, toks, pos + 2, end, "*") {
+            let id = parse.mk(nodes, kids, st, parse.n_star(), pos, tmp, 0, 0 - 1, 0 - 1);
+            if id < 0 {
+                return parse.fail(st, pos, 0 - id);
+            }
+            let r = stage(tmp, st, id);
+            if r < 0 {
+                return parse.fail(st, pos, 0 - r);
+            }
+            pos = pos + 3;
+        } else {
+            let mark = st[10];
+            var q = expr_item(sql, toks, pos, end, nodes, kids, vs, os, tmp, st);
+            if q < 0 {
+                return q;
+            }
+            q = alias(sql, toks, q, end, true, st);
+            if q < 0 {
+                return q;
+            }
+            // the expression is staged at `mark`; replace it by an ITEM node holding it
+            let id = parse.mk(nodes, kids, st, parse.n_item(), st[9], tmp[mark..mark + 1], 1, 0 - 1, 0 - 1);
+            if id < 0 {
+                return parse.fail(st, pos, 0 - id);
+            }
+            st[10] = mark;
+            let r = stage(tmp, st, id);
+            if r < 0 {
+                return parse.fail(st, pos, 0 - r);
+            }
+            pos = q;
+        }
+        if parse.punct(sql, toks, pos, end, ',') {
+            pos = pos + 1;
+        } else {
+            more = false;
+        }
+    }
+    var items = close_list(nodes, kids, tmp, st, parse.n_items(), 0, 0);
+    if items < 0 {
+        return parse.fail(st, pos, 0 - items);
+    }
+    clauses[0] = items;
+    var nclauses = 1;
+    // FROM
+    if parse.kw(sql, toks, pos, end, "from") {
+        pos = pos + 1;
+        more = true;
+        while more {
+            var q = table_ref(sql, toks, pos, end, nodes, kids, tmp, st);
+            if q < 0 {
+                return q;
+            }
+            pos = q;
+            // joins bind left to right: `a join b on c join d on e` is `((a join b on c) join d on e)`
+            var joining = true;
+            while joining {
+                var kind = 0 - 1;
+                if parse.kw(sql, toks, pos, end, "join") {
+                    kind = 0;
+                    pos = pos + 1;
+                } else if parse.kw(sql, toks, pos, end, "inner") && parse.kw(sql, toks, pos + 1, end, "join") {
+                    kind = 0;
+                    pos = pos + 2;
+                } else if parse.kw(sql, toks, pos, end, "left") {
+                    if parse.kw(sql, toks, pos + 1, end, "outer") && parse.kw(sql, toks, pos + 2, end, "join") {
+                        pos = pos + 3;
+                    } else if parse.kw(sql, toks, pos + 1, end, "join") {
+                        pos = pos + 2;
+                    } else {
+                        return parse.fail(st, pos, parse.e_unsupported_join());
+                    }
+                    kind = 1;
+                } else if parse.kw(sql, toks, pos, end, "right") || parse.kw(sql, toks, pos, end, "full") || parse.kw(sql, toks, pos, end, "cross") || parse.kw(sql, toks, pos, end, "natural") {
+                    return parse.fail(st, pos, parse.e_unsupported_join());
+                }
+                if kind < 0 {
+                    joining = false;
+                } else {
+                    q = table_ref(sql, toks, pos, end, nodes, kids, tmp, st);
+                    if q < 0 {
+                        return q;
+                    }
+                    pos = q;
+                    if !parse.kw(sql, toks, pos, end, "on") {
+                        if parse.kw(sql, toks, pos, end, "using") {
+                            return parse.fail(st, pos, parse.e_unsupported_join());
+                        }
+                        return parse.fail(st, pos, parse.e_syntax());
+                    }
+                    q = expr_item(sql, toks, pos + 1, end, nodes, kids, vs, os, tmp, st);
+                    if q < 0 {
+                        return q;
+                    }
+                    pos = q;
+                    // staged: left, right, condition: they become one JOIN node, which is the new left
+                    let top = st[10];
+                    let id = parse.mk(nodes, kids, st, parse.n_join(), kind, tmp[top - 3..top], 3, 0 - 1, 0 - 1);
+                    if id < 0 {
+                        return parse.fail(st, pos, 0 - id);
+                    }
+                    st[10] = top - 3;
+                    let r = stage(tmp, st, id);
+                    if r < 0 {
+                        return parse.fail(st, pos, 0 - r);
+                    }
+                }
+            }
+            if parse.punct(sql, toks, pos, end, ',') {
+                pos = pos + 1;
+            } else {
+                more = false;
+            }
+        }
+        let id = close_list(nodes, kids, tmp, st, parse.n_from(), 0, 0);
+        if id < 0 {
+            return parse.fail(st, pos, 0 - id);
+        }
+        clauses[nclauses] = id;
+        nclauses = nclauses + 1;
+    }
+    // WHERE
+    if parse.kw(sql, toks, pos, end, "where") {
+        let q = expr_item(sql, toks, pos + 1, end, nodes, kids, vs, os, tmp, st);
+        if q < 0 {
+            return q;
+        }
+        pos = q;
+        let id = close_list(nodes, kids, tmp, st, parse.n_where(), 0, 0);
+        if id < 0 {
+            return parse.fail(st, pos, 0 - id);
+        }
+        clauses[nclauses] = id;
+        nclauses = nclauses + 1;
+    }
+    // GROUP BY
+    if parse.kw(sql, toks, pos, end, "group") {
+        if !parse.kw(sql, toks, pos + 1, end, "by") {
+            return parse.fail(st, pos + 1, parse.e_syntax());
+        }
+        pos = pos + 2;
+        more = true;
+        while more {
+            // GROUP BY ROLLUP (...) and CUBE (...) are grouping sets in PostgreSQL, not calls
+            if (parse.kw(sql, toks, pos, end, "rollup") || parse.kw(sql, toks, pos, end, "cube")) && parse.punct(sql, toks, pos + 1, end, '(') {
+                return parse.fail(st, pos, parse.e_unknown_construct());
+            }
+            let q = expr_item(sql, toks, pos, end, nodes, kids, vs, os, tmp, st);
+            if q < 0 {
+                return q;
+            }
+            pos = q;
+            if parse.punct(sql, toks, pos, end, ',') {
+                pos = pos + 1;
+            } else {
+                more = false;
+            }
+        }
+        let id = close_list(nodes, kids, tmp, st, parse.n_group(), 0, 0);
+        if id < 0 {
+            return parse.fail(st, pos, 0 - id);
+        }
+        clauses[nclauses] = id;
+        nclauses = nclauses + 1;
+    }
+    // HAVING
+    if parse.kw(sql, toks, pos, end, "having") {
+        let q = expr_item(sql, toks, pos + 1, end, nodes, kids, vs, os, tmp, st);
+        if q < 0 {
+            return q;
+        }
+        pos = q;
+        let id = close_list(nodes, kids, tmp, st, parse.n_having(), 0, 0);
+        if id < 0 {
+            return parse.fail(st, pos, 0 - id);
+        }
+        clauses[nclauses] = id;
+        nclauses = nclauses + 1;
+    }
+    // ORDER BY
+    if parse.kw(sql, toks, pos, end, "order") {
+        if !parse.kw(sql, toks, pos + 1, end, "by") {
+            return parse.fail(st, pos + 1, parse.e_syntax());
+        }
+        pos = pos + 2;
+        more = true;
+        while more {
+            let mark = st[10];
+            var q = expr_item(sql, toks, pos, end, nodes, kids, vs, os, tmp, st);
+            if q < 0 {
+                return q;
+            }
+            var dir = 0;
+            if parse.kw(sql, toks, q, end, "asc") {
+                dir = 1;
+                q = q + 1;
+            } else if parse.kw(sql, toks, q, end, "desc") {
+                dir = 2;
+                q = q + 1;
+            }
+            if parse.kw(sql, toks, q, end, "nulls") || parse.kw(sql, toks, q, end, "using") {
+                return parse.fail(st, q, parse.e_unknown_construct());
+            }
+            let id = parse.mk(nodes, kids, st, parse.n_order(), dir, tmp[mark..mark + 1], 1, 0 - 1, 0 - 1);
+            if id < 0 {
+                return parse.fail(st, pos, 0 - id);
+            }
+            st[10] = mark;
+            let r = stage(tmp, st, id);
+            if r < 0 {
+                return parse.fail(st, pos, 0 - r);
+            }
+            pos = q;
+            if parse.punct(sql, toks, pos, end, ',') {
+                pos = pos + 1;
+            } else {
+                more = false;
+            }
+        }
+        let id = close_list(nodes, kids, tmp, st, parse.n_orderby(), 0, 0);
+        if id < 0 {
+            return parse.fail(st, pos, 0 - id);
+        }
+        clauses[nclauses] = id;
+        nclauses = nclauses + 1;
+    }
+    // LIMIT, OFFSET
+    if parse.kw(sql, toks, pos, end, "limit") {
+        let q = expr_item(sql, toks, pos + 1, end, nodes, kids, vs, os, tmp, st);
+        if q < 0 {
+            return q;
+        }
+        pos = q;
+        let id = close_list(nodes, kids, tmp, st, parse.n_limit(), 0, 0);
+        if id < 0 {
+            return parse.fail(st, pos, 0 - id);
+        }
+        clauses[nclauses] = id;
+        nclauses = nclauses + 1;
+    }
+    if parse.kw(sql, toks, pos, end, "offset") {
+        let q = expr_item(sql, toks, pos + 1, end, nodes, kids, vs, os, tmp, st);
+        if q < 0 {
+            return q;
+        }
+        pos = q;
+        let id = close_list(nodes, kids, tmp, st, parse.n_offset(), 0, 0);
+        if id < 0 {
+            return parse.fail(st, pos, 0 - id);
+        }
+        clauses[nclauses] = id;
+        nclauses = nclauses + 1;
+    }
+    if pos < end {
+        if parse.kw(sql, toks, pos, end, "union") || parse.kw(sql, toks, pos, end, "intersect") || parse.kw(sql, toks, pos, end, "except") {
+            return parse.fail(st, pos, parse.e_set_operation());
+        }
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    let root = parse.mk(nodes, kids, st, parse.n_select(), distinct, clauses[0..nclauses], nclauses, 0 - 1, 0 - 1);
+    if root < 0 {
+        return parse.fail(st, pos, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
