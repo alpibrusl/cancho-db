@@ -442,6 +442,77 @@ def run_proxy(cancho):
     return 1 if survivors else 0
 
 
+LEX = [
+    # ---- the SQL lexer (src/lex.cho, tests/lex_test.cho)
+    ("lex: block comments do not nest", "src/lex.cho", "                    depth = depth + 1;\n                    i = i + 2;", "                    i = i + 2;"),
+    ("lex: a line comment runs past the newline", "src/lex.cho", "while i < n_in && int_of(sql[i]) != '\\n' {", "while i < n_in && int_of(sql[i]) != '\\r' {"),
+    ("lex: a doubled quote ends a string", "src/lex.cho", "                        doubled = 1;\n                        j = j + 2;\n                    } else {\n                        closed = true;\n                    }\n                } else {\n                    j = j + 1;\n                }\n            }\n            n = put(toks, n, t_string()", "                        closed = true;\n                    } else {\n                        closed = true;\n                    }\n                } else {\n                    j = j + 1;\n                }\n            }\n            n = put(toks, n, t_string()"),
+    ("lex: an empty quoted identifier is allowed", "src/lex.cho", "if width == 0 {", "if false {"),
+    ("lex: a 64-byte identifier is allowed", "src/lex.cho", "fn max_ident() -> [] int {\n    return 63;", "fn max_ident() -> [] int {\n    return 64;"),
+    ("lex: an identifier of 62 is refused", "src/lex.cho", "fn max_ident() -> [] int {\n    return 63;", "fn max_ident() -> [] int {\n    return 62;"),
+    ("lex: non-ASCII bytes are allowed", "src/lex.cho", "        if c >= 128 {\n            return 0 - e_non_ascii();", "        if false {\n            return 0 - e_non_ascii();"),
+    ("lex: a NUL byte is allowed", "src/lex.cho", "        if c == 0 {\n            return 0 - e_nul_byte();", "        if false {\n            return 0 - e_nul_byte();"),
+    ("lex: dollar quoting is allowed to fall through", "src/lex.cho", "} else if c == '$' {", "} else if c == '#' {"),
+    ("lex: a parameter is a dollar quote", "src/lex.cho", "if i + 1 < n_in && is_digit(int_of(sql[i + 1])) {\n                return 0 - e_parameter();", "if false {\n                return 0 - e_parameter();"),
+    ("lex: lower-case e is not an escape string", "src/lex.cho", "if p == 'e' || p == 'E' {", "if p == 'E' {"),
+    ("lex: n is not a prefix", "src/lex.cho", "|| p == 'n' || p == 'N' {", "{"),
+    ("lex: x is not a prefix", "src/lex.cho", "|| p == 'x' || p == 'X' || p == 'n'", "|| p == 'n'"),
+    ("lex: a two-letter prefix is one too", "src/lex.cho", "if j - i == 1 && j < n_in && int_of(sql[j]) == '\\'' {", "if j - i <= 2 && j < n_in && int_of(sql[j]) == '\\'' {"),
+    ("lex: U&' is an ordinary string", "src/lex.cho", "if j - i == 1 && (c == 'u' || c == 'U') &&", "if false && (c == 'u' || c == 'U') &&"),
+    ("lex: U&\" is an ordinary identifier", "src/lex.cho", "&& (int_of(sql[j + 1]) == '\\'' || int_of(sql[j + 1]) == '\"')", "&& (int_of(sql[j + 1]) == '\\'')"),
+    ("lex: a number may be followed by letters", "src/lex.cho", "if j < n_in && is_ident_char(int_of(sql[j])) {\n                return 0 - e_number_junk();", "if false {\n                return 0 - e_number_junk();"),
+    ("lex: an exponent is not read", "src/lex.cho", "if j < n_in && (int_of(sql[j]) == 'e' || int_of(sql[j]) == 'E') {", "if false {"),
+    ("lex: a fraction is not read", "src/lex.cho", "if j < n_in && int_of(sql[j]) == '.' {\n                j = j + 1;", "if false {\n                j = j + 1;"),
+    ("lex: .5 is not a number", "src/lex.cho", "} else if is_digit(c) || c == '.' && i + 1 < n_in && is_digit(int_of(sql[i + 1])) {", "} else if is_digit(c) {"),
+    ("lex: $ may not be inside an identifier", "src/lex.cho", "return is_ident_start(c) || is_digit(c) || c == '$';", "return is_ident_start(c) || is_digit(c);"),
+    ("lex: an operator runs into a line comment", "src/lex.cho", "if d == '-' && j + 1 < n_in && int_of(sql[j + 1]) == '-' {\n                    stop = true;", "if false {\n                    stop = true;"),
+    ("lex: an operator runs into a block comment", "src/lex.cho", "} else if d == '/' && j + 1 < n_in && int_of(sql[j + 1]) == '*' {\n                    stop = true;", "} else if false {\n                    stop = true;"),
+    ("lex: an operator may always end in + or -", "src/lex.cho", "            if !special {", "            if false {"),
+    ("lex: an operator may never end in + or -", "src/lex.cho", "            if !special {", "            if true {"),
+    ("lex: ~ is not special", "src/lex.cho", "return c == '~' || c == '!' || c == '@'", "return c == '!' || c == '@'"),
+    ("lex: @ is not special", "src/lex.cho", "|| c == '@' || c == '#' || c == '%' || c == '^' || c == '&' || c == '|' || c == '`' || c == '?';\n}\n\nfn put", "|| c == '#' || c == '%' || c == '^' || c == '&' || c == '|' || c == '`' || c == '?';\n}\n\nfn put"),
+    ("lex: a form feed is whitespace", "src/lex.cho", "if c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' {", "if c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == 12 {"),
+    ("lex: a carriage return is not whitespace", "src/lex.cho", "if c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' {", "if c == ' ' || c == '\\t' || c == '\\n' {"),
+    ("lex: :: is two colons", "src/lex.cho", "} else if c == ':' && i + 1 < n_in && int_of(sql[i + 1]) == ':' {", "} else if false {"),
+    ("lex: ; is ordinary punctuation", "src/lex.cho", "n = put(toks, n, t_semicolon(), i, 1, 0);", "n = put(toks, n, t_punct(), i, 1, 0);"),
+    ("lex: empty statements are kept", "src/lex.cho", "            if i > from {", "            if i >= from {"),
+    ("lex: the last statement is dropped", "src/lex.cho", "var cut = i == n;", "var cut = false;"),
+    ("lex: the token cap is off by one", "src/lex.cho", "if n >= cap - 1 {", "if n >= cap {"),
+    ("lex: a string with a prefix letter after a digit", "src/lex.cho", "fn is_ident_start(c: int) -> [] bool {\n    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_';", "fn is_ident_start(c: int) -> [] bool {\n    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z';"),
+]
+
+def run_unit(table, test_files, src_names, cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    if only:
+        table = [m for m in table if only in m[0]]
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            shutil.copytree(ROOT / "tests", work / "tests", ignore=shutil.ignore_patterns("__pycache__"))
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            files = [str(work / t) for t in test_files] + [str(work / "src" / n) for n in src_names]
+            r = subprocess.run([cancho, "test"] + files + ["--std"], capture_output=True, text=True)
+            if r.returncode == 0:
+                print("SURVIVED %-46s every unit test passes" % label)
+                survivors.append(label)
+            elif "running" not in r.stdout:
+                print("BROKEN %-48s does not build: %s" % (label, (r.stdout + r.stderr).strip()[:160]))
+                survivors.append(label)
+            else:
+                failed = [l.split()[1] for l in r.stdout.splitlines() if l.startswith("test ") and "FAILED" in l]
+                print("killed   %-46s by %s" % (label, ", ".join(failed) or "a trap"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 # Mutants that cannot be killed because they change nothing observable, with the reason. Empty: every mutant above
 # changes behaviour, and the ones that looked equivalent (the count guard against the bytes left) are not listed
 # because they are not mutants here: removing the guard leaves every field read bounds-checked, so the verdict is the
@@ -482,6 +553,8 @@ def run_login(cancho):
 def run(kind, cancho):
     if kind == "login":
         return run_login(cancho)
+    if kind == "lex":
+        return run_unit(LEX, ["tests/lex_test.cho", "tests/lex_cases.cho"], ["lex.cho"], cancho)
     if kind == "proxy":
         return run_proxy(cancho)
     table = PY if kind == "py" else CHO

@@ -39,6 +39,15 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C20 | With statements, `effect-denied` is judged on the effect set shown to be real, after `stmt-missing` and `effects-mismatch`. | `ir_effect_denied_on_the_true_effects`, `ir_order_*`; the "effects judged before the statements" mutants of both verifiers | a lying recorded set must not be what the token is judged against |
 | C21 | A malformed statement store is refused with a tag and the entry it names, before any commit is judged, after the token store and the revocation list; an unused bad entry is still an error. | `ir_stmts_*`, `ir_bad_entry_unused_is_still_an_error`, `ir_order_*_before_stmts` | as C15 |
 
+### The SQL lexer, P1a ([`m1-lowering.md`](m1-lowering.md) section 3)
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C33 | **The lexer finds the same statements PostgreSQL runs**, for everything it accepts: a `;` inside a string, a comment (nested or not) or a quoted identifier separates nothing; a backslash in a string is a backslash. | `tests/lex_diff.py`: SQL strings from a grammar of valid lists and from a fuzzer over hostile fragments are sent to a real PostgreSQL, whose `CommandComplete` count must equal the lexer's. 12,000 strings, 6,247 comparable (4,505 with 2 or more statements): 0 disagreements. A lexer with non-nesting comments is caught (20 in 3,000) | a lexer that found fewer statements than PostgreSQL runs would let one through unchecked |
+| C34 | Operators end where PostgreSQL ends them, including its rule that only an operator holding one of `~ ! @ # % ^ & | ` ?` may end in `+` or `-`. | `tests/lex_diff.py` reads PostgreSQL's own error message for 3,000 random operator strings (0 disagreements); 26 hand cases (each special character with each sign, plus the trimming and comment cases); the mutants "~ is not special", "@ is not special", "never trims", "always trims" | the rule was missed by my first cases and found by mutation |
+| C35 | **Everything not understood is refused with a tag**: `E''`, `U&''`, bit and hex strings, `$$` and `$tag$`, `$1`, non-ASCII outside strings and comments, NUL, form feed, vertical tab, unknown characters, a number followed by identifier characters (`1abc`, `1_000`, `0x1F`), an unterminated string, comment or identifier. | 54 refusal cases with their exact tags; 35 mutants of the lexer, none surviving | the default is refusal, so a form not named is an error |
+| C36 | An identifier over 63 bytes is refused: PostgreSQL truncates it silently, so two different long names would be one. | measured on PostgreSQL (a `NOTICE`, then `column ... specified more than once`); cases at 63 and 64 bytes, quoted, unquoted and with doubled quotes | a name checked as one thing would run as another |
+
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
 | # | Claim | Enforced by | Fails when the claim is false because |
@@ -111,6 +120,10 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 - **IR v2 independence:** the Go verifier was extended to v2 by the same separate agent, from the spec and the vectors only,
   and passed all 428 without a fix; I re-ran its code and its tool-call log shows no read outside its directory. Same
   caveats as before (instruction-enforced, same model family). Its six open points are written into `ir.md` section 6.
+- **The lexer is not the parser.** It reads tokens and statement boundaries; nothing yet builds an expression, resolves a name or
+  renders SQL (P1b to P1d). The statement-count differential cannot see a lexing error that keeps statement boundaries (for
+  example, a doubled quote ending a string preserves quote parity); the unit cases cover that, and each check is claimed for
+  what it covers. The fuzzer's alphabet is finite and its statements are harmless selects.
 - **No SQL is lowered to v2 yet.** The IR can say what a psql user types; nothing produces it from SQL (P1, `m1-lowering.md`).
 - **Ed25519 edge cases are unspecified.** Small-order and non-canonical-but-decodable keys and `R` values are
   implementation-defined in v1 and no vector exercises them (`commit.md` header).

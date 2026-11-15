@@ -23,6 +23,8 @@ echo "== formatting";                "$CANCHO" fmt --check src
 echo "== vectors are reproducible";  rm -rf build/vectors && python3 tools/gen_vectors.py build/vectors >/dev/null && diff -r vectors build/vectors
 echo "== login cases are reproducible"; python3 tools/gen_login.py --check
 echo "== login tests (the proxy's front door, from bytes)"; quiet 2 "$CANCHO" test tests/login_test.cho tests/login_cases.cho src/commit.cho src/token.cho src/login.cho --std
+echo "== lexer cases are reproducible"; python3 tools/gen_lex.py --check
+echo "== lexer tests (from bytes)"; quiet 2 "$CANCHO" test tests/lex_test.cho tests/lex_cases.cho src/lex.cho --std
 echo "== build";                     "$CANCHO" build --std src/*.cho -o build/verify
 echo "== go verifier";               (cd verifiers/go && gofmt -l . | (! grep .) && go vet ./... && go build -o ../../build/verify-go .)
 export FUZZ_EXTRA="build/verify-go"
@@ -36,10 +38,14 @@ sh scripts/pg_throwaway.sh start 5593
 trap 'sh scripts/pg_throwaway.sh stop 5593' EXIT
 export PG_E2E_PORT=5593
 quiet 3 python3 tests/proxy_e2e.py build/proxy
+echo "== the lexer against PostgreSQL (statement counts, operator tokens)"
+"$CANCHO" build --std proxy/lexcheck.cho src/lex.cho -o build/lexcheck
+quiet 4 python3 tests/lex_diff.py build/lexcheck 4000 1
 echo "== command lines";             python3 tests/cli_test.py vectors build/verify
 echo "== attenuation property";       python3 tests/properties.py 4000 1
 echo "== fuzz (three verifiers, no crash)"; python3 tests/fuzz.py vectors build/verify 3000 1
 echo "== mutants, python";           quiet 1 python3 tests/mutants.py py
 echo "== mutants, cancho";           quiet 1 python3 tests/mutants.py cho "$CANCHO"
 echo "== mutants, login";            quiet 1 python3 tests/mutants.py login "$CANCHO"
+echo "== mutants, lexer";            quiet 1 python3 tests/mutants.py lex "$CANCHO"
 echo "all green"

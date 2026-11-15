@@ -1,0 +1,66 @@
+import std.buffer;
+import std.io;
+import cdb.lex;
+
+// `lexcheck`: reads SQL on standard input and says what the lexer makes of it, for tests/lex_diff.py to compare with
+// PostgreSQL. One line: `ok <tokens> <statements>` or `refused <tag>`.
+
+fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer) -> [heap, io_read] buffer.Buffer {
+    var out = text;
+    var c = getchar(io);
+    while c >= 0 {
+        out = buffer.push(heap, out, byte_of(c));
+        c = getchar(io);
+    }
+    return out;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(ffi);
+    release(fs);
+    release(args);
+    borrow mut heap as &!h in {
+        var text = buffer.empty(h, 4096);
+        borrow mut io as &!i in {
+            text = read_stdin(h, i, text);
+        }
+        var answer = 0;
+        var tokens = 0;
+        var statements = 0;
+        borrow text as &t in {
+            let sql = buffer.bytes(t);
+            var tb = box_slice(h, 4 * (len(sql) + 4), 0);
+            var cb = box_slice(h, 2 * (len(sql) + 4), 0);
+            borrow mut tb as &!tw in {
+                borrow mut cb as &!cw in {
+                    let n = lex.tokenize(sql, contents(tw));
+                    if n < 0 {
+                        answer = n;
+                    } else {
+                        tokens = n;
+                        statements = lex.statements(contents(tw), n, contents(cw));
+                    }
+                }
+            }
+            unbox_slice(h, tb);
+            unbox_slice(h, cb);
+        }
+        borrow mut io as &!o in {
+            if answer < 0 {
+                io.write_all(o, "refused ");
+                io.write_all(o, lex.error_name(0 - answer));
+            } else {
+                io.write_all(o, "ok ");
+                io.print_nat(o, tokens);
+                io.write_all(o, " ");
+                io.print_nat(o, statements);
+            }
+            io.newline(o);
+        }
+        buffer.drop(h, text);
+    }
+    release(io);
+    release(heap);
+    return 0;
+}

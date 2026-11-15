@@ -1,0 +1,152 @@
+import std.test;
+import std.bytes;
+import cdb.lex;
+import cdb.lex_cases;
+
+// src/lex.cho from bytes, with no server: the cases are tests/lex_cases.cho, which tools/gen_lex.py writes, with every answer
+// written by hand there. A token renders as `K:text`, joined by newlines; a refusal is its tag.
+
+fn hexval(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0 - 1;
+}
+
+fn unhex[&t, &o](text: &t [byte], out: &!o [byte]) -> [] int {
+    if len(text) % 2 != 0 {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < len(text) / 2 {
+        let hi = hexval(int_of(text[2 * i]));
+        let lo = hexval(int_of(text[2 * i + 1]));
+        if hi < 0 || lo < 0 {
+            return 0 - 1;
+        }
+        out[i] = byte_of(hi * 16 + lo);
+        i = i + 1;
+    }
+    return len(text) / 2;
+}
+
+fn letter(kind: int) -> [] int {
+    if kind == lex.t_ident() {
+        return 'I';
+    }
+    if kind == lex.t_quoted() {
+        return 'Q';
+    }
+    if kind == lex.t_string() {
+        return 'S';
+    }
+    if kind == lex.t_number() {
+        return 'N';
+    }
+    if kind == lex.t_operator() {
+        return 'O';
+    }
+    if kind == lex.t_punct() {
+        return 'P';
+    }
+    if kind == lex.t_cast() {
+        return 'C';
+    }
+    return 'T';
+}
+
+// The tokens as `K:text` lines, into `out`; answers how many bytes.
+fn render[&s, &t, &o](sql: &s [byte], toks: &t [int], n: int, out: &!o [byte]) -> [] int {
+    var w = 0;
+    var i = 0;
+    while i < n {
+        if i > 0 {
+            out[w] = byte_of('\n');
+            w = w + 1;
+        }
+        out[w] = byte_of(letter(toks[4 * i]));
+        out[w + 1] = byte_of(':');
+        w = w + 2;
+        var k = 0;
+        while k < toks[4 * i + 2] {
+            out[w] = sql[toks[4 * i + 1] + k];
+            w = w + 1;
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return w;
+}
+
+fn test_every_case() -> [] int {
+    var i = 0;
+    while i < lex_cases.n_lex() {
+        region r {
+            let hex = lex_cases.lex_input(i);
+            let sql = alloc_slice[r](len(hex) / 2 + 1, byte_of(0));
+            let m = unhex(hex, sql);
+            test.assert(m >= 0);
+            let toks = alloc_slice[r](4 * lex_cases.lex_cap(i), 0);
+            let n = lex.tokenize(sql[0..m], toks);
+            if lex_cases.lex_ok(i) == 1 {
+                test.assert(n >= 0);
+                let shown = alloc_slice[r](m * 2 + 8 * n + 16, byte_of(0));
+                let w = render(sql[0..m], toks, n, shown);
+                let want_hex = lex_cases.lex_want(i);
+                let want = alloc_slice[r](len(want_hex) / 2 + 1, byte_of(0));
+                let wn = unhex(want_hex, want);
+                test.assert_eq(w, wn);
+                test.assert(bytes.equal(shown[0..w], want[0..wn]));
+                let cuts = alloc_slice[r](2 * n + 2, 0);
+                test.assert_eq(lex.statements(toks, n, cuts), lex_cases.lex_stmts(i));
+            } else {
+                test.assert(n < 0);
+                test.assert(bytes.equal(lex.error_name(0 - n), lex_cases.lex_tag(i)));
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// The cuts are token ranges: `select 1; select 2;` is two statements, [0,2) and [3,5).
+fn test_statement_ranges() -> [] int {
+    region r {
+        let sql = "select 1;; select 2 ;";
+        let toks = alloc_slice[r](64, 0);
+        let n = lex.tokenize(sql, toks);
+        test.assert_eq(n, 7);
+        let cuts = alloc_slice[r](8, 0);
+        test.assert_eq(lex.statements(toks, n, cuts), 2);
+        test.assert_eq(cuts[0], 0);
+        test.assert_eq(cuts[1], 2);
+        test.assert_eq(cuts[2], 4);
+        test.assert_eq(cuts[3], 6);
+    }
+    return 0;
+}
+
+// Too small an output for the statements is an answer, not a trap.
+fn test_statements_output_too_small() -> [] int {
+    region r {
+        let sql = "a;b;c";
+        let toks = alloc_slice[r](64, 0);
+        let n = lex.tokenize(sql, toks);
+        let cuts = alloc_slice[r](4, 0);
+        test.assert_eq(lex.statements(toks, n, cuts), 0 - 1);
+    }
+    return 0;
+}
+
+// Every refusal has a tag.
+fn test_every_refusal_has_a_tag() -> [] int {
+    var code = 1;
+    while code <= 13 {
+        test.assert(len(lex.error_name(code)) > 3);
+        code = code + 1;
+    }
+    return 0;
+}
