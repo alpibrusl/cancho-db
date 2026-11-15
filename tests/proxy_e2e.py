@@ -63,7 +63,11 @@ def psql(port, password, sql, db="main", extra=(), input=None, ssl="prefer", tim
     env = dict(os.environ, PGPASSWORD=password, PGHOST="127.0.0.1", PGPORT=str(port), PGUSER="agent", PGDATABASE=db,
                PGSSLMODE=ssl, PGCONNECT_TIMEOUT="25")
     args = ["psql", "-w", "-At", "-v", "ON_ERROR_STOP=0", *extra] + (["-c", sql] if sql else [])
-    return subprocess.run(args, env=env, capture_output=True, text=True, input=input, timeout=timeout)
+    try:
+        return subprocess.run(args, env=env, capture_output=True, text=True, input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # a hung psql is a failed check, not a crashed test
+        return subprocess.CompletedProcess(args, 124, "", "psql timed out after %d s" % timeout)
 
 
 def raw(port, data, read=64, wait=1.0):
