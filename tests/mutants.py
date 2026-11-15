@@ -10,6 +10,7 @@ exercises: either add the vector or, if the change is behaviourally identical, s
 mutated source must contain the original text exactly once, so a mutant cannot rot silently when the source moves.
 Exit status 0 only if every mutant is killed.
 """
+import os
 import shutil
 import subprocess
 import sys
@@ -295,16 +296,16 @@ CHO += [
     ("v2: a Cast operand is not owed", "src/ir.cho", "} else {\n                    pending = pending + 1;\n                }\n            } else {", "} else {\n                    pending = pending + 0;\n                }\n            } else {"),
     ("v2: distinct 2 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 {\n                        good = false;\n                    }\n                    cur[0] = cur[0] + 1;\n                }\n                if good {\n                    let ni", "if int_of(data[cur[0]]) > 2 {\n                        good = false;\n                    }\n                    cur[0] = cur[0] + 1;\n                }\n                if good {\n                    let ni"),
     ("v2: a Select2 without from accepted", "src/ir.cho", "                    if nf < 1 {\n                        good = false;\n                    }", "                    if nf < 0 {\n                        good = false;\n                    }"),
-    ("v2: the first from may be a join", "src/ir.cho", "if kind > 2 || (fi == 0 && kind != 0) || flag > 1 || flag != joined {", "if kind > 2 || flag > 1 || flag != joined {"),
-    ("v2: join kind 3 accepted", "src/ir.cho", "if kind > 2 || (fi == 0 && kind != 0) || flag > 1 || flag != joined {", "if kind > 3 || (fi == 0 && kind != 0) || flag > 1 || flag != joined {"),
-    ("v2: a join needs no on", "src/ir.cho", "if kind > 2 || (fi == 0 && kind != 0) || flag > 1 || flag != joined {", "if kind > 2 || (fi == 0 && kind != 0) || flag > 1 {"),
+    ("v2: the first from may be a join", "src/ir.cho", "if kind > 2 || fi == 0 && kind != 0 || flag > 1 || flag != joined {", "if kind > 2 || flag > 1 || flag != joined {"),
+    ("v2: join kind 3 accepted", "src/ir.cho", "if kind > 2 || fi == 0 && kind != 0 || flag > 1 || flag != joined {", "if kind > 3 || fi == 0 && kind != 0 || flag > 1 || flag != joined {"),
+    ("v2: a join needs no on", "src/ir.cho", "if kind > 2 || fi == 0 && kind != 0 || flag > 1 || flag != joined {", "if kind > 2 || fi == 0 && kind != 0 || flag > 1 {"),
     ("v2: a comma may have an on", "src/ir.cho", "|| flag > 1 || flag != joined {", "|| flag > 1 || (joined == 1 && flag != 1) {"),
     ("v2: order direction 2 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 || int_of(data[cur[0] + 1]) > 2 {", "if int_of(data[cur[0]]) > 2 || int_of(data[cur[0] + 1]) > 2 {"),
     ("v2: order nulls 3 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 || int_of(data[cur[0] + 1]) > 2 {", "if int_of(data[cur[0]]) > 1 || int_of(data[cur[0] + 1]) > 3 {"),
     ("v2: the from table is not a read", "src/ir.cho", "                        } else {\n                            m = add(heap, m, 0, data, nm[0], nm[1], false, 0, 0);\n                            if !commit.have(data, cur, 2) {", "                        } else {\n                            if !commit.have(data, cur, 2) {"),
     ("v2: a join condition is not parsed", "src/ir.cho", "                                } else if flag == 1 {\n                                    let (grown, ok) = expr(heap, m, data, cur, nm, true, v2);\n                                    m = grown;\n                                    good = ok;\n                                }", "                                } else if flag == 1 {\n                                    good = false;\n                                }"),
     # ---- statement IR (ir.md)
-    ("IR: select forgets the table read", "src/ir.cho", "m = add(heap, m, 0, data, nm[0], nm[1], false, 0, 0);", "m = m;"),
+    ("IR: select forgets the table read", "src/ir.cho", "                        } else {\n                            m = add(heap, m, 0, data, nm[0], nm[1], false, 0, 0);\n                        }\n                        i = i + 1;", "                        } else {\n                            m = m;\n                        }\n                        i = i + 1;"),
     ("IR: column read forgets the column", "src/ir.cho", "m = add(heap, m, 0, data, t_at, t_len, true, nm[0], nm[1]);", "m = add(heap, m, 0, data, t_at, t_len, false, 0, 0);"),
     ("IR: column read forgets the table", "src/ir.cho", "data, t_at, t_len, true, nm[0], nm[1]);", "data, nm[0], nm[1], false, 0, 0);"),
     ("IR: columns are not reads", "src/ir.cho", "m = add(heap, m, 0, data, t_at, t_len, true, nm[0], nm[1]);", "m = m;"),
@@ -322,7 +323,7 @@ CHO += [
     ("IR: select without from allowed", "src/ir.cho", "if nt < 1 {", "if nt < 0 {"),
     ("IR: update without sets allowed", "src/ir.cho", "if nsets < 1 {", "if nsets < 0 {"),
     ("IR: ddl kind 5 allowed", "src/ir.cho", "if int_of(data[cur[0]]) > 4 {", "if int_of(data[cur[0]]) > 5 {"),
-    ("IR: operator 12 allowed", "src/ir.cho", "if int_of(data[cur[0]]) > 11 {", "if int_of(data[cur[0]]) > 12 {"),
+    ("IR: operator 12 allowed in a v1 store", "src/ir.cho", "        return 17;\n    }\n    return 11;", "        return 17;\n    }\n    return 12;"),
     ("IR: value tag 3 allowed", "src/ir.cho", "} else if vt != 0 {\n                        good = false;", "} else if vt != 0 {\n                        good = good;"),
     ("IR: optional flag 2 allowed", "src/ir.cho", "return (set, flag == 0);", "return (set, true);"),
     ("IR: unknown expression tag allowed", "src/ir.cho", "            } else {\n                good = false;\n            }\n            // every node", "            } else {\n                good = good;\n            }\n            // every node"),
@@ -484,6 +485,9 @@ def run(kind, cancho):
     if kind == "proxy":
         return run_proxy(cancho)
     table = PY if kind == "py" else CHO
+    only = os.environ.get("MUTANT_ONLY")
+    if only:
+        table = [m for m in table if only in m[0]]
     survivors = []
     for label, rel, old, new in table:
         with tempfile.TemporaryDirectory() as tmp:

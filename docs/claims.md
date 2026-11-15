@@ -39,6 +39,15 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C20 | With statements, `effect-denied` is judged on the effect set shown to be real, after `stmt-missing` and `effects-mismatch`. | `ir_effect_denied_on_the_true_effects`, `ir_order_*`; the "effects judged before the statements" mutants of both verifiers | a lying recorded set must not be what the token is judged against |
 | C21 | A malformed statement store is refused with a tag and the entry it names, before any commit is judged, after the token store and the revocation list; an unused bad entry is still an error. | `ir_stmts_*`, `ir_bad_entry_unused_is_still_an_error`, `ir_order_*_before_stmts` | as C15 |
 
+### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C29 | **A column named in any clause is a read**: `ORDER BY`, `GROUP BY`, `HAVING`, `LIMIT`/`OFFSET`, a join's `ON`, a `CASE`, an `IN` list, under `NOT`. A recorded set that leaves one out is `effects-mismatch`. | `ir2_ok_*` (effects written by hand) and `ir2_mismatch_*` vectors; the "reads nothing" mutants (one per clause) in the Python verifier; all three verifiers agree | each clause has a vector whose only read of some column is in that clause |
+| C30 | A cast is not a call, a type name is not an effect, and `count(*)` reads no column: `Cast` and `Star` add nothing; an aggregate is `call count`. | `ir2_ok_cast_is_not_a_call`, `ir2_ok_star_reads_no_column`, `ir2_mismatch_cast_recorded_as_a_call`; the "a Cast is a call" mutant | a token that granted no `call` would otherwise refuse every cast |
+| C31 | v2 is a strict superset of v1, selected by the store's magic: a v1 statement keeps its id in a v2 store; a v1 store refuses every v2 construct; any other magic is refused. | `ir2_ok_a_v1_select_in_a_v2_store`, `ir2_ok_v1_and_v2_statements_in_one_commit`, the nine `ir2_v1_store_refuses_*` vectors, `ir2_a_store_with_another_magic_is_refused`; the "accepted in a v1 store" mutants of both verifiers | moving a store from v1 to v2 must not change a commit's `statements` hashes |
+| C32 | A malformed v2 statement is refused for **its own** fault: each of the 30 `ir2_bad_*` vectors carries one fault only. | the mutants of each rule in both verifiers (150 Python, 139 cancho, none surviving) | two vectors carried a second fault that masked the first (a `Case` else flag of 2, a join kind of 3); the mutants found them and they were fixed |
+
 ### The proxy, P0 ([`m1-proxy.md`](m1-proxy.md))
 
 | # | Claim | Enforced by | Fails when the claim is false because |
@@ -99,6 +108,10 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
   text. The agent was then asked to look for the same ambiguity elsewhere by reading; it named three more (the order
   of entries inside the token, revocation and statement stores), now written into `token.md` §4 and `ir.md` §4 and pinned by
   three vectors. A spec sentence is not counted as settled until a vector separates the two readings.
+- **IR v2 independence:** the Go verifier was extended to v2 by the same separate agent, from the spec and the vectors only,
+  and passed all 428 without a fix; I re-ran its code and its tool-call log shows no read outside its directory. Same
+  caveats as before (instruction-enforced, same model family). Its six open points are written into `ir.md` section 6.
+- **No SQL is lowered to v2 yet.** The IR can say what a psql user types; nothing produces it from SQL (P1, `m1-lowering.md`).
 - **Ed25519 edge cases are unspecified.** Small-order and non-canonical-but-decodable keys and `R` values are
   implementation-defined in v1 and no vector exercises them (`commit.md` header).
 - **Mutants are the ones listed.** `tests/mutants.py` shows the vectors fail for those changes, not for every possible
