@@ -77,6 +77,27 @@ Anything the lexer meets that it does not fully understand is `unknown-construct
   Expressions are parsed by operator-precedence climbing with an explicit stack and an arena of nodes, and emitted in the IR's
   prefix order with a second explicit stack, so a deep expression is a refusal, not a stack overflow.
 
+### 3.1 Measured, and what the differential found
+
+- **PostgreSQL truncates an identifier longer than 63 bytes with only a `NOTICE`**, and two different long names that share a
+  63-byte prefix become one: `create table t(<70 a's>, <63 a's>bbbbbbb)` fails with `column "<63 a's>" specified more than
+  once`. The lexer refuses an identifier over 63 bytes (`identifier-too-long`), quoted or not, counting a doubled quote as one.
+- **PostgreSQL ends an operator by a rule that is easy to get wrong**: a multi-character operator may end in `+` or `-` only if
+  it also contains one of `~ ! @ # % ^ & | ` ?`; otherwise the trailing signs are trimmed and lexed on (`1<-2` is `1 < -2`).
+  Checked from PostgreSQL's own error messages (`select null::xml OP null::xml` fails naming the operator token it read) over
+  3,000 random operator strings (2,809 that PostgreSQL reads as one operator, 191 that it trims into several): 0 disagreements. `!=` is rewritten to `<>` by PostgreSQL's
+  scanner and `=>` is its own token; both are accounted for, not hidden.
+- **The statement count is compared with PostgreSQL's.** `tests/lex_diff.py` builds SQL from a grammar of valid statement lists
+  with hostile lexical content (`;` in strings, comments, quoted identifiers; nested comments; backslashes; doubled quotes) and
+  from a fuzzer over an alphabet of dangerous fragments, sends each to a real server, and counts the `CommandComplete`
+  messages. In a run of 12,000 strings, 6,247 were comparable (the lexer accepted, PostgreSQL ran it without error), 4,505 with
+  two or more statements: **0 disagreements**. The lexer refused 4,882 (the safe direction) and PostgreSQL rejected 871.
+- **Its teeth, shown:** a lexer whose block comments do not nest is caught at once (20 disagreements in 3,000 strings). A lexer
+  that lets a doubled quote end a string is **not** caught by the statement count (quote parity is preserved, so boundaries do
+  not move); the unit cases kill it. The two checks cover different things, and the claim is made for each separately.
+- The first version of the differential reported 145 "disagreements" that were its own generator's bad fragment, and then 15 that
+  were its own misreading of what a successful `select 1 - 2` shows. Both were caught by checks in the test itself.
+
 ## 4. Lowering
 
 - **Aliases** (`FROM orders o`) are resolved to base tables: the IR names `orders`, never `o`.
@@ -123,7 +144,7 @@ it to PostgreSQL and counting the commands it reports), has the same number of s
 | Slice | Delivers | Gate |
 |---|---|---|
 | IR v2 | `ir.md` section 6, three verifiers | built; 428 vectors agree |
-| **P1a** | the lexer and statement splitter, with the refusals of section 3 | corpus of tokens and splits; lexer fuzz; mutants |
+| **P1a** | the lexer and statement splitter, with the refusals of section 3 | **built** (`src/lex.cho`): 167 hand-written cases (54 refusals), 35 mutants killed, and a differential against PostgreSQL itself (section 3.1) |
 | **P1b** | the parser (expressions by precedence climbing, the statement forms) and the renderer | parse then render then re-parse is a fixed point; EXPLAIN differential on the accepted corpus |
 | **P1c** | lowering, the schema snapshot, the effect check | lowering gate (1); refusals (3) |
 | **P1d** | the `Query` branch in the proxy | end to end with psql: differential (2) and the server log (3) |
