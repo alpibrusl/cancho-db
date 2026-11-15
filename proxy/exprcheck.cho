@@ -1,0 +1,112 @@
+import std.buffer;
+import std.io;
+import cdb.lex;
+import cdb.parse;
+
+// `exprcheck`: reads one SQL expression on standard input, parses it and renders it, for tests/parse_diff.py to compare with
+// PostgreSQL. One line: `ok <rendering>` or `refused <tag>`.
+
+fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer) -> [heap, io_read] buffer.Buffer {
+    var out = text;
+    var c = getchar(io);
+    while c >= 0 {
+        out = buffer.push(heap, out, byte_of(c));
+        c = getchar(io);
+    }
+    return out;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(ffi);
+    release(fs);
+    release(args);
+    borrow mut heap as &!h in {
+        var text = buffer.empty(h, 4096);
+        borrow mut io as &!i in {
+            text = read_stdin(h, i, text);
+        }
+        var answer = 0;
+        var tag = 0;
+        var rendered = box_slice(h, 8192, byte_of(0));
+        borrow text as &t in {
+            let sql = buffer.bytes(t);
+            let cap = len(sql) + 4;
+            var tb = box_slice(h, 4 * cap, 0);
+            var nb = box_slice(h, 6 * cap, 0);
+            var kb = box_slice(h, cap, 0);
+            var vb = box_slice(h, 64, 0);
+            var ob = box_slice(h, 4 * 64, 0);
+            var rb = box_slice(h, 2 * 64, 0);
+            var st = box_slice(h, 16, 0);
+            borrow mut tb as &!tw in {
+                borrow mut nb as &!nw in {
+                    borrow mut kb as &!kw in {
+                        borrow mut vb as &!vw in {
+                            borrow mut ob as &!ow in {
+                                borrow mut rb as &!rw in {
+                                    borrow mut st as &!sw in {
+                                        borrow mut rendered as &!xw in {
+                                            let n = lex.tokenize(sql, contents(tw));
+                                            if n < 0 {
+                                                answer = n;
+                                                tag = 1;
+                                            } else {
+                                                parse.reset(contents(sw));
+                                                let q = parse.expr(sql, contents(tw), 0, n, contents(nw), contents(kw), contents(vw), contents(ow), contents(sw));
+                                                if q < 0 {
+                                                    answer = q;
+                                                    tag = 2;
+                                                } else if q != n {
+                                                    answer = 0 - parse.e_syntax();
+                                                    tag = 2;
+                                                } else {
+                                                    let root = contents(sw)[2];
+                                                    let w = parse.render(sql, contents(tw), contents(nw), contents(kw), root, contents(rw), contents(xw));
+                                                    if w < 0 {
+                                                        answer = w;
+                                                        tag = 2;
+                                                    } else {
+                                                        answer = w;
+                                                        tag = 0;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            unbox_slice(h, tb);
+            unbox_slice(h, nb);
+            unbox_slice(h, kb);
+            unbox_slice(h, vb);
+            unbox_slice(h, ob);
+            unbox_slice(h, rb);
+            unbox_slice(h, st);
+        }
+        borrow mut io as &!o in {
+            if tag == 1 {
+                io.write_all(o, "refused ");
+                io.write_all(o, lex.error_name(0 - answer));
+            } else if tag == 2 {
+                io.write_all(o, "refused ");
+                io.write_all(o, parse.error_name(0 - answer));
+            } else {
+                io.write_all(o, "ok ");
+                borrow rendered as &r in {
+                    io.write_all(o, contents(r)[0..answer]);
+                }
+            }
+            io.newline(o);
+        }
+        unbox_slice(h, rendered);
+        buffer.drop(h, text);
+    }
+    release(io);
+    release(heap);
+    return 0;
+}

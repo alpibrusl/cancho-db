@@ -1,0 +1,1500 @@
+module cdb.parse;
+
+import cdb.lex;
+
+// The SQL expression parser and renderer (docs/m1-lowering.md sections 1, 2 and 7: slice P1b), sans-io: tokens in, a tree in
+// caller-supplied arrays out, and a rendering of the tree back to SQL.
+//
+// THE RENDERING IS WHAT RUNS. The proxy never forwards the client's bytes: it forwards `render` of what was parsed here, so a
+// parse that differs from PostgreSQL's is a different statement run, not a bypass. Every operator is therefore parenthesised
+// in the rendering, and the gate (tests/parse_diff.py) is that PostgreSQL's own plan for the original and for the rendering
+// are the same, and that anything this parser accepts PostgreSQL accepts.
+//
+// Nothing here recurses and nothing allocates. Expressions are parsed by operator-precedence climbing with two explicit
+// stacks (values, and operators with the brackets of calls, lists, CASE and CAST as frames among them), and rendered with a
+// third. A deep expression is a refusal (`nested-too-deep`), not a stack overflow.
+//
+// What is accepted (the rest is refused, never passed through): number, string, NULL, TRUE, FALSE; a column `c` or `t.c`; the
+// operators `or and not = <> != < <= > >= + - * / % || like ilike (and NOT of each) between in`, unary minus, `is [not]
+// null`; `CASE`; `CAST(x AS type)` and `x::type`, the types of `type_code`; and a call `f(args)` or `count(*)`. PostgreSQL's
+// reserved and column-name keywords are refused as names, so a word PostgreSQL would reject is not quietly quoted into one it
+// accepts.
+//
+// The tree: nodes are six ints, `kind data kfirst kcount x y`; node 0 is unused. A node's children are
+// `kids[kfirst .. kfirst + kcount]`. Per kind (`data`, `x`, `y`):
+//
+//     NUM STR            data = the token                    NULL TRUE FALSE: no data
+//     COL                data = first name token, x = second name token or -1
+//     BIN                data = operator code; two children (for IN, the right one is a LIST)
+//     NOT NEG            one child                           ISNULL: data = 1 for IS NOT NULL, one child
+//     BETWEEN            data = 1 for NOT BETWEEN; children x, low, high
+//     LIST               the items of IN (...)
+//     CALL               data = the name token, x = 1 for count(*); the arguments
+//     CASE               x = 1 if there is an operand, y = 1 if there is an ELSE; children: operand?, (when, then)*, else?
+//     CAST               data = type code, x and y = the modifiers or -1; one child
+
+// Node kinds.
+pub fn n_num() -> [] int {
+    return 1;
+}
+
+pub fn n_str() -> [] int {
+    return 2;
+}
+
+pub fn n_null() -> [] int {
+    return 3;
+}
+
+pub fn n_true() -> [] int {
+    return 4;
+}
+
+pub fn n_false() -> [] int {
+    return 5;
+}
+
+pub fn n_col() -> [] int {
+    return 6;
+}
+
+pub fn n_bin() -> [] int {
+    return 7;
+}
+
+pub fn n_not() -> [] int {
+    return 8;
+}
+
+pub fn n_neg() -> [] int {
+    return 9;
+}
+
+pub fn n_isnull() -> [] int {
+    return 10;
+}
+
+pub fn n_between() -> [] int {
+    return 11;
+}
+
+pub fn n_list() -> [] int {
+    return 12;
+}
+
+pub fn n_call() -> [] int {
+    return 13;
+}
+
+pub fn n_case() -> [] int {
+    return 14;
+}
+
+pub fn n_cast() -> [] int {
+    return 15;
+}
+
+// The ways a parse is refused: `expr` answers `0 - code`, and `st[3]` is the token index it stopped at.
+pub fn e_syntax() -> [] int {
+    return 1;
+}
+
+pub fn e_unknown_construct() -> [] int {
+    return 2;
+}
+
+pub fn e_unsupported_operator() -> [] int {
+    return 3;
+}
+
+pub fn e_reserved_word() -> [] int {
+    return 4;
+}
+
+pub fn e_unknown_type() -> [] int {
+    return 5;
+}
+
+pub fn e_nested_too_deep() -> [] int {
+    return 6;
+}
+
+pub fn e_too_big() -> [] int {
+    return 7;
+}
+
+pub fn e_subquery() -> [] int {
+    return 8;
+}
+
+pub fn error_name(code: int) -> [] &static [byte] {
+    if code == 1 {
+        return "syntax";
+    }
+    if code == 2 {
+        return "unknown-construct";
+    }
+    if code == 3 {
+        return "unsupported-operator";
+    }
+    if code == 4 {
+        return "reserved-word";
+    }
+    if code == 5 {
+        return "unknown-type";
+    }
+    if code == 6 {
+        return "nested-too-deep";
+    }
+    if code == 7 {
+        return "too-big";
+    }
+    return "subquery";
+}
+
+// Indices into the state slice `st` (at least 10 ints, the first four zeroed by `reset`): the next free node, the kids used,
+// the root of the last parse, the token a refusal stopped at, then the two stack heights and scratch for a parsed type.
+fn s_nodes() -> [] int {
+    return 0;
+}
+
+fn s_kids() -> [] int {
+    return 1;
+}
+
+pub fn s_root() -> [] int {
+    return 2;
+}
+
+pub fn s_errpos() -> [] int {
+    return 3;
+}
+
+fn s_vtop() -> [] int {
+    return 4;
+}
+
+fn s_otop() -> [] int {
+    return 5;
+}
+
+fn s_type() -> [] int {
+    return 6;
+}
+
+fn s_mod1() -> [] int {
+    return 7;
+}
+
+fn s_mod2() -> [] int {
+    return 8;
+}
+
+// Starts a fresh tree: node 0 is reserved, so a node id of 0 means none.
+pub fn reset[&x](st: &!x [int]) -> [] int {
+    st[0] = 1;
+    st[1] = 0;
+    st[2] = 0;
+    st[3] = 0;
+    st[4] = 0;
+    st[5] = 0;
+    st[6] = 0;
+    st[7] = 0;
+    st[8] = 0;
+    st[9] = 0;
+    return 0;
+}
+
+// Operator codes: the binary operators, then the prefix ones, then BETWEEN.
+fn o_or() -> [] int {
+    return 1;
+}
+
+fn o_and() -> [] int {
+    return 2;
+}
+
+fn o_eq() -> [] int {
+    return 3;
+}
+
+fn o_ne() -> [] int {
+    return 4;
+}
+
+fn o_lt() -> [] int {
+    return 5;
+}
+
+fn o_le() -> [] int {
+    return 6;
+}
+
+fn o_gt() -> [] int {
+    return 7;
+}
+
+fn o_ge() -> [] int {
+    return 8;
+}
+
+fn o_add() -> [] int {
+    return 9;
+}
+
+fn o_sub() -> [] int {
+    return 10;
+}
+
+fn o_mul() -> [] int {
+    return 11;
+}
+
+fn o_div() -> [] int {
+    return 12;
+}
+
+fn o_mod() -> [] int {
+    return 13;
+}
+
+fn o_concat() -> [] int {
+    return 14;
+}
+
+fn o_like() -> [] int {
+    return 15;
+}
+
+fn o_nlike() -> [] int {
+    return 16;
+}
+
+fn o_ilike() -> [] int {
+    return 17;
+}
+
+fn o_nilike() -> [] int {
+    return 18;
+}
+
+fn o_in() -> [] int {
+    return 19;
+}
+
+fn o_nin() -> [] int {
+    return 20;
+}
+
+fn o_not() -> [] int {
+    return 21;
+}
+
+fn o_neg() -> [] int {
+    return 22;
+}
+
+fn o_between() -> [] int {
+    return 23;
+}
+
+fn o_nbetween() -> [] int {
+    return 24;
+}
+
+// The brackets, which sit on the operator stack with precedence -1 so that no reduction reaches past them.
+fn f_paren() -> [] int {
+    return 30;
+}
+
+fn f_call() -> [] int {
+    return 31;
+}
+
+fn f_case() -> [] int {
+    return 32;
+}
+
+fn f_cast() -> [] int {
+    return 33;
+}
+
+fn f_in() -> [] int {
+    return 34;
+}
+
+// PostgreSQL's precedence, tightest last (its documentation, "Operator Precedence"): OR, AND, NOT, IS, the comparisons,
+// BETWEEN IN LIKE ILIKE, any other operator (`||`), + -, * / %, unary minus. The comparisons and BETWEEN-IN-LIKE do not
+// associate: `a < b < c` is a syntax error there, and here.
+fn prec_of(code: int) -> [] int {
+    if code == o_or() {
+        return 1;
+    }
+    if code == o_and() {
+        return 2;
+    }
+    if code == o_not() {
+        return 3;
+    }
+    if code >= o_eq() && code <= o_ge() {
+        return 5;
+    }
+    if code >= o_like() && code <= o_nin() || code == o_between() || code == o_nbetween() {
+        return 6;
+    }
+    if code == o_concat() {
+        return 7;
+    }
+    if code == o_add() || code == o_sub() {
+        return 8;
+    }
+    if code >= o_mul() && code <= o_mod() {
+        return 9;
+    }
+    return 11;
+}
+
+fn nonassoc(prec: int) -> [] bool {
+    return prec == 5 || prec == 6;
+}
+
+fn op_text(code: int) -> [] &static [byte] {
+    if code == 1 {
+        return "or";
+    }
+    if code == 2 {
+        return "and";
+    }
+    if code == 3 {
+        return "=";
+    }
+    if code == 4 {
+        return "<>";
+    }
+    if code == 5 {
+        return "<";
+    }
+    if code == 6 {
+        return "<=";
+    }
+    if code == 7 {
+        return ">";
+    }
+    if code == 8 {
+        return ">=";
+    }
+    if code == 9 {
+        return "+";
+    }
+    if code == 10 {
+        return "-";
+    }
+    if code == 11 {
+        return "*";
+    }
+    if code == 12 {
+        return "/";
+    }
+    if code == 13 {
+        return "%";
+    }
+    if code == 14 {
+        return "||";
+    }
+    if code == 15 {
+        return "like";
+    }
+    if code == 16 {
+        return "not like";
+    }
+    if code == 17 {
+        return "ilike";
+    }
+    if code == 18 {
+        return "not ilike";
+    }
+    if code == 19 {
+        return "in";
+    }
+    return "not in";
+}
+
+// PostgreSQL's reserved, type-or-function-name and column-name keywords (`pg_get_keywords()` on 16, catcodes R T C). None may
+// be a bare name here: PostgreSQL rejects most of them as a column, and the rest introduce syntax this parser does not read.
+fn reserved_words() -> [] &static [byte] {
+    return "all analyse analyze and any array as asc asymmetric authorization between bigint binary bit boolean both case cast char character check coalesce collate collation column concurrently constraint create cross current_catalog current_date current_role current_schema current_time current_timestamp current_user dec decimal default deferrable desc distinct do else end except exists extract false fetch float for foreign freeze from full grant greatest group grouping having ilike in initially inner inout int integer intersect interval into is isnull join json_array json_arrayagg json_object json_objectagg lateral leading least left like limit localtime localtimestamp national natural nchar none normalize not notnull null nullif numeric offset on only or order out outer overlaps overlay placing position precision primary real references returning right row select session_user setof similar smallint some substring symmetric system_user table tablesample then time timestamp to trailing treat trim true union unique user using values varchar variadic verbose when where window with xmlattributes xmlconcat xmlelement xmlexists xmlforest xmlnamespaces xmlparse xmlpi xmlroot xmlserialize xmltable";
+}
+
+fn lower(c: int) -> [] int {
+    if c >= 'A' && c <= 'Z' {
+        return c + 32;
+    }
+    return c;
+}
+
+// Is the text at `start`, `length` bytes, equal to `lit` (lower case) ignoring ASCII case?
+fn word_is[&s](sql: &s [byte], start: int, length: int, lit: &static [byte]) -> [] bool {
+    if length != len(lit) {
+        return false;
+    }
+    var i = 0;
+    while i < length {
+        if lower(int_of(sql[start + i])) != int_of(lit[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Is the text at `start` equal, ignoring case, to the `length` bytes of `words` from `at`?
+fn word_at[&s](sql: &s [byte], start: int, length: int, words: &static [byte], at: int) -> [] bool {
+    var i = 0;
+    while i < length {
+        if lower(int_of(sql[start + i])) != int_of(words[at + i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn is_reserved[&s](sql: &s [byte], start: int, length: int) -> [] bool {
+    let words = reserved_words();
+    var i = 0;
+    var ws = 0;
+    while i <= len(words) {
+        if i == len(words) || int_of(words[i]) == ' ' {
+            if i - ws == length && word_at(sql, start, length, words, ws) {
+                return true;
+            }
+            ws = i + 1;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn tkind[&t](toks: &t [int], i: int) -> [] int {
+    return toks[4 * i];
+}
+
+fn tstart[&t](toks: &t [int], i: int) -> [] int {
+    return toks[4 * i + 1];
+}
+
+fn tlen[&t](toks: &t [int], i: int) -> [] int {
+    return toks[4 * i + 2];
+}
+
+// Is token `i` (before `end`) the unquoted word `lit`?
+fn kw[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, lit: &static [byte]) -> [] bool {
+    if i >= end {
+        return false;
+    }
+    if tkind(toks, i) != lex.t_ident() {
+        return false;
+    }
+    return word_is(sql, tstart(toks, i), tlen(toks, i), lit);
+}
+
+// Is token `i` (before `end`) the punctuation byte `c`?
+fn punct[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, c: int) -> [] bool {
+    if i >= end {
+        return false;
+    }
+    if tkind(toks, i) != lex.t_punct() {
+        return false;
+    }
+    return int_of(sql[tstart(toks, i)]) == c;
+}
+
+// Is token `i` (before `end`) the operator `lit`?
+fn opr[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int, lit: &static [byte]) -> [] bool {
+    if i >= end {
+        return false;
+    }
+    if tkind(toks, i) != lex.t_operator() {
+        return false;
+    }
+    return word_is(sql, tstart(toks, i), tlen(toks, i), lit);
+}
+
+// Does a sub-select, a CTE or a VALUES list start at token `i`?
+fn starts_query[&s, &t](sql: &s [byte], toks: &t [int], i: int, end: int) -> [] bool {
+    return kw(sql, toks, i, end, "select") || kw(sql, toks, i, end, "with") || kw(sql, toks, i, end, "values");
+}
+
+fn fail[&x](st: &!x [int], pos: int, code: int) -> [] int {
+    st[3] = pos;
+    return 0 - code;
+}
+
+// The infix operator a token is, or 0.
+fn infix_code[&s, &t](sql: &s [byte], toks: &t [int], i: int) -> [] int {
+    let a = tstart(toks, i);
+    let n = tlen(toks, i);
+    if word_is(sql, a, n, "=") {
+        return o_eq();
+    }
+    if word_is(sql, a, n, "<>") || word_is(sql, a, n, "!=") {
+        return o_ne();
+    }
+    if word_is(sql, a, n, "<") {
+        return o_lt();
+    }
+    if word_is(sql, a, n, "<=") {
+        return o_le();
+    }
+    if word_is(sql, a, n, ">") {
+        return o_gt();
+    }
+    if word_is(sql, a, n, ">=") {
+        return o_ge();
+    }
+    if word_is(sql, a, n, "+") {
+        return o_add();
+    }
+    if word_is(sql, a, n, "-") {
+        return o_sub();
+    }
+    if word_is(sql, a, n, "*") {
+        return o_mul();
+    }
+    if word_is(sql, a, n, "/") {
+        return o_div();
+    }
+    if word_is(sql, a, n, "%") {
+        return o_mod();
+    }
+    if word_is(sql, a, n, "||") {
+        return o_concat();
+    }
+    return 0;
+}
+
+// The closed list of types: a name that could be a user-defined type (with whatever that type's functions do) is refused.
+fn type_code[&s](sql: &s [byte], start: int, length: int) -> [] int {
+    if word_is(sql, start, length, "smallint") {
+        return 1;
+    }
+    if word_is(sql, start, length, "int") || word_is(sql, start, length, "integer") {
+        return 2;
+    }
+    if word_is(sql, start, length, "bigint") {
+        return 3;
+    }
+    if word_is(sql, start, length, "text") {
+        return 4;
+    }
+    if word_is(sql, start, length, "boolean") || word_is(sql, start, length, "bool") {
+        return 5;
+    }
+    if word_is(sql, start, length, "numeric") || word_is(sql, start, length, "decimal") {
+        return 6;
+    }
+    if word_is(sql, start, length, "varchar") {
+        return 7;
+    }
+    if word_is(sql, start, length, "date") {
+        return 8;
+    }
+    if word_is(sql, start, length, "timestamp") {
+        return 9;
+    }
+    if word_is(sql, start, length, "timestamptz") {
+        return 10;
+    }
+    return 11;
+}
+
+fn type_name(code: int) -> [] &static [byte] {
+    if code == 1 {
+        return "smallint";
+    }
+    if code == 2 {
+        return "integer";
+    }
+    if code == 3 {
+        return "bigint";
+    }
+    if code == 4 {
+        return "text";
+    }
+    if code == 5 {
+        return "boolean";
+    }
+    if code == 6 {
+        return "numeric";
+    }
+    if code == 7 {
+        return "varchar";
+    }
+    if code == 8 {
+        return "date";
+    }
+    if code == 9 {
+        return "timestamp";
+    }
+    if code == 10 {
+        return "timestamptz";
+    }
+    return "real";
+}
+
+// A small unsigned integer written in digits only, or -1.
+fn small_int[&s](sql: &s [byte], start: int, length: int) -> [] int {
+    if length > 4 {
+        return 0 - 1;
+    }
+    var v = 0;
+    var i = 0;
+    while i < length {
+        let c = int_of(sql[start + i]);
+        if c < '0' || c > '9' {
+            return 0 - 1;
+        }
+        v = v * 10 + c - '0';
+        i = i + 1;
+    }
+    return v;
+}
+
+// Reads a type at token `pos`: a name of `type_code`, and for numeric `(p)` or `(p, s)`, for varchar `(n)`. Into st[6..8] the
+// code and modifiers; answers the token after it, or a refusal.
+fn parse_type[&s, &t, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, st: &!x [int]) -> [] int {
+    if pos >= end {
+        return fail(st, pos, e_syntax());
+    }
+    if tkind(toks, pos) == lex.t_quoted() {
+        return fail(st, pos, e_unknown_type());
+    }
+    if tkind(toks, pos) != lex.t_ident() {
+        return fail(st, pos, e_syntax());
+    }
+    let code = type_code(sql, tstart(toks, pos), tlen(toks, pos));
+    var known = code != 11;
+    if word_is(sql, tstart(toks, pos), tlen(toks, pos), "real") {
+        known = true;
+    }
+    if !known {
+        return fail(st, pos, e_unknown_type());
+    }
+    st[6] = code;
+    st[7] = 0 - 1;
+    st[8] = 0 - 1;
+    var p = pos + 1;
+    if punct(sql, toks, p, end, '(') {
+        var mods = 0;
+        if code == 6 {
+            mods = 2;
+        } else if code == 7 {
+            mods = 1;
+        } else {
+            return fail(st, p, e_unknown_construct());
+        }
+        if p + 1 >= end || tkind(toks, p + 1) != lex.t_number() {
+            return fail(st, p + 1, e_syntax());
+        }
+        let first = small_int(sql, tstart(toks, p + 1), tlen(toks, p + 1));
+        if first < 0 {
+            return fail(st, p + 1, e_unknown_construct());
+        }
+        st[7] = first;
+        p = p + 2;
+        if punct(sql, toks, p, end, ',') {
+            if mods < 2 || p + 1 >= end || tkind(toks, p + 1) != lex.t_number() {
+                return fail(st, p, e_syntax());
+            }
+            let second = small_int(sql, tstart(toks, p + 1), tlen(toks, p + 1));
+            if second < 0 {
+                return fail(st, p + 1, e_unknown_construct());
+            }
+            st[8] = second;
+            p = p + 2;
+        }
+        if !punct(sql, toks, p, end, ')') {
+            return fail(st, p, e_syntax());
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+// ---- the arena and the two stacks ----
+
+fn new_node[&n, &k, &x](nodes: &!n [int], kids: &!k [int], st: &!x [int], kind: int, data: int, kfirst: int, kcount: int, ex: int, ey: int) -> [] int {
+    let id = st[0];
+    if 6 * id + 6 > len(nodes) {
+        return 0 - e_too_big();
+    }
+    nodes[6 * id] = kind;
+    nodes[6 * id + 1] = data;
+    nodes[6 * id + 2] = kfirst;
+    nodes[6 * id + 3] = kcount;
+    nodes[6 * id + 4] = ex;
+    nodes[6 * id + 5] = ey;
+    st[0] = id + 1;
+    return id;
+}
+
+fn vpush[&v, &x](vs: &!v [int], st: &!x [int], id: int) -> [] int {
+    if st[4] >= len(vs) {
+        return 0 - e_nested_too_deep();
+    }
+    vs[st[4]] = id;
+    st[4] = st[4] + 1;
+    return 0;
+}
+
+fn opush[&o, &x](os: &!o [int], st: &!x [int], code: int, prec: int, a: int, b: int) -> [] int {
+    if 4 * st[5] + 4 > len(os) {
+        return 0 - e_nested_too_deep();
+    }
+    let at = 4 * st[5];
+    os[at] = code;
+    os[at + 1] = prec;
+    os[at + 2] = a;
+    os[at + 3] = b;
+    st[5] = st[5] + 1;
+    return 0;
+}
+
+// A leaf node, pushed on the value stack.
+fn leaf[&n, &k, &v, &x](nodes: &!n [int], kids: &!k [int], vs: &!v [int], st: &!x [int], kind: int, data: int, ex: int) -> [] int {
+    let id = new_node(nodes, kids, st, kind, data, 0, 0, ex, 0 - 1);
+    if id < 0 {
+        return id;
+    }
+    return vpush(vs, st, id);
+}
+
+// Builds a node over the top `n` values (which become its children), replacing them with it.
+fn build[&n, &k, &v, &x](nodes: &!n [int], kids: &!k [int], vs: &!v [int], st: &!x [int], kind: int, data: int, count: int, ex: int, ey: int) -> [] int {
+    if st[4] < count {
+        return 0 - e_syntax();
+    }
+    if st[1] + count > len(kids) {
+        return 0 - e_too_big();
+    }
+    let first = st[1];
+    var i = 0;
+    while i < count {
+        kids[first + i] = vs[st[4] - count + i];
+        i = i + 1;
+    }
+    st[1] = first + count;
+    st[4] = st[4] - count;
+    let id = new_node(nodes, kids, st, kind, data, first, count, ex, ey);
+    if id < 0 {
+        return id;
+    }
+    return vpush(vs, st, id);
+}
+
+// Pops the operator on top of the operator stack and applies it to the values below.
+fn reduce_one[&n, &k, &v, &o, &x](nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], st: &!x [int]) -> [] int {
+    let at = 4 * (st[5] - 1);
+    let code = os[at];
+    let b = os[at + 3];
+    st[5] = st[5] - 1;
+    if code == o_not() {
+        return build(nodes, kids, vs, st, n_not(), 0, 1, 0 - 1, 0 - 1);
+    }
+    if code == o_neg() {
+        return build(nodes, kids, vs, st, n_neg(), 0, 1, 0 - 1, 0 - 1);
+    }
+    if code == o_between() || code == o_nbetween() {
+        if b != 1 {
+            return 0 - e_syntax();
+        }
+        var neg = 0;
+        if code == o_nbetween() {
+            neg = 1;
+        }
+        return build(nodes, kids, vs, st, n_between(), neg, 3, 0 - 1, 0 - 1);
+    }
+    return build(nodes, kids, vs, st, n_bin(), code, 2, 0 - 1, 0 - 1);
+}
+
+// Reduces operators of precedence at least `minprec` from the top, stopping at a bracket. `na` is the precedence that must not
+// be reduced because the incoming operator does not associate with it (-2 for none).
+fn reduce_while[&n, &k, &v, &o, &x](nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], st: &!x [int], minprec: int, na: int) -> [] int {
+    while st[5] > 0 {
+        let prec = os[4 * (st[5] - 1) + 1];
+        if prec < 0 || prec < minprec {
+            return 0;
+        }
+        if prec == na {
+            return 0 - e_syntax();
+        }
+        let r = reduce_one(nodes, kids, vs, os, st);
+        if r < 0 {
+            return r;
+        }
+    }
+    return 0;
+}
+
+// An infix operator arrives: what binds at least as tightly is reduced first, then it waits for its right operand.
+fn push_infix[&n, &k, &v, &o, &x](nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], st: &!x [int], code: int) -> [] int {
+    let prec = prec_of(code);
+    var na = 0 - 2;
+    if nonassoc(prec) {
+        na = prec;
+    }
+    let r = reduce_while(nodes, kids, vs, os, st, prec, na);
+    if r < 0 {
+        return r;
+    }
+    return opush(os, st, code, prec, 0, 0);
+}
+
+// Is there a bracket anywhere on the operator stack?
+fn has_frame[&o, &x](os: &o [int], st: &x [int]) -> [] bool {
+    var i = 0;
+    while i < st[5] {
+        if os[4 * i + 1] < 0 {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// A name: `a` or `a.b`, as a COL leaf. Answers the token after it.
+fn colref[&s, &t, &n, &k, &v, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], st: &!x [int]) -> [] int {
+    var second = 0 - 1;
+    var next = pos + 1;
+    if punct(sql, toks, pos + 1, end, '.') {
+        if pos + 2 >= end {
+            return fail(st, pos + 2, e_syntax());
+        }
+        let kk = tkind(toks, pos + 2);
+        if kk == lex.t_ident() {
+            if is_reserved(sql, tstart(toks, pos + 2), tlen(toks, pos + 2)) {
+                return fail(st, pos + 2, e_reserved_word());
+            }
+        } else if kk != lex.t_quoted() {
+            return fail(st, pos + 2, e_unknown_construct());
+        }
+        second = pos + 2;
+        next = pos + 3;
+        if punct(sql, toks, next, end, '.') {
+            return fail(st, next, e_unknown_construct());
+        }
+    }
+    let r = leaf(nodes, kids, vs, st, n_col(), pos, second);
+    if r < 0 {
+        return fail(st, pos, 0 - r);
+    }
+    return next;
+}
+
+// Parses one expression from token `from`, stopping before the first token that cannot continue it (before `end`, which bounds
+// the statement). Answers the index of that token, or `0 - code` with `st[3]` the token the refusal is at; on success
+// `st[2]` is the root node. `nodes` holds six ints a node, `kids` the children, `vs` the value stack, `os` the operator stack
+// (four ints an entry); `st` is the state `reset` made.
+pub fn expr[&s, &t, &n, &k, &v, &o, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], st: &!x [int]) -> [] int {
+    st[4] = 0;
+    st[5] = 0;
+    var pos = from;
+    var want = true;
+    var done = false;
+    while !done {
+        var r = 0;
+        if want {
+            if pos >= end {
+                return fail(st, pos, e_syntax());
+            }
+            let kind = tkind(toks, pos);
+            let a = tstart(toks, pos);
+            let l = tlen(toks, pos);
+            if kind == lex.t_number() {
+                r = leaf(nodes, kids, vs, st, n_num(), pos, 0 - 1);
+                pos = pos + 1;
+                want = false;
+            } else if kind == lex.t_string() {
+                r = leaf(nodes, kids, vs, st, n_str(), pos, 0 - 1);
+                pos = pos + 1;
+                want = false;
+            } else if kind == lex.t_ident() {
+                if word_is(sql, a, l, "null") {
+                    r = leaf(nodes, kids, vs, st, n_null(), 0, 0 - 1);
+                    pos = pos + 1;
+                    want = false;
+                } else if word_is(sql, a, l, "true") {
+                    r = leaf(nodes, kids, vs, st, n_true(), 0, 0 - 1);
+                    pos = pos + 1;
+                    want = false;
+                } else if word_is(sql, a, l, "false") {
+                    r = leaf(nodes, kids, vs, st, n_false(), 0, 0 - 1);
+                    pos = pos + 1;
+                    want = false;
+                } else if word_is(sql, a, l, "not") {
+                    r = opush(os, st, o_not(), prec_of(o_not()), 0, 0);
+                    pos = pos + 1;
+                } else if word_is(sql, a, l, "case") {
+                    r = opush(os, st, f_case(), 0 - 1, st[4], 1);
+                    pos = pos + 1;
+                    if kw(sql, toks, pos, end, "when") {
+                        want = false;
+                    }
+                } else if word_is(sql, a, l, "cast") && punct(sql, toks, pos + 1, end, '(') {
+                    r = opush(os, st, f_cast(), 0 - 1, st[4], 0);
+                    pos = pos + 2;
+                } else if is_reserved(sql, a, l) {
+                    return fail(st, pos, e_reserved_word());
+                } else if punct(sql, toks, pos + 1, end, '(') {
+                    if punct(sql, toks, pos + 2, end, ')') {
+                        r = build(nodes, kids, vs, st, n_call(), pos, 0, 0, 0 - 1);
+                        pos = pos + 3;
+                        want = false;
+                    } else if opr(sql, toks, pos + 2, end, "*") && punct(sql, toks, pos + 3, end, ')') && word_is(sql, a, l, "count") {
+                        r = build(nodes, kids, vs, st, n_call(), pos, 0, 1, 0 - 1);
+                        pos = pos + 4;
+                        want = false;
+                    } else {
+                        if starts_query(sql, toks, pos + 2, end) {
+                            return fail(st, pos + 2, e_subquery());
+                        }
+                        r = opush(os, st, f_call(), 0 - 1, st[4], pos);
+                        pos = pos + 2;
+                    }
+                } else {
+                    let next = colref(sql, toks, pos, end, nodes, kids, vs, st);
+                    if next < 0 {
+                        return next;
+                    }
+                    pos = next;
+                    want = false;
+                }
+            } else if kind == lex.t_quoted() {
+                if punct(sql, toks, pos + 1, end, '(') {
+                    return fail(st, pos, e_unknown_construct());
+                }
+                let next = colref(sql, toks, pos, end, nodes, kids, vs, st);
+                if next < 0 {
+                    return next;
+                }
+                pos = next;
+                want = false;
+            } else if kind == lex.t_punct() && int_of(sql[a]) == '(' {
+                if starts_query(sql, toks, pos + 1, end) {
+                    return fail(st, pos + 1, e_subquery());
+                }
+                r = opush(os, st, f_paren(), 0 - 1, st[4], 0);
+                pos = pos + 1;
+            } else if kind == lex.t_operator() {
+                if word_is(sql, a, l, "-") {
+                    r = opush(os, st, o_neg(), prec_of(o_neg()), 0, 0);
+                    pos = pos + 1;
+                } else if word_is(sql, a, l, "+") {
+                    return fail(st, pos, e_unknown_construct());
+                } else {
+                    return fail(st, pos, e_unsupported_operator());
+                }
+            } else {
+                return fail(st, pos, e_syntax());
+            }
+        } else {
+            var stop = pos >= end;
+            if !stop {
+                let kind = tkind(toks, pos);
+                let a = tstart(toks, pos);
+                let l = tlen(toks, pos);
+                if kind == lex.t_operator() {
+                    let code = infix_code(sql, toks, pos);
+                    if code == 0 {
+                        return fail(st, pos, e_unsupported_operator());
+                    }
+                    r = push_infix(nodes, kids, vs, os, st, code);
+                    pos = pos + 1;
+                    want = true;
+                } else if kind == lex.t_cast() {
+                    let q = parse_type(sql, toks, pos + 1, end, st);
+                    if q < 0 {
+                        return q;
+                    }
+                    r = build(nodes, kids, vs, st, n_cast(), st[6], 1, st[7], st[8]);
+                    pos = q;
+                } else if kind == lex.t_ident() {
+                    var neg = false;
+                    var at = pos;
+                    if word_is(sql, a, l, "not") {
+                        if kw(sql, toks, pos + 1, end, "in") || kw(sql, toks, pos + 1, end, "like") || kw(sql, toks, pos + 1, end, "ilike") || kw(sql, toks, pos + 1, end, "between") {
+                            neg = true;
+                            at = pos + 1;
+                        } else {
+                            return fail(st, pos, e_syntax());
+                        }
+                    }
+                    let w = tstart(toks, at);
+                    let wl = tlen(toks, at);
+                    if word_is(sql, w, wl, "and") && !neg {
+                        r = reduce_while(nodes, kids, vs, os, st, 7, 0 - 2);
+                        if r >= 0 {
+                            let top = 4 * (st[5] - 1);
+                            if st[5] > 0 && (os[top] == o_between() || os[top] == o_nbetween()) && os[top + 3] == 0 {
+                                os[top + 3] = 1;
+                            } else {
+                                r = push_infix(nodes, kids, vs, os, st, o_and());
+                            }
+                        }
+                        pos = pos + 1;
+                        want = true;
+                    } else if word_is(sql, w, wl, "or") && !neg {
+                        r = push_infix(nodes, kids, vs, os, st, o_or());
+                        pos = pos + 1;
+                        want = true;
+                    } else if word_is(sql, w, wl, "like") {
+                        var code = o_like();
+                        if neg {
+                            code = o_nlike();
+                        }
+                        r = push_infix(nodes, kids, vs, os, st, code);
+                        pos = at + 1;
+                        want = true;
+                    } else if word_is(sql, w, wl, "ilike") {
+                        var code = o_ilike();
+                        if neg {
+                            code = o_nilike();
+                        }
+                        r = push_infix(nodes, kids, vs, os, st, code);
+                        pos = at + 1;
+                        want = true;
+                    } else if word_is(sql, w, wl, "between") {
+                        var code = o_between();
+                        if neg {
+                            code = o_nbetween();
+                        }
+                        r = push_infix(nodes, kids, vs, os, st, code);
+                        pos = at + 1;
+                        want = true;
+                    } else if word_is(sql, w, wl, "in") {
+                        if !punct(sql, toks, at + 1, end, '(') {
+                            return fail(st, at + 1, e_syntax());
+                        }
+                        if starts_query(sql, toks, at + 2, end) {
+                            return fail(st, at + 2, e_subquery());
+                        }
+                        var code = o_in();
+                        if neg {
+                            code = o_nin();
+                        }
+                        r = push_infix(nodes, kids, vs, os, st, code);
+                        if r >= 0 {
+                            r = opush(os, st, f_in(), 0 - 1, st[4], 0);
+                        }
+                        pos = at + 2;
+                        want = true;
+                    } else if word_is(sql, a, l, "is") {
+                        r = reduce_while(nodes, kids, vs, os, st, 4, 0 - 2);
+                        var isneg = 0;
+                        var q = pos + 1;
+                        if kw(sql, toks, q, end, "not") {
+                            isneg = 1;
+                            q = q + 1;
+                        }
+                        if !kw(sql, toks, q, end, "null") {
+                            return fail(st, q, e_unknown_construct());
+                        }
+                        if r >= 0 {
+                            r = build(nodes, kids, vs, st, n_isnull(), isneg, 1, 0 - 1, 0 - 1);
+                        }
+                        pos = q + 1;
+                    } else if word_is(sql, a, l, "when") || word_is(sql, a, l, "then") || word_is(sql, a, l, "else") || word_is(sql, a, l, "end") || word_is(sql, a, l, "as") {
+                        if has_frame(os, st) {
+                            let q = frame_word(sql, toks, pos, end, nodes, kids, vs, os, st);
+                            if q < 0 {
+                                return q;
+                            }
+                            pos = q;
+                            want = st[9] == 1;
+                        } else {
+                            stop = true;
+                        }
+                    } else {
+                        stop = true;
+                    }
+                } else if kind == lex.t_punct() && (int_of(sql[a]) == ',' || int_of(sql[a]) == ')') {
+                    if has_frame(os, st) {
+                        let q = frame_punct(sql, toks, pos, end, nodes, kids, vs, os, st);
+                        if q < 0 {
+                            return q;
+                        }
+                        pos = q;
+                        want = st[9] == 1;
+                    } else {
+                        stop = true;
+                    }
+                } else {
+                    stop = true;
+                }
+            }
+            if stop {
+                done = true;
+                if want {
+                    return fail(st, pos, e_syntax());
+                }
+                r = reduce_while(nodes, kids, vs, os, st, 0, 0 - 2);
+                if r >= 0 && (st[5] != 0 || st[4] != 1) {
+                    r = 0 - e_syntax();
+                }
+                if r >= 0 {
+                    st[2] = vs[0];
+                }
+            }
+        }
+        if r < 0 {
+            return fail(st, pos, 0 - r);
+        }
+    }
+    return pos;
+}
+
+// A `,` or `)` met while a bracket is open. `st[9]` is set to 1 if an operand is wanted next. Answers the next token.
+fn frame_punct[&s, &t, &n, &k, &v, &o, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], st: &!x [int]) -> [] int {
+    var r = reduce_while(nodes, kids, vs, os, st, 0, 0 - 2);
+    if r < 0 {
+        return fail(st, pos, 0 - r);
+    }
+    let at = 4 * (st[5] - 1);
+    let code = os[at];
+    let base = os[at + 2];
+    let comma = int_of(sql[tstart(toks, pos)]) == ',';
+    st[9] = 0;
+    if comma {
+        if code == f_call() || code == f_in() {
+            st[9] = 1;
+            return pos + 1;
+        }
+        if code == f_paren() {
+            return fail(st, pos, e_unknown_construct());
+        }
+        return fail(st, pos, e_syntax());
+    }
+    if code == f_call() {
+        st[5] = st[5] - 1;
+        r = build(nodes, kids, vs, st, n_call(), os[at + 3], st[4] - base, 0, 0 - 1);
+    } else if code == f_in() {
+        st[5] = st[5] - 1;
+        r = build(nodes, kids, vs, st, n_list(), 0, st[4] - base, 0 - 1, 0 - 1);
+        if r >= 0 {
+            // `x IN (...)` is closed on the right, so it is complete here: `x IN (1) - y` is `(x IN (1)) - y`, which the
+            // differential against PostgreSQL found (first written to wait for its operand like any infix operator)
+            r = reduce_one(nodes, kids, vs, os, st);
+        }
+    } else if code == f_paren() {
+        st[5] = st[5] - 1;
+    } else {
+        return fail(st, pos, e_syntax());
+    }
+    if r < 0 {
+        return fail(st, pos, 0 - r);
+    }
+    return pos + 1;
+}
+
+// `when`, `then`, `else`, `end` or `as` met while a bracket is open (CASE and CAST own them). `st[9]` is as in `frame_punct`.
+// A CASE frame's second field is its state: 1 before the first WHEN, 2 after WHEN, 3 after THEN, 4 after ELSE, plus 8 if it
+// has an operand.
+fn frame_word[&s, &t, &n, &k, &v, &o, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], st: &!x [int]) -> [] int {
+    var r = reduce_while(nodes, kids, vs, os, st, 0, 0 - 2);
+    if r < 0 {
+        return fail(st, pos, 0 - r);
+    }
+    let at = 4 * (st[5] - 1);
+    let code = os[at];
+    let base = os[at + 2];
+    let b = os[at + 3];
+    let a = tstart(toks, pos);
+    let l = tlen(toks, pos);
+    st[9] = 0;
+    if code == f_cast() {
+        if !word_is(sql, a, l, "as") || st[4] - base != 1 {
+            return fail(st, pos, e_syntax());
+        }
+        let q = parse_type(sql, toks, pos + 1, end, st);
+        if q < 0 {
+            return q;
+        }
+        if !punct(sql, toks, q, end, ')') {
+            return fail(st, q, e_syntax());
+        }
+        st[5] = st[5] - 1;
+        r = build(nodes, kids, vs, st, n_cast(), st[6], 1, st[7], st[8]);
+        if r < 0 {
+            return fail(st, pos, 0 - r);
+        }
+        return q + 1;
+    }
+    if code != f_case() {
+        return fail(st, pos, e_syntax());
+    }
+    let state = b % 8;
+    var operand = b / 8;
+    if word_is(sql, a, l, "when") {
+        if state == 1 {
+            if st[4] - base > 1 {
+                return fail(st, pos, e_syntax());
+            }
+            operand = st[4] - base;
+            os[at + 3] = 2 + 8 * operand;
+        } else if state == 3 {
+            os[at + 3] = 2 + 8 * operand;
+        } else {
+            return fail(st, pos, e_syntax());
+        }
+        st[9] = 1;
+        return pos + 1;
+    }
+    if word_is(sql, a, l, "then") {
+        if state != 2 {
+            return fail(st, pos, e_syntax());
+        }
+        os[at + 3] = 3 + 8 * operand;
+        st[9] = 1;
+        return pos + 1;
+    }
+    if word_is(sql, a, l, "else") {
+        if state != 3 {
+            return fail(st, pos, e_syntax());
+        }
+        os[at + 3] = 4 + 8 * operand;
+        st[9] = 1;
+        return pos + 1;
+    }
+    if word_is(sql, a, l, "end") {
+        if state != 3 && state != 4 {
+            return fail(st, pos, e_syntax());
+        }
+        var has_else = 0;
+        if state == 4 {
+            has_else = 1;
+        }
+        st[5] = st[5] - 1;
+        r = build(nodes, kids, vs, st, n_case(), 0, st[4] - base, operand, has_else);
+        if r < 0 {
+            return fail(st, pos, 0 - r);
+        }
+        return pos + 1;
+    }
+    return fail(st, pos, e_syntax());
+}
+
+// ---- rendering ----
+
+fn put_byte[&o](out: &!o [byte], at: int, c: int) -> [] int {
+    if at < 0 || at >= len(out) {
+        return 0 - 1;
+    }
+    out[at] = byte_of(c);
+    return at + 1;
+}
+
+fn put_lit[&o](out: &!o [byte], at: int, lit: &static [byte]) -> [] int {
+    var i = 0;
+    var p = at;
+    while i < len(lit) && p >= 0 {
+        p = put_byte(out, p, int_of(lit[i]));
+        i = i + 1;
+    }
+    return p;
+}
+
+// Copies `length` bytes of the source from `start`; `fold` lower-cases them (an unquoted name's meaning in PostgreSQL).
+fn put_text[&s, &o](out: &!o [byte], at: int, sql: &s [byte], start: int, length: int, fold: bool) -> [] int {
+    var i = 0;
+    var p = at;
+    while i < length && p >= 0 {
+        var c = int_of(sql[start + i]);
+        if fold {
+            c = lower(c);
+        }
+        p = put_byte(out, p, c);
+        i = i + 1;
+    }
+    return p;
+}
+
+fn put_int[&o](out: &!o [byte], at: int, v: int) -> [] int {
+    var scale = 1;
+    while v / scale >= 10 {
+        scale = scale * 10;
+    }
+    var p = at;
+    while scale > 0 && p >= 0 {
+        p = put_byte(out, p, '0' + v / scale % 10);
+        scale = scale / 10;
+    }
+    return p;
+}
+
+// A name token as an always-quoted identifier: an unquoted name is folded to lower case, a quoted one is kept as written.
+fn put_name[&s, &t, &o](out: &!o [byte], at: int, sql: &s [byte], toks: &t [int], tok: int) -> [] int {
+    var p = put_byte(out, at, '"');
+    p = put_text(out, p, sql, tstart(toks, tok), tlen(toks, tok), tkind(toks, tok) == lex.t_ident());
+    return put_byte(out, p, '"');
+}
+
+fn emit_open[&s, &t, &n, &o](out: &!o [byte], at: int, sql: &s [byte], toks: &t [int], nodes: &n [int], node: int) -> [] int {
+    let kind = nodes[6 * node];
+    let data = nodes[6 * node + 1];
+    var p = at;
+    if kind == n_num() {
+        return put_text(out, p, sql, tstart(toks, data), tlen(toks, data), false);
+    }
+    if kind == n_str() {
+        p = put_byte(out, p, '\'');
+        p = put_text(out, p, sql, tstart(toks, data), tlen(toks, data), false);
+        return put_byte(out, p, '\'');
+    }
+    if kind == n_null() {
+        return put_lit(out, p, "null");
+    }
+    if kind == n_true() {
+        return put_lit(out, p, "true");
+    }
+    if kind == n_false() {
+        return put_lit(out, p, "false");
+    }
+    if kind == n_col() {
+        p = put_name(out, p, sql, toks, data);
+        if nodes[6 * node + 4] >= 0 {
+            p = put_byte(out, p, '.');
+            p = put_name(out, p, sql, toks, nodes[6 * node + 4]);
+        }
+        return p;
+    }
+    if kind == n_not() {
+        return put_lit(out, p, "(not ");
+    }
+    if kind == n_neg() {
+        return put_lit(out, p, "(- ");
+    }
+    if kind == n_call() {
+        p = put_text(out, p, sql, tstart(toks, data), tlen(toks, data), true);
+        p = put_byte(out, p, '(');
+        if nodes[6 * node + 4] == 1 {
+            p = put_byte(out, p, '*');
+        }
+        return p;
+    }
+    if kind == n_case() {
+        return put_lit(out, p, "(case");
+    }
+    if kind == n_cast() {
+        return put_lit(out, p, "cast(");
+    }
+    return put_byte(out, p, '(');
+}
+
+fn emit_sep[&o, &n](out: &!o [byte], at: int, nodes: &n [int], node: int, k: int) -> [] int {
+    let kind = nodes[6 * node];
+    let data = nodes[6 * node + 1];
+    var p = at;
+    if kind == n_bin() {
+        p = put_byte(out, p, ' ');
+        p = put_lit(out, p, op_text(data));
+        return put_byte(out, p, ' ');
+    }
+    if kind == n_between() {
+        if k == 1 {
+            if data == 1 {
+                return put_lit(out, p, " not between ");
+            }
+            return put_lit(out, p, " between ");
+        }
+        return put_lit(out, p, " and ");
+    }
+    if kind == n_case() {
+        let operand = nodes[6 * node + 4];
+        let has_else = nodes[6 * node + 5];
+        if k < operand {
+            return put_byte(out, p, ' ');
+        }
+        if has_else == 1 && k == nodes[6 * node + 3] - 1 {
+            return put_lit(out, p, " else ");
+        }
+        if (k - operand) % 2 == 0 {
+            return put_lit(out, p, " when ");
+        }
+        return put_lit(out, p, " then ");
+    }
+    return put_lit(out, p, ", ");
+}
+
+fn emit_close[&o, &n](out: &!o [byte], at: int, nodes: &n [int], node: int) -> [] int {
+    let kind = nodes[6 * node];
+    let data = nodes[6 * node + 1];
+    var p = at;
+    if kind >= n_num() && kind <= n_col() {
+        return p;
+    }
+    if kind == n_isnull() {
+        if data == 1 {
+            return put_lit(out, p, " is not null)");
+        }
+        return put_lit(out, p, " is null)");
+    }
+    if kind == n_case() {
+        return put_lit(out, p, " end)");
+    }
+    if kind == n_cast() {
+        p = put_lit(out, p, " as ");
+        p = put_lit(out, p, type_name(data));
+        if nodes[6 * node + 4] >= 0 {
+            p = put_byte(out, p, '(');
+            p = put_int(out, p, nodes[6 * node + 4]);
+            if nodes[6 * node + 5] >= 0 {
+                p = put_lit(out, p, ", ");
+                p = put_int(out, p, nodes[6 * node + 5]);
+            }
+            p = put_byte(out, p, ')');
+        }
+        return put_byte(out, p, ')');
+    }
+    return put_byte(out, p, ')');
+}
+
+// Renders the tree at `root` into `out` as SQL with every operator parenthesised, names always quoted and keywords in lower
+// case. `rs` is the traversal stack (two ints a level). Answers the length written, or `0 - code`.
+pub fn render[&s, &t, &n, &k, &r, &o](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, rs: &!r [int], out: &!o [byte]) -> [] int {
+    var p = 0;
+    var sp = 1;
+    if len(rs) < 2 {
+        return 0 - e_nested_too_deep();
+    }
+    rs[0] = root;
+    rs[1] = 0;
+    while sp > 0 && p >= 0 {
+        let node = rs[2 * (sp - 1)];
+        let idx = rs[2 * (sp - 1) + 1];
+        let count = nodes[6 * node + 3];
+        if idx == 0 {
+            p = emit_open(out, p, sql, toks, nodes, node);
+        }
+        if p >= 0 {
+            if idx < count {
+                if idx > 0 || nodes[6 * node] == n_case() {
+                    p = emit_sep(out, p, nodes, node, idx);
+                }
+                if 2 * sp + 2 > len(rs) {
+                    return 0 - e_nested_too_deep();
+                }
+                rs[2 * (sp - 1) + 1] = idx + 1;
+                rs[2 * sp] = kids[nodes[6 * node + 2] + idx];
+                rs[2 * sp + 1] = 0;
+                sp = sp + 1;
+            } else {
+                p = emit_close(out, p, nodes, node);
+                sp = sp - 1;
+            }
+        }
+    }
+    if p < 0 {
+        return 0 - e_too_big();
+    }
+    return p;
+}

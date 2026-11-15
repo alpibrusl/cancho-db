@@ -98,6 +98,38 @@ Anything the lexer meets that it does not fully understand is `unknown-construct
 - The first version of the differential reported 145 "disagreements" that were its own generator's bad fragment, and then 15 that
   were its own misreading of what a successful `select 1 - 2` shows. Both were caught by checks in the test itself.
 
+### 3.2 The expression parser, and what the differential found
+
+`src/parse.cho` reads the expression subset of section 2 and renders it back with **every operator parenthesised, every name
+folded and double-quoted, and keywords in lower case**: that rendering, not the client's text, is what the proxy will send. The
+parser is operator-precedence climbing with an explicit operator stack (brackets of calls, `IN` lists, `CASE` and `CAST` sit on
+it as frames) and a value stack; the tree is built into caller arrays; the renderer walks it with a third stack. Nothing
+recurses; every stack and arena has a limit that is a tagged refusal (`nested-too-deep`, `too-big`).
+
+- **The check is PostgreSQL's own plan.** `tests/parse_diff.py` sends `EXPLAIN (VERBOSE, COSTS OFF) SELECT <expr> FROM t` for the
+  original and for the rendering to a real server. Its `Output:` line is the expression as PostgreSQL parsed it, parenthesised,
+  so a precedence or associativity error in this parser shows as a different line. Over 12,000 cases (three seeds; a typed grammar
+  written with and without redundant parentheses, with random spacing, case and comments; chains of operands and operators with
+  no parentheses at all; and a fuzzer over a token vocabulary): **0 disagreements**. About 2,000 of 4,000 cases per seed are valid
+  expressions that plan identically; about 500 more are expressions that PostgreSQL refuses for a type error, both before and after
+  rendering, with the same SQLSTATE.
+- **It also checks the other direction**: an expression the parser accepts must not be a *syntax* error (`42601`) to PostgreSQL,
+  or the proxy would run a statement nobody could have run. None is.
+- **What the differential found (a real bug).** `a IN (1) - b` was parsed as `a IN ((1) - b)`: the `IN` operator waited for its
+  right operand like any infix operator, so the `-` that followed bound to the list. PostgreSQL reads `(a IN (1)) - b`: a list
+  is closed on the right. The generator did not intend this case; a chain of random operators did. It is now reduced when its
+  `)` arrives, a hand case pins it, and the mutant that restores the wait is killed.
+- **A second bug, found by a limit case.** The renderer wrote at index -1 when the output buffer was already full, a trap: caught
+  by the case "output of 3 bytes for `1 + 2`", not by anything that ran the proxy's way.
+- **A deliberate narrowing.** `a BETWEEN 1 = 1 AND 2` is valid in PostgreSQL (the bound is `1 = 1`) and refused here: the
+  `AND` that closes a `BETWEEN` is recognised only after operators tighter than `BETWEEN` have been reduced. A refusal is the safe
+  direction, and the case is in the corpus so a change of mind is visible. The mutant that would accept it behaves like
+  PostgreSQL, so it is not listed as a mutant to kill.
+- **Names.** PostgreSQL's reserved, type-or-function-name and column-name keywords (156 words, from `pg_get_keywords()` on 16)
+  are refused as bare names, so `user` is not quietly rendered as `"user"` and run, where PostgreSQL would have refused it.
+  Types come from a closed list (`smallint integer bigint text boolean numeric varchar date timestamp timestamptz real`, with `int`,
+  `bool` and `decimal` as spellings); anything else is `unknown-type`, since a type can be user-defined.
+
 ## 4. Lowering
 
 - **Aliases** (`FROM orders o`) are resolved to base tables: the IR names `orders`, never `o`.
@@ -145,7 +177,8 @@ it to PostgreSQL and counting the commands it reports), has the same number of s
 |---|---|---|
 | IR v2 | `ir.md` section 6, three verifiers | built; 428 vectors agree |
 | **P1a** | the lexer and statement splitter, with the refusals of section 3 | **built** (`src/lex.cho`): 167 hand-written cases (54 refusals), 35 mutants killed, and a differential against PostgreSQL itself (section 3.1) |
-| **P1b** | the parser (expressions by precedence climbing, the statement forms) and the renderer | parse then render then re-parse is a fixed point; EXPLAIN differential on the accepted corpus |
+| **P1b-1** | **the expression parser and the renderer** (`src/parse.cho`): precedence climbing over explicit stacks, a tree in caller arrays, and the parenthesised rendering | **built**: 265 hand-written cases (123 refusals), each accepted one a fixed point of parse-then-render; PostgreSQL's plan for the original equal to its plan for the rendering over 12,000 generated expressions (section 3.2); 56 mutants killed |
+| **P1b-2** | the statement forms (SELECT, INSERT, UPDATE, DELETE, the closed DDL) over the same parser | the same two checks, on whole statements |
 | **P1c** | lowering, the schema snapshot, the effect check | lowering gate (1); refusals (3) |
 | **P1d** | the `Query` branch in the proxy | end to end with psql: differential (2) and the server log (3) |
 
