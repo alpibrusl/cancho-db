@@ -19,7 +19,8 @@ Working name. The design is [`docs/design.md`](docs/design.md).
   [`tools/verify.py`](tools/verify.py) in Python, and [`verifiers/go/`](verifiers/go) in Go, written from the specs alone
   by a separate agent session (see its README and [`docs/claims.md`](docs/claims.md) for what that does and does not show).
 
-**Not built:** L3 replay, SQL-to-IR lowering, and M1 onward (the proxy, branches, the engine). Without `--stmts`, L2
+**Designed, not built:** M1, the proxy in front of PostgreSQL with psql first ([`docs/m1-proxy.md`](docs/m1-proxy.md)).
+**Not built:** L3 replay, SQL-to-IR lowering, and M2 onward (branches, the engine). Without `--stmts`, L2
 checks only the commit's *recorded* effect set against its token; with it, the recorded set is shown to equal what the
 statements infer. That the store holds what was actually executed is L3's (see [`docs/claims.md`](docs/claims.md)). That file says what is claimed, what each claim rests on, and what is *not*
 claimed.
