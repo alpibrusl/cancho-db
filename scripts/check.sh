@@ -53,6 +53,8 @@ echo "== the SELECT parser against PostgreSQL (the plan of the original and of t
 "$CANCHO" build --std proxy/stmtcheck.cho src/lex.cho src/parse.cho src/stmt.cho -o build/stmtcheck
 quiet 2 python3 tests/stmt_diff.py build/stmtcheck 4000 1
 quiet 2 python3 tests/stmt_diff.py build/stmtcheck 4000 2
+echo "== the DDL parser against PostgreSQL (what the original and the rendering leave in the catalog)"
+quiet 2 python3 tests/ddl_diff.py build/stmtcheck 3000 1
 echo "== command lines";             python3 tests/cli_test.py vectors build/verify
 echo "== attenuation property";       python3 tests/properties.py 4000 1
 echo "== fuzz (three verifiers, no crash)"; python3 tests/fuzz.py vectors build/verify 3000 1
