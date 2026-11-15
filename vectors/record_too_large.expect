@@ -1,0 +1,1 @@
+reject rule=record-too-large record=1

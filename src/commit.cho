@@ -1,0 +1,368 @@
+module cdb.commit;
+
+// The commit layout of docs/spec/commit.md (version 1), read and nothing else: `decode` says whether a record's bytes
+// are exactly what an encoder would have produced, and where the fields the chain rules need are.
+//
+// It never panics: every read is bounds-checked first and every count is checked against the bytes left before it is
+// used (spec §1). The rule codes are the spec's rule tags, in one table (`rule_name`), so a refusal always has a tag.
+
+pub fn ok() -> [] int {
+    return 0;
+}
+
+pub fn bad_magic() -> [] int {
+    return 1;
+}
+
+pub fn truncated() -> [] int {
+    return 2;
+}
+
+pub fn record_too_large() -> [] int {
+    return 3;
+}
+
+pub fn bad_version() -> [] int {
+    return 4;
+}
+
+pub fn bad_encoding() -> [] int {
+    return 5;
+}
+
+pub fn branch_empty() -> [] int {
+    return 6;
+}
+
+pub fn effects_unordered() -> [] int {
+    return 7;
+}
+
+pub fn parent_count() -> [] int {
+    return 8;
+}
+
+pub fn duplicate_commit() -> [] int {
+    return 9;
+}
+
+pub fn bad_signature() -> [] int {
+    return 10;
+}
+
+pub fn seq_gap() -> [] int {
+    return 11;
+}
+
+pub fn parent_unknown() -> [] int {
+    return 12;
+}
+
+pub fn parent_mismatch() -> [] int {
+    return 13;
+}
+
+pub fn expected_missing() -> [] int {
+    return 14;
+}
+
+// The spec's tag for a rule code.
+pub fn rule_name(code: int) -> [] &static [byte] {
+    if code == 1 {
+        return "bad-magic";
+    }
+    if code == 2 {
+        return "truncated";
+    }
+    if code == 3 {
+        return "record-too-large";
+    }
+    if code == 4 {
+        return "bad-version";
+    }
+    if code == 5 {
+        return "bad-encoding";
+    }
+    if code == 6 {
+        return "branch-empty";
+    }
+    if code == 7 {
+        return "effects-unordered";
+    }
+    if code == 8 {
+        return "parent-count";
+    }
+    if code == 9 {
+        return "duplicate-commit";
+    }
+    if code == 10 {
+        return "bad-signature";
+    }
+    if code == 11 {
+        return "seq-gap";
+    }
+    if code == 12 {
+        return "parent-unknown";
+    }
+    if code == 13 {
+        return "parent-mismatch";
+    }
+    return "expected-missing";
+}
+
+// Indexes into the `out` slice `decode` fills.
+pub fn out_len() -> [] int {
+    return 6;
+}
+
+pub fn f_branch_at() -> [] int {
+    return 0;
+}
+
+pub fn f_branch_len() -> [] int {
+    return 1;
+}
+
+// `seq` is a u64 and cancho's int is signed, so it is kept as two u32 halves: the chain rule only compares it with a
+// count, which fits in the low half.
+pub fn f_seq_hi() -> [] int {
+    return 2;
+}
+
+pub fn f_seq_lo() -> [] int {
+    return 3;
+}
+
+pub fn f_parents() -> [] int {
+    return 4;
+}
+
+pub fn f_parents_at() -> [] int {
+    return 5;
+}
+
+// A big-endian unsigned integer of `n` bytes at `at`, for `n` up to 4 (no overflow in a 64-bit int).
+pub fn be[&d](data: &d [byte], at: int, n: int) -> [] int {
+    var v = 0;
+    var i = 0;
+    while i < n {
+        v = v * 256 + int_of(data[at + i]);
+        i = i + 1;
+    }
+    return v;
+}
+
+// `cur[0]` is the read position. A read of `n` bytes that is not wholly inside the record is `false`.
+fn have[&d, &c](data: &d [byte], cur: &!c [int], n: int) -> [] bool {
+    return n >= 0 && n <= len(data) - cur[0];
+}
+
+fn skip[&d, &c](data: &d [byte], cur: &!c [int], n: int) -> [] bool {
+    if !have(data, cur, n) {
+        return false;
+    }
+    cur[0] = cur[0] + n;
+    return true;
+}
+
+// A `u32` count whose elements are each at least one byte: more than the bytes left is malformed, so nothing is ever
+// sized from a count the record cannot back. `-1` is malformed.
+fn count[&d, &c](data: &d [byte], cur: &!c [int]) -> [] int {
+    if !have(data, cur, 4) {
+        return 0 - 1;
+    }
+    let n = be(data, cur[0], 4);
+    cur[0] = cur[0] + 4;
+    if n > len(data) - cur[0] {
+        return 0 - 1;
+    }
+    return n;
+}
+
+// A list of `n` fixed-size elements.
+fn skip_hashes[&d, &c](data: &d [byte], cur: &!c [int]) -> [] bool {
+    let n = count(data, cur);
+    if n < 0 {
+        return false;
+    }
+    return skip(data, cur, n * 32);
+}
+
+// Decodes one record's `encoding` (spec §2). Answers `ok()` or the first rule it breaks, in field order, and fills
+// `out` (`out_len()` ints) with what the chain rules need when it answers `ok()`.
+pub fn decode[&d, &o](data: &d [byte], out: &!o [int]) -> [] int {
+    region r {
+        let cur = alloc_slice[r](1, 0);
+        if !have(data, cur, 2) {
+            return bad_encoding();
+        }
+        if be(data, 0, 2) != 1 {
+            return bad_version();
+        }
+        cur[0] = 2;
+
+        // parents
+        let np = count(data, cur);
+        if np < 0 || !have(data, cur, np * 32) {
+            return bad_encoding();
+        }
+        out[f_parents()] = np;
+        out[f_parents_at()] = cur[0];
+        cur[0] = cur[0] + np * 32;
+        if np > 2 {
+            return parent_count();
+        }
+
+        // branch
+        if !have(data, cur, 2) {
+            return bad_encoding();
+        }
+        let bl = be(data, cur[0], 2);
+        cur[0] = cur[0] + 2;
+        if bl == 0 {
+            return branch_empty();
+        }
+        if bl > 255 || !have(data, cur, bl) {
+            return bad_encoding();
+        }
+        out[f_branch_at()] = cur[0];
+        out[f_branch_len()] = bl;
+        cur[0] = cur[0] + bl;
+
+        // seq
+        if !have(data, cur, 8) {
+            return bad_encoding();
+        }
+        out[f_seq_hi()] = be(data, cur[0], 4);
+        out[f_seq_lo()] = be(data, cur[0] + 4, 4);
+        cur[0] = cur[0] + 8;
+
+        // schema, statements
+        if !skip(data, cur, 32) || !skip_hashes(data, cur) {
+            return bad_encoding();
+        }
+
+        // effects: strictly ascending by (kind, target)
+        let ne = count(data, cur);
+        if ne < 0 {
+            return bad_encoding();
+        }
+        var seen_one = false;
+        var last_kind = 0;
+        var last_at = 0;
+        var last_len = 0;
+        var i = 0;
+        while i < ne {
+            if !have(data, cur, 3) {
+                return bad_encoding();
+            }
+            let kind = int_of(data[cur[0]]);
+            if kind > 4 {
+                return bad_encoding();
+            }
+            let tl = be(data, cur[0] + 1, 2);
+            cur[0] = cur[0] + 3;
+            if !have(data, cur, tl) {
+                return bad_encoding();
+            }
+            if seen_one {
+                var c = kind - last_kind;
+                if c == 0 {
+                    c = compare_at(data, cur[0], tl, last_at, last_len);
+                }
+                if c <= 0 {
+                    return effects_unordered();
+                }
+            }
+            seen_one = true;
+            last_kind = kind;
+            last_at = cur[0];
+            last_len = tl;
+            cur[0] = cur[0] + tl;
+            i = i + 1;
+        }
+
+        // token, principal, code
+        if !skip(data, cur, 64) || !skip_hashes(data, cur) {
+            return bad_encoding();
+        }
+
+        // nondet
+        let nn = count(data, cur);
+        if nn < 0 {
+            return bad_encoding();
+        }
+        i = 0;
+        while i < nn {
+            if !have(data, cur, 1) {
+                return bad_encoding();
+            }
+            let tag = int_of(data[cur[0]]);
+            cur[0] = cur[0] + 1;
+            if tag == 1 {
+                if !skip(data, cur, 8) {
+                    return bad_encoding();
+                }
+            } else if tag == 2 {
+                if !have(data, cur, 4) {
+                    return bad_encoding();
+                }
+                let vl = be(data, cur[0], 4);
+                cur[0] = cur[0] + 4;
+                if !skip(data, cur, vl) {
+                    return bad_encoding();
+                }
+            } else if tag != 0 {
+                return bad_encoding();
+            }
+            i = i + 1;
+        }
+
+        // changes, state
+        if !skip(data, cur, 64) {
+            return bad_encoding();
+        }
+
+        // checks
+        let nc = count(data, cur);
+        if nc < 0 {
+            return bad_encoding();
+        }
+        i = 0;
+        while i < nc {
+            if !have(data, cur, 2) {
+                return bad_encoding();
+            }
+            let nl = be(data, cur[0], 2);
+            cur[0] = cur[0] + 2;
+            if !skip(data, cur, nl) || !have(data, cur, 1) {
+                return bad_encoding();
+            }
+            if int_of(data[cur[0]]) > 1 {
+                return bad_encoding();
+            }
+            cur[0] = cur[0] + 1;
+            i = i + 1;
+        }
+
+        // time, and nothing after it
+        if !skip(data, cur, 8) || cur[0] != len(data) {
+            return bad_encoding();
+        }
+    }
+    return ok();
+}
+
+// Unsigned lexicographic comparison of two runs of `data`, a prefix first: negative, zero or positive.
+fn compare_at[&d](data: &d [byte], a: int, alen: int, b: int, blen: int) -> [] int {
+    var i = 0;
+    while i < alen && i < blen {
+        let x = int_of(data[a + i]);
+        let y = int_of(data[b + i]);
+        if x != y {
+            return x - y;
+        }
+        i = i + 1;
+    }
+    return alen - blen;
+}

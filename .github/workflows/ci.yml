@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  # The compiler these sources are built with. Also `[package] cancho` in cancho.toml (checked below).
+  CANCHO_REV: 0da6d1c39f7fff7b1d70fa77ebcaf7775e2210c6
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: db
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alpibrusl/cancho
+          ref: ${{ env.CANCHO_REV }}
+          path: cancho
+
+      - name: Cache the compiler
+        id: compiler
+        uses: actions/cache@v4
+        with:
+          path: cancho/target/release/cancho
+          key: cancho-${{ env.CANCHO_REV }}
+
+      - name: Build cancho
+        if: steps.compiler.outputs.cache-hit != 'true'
+        working-directory: cancho
+        run: cargo build --release -p cancho
+
+      - name: cancho.toml names the compiler CI builds
+        working-directory: db
+        run: grep -qx "cancho = \"$CANCHO_REV\"" cancho.toml
+
+      - name: The second verifier's one dependency (Ed25519)
+        run: pip install cryptography
+
+      # Formatting, reproducible vectors, build, authority, both verifiers on every vector, the command lines,
+      # differential fuzzing, and the mutants of both verifiers (each must make a vector fail).
+      - name: Check
+        working-directory: db
+        env:
+          CANCHO: ${{ github.workspace }}/cancho/target/release/cancho
+        run: sh scripts/check.sh
