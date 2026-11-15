@@ -88,7 +88,7 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C50 | **The effects of the lowered statement are the hand-written ones**, as the verifier sees them: a commit recording exactly the hand-written set verifies (`level=2+ir`), one with an effect fewer or one more is refused `effects-mismatch`. | the same 42 cases, run through `build/verify --stmts`; 126 refusals of the altered sets | a lowering that read a column it did not record, or the reverse, is the whole point of the IR |
 | C51 | **A name the lowering resolves, PostgreSQL resolves the same way**, and one it refuses is one PostgreSQL does not accept: unknown tables, unknown and ambiguous columns, `ORDER BY` output names. | `tests/lower_diff.py`: 20,000 generated statements against PostgreSQL's `42P01`, `42703`, `42702`, 0 disagreements | the IR would name something other than what runs |
 | C52 | **What the log could not reproduce is refused**: `random`, `clock_timestamp`, `nextval`, `gen_random_uuid`, `setseed`, `txid_current`, `timeofday`, `statement_timestamp`, `transaction_timestamp`, `currval`, `lastval` (`nondeterministic`); `now()` is recorded as `Nondet now`. | refusal cases; the mutants that allow `random()` or `nextval()`, and that make `now()` a plain call | a value the server chose, not in the log |
-| C53 | 73 cases, @LM@ mutants of the lowering killed, none surviving. | `tests/lower_check.py`, `tests/mutants.py lower` | |
+| C53 | 73 cases, 27 mutants of the lowering killed, none surviving. | `tests/lower_check.py`, `tests/mutants.py lower` | |
 
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
