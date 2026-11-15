@@ -78,7 +78,9 @@ psql ── 1 listener ── 2 startup + token ── 3 message loop ───�
 
 ## 4. Decisions
 
-**D1. The token is the password, cleartext, with proof of possession.** The password carries `base64url(token ‖ seed)`,
+**D1. The token is the password, cleartext, with proof of possession.** (Built in `src/login.cho`; the principal a commit records is
+the one non-zero principal the token's blocks name, or all zeros for a bearer token, and a token that names two is refused at
+login: `login-principal-conflict`.) The password carries `base64url(token ‖ seed)`,
 where `seed` is the 32-byte private key of the token's last block; the proxy checks that it derives the last block's
 `next_key`. That is the missing piece `token.md` §1 deferred ("a client that presents a token also proves it holds the
 private key of the last block"), in the form Biscuit calls an open token: the holder presents the key. *Chosen over* SCRAM,
@@ -196,7 +198,7 @@ Each is one change with its own gate, and a gate is a test that fails when the s
 
 | Slice | Delivers | Gate |
 |---|---|---|
-| **P0** | listener, `SSLRequest` answered, startup parsed, token login (D1, D2), upstream relay of the login, then every message forwarded untouched with framing | psql connects with a valid token and runs `select 1` against a real PostgreSQL; a wrong token, a bad key proof and a branch outside the token are each refused at login and **no connection reaches PostgreSQL** (checked in the server's log); `cancho authority` on it; the measured password length of a token |
+| **P0** | listener, `SSLRequest` answered, startup parsed, token login (D1, D2), upstream relay of the login, then every message forwarded untouched with framing. **Built so far: the sans-io half** (`src/login.cho`: startup packet, strict base64url, the token checks in D1's order, the messages the proxy writes), tested from bytes by `tests/login_test.cho` with 32 mutants killed. **Not built: the event loop** and so none of the gate below is met yet | psql connects with a valid token and runs `select 1` against a real PostgreSQL; a wrong token, a bad key proof and a branch outside the token are each refused at login and **no connection reaches PostgreSQL** (checked in the server's log); `cancho authority` on it; the measured password length of a token |
 | **IR v2** | `ir.md` v2: the constructs of D4, effect rules, vectors with hand-written expected sets, all three verifiers | the same gates as v1: three verifiers agree, mutants killed |
 | **P1** | lexer, parser, lowering, schema snapshot, effect check, refusals with rule tags | a corpus of statements: each lowers to IR whose id and effects equal hand-written ones; **a refused statement never appears in PostgreSQL's log** (`log_statement=all`); psql output through the proxy equals psql output direct, for every accepted statement, as a diff |
 | **P2** | transaction tracking, commit builder, three files, two-phase commit, recovery, `now()` | after a psql session, all three verifiers accept the files at L2+IR with `--expect` the last commit id; **fault injection** at each window of §6 leaves PostgreSQL's rows and the log's commits equal in number and identity |

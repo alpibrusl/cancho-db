@@ -303,3 +303,62 @@ pub fn effect_denied[&t, &c](tk: &t [byte], enc: &c [byte], eat: int, en: int) -
     }
     return hit;
 }
+
+// The offset of the last block's `next_key` (32 bytes): the key whose private half the holder of the token proves it has
+// (docs/m1-proxy.md D1).
+pub fn last_next_key[&t](tk: &t [byte]) -> [] int {
+    let n = blocks(tk);
+    var at = 4;
+    var i = 0;
+    while i < n - 1 {
+        at = payload_end(tk, at) + tail();
+        i = i + 1;
+    }
+    return payload_end(tk, at);
+}
+
+// The principal a commit under this token must record: the one non-zero principal its blocks name, or all zeros if none
+// names one. Writes it to `out[0..32]` and answers 0; answers 1 if two blocks name different principals (no commit could
+// satisfy both: the token is unusable).
+pub fn principal_of[&t, &o](tk: &t [byte], out: &!o [byte]) -> [] int {
+    let n = blocks(tk);
+    var at = 4;
+    var i = 0;
+    var have = false;
+    var conflict = false;
+    var j = 0;
+    while j < 32 {
+        out[j] = byte_of(0);
+        j = j + 1;
+    }
+    while i < n {
+        let pe = payload_end(tk, at);
+        var zero = true;
+        j = 0;
+        while j < 32 {
+            if int_of(tk[at + j]) != 0 {
+                zero = false;
+            }
+            j = j + 1;
+        }
+        if !zero {
+            if have && !bytes.equal(tk[at..at + 32], out) {
+                conflict = true;
+            }
+            if !have {
+                j = 0;
+                while j < 32 {
+                    out[j] = tk[at + j];
+                    j = j + 1;
+                }
+                have = true;
+            }
+        }
+        at = pe + tail();
+        i = i + 1;
+    }
+    if conflict {
+        return 1;
+    }
+    return 0;
+}

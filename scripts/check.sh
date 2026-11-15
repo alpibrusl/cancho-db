@@ -8,6 +8,8 @@ mkdir -p build
 
 echo "== formatting";                "$CANCHO" fmt --check src
 echo "== vectors are reproducible";  rm -rf build/vectors && python3 tools/gen_vectors.py build/vectors >/dev/null && diff -r vectors build/vectors
+echo "== login cases are reproducible"; python3 tools/gen_login.py --check
+echo "== login tests (the proxy's front door, from bytes)"; "$CANCHO" test tests/login_test.cho tests/login_cases.cho src/commit.cho src/token.cho src/login.cho --std | tail -2
 echo "== build";                     "$CANCHO" build --std src/*.cho -o build/verify
 echo "== go verifier";               (cd verifiers/go && gofmt -l . | (! grep .) && go vet ./... && go build -o ../../build/verify-go .)
 export FUZZ_EXTRA="build/verify-go"
@@ -20,4 +22,5 @@ echo "== attenuation property";       python3 tests/properties.py 4000 1
 echo "== fuzz (three verifiers, no crash)"; python3 tests/fuzz.py vectors build/verify 3000 1
 echo "== mutants, python";           python3 tests/mutants.py py | tail -1
 echo "== mutants, cancho";           python3 tests/mutants.py cho "$CANCHO" | tail -1
+echo "== mutants, login";            python3 tests/mutants.py login "$CANCHO" | tail -1
 echo "all green"
