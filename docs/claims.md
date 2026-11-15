@@ -58,6 +58,14 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C40 | **Everything outside the subset is refused with a tag**: other operators (`^ @> ~ ->`), unary `+`, `IS TRUE/DISTINCT FROM`, row constructors, sub-selects (`subquery`), `ESCAPE`, `SIMILAR TO`, array syntax, a third name part, a quoted function name, every PostgreSQL reserved, function-name or column-name keyword as a bare name, any type outside the closed list. | 123 refusal cases with exact tags; the reserved-word list is PostgreSQL's `pg_get_keywords()` | a word PostgreSQL rejects must not be quietly quoted into one it accepts |
 | C41 | **A limit is a refusal, never a trap**: operator and value stack depth, node and child arenas, the rendering stack and the output buffer each have a case at the limit and one under it. | the `limits` cases; one found a real trap (the renderer wrote at index -1 into a full buffer) | an input must never reach a panic |
 
+### The SELECT parser, P1b-2a ([`m1-lowering.md`](m1-lowering.md) section 3.3)
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C42 | **A SELECT's rendering means what the original means**: PostgreSQL's plan for the statement and for its rendering are identical (or both errors with one SQLSTATE), and nothing accepted is a syntax error to PostgreSQL's parser. | `tests/stmt_diff.py`: 12,000 statements over three seeds, 0 disagreements; seven rendering breakages each caught | the proxy runs the rendering |
+| C43 | Every clause, alias, join kind and direction the subset reads is pinned by hand: 146 cases (83 refusals with exact tags), each accepted statement a fixed point of parse-then-render; 34 mutants of the statement parser and its half of the renderer killed. | `tests/stmt_test.cho`, `tools/gen_stmt.py --check`, `tests/mutants.py stmt` | the differential cannot see what a plan does not show (aliases) |
+| C44 | Words PostgreSQL treats specially are not taken for names: `nulls first`, the eleven non-bare-label words as a label without `AS`, `ROLLUP` and `CUBE` in `GROUP BY`. | cases for each, and the differential that found the first two | a statement PostgreSQL would reject, or read differently, would run |
+
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
 | # | Claim | Enforced by | Fails when the claim is false because |
@@ -130,8 +138,9 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 - **IR v2 independence:** the Go verifier was extended to v2 by the same separate agent, from the spec and the vectors only,
   and passed all 428 without a fix; I re-ran its code and its tool-call log shows no read outside its directory. Same
   caveats as before (instruction-enforced, same model family). Its six open points are written into `ir.md` section 6.
-- **The parser is expressions only.** `src/parse.cho` reads and renders an expression; no statement (`SELECT`, `INSERT`, DDL) is
-  parsed yet (P1b-2), nothing resolves a name or lowers to the IR (P1c), and the proxy does not call it (P1d). The statement-count differential cannot see a lexing error that keeps statement boundaries (for
+- **The parser reads expressions and SELECT only.** INSERT, UPDATE, DELETE and DDL are not parsed yet (P1b-2b), nothing resolves a
+  name or lowers to the IR (P1c), and the proxy does not call it (P1d). The schema of the SELECT differential is three small tables;
+  plans for them show joins and clauses, not every alias or name. The statement-count differential cannot see a lexing error that keeps statement boundaries (for
   example, a doubled quote ending a string preserves quote parity); the unit cases cover that, and each check is claimed for
   what it covers. The fuzzer's alphabet is finite and its statements are harmless selects.
 - **The expression differential is as good as its generator.** Expressions are type-correct by construction in the grammar

@@ -566,10 +566,48 @@ PARSE = [
     ("parse: the operand stack has no limit", "src/parse.cho", "    if st[4] >= len(vs) {\n        return 0 - e_nested_too_deep();\n    }\n", "    if false {\n        return 0 - e_nested_too_deep();\n    }\n"),
     ("parse: the operator stack limit is off by one", "src/parse.cho", "if 4 * st[5] + 4 > len(os) {", "if 4 * st[5] + 4 > len(os) + 4 {"),
     ("parse: the node arena limit is off by one", "src/parse.cho", "if 6 * id + 6 > len(nodes) {", "if 6 * id + 6 > len(nodes) + 6 {"),
-    ("parse: the kids limit is off by one", "src/parse.cho", "if st[1] + count > len(kids) {", "if st[1] + count > len(kids) + 1 {"),
+    ("parse: the kids limit is off by one", "src/parse.cho", "    if st[1] + count > len(kids) {\n        return 0 - e_too_big();\n    }\n    let first = st[1];\n    var i = 0;\n    while i < count {\n        kids[first + i] = vs[", "    if st[1] + count > len(kids) + 1 {\n        return 0 - e_too_big();\n    }\n    let first = st[1];\n    var i = 0;\n    while i < count {\n        kids[first + i] = vs["),
     ("parse: the traversal stack limit is off by one", "src/parse.cho", "if 2 * sp + 2 > len(rs) {", "if 2 * sp + 2 > len(rs) + 2 {"),
     ("parse: the output limit is off by one", "src/parse.cho", "if at < 0 || at >= len(out) {", "if at < 0 || at > len(out) {"),
     ("parse: an overrun of the output goes unnoticed", "src/parse.cho", "    if p < 0 {\n        return 0 - e_too_big();\n    }\n    return p;", "    return p;"),
+]
+
+# ---- the SELECT parser (src/stmt.cho, and the statement half of the renderer in src/parse.cho; tests/stmt_test.cho)
+STMT = [
+    ("stmt: DISTINCT is ignored", "src/stmt.cho", "        distinct = 1;\n", "        distinct = 0;\n"),
+    ("stmt: a left join is an inner join", "src/stmt.cho", "                    kind = 1;\n                } else if", "                    kind = 0;\n                } else if"),
+    ("stmt: a right join is accepted", "src/stmt.cho", '} else if parse.kw(sql, toks, pos, end, "right") ||', "} else if false ||"),
+    ("stmt: USING is a syntax error", "src/stmt.cho", '        if parse.kw(sql, toks, pos, end, "using") {', "        if false {"),
+    ("stmt: a schema-qualified table is accepted", "src/stmt.cho", "if parse.punct(sql, toks, pos + 1, end, '.') || parse.punct(sql, toks, pos + 1, end, '(') {", "if false {"),
+    ("stmt: a set operation is a syntax error", "src/stmt.cho", '        if parse.kw(sql, toks, pos, end, "union") ||', "        if false ||"),
+    ("stmt: ASC is DESC", "src/stmt.cho", "                dir = 1;\n                q = q + 1;", "                dir = 2;\n                q = q + 1;"),
+    ("stmt: NULLS FIRST is accepted", "src/stmt.cho", '            if parse.kw(sql, toks, q, end, "nulls") ||', "            if false ||"),
+    ("stmt: a reserved word may follow AS", "src/stmt.cho", "if parse.tkind(toks, p) == lex.t_ident() && parse.is_reserved(sql, parse.tstart(toks, p), parse.tlen(toks, p)) {", "if false {"),
+    ("stmt: any word is a bare label", "src/stmt.cho", "(!select_item || bare_label_ok(sql, toks, p))", "true"),
+    ("stmt: filter is a bare label", "src/stmt.cho", 'parse.word_is(sql, a, n, "filter") || ', ""),
+    ("stmt: year is a bare label", "src/stmt.cho", ' || parse.word_is(sql, a, n, "year")', ""),
+    ("stmt: ROLLUP is a call", "src/stmt.cho", '            if (parse.kw(sql, toks, pos, end, "rollup") || parse.kw(sql, toks, pos, end, "cube")) &&', "            if false &&"),
+    ("stmt: CUBE is a call", "src/stmt.cho", ' || parse.kw(sql, toks, pos, end, "cube")) &&', ") &&"),
+    ("stmt: t.* loses its table", "src/stmt.cho", "parse.n_star(), pos, tmp, 0", "parse.n_star(), 0 - 1, tmp, 0"),
+    ("stmt: the staging limit is off by one", "src/stmt.cho", "if st[10] >= len(tmp) {", "if st[10] > len(tmp) {"),
+    ("stmt: HAVING is a WHERE", "src/stmt.cho", "parse.n_having(), 0, 0);", "parse.n_where(), 0, 0);"),
+    ("stmt: LIMIT is an OFFSET", "src/stmt.cho", "parse.n_limit(), 0, 0);", "parse.n_offset(), 0, 0);"),
+    ("stmt: a join's condition is not required", "src/stmt.cho", '                    if !parse.kw(sql, toks, pos, end, "on") {', '                    if false {'),
+    ("stmt: a table alias is dropped", "src/stmt.cho", "parse.n_table(), pos, tmp, 0, st[9], 0 - 1);", "parse.n_table(), pos, tmp, 0, 0 - 1, 0 - 1);"),
+    ("stmt: a select alias is dropped", "src/stmt.cho", "parse.n_item(), st[9], tmp[mark..mark + 1]", "parse.n_item(), 0 - 1, tmp[mark..mark + 1]"),
+    ("stmt: FROM may be empty", "src/stmt.cho", '        pos = pos + 1;\n        more = true;\n        while more {\n            var q = table_ref(', '        pos = pos + 1;\n        more = false;\n        while more {\n            var q = table_ref('),
+    ("stmt: a trailing token is ignored", "src/stmt.cho", "    if pos < end {\n        if parse.kw(sql, toks, pos, end, \"union\")", "    if false {\n        if parse.kw(sql, toks, pos, end, \"union\")"),
+    ("stmt: a non-SELECT is a syntax error", "src/stmt.cho", "return parse.fail(st, from, parse.e_unsupported_statement());", "return parse.fail(st, from, parse.e_syntax());"),
+    ("stmt: a left join renders as inner", "src/parse.cho", 'return put_lit(out, p, " left join ");', 'return put_lit(out, p, " inner join ");'),
+    ("stmt: DESC renders as ASC", "src/parse.cho", 'if data == 2 {\n            return put_lit(out, p, " desc");', 'if data == 2 {\n            return put_lit(out, p, " asc");'),
+    ("stmt: DISTINCT is not rendered", "src/parse.cho", '        if data == 1 {\n            p = put_lit(out, p, "distinct ");', '        if false {\n            p = put_lit(out, p, "distinct ");'),
+    ("stmt: WHERE renders as HAVING", "src/parse.cho", 'return put_lit(out, p, "where ");', 'return put_lit(out, p, "having ");'),
+    ("stmt: ORDER BY renders as GROUP BY", "src/parse.cho", 'return put_lit(out, p, "order by ");', 'return put_lit(out, p, "group by ");'),
+    ("stmt: OFFSET renders as LIMIT", "src/parse.cho", 'return put_lit(out, p, "offset ");', 'return put_lit(out, p, "limit ");'),
+    ("stmt: a table alias is not rendered", "src/parse.cho", "        if nodes[6 * node + 4] >= 0 {\n            p = put_lit(out, p, \" as \");\n            p = put_name(out, p, sql, toks, nodes[6 * node + 4]);\n        }\n        return p;\n    }\n    if kind == n_from()", "        return p;\n    }\n    if kind == n_from()"),
+    ("stmt: a select alias is not rendered", "src/parse.cho", "        if data >= 0 {\n            p = put_lit(out, p, \" as \");\n            return put_name(out, p, sql, toks, data);\n        }\n        return p;\n    }\n    if kind == n_order()", "        return p;\n    }\n    if kind == n_order()"),
+    ("stmt: t.* renders without its table", "src/parse.cho", "        p = put_name(out, p, sql, toks, data);\n        return put_lit(out, p, \".*\");", "        return put_lit(out, p, \"*\");"),
+    ("stmt: clauses are not separated", "src/parse.cho", "    if kind == n_select() {\n        return put_byte(out, p, ' ');\n    }", "    if kind == n_select() {\n        return p;\n    }"),
 ]
 
 
@@ -617,6 +655,8 @@ def run(kind, cancho):
         return run_unit(LEX, ["tests/lex_test.cho", "tests/lex_cases.cho"], ["lex.cho"], cancho)
     if kind == "parse":
         return run_unit(PARSE, ["tests/parse_test.cho", "tests/parse_cases.cho"], ["lex.cho", "parse.cho"], cancho)
+    if kind == "stmt":
+        return run_unit(STMT, ["tests/stmt_test.cho", "tests/stmt_cases.cho"], ["lex.cho", "parse.cho", "stmt.cho"], cancho)
     if kind == "proxy":
         return run_proxy(cancho)
     table = PY if kind == "py" else CHO
