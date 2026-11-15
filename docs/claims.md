@@ -14,8 +14,8 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C5 | A log cut short is refused, and **a log with its end removed is detected only against a commit id the reader already holds** (`--expect`). | `truncated_*`, `record_too_large*`, `truncated_tail_ok_alone`, `truncated_tail_pinned`, `expected_*` | a prefix of a valid log is a valid log (spec §5); the vectors state both halves |
 | C6 | Every byte sequence has one reading: anything an encoder would not produce is refused (trailing bytes, unsorted or repeated effects, a bad tag, a count the record cannot back). | `bad-encoding`, `effects_*`, `*_overrun`, `count_*` vectors; the decode mutants | spec §1: exactly one byte representation per value |
 | C7 | The cancho verifier reaches the log and the console and nothing else: no network, no signals, no other program, no foreign code. | `tests/authority.sh` | `cancho authority` lists what the program performs; the test pins the list |
-| C8 | No input makes either verifier crash or print anything but its one line. | `tests/fuzz.py` (differential, damaged vectors), `tests/cli_test.py` | a trap, a signal, a stray stderr line, or a disagreement between the two verifiers fails the run |
-| C9 | The two verifiers give the same answer on every vector. | `tests/run_vectors.py`, run on each | each vector holds the line a verifier must print; the lines are written by hand in `tools/gen_vectors.py`, not taken from either verifier |
+| C8 | No input makes any verifier crash or print anything but its one line. | `tests/fuzz.py` (differential, damaged vectors), `tests/cli_test.py` | a trap, a signal, a stray stderr line, or a disagreement between the verifiers fails the run |
+| C9 | The three verifiers give the same answer on every vector. | `tests/run_vectors.py`, run on each | each vector holds the line a verifier must print; the lines are written by hand in `tools/gen_vectors.py`, not taken from either verifier |
 
 ### L2: tokens ([`spec/token.md`](spec/token.md))
 
@@ -44,12 +44,18 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
   protocol of M1 and not something a log can show.
 - **Patterns are crude on purpose.** One wildcard, a trailing `*` meaning prefix; `o*` matches `orders` and `orders_archive`
   (`l2_ok_star_is_a_prefix_sharp_edge`). Row-level predicates are later (design, open question 7).
-- **The second verifier is not yet independent in the way the design asks.** The design wants it written from the spec
-  alone by a session with no access to the engine source. Here one author wrote the spec, the vectors, the cancho
-  verifier and the Python verifier, in one sitting, and the Python one was written after the cancho one existed. What
-  independence there is: a different language, and a different Ed25519 (cancho's own against OpenSSL's, via
-  `cryptography`). M0's exit criterion is **not met** until a verifier is written from `docs/spec/commit.md` by someone
-  who has not seen `src/` or `tools/verify.py`, and agrees on every vector.
+- **How independent the verifiers are.** The cancho and Python verifiers were written by the author of the specs and the
+  vectors, the Python one after the cancho one. The third, in Go (`verifiers/go/`), was written from `commit.md` and
+  `token.md` alone by a separate agent session handed a directory with only those files, the vectors and the runner. That
+  isolation was by instruction, not a sandbox; the agent's tool-call log was read afterwards and shows it read the two specs,
+  wrote the file and ran the vectors. It is the same model family as the author, so a misreading the family shares would be
+  shared. What it did show: one bug of its own on the first run (66 of 209 vectors, a missing `next_key` in a signed message
+  that the spec states plainly), and seven places where the spec left a careful implementer to decide, now written into the
+  specs. Three implementations use three different Ed25519 code bases (cancho's own, OpenSSL's, Go's). **The M0 exit
+  criterion** (every verifier agrees on every vector and rejects every tampered chain) **is met for L1 and L2** by
+  these three, on the strength of that caveat.
+- **Ed25519 edge cases are unspecified.** Small-order and non-canonical-but-decodable keys and `R` values are
+  implementation-defined in v1 and no vector exercises them (`commit.md` header).
 - **Mutants are the ones listed.** `tests/mutants.py` shows the vectors fail for those changes, not for every possible
   fault. It found real gaps while this was written, each now covered by a vector: a `seq` above 2^32
   (`seq_2_pow_32*`); and for L2 a commit whose second effect is the denied one (`l2_effect_denied_second_effect`), an

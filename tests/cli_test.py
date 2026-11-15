@@ -53,12 +53,14 @@ cases += [
     ([bad, "--root", root, "--tokens", tok], 1, "reject rule=bad-magic record=-1\n"),  # L1 first
 ]
 failed = 0
-for name, cmd in (("cancho", [cho]), ("python", py)):
+import os
+extra = [("extra:" + e, [e]) for e in os.environ.get("FUZZ_EXTRA", "").split()]
+for name, cmd in (("cancho", [cho]), ("python", py)) + tuple(extra):
     for args, status, out in cases:
         p = subprocess.run(cmd + args, capture_output=True, text=True)
         # the python one lowercases nothing: accept either upper or lower hex as the spec's "64 hex digits"
         if p.returncode != status or p.stdout != out:
             failed += 1
             print("FAIL %s %r: exit %d stdout %r, want exit %d stdout %r" % (name, args, p.returncode, p.stdout, status, out))
-print("%d checks, %d failed" % (2 * len(cases), failed))
+print("%d checks, %d failed" % ((2 + len(extra)) * len(cases), failed))
 sys.exit(1 if failed else 0)

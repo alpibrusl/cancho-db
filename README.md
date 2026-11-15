@@ -12,7 +12,7 @@ Working name. The design is [`docs/design.md`](docs/design.md).
   verification, written so a verifier needs only SHA-256 and Ed25519.
 - [`docs/spec/token.md`](docs/spec/token.md): capability tokens (a chain of signed blocks that can only narrow) and
   **L2 (authority)**: was each commit allowed by the token it presented?
-- [`vectors/`](vectors): 209 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
+- [`vectors/`](vectors): 212 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
 - Two verifiers that must agree on every one: [`src/`](src) in cancho (no C, no foreign call) and
   [`tools/verify.py`](tools/verify.py) in Python.
 
@@ -57,7 +57,7 @@ $ CANCHO=/path/to/cancho sh scripts/check.sh
 
 Runs what CI runs: formatting, vectors regenerate byte for byte, both verifiers on every vector, the command lines,
 the authority report, the attenuation property over thousands of random tokens, 4,500 differentially fuzzed inputs (the
-two verifiers agree and neither crashes), and the mutants of both verifiers (every one must make a vector fail). Needs `python3` with `cryptography`, and the cancho
+verifiers agree and none crashes), and the mutants of both verifiers (every one must make a vector fail). Needs `python3` with `cryptography`, and the cancho
 compiler at the revision in [`cancho.toml`](cancho.toml).
 
 ## Licence

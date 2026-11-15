@@ -1,7 +1,11 @@
 # Commit and log format, version 1 (L1)
 
 This is the language-neutral definition of what a Cancho DB log is and what it takes for it to verify at **L1
-(integrity)**. A verifier needs this page, SHA-256 and Ed25519 (RFC 8032), and nothing else. It does not need cancho,
+(integrity)**. A verifier needs this page, SHA-256 and Ed25519 (RFC 8032), and nothing else. A signature check MUST reject a
+signature whose `S` is not below the group order, and a key (or `R`) that does not decode; it answers "invalid", it does
+not fail. What an implementation does with small-order or non-canonical-but-decodable keys and `R` values is **not
+specified in v1** and no vector exercises it: implementations are known to differ there, and a log's signer is trusted
+not to produce them. It does not need cancho,
 and `tools/verify.py` is meant to be written from this page (and `token.md`) alone. *Corrected:* it was written from them
 by the same author who wrote the cancho verifier and after it, so it is not yet the independent second verifier the design
 asks for ([`../claims.md`](../claims.md)).
@@ -32,7 +36,7 @@ A commit is the concatenation, in this order and with no padding, of:
 |---|---|---|---|
 | 1 | `version` | `u16` | MUST be `1` (`bad-version`) |
 | 2 | `parents` | `[Hash]` | at most 2 entries (`parent-count`) |
-| 3 | `branch` | `bytes16` | length 1 to 255 (`branch-empty`, `bad-encoding`) |
+| 3 | `branch` | `bytes16` | length 0 is `branch-empty`; length over 255 is `bad-encoding` |
 | 4 | `seq` | `u64` | |
 | 5 | `schema` | `Hash` | |
 | 6 | `statements` | `[Hash]` | |
@@ -66,7 +70,7 @@ id        = SHA-256( "cancho-db/commit/v1" || 0x00 || encoding(commit) )
 signature = Ed25519-Sign(server_key, id)        // the 32 id bytes are the message
 ```
 
-The 20-byte prefix is a domain separator: a hash of a commit can never be mistaken for a hash of anything else the system
+The prefix (the 19 ASCII bytes `cancho-db/commit/v1` and one `0x00`: 20 bytes) is a domain separator: a hash of a commit can never be mistaken for a hash of anything else the system
 hashes. The signature is over the id, so it covers every field.
 
 ## 4. Log file
@@ -94,11 +98,17 @@ Framing is read in this order, and the first failure is the verdict:
 
 ## 5. What L1 checks
 
-Records are checked **in file order**, and for each record the checks run in this order; the first that fails is the
-verdict, so that two verifiers agree on the rule and not only on the refusal:
+Records are checked **in file order**, one at a time, each judged completely when it is reached (framing included: a
+record that fails to decode is the verdict even if a later record is truncated); for each record the checks run in this
+order; the first that fails is the verdict, so that two verifiers agree on the rule and not only on the refusal:
 
 1. **Framing**: `bad-magic`, `truncated`, `record-too-large`.
-2. **Decoding** (§2): `bad-version`, `bad-encoding`, `branch-empty`, `effects-unordered`, `parent-count`.
+2. **Decoding** (§2): `bad-version`, `bad-encoding`, `branch-empty`, `effects-unordered`, `parent-count`. Fields are read in
+   the order of §2 and **the first violation met is the verdict**: a rule is judged when its field has been read, not at
+   the end. In particular a `parents` count is first checked against the bytes left (`bad-encoding` if `count * 32`
+   does not fit) and only then against 2, so three parents with fewer than 96 bytes behind them are `bad-encoding`,
+   and with all 96 `parent-count`; and an out-of-order `effects` list is `effects-unordered` even if a later field is
+   malformed.
 3. **Duplicate**: the id was already seen in this log: `duplicate-commit`.
 4. **Signature**: `bad-signature`. (Before the chain rules: an unsigned record claims nothing, so nothing it says can be
    wrong.)
@@ -128,6 +138,9 @@ or after the path; upper or lower case), and write exactly one line to standard 
 ok commits=<N> branches=<B>
 reject rule=<tag> record=<i>
 ```
+
+Any repeated option, extra positional argument, option without its value, or hex value that is not exactly 64 hex digits
+(either case) is a usage error, exit 2 and no verdict.
 
 `<i>` is the zero-based index of the record that failed, or `-1` when the failure is in the header or is
 `expected-missing`. Exit status is 0 for `ok`, 1 for `reject`, 2 for a usage error or an unreadable file (no verdict).

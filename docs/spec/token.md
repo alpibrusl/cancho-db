@@ -42,6 +42,9 @@ SHA-256( "cancho-db/token/v1" || 0x00 || u32(k) || b0 || ... || bk-1 )
 The id of the whole token (*k* = *n*) is what a commit records in `token`. The ids of the shorter prefixes exist so that
 revoking a token revokes every token attenuated from it (§4).
 
+A block's `branch` pattern may be empty (it then matches only the empty branch name, which no commit has) and a pattern
+has no length limit but its `u16` length; there are no further constraints on a block than those written here.
+
 **Decoding** is as strict as in `commit.md` §1: one byte representation per value, a count larger than the bytes left is
 malformed, effects strictly ascending (`token-bad-encoding`), a token with no blocks is malformed, bytes left over after
 the last block of a token are malformed. A `kind` above 4 is malformed.
@@ -79,7 +82,8 @@ signature = Ed25519-Sign(root_key, "cancho-db/revoke/v1" || 0x00 || token_id || 
 ```
 
 `since` is a time in ms: the token (or any token with that id as a prefix id) is refused for commits whose `time` is
-`since` or later, and not for earlier ones.
+`since` or later, and not for earlier ones. An id listed more than once is revoked from the **earliest** of its `since`
+values (a commit is refused if any entry for the id has `since` at or before its `time`).
 
 The verifier is given the **root public key** and both files. Which root key is trusted is the reader's decision, as the
 `--expect` id is (`commit.md` §5).

@@ -235,6 +235,12 @@ nd = (u16(1) + lst([]) + b16(b"main") + u64(0) + h("s") + lst([]) + lst([]) + h(
 vec("nondet_count_huge", log(record(nd)), rejects("bad-encoding", 0))
 
 vec("parents_three", log(record(commit(parents=[h("1"), h("2"), h("3")]))), rejects("parent-count", 0))
+# the count is checked against the bytes left before it is checked against 2
+vec("parents_three_but_short", log(record(u16(1) + u32(3) + h("1") + h("2"))), rejects("bad-encoding", 0))
+# a record is judged when it is reached: an early decode failure beats a later truncation
+vec("decode_error_before_later_truncation", log(record(commit(version=9)), r0, r0)[:-5], rejects("bad-version", 0))
+vec("effects_unordered_before_later_malformed",
+    log(record(commit(effects=[effect(1, b"t"), effect(0, b"t")]) + b"\x00")), rejects("effects-unordered", 0))
 vec("branch_empty", log(record(commit(branch=b""))), rejects("branch-empty", 0))
 vec("branch_256", log(record(commit(branch=b"x" * 256))), rejects("bad-encoding", 0))
 vec("branch_255_ok", log(record(commit(branch=b"x" * 255))), "ok commits=1 branches=1")

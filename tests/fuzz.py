@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Differential fuzzing of the two verifiers, and the no-panic rule: no input may reach a crash.
 
-    fuzz.py VECTORS_DIR CHO_VERIFIER [CASES] [SEED]
+    [FUZZ_EXTRA="exe exe..."] fuzz.py VECTORS_DIR CHO_VERIFIER [CASES] [SEED]
+
+FUZZ_EXTRA names more verifiers (the Go one) that must print the same line as the other two.
 
 Each case is a vector with random damage (flipped bits, cut or grown tails, inserted or deleted bytes, records swapped
 or spliced from another vector). Both verifiers must print the same single line, and the cancho one must exit 0 or 1
@@ -9,6 +11,7 @@ with nothing on stderr: a trap, a signal or a stray message is a failure. The se
 a failure reproduces; the failing input is written next to the report.
 """
 import importlib.util
+import os
 import random
 import subprocess
 import sys
@@ -68,6 +71,12 @@ def main(argv):
     cases = int(argv[3]) if len(argv) > 3 else 1500
     seed = int(argv[4]) if len(argv) > 4 else 1
     rng = random.Random(seed)
+    extra = os.environ.get("FUZZ_EXTRA", "").split()
+
+    def others(cmd):
+        """The lines the extra verifiers print for the same command line (compared to the cancho one)."""
+        return [subprocess.run([e] + cmd[1:], capture_output=True, timeout=30) for e in extra]
+
     pool = [p.read_bytes() for p in sorted(vdir.glob("*.log"))]
     print("fuzz: %d cases, seed %d, %d seeds" % (cases, seed, len(pool)))
     verdicts, bad = {}, 0
@@ -81,12 +90,14 @@ def main(argv):
             want = py_verdict(data)
             rule = want.split()[1][5:] if want.startswith("reject") else "ok"
             verdicts[rule] = verdicts.get(rule, 0) + 1
-            if got != want or p.returncode not in (0, 1) or p.stderr:
+            more = [(q.stdout.decode(errors="replace").strip(), q.returncode, q.stderr) for q in others([exe, str(f)])]
+            if got != want or p.returncode not in (0, 1) or p.stderr or any(
+                    m[0] != want or m[1] not in (0, 1) or m[2] for m in more):
                 bad += 1
                 keep = ROOT / ("fuzz-failure-%d-%d.log" % (seed, n))
                 keep.write_bytes(data)
-                print("FAIL case %d: cancho=%r exit=%d stderr=%r python=%r (input kept: %s)" % (
-                    n, got, p.returncode, p.stderr[:100], want, keep.name))
+                print("FAIL case %d: cancho=%r exit=%d stderr=%r python=%r others=%r (input kept: %s)" % (
+                    n, got, p.returncode, p.stderr[:100], want, more, keep.name))
         # L2: damage the log, the token store or the revocation list of an L2 vector
         l2_cases = [(a.with_suffix(".log"), a.with_suffix(".tokens"), a.with_suffix(".revoked"),
                      a.read_text().split()[1]) for a in sorted(vdir.glob("*.args")) if "--root" in a.read_text()]
@@ -115,15 +126,17 @@ def main(argv):
             want = py_verdict(log_b, (bytes.fromhex(root_hex), tok_b, rev_b))
             rule = want.split()[1][5:] if want.startswith("reject") else "ok"
             l2_verdicts[rule] = l2_verdicts.get(rule, 0) + 1
-            if got != want or p.returncode not in (0, 1) or p.stderr:
+            more = [(q.stdout.decode(errors="replace").strip(), q.returncode, q.stderr) for q in others(cmd)]
+            if got != want or p.returncode not in (0, 1) or p.stderr or any(
+                    m[0] != want or m[1] not in (0, 1) or m[2] for m in more):
                 bad += 1
                 keep = ROOT / ("fuzz-failure-l2-%d-%d" % (seed, n))
                 keep.with_suffix(".log").write_bytes(log_b)
                 keep.with_suffix(".tokens").write_bytes(tok_b)
                 if rev_b is not None:
                     keep.with_suffix(".revoked").write_bytes(rev_b)
-                print("FAIL L2 case %d: cancho=%r exit=%d stderr=%r python=%r (input kept: %s.*)" % (
-                    n, got, p.returncode, p.stderr[:100], want, keep.name))
+                print("FAIL L2 case %d: cancho=%r exit=%d stderr=%r python=%r others=%r (input kept: %s.*)" % (
+                    n, got, p.returncode, p.stderr[:100], want, more, keep.name))
     print("verdicts reached:", ", ".join("%s=%d" % kv for kv in sorted(verdicts.items())))
     print("L2 verdicts reached:", ", ".join("%s=%d" % kv for kv in sorted(l2_verdicts.items())))
     print("%d cases, %d failed" % (cases + cases // 2, bad))
