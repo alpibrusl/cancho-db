@@ -1,0 +1,184 @@
+import std.test;
+import std.addr;
+import std.bytes;
+import cdb.commit;
+import cdb.login;
+import cdb.login_cases;
+
+// src/login.cho from bytes, with no socket: the cases are tests/login_cases.cho, which tools/gen_login.py writes, with the
+// answers written by hand there and the tokens signed by code that shares nothing with src/.
+
+fn hexval(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0 - 1;
+}
+
+// Hex text into bytes: how many, or -1.
+fn unhex[&t, &o](text: &t [byte], out: &!o [byte]) -> [] int {
+    if len(text) % 2 != 0 {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < len(text) / 2 {
+        let hi = hexval(int_of(text[2 * i]));
+        let lo = hexval(int_of(text[2 * i + 1]));
+        if hi < 0 || lo < 0 {
+            return 0 - 1;
+        }
+        out[i] = byte_of(hi * 16 + lo);
+        i = i + 1;
+    }
+    return len(text) / 2;
+}
+
+fn test_startup_packets() -> [] int {
+    var i = 0;
+    while i < login_cases.n_startup() {
+        region r {
+            let hex = login_cases.startup_hex(i);
+            let msg = alloc_slice[r](len(hex) / 2 + 1, byte_of(0));
+            let n = unhex(hex, msg);
+            test.assert(n >= 0);
+            let out = alloc_slice[r](6, 0);
+            let kind = login.parse_startup(msg[0..n], out);
+            test.assert_eq(kind, login_cases.startup_kind(i));
+            if kind == login.kind_startup() {
+                test.assert(same_hex(msg[out[0]..out[0] + out[1]], out[1], login_cases.startup_user(i)));
+                test.assert(same_hex(msg[out[2]..out[2] + out[3]], out[3], login_cases.startup_db(i)));
+                if login_cases.startup_app_present(i) == 1 {
+                    test.assert(same_hex(msg[out[4]..out[4] + out[5]], out[5], login_cases.startup_app(i)));
+                } else {
+                    test.assert_eq(out[4], 0 - 1);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_startup_length() -> [] int {
+    var i = 0;
+    while i < login_cases.n_slen() {
+        region r {
+            let hex = login_cases.slen_hex(i);
+            let buf = alloc_slice[r](len(hex) / 2 + 1, byte_of(0));
+            let n = unhex(hex, buf);
+            test.assert(n >= 0);
+            test.assert_eq(login.startup_body_len(buf[0..n]), login_cases.slen_want(i));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_base64url() -> [] int {
+    var i = 0;
+    while i < login_cases.n_b64() {
+        region r {
+            let text = login_cases.b64_text(i);
+            let out = alloc_slice[r](len(text) + 4, byte_of(0));
+            let n = login.decode_b64url(text, out);
+            if login_cases.b64_ok(i) == 1 {
+                let want_hex = login_cases.b64_hex(i);
+                let want = alloc_slice[r](len(want_hex) / 2 + 1, byte_of(0));
+                let wn = unhex(want_hex, want);
+                test.assert_eq(n, wn);
+                test.assert(bytes.equal(out[0..n], want[0..wn]));
+            } else {
+                test.assert_eq(n, 0 - 1);
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_login() -> [] int {
+    var i = 0;
+    while i < login_cases.n_login() {
+        region r {
+            let pw = login_cases.login_pw(i);
+            let blob = alloc_slice[r](len(pw) + 4, byte_of(0));
+            let n = login.decode_b64url(pw, blob);
+            test.assert(n >= 0);
+            let root_hex = login_cases.login_root(i);
+            let root = alloc_slice[r](32, byte_of(0));
+            test.assert_eq(unhex(root_hex, root), 32);
+            let rule = login.check(blob[0..n], login_cases.login_db(i), login_cases.login_branch(i), root, login_cases.login_now_hi(i), login_cases.login_now_lo(i));
+            test.assert_eq(rule, login_cases.login_want(i));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// A refused login names a rule with exactly this tag and this SQLSTATE.
+fn test_every_refusal_has_its_tag() -> [] int {
+    var i = 0;
+    while i < login_cases.n_rule() {
+        let code = login_cases.rule_code(i);
+        test.assert(bytes.equal(login.rule_name(code), login_cases.rule_tag(i)));
+        test.assert(bytes.equal(login.sqlstate(code), login_cases.rule_state(i)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn same_hex[&b](actual: &b [byte], n: int, want_hex: &static [byte]) -> [] bool {
+    var ok = false;
+    region r {
+        let want = alloc_slice[r](len(want_hex) / 2 + 1, byte_of(0));
+        let wn = unhex(want_hex, want);
+        ok = wn == n && bytes.equal(actual[0..n], want[0..wn]);
+    }
+    return ok;
+}
+
+fn test_messages() -> [] int {
+    region r {
+        let buf = alloc_slice[r](32, byte_of(0));
+        test.assert(same_hex(buf, login.auth_cleartext(buf), login_cases.msg_auth()));
+        test.assert(same_hex(buf, login.ready_for_query(buf, 'I'), login_cases.msg_ready_i()));
+        test.assert(same_hex(buf, login.ready_for_query(buf, 'T'), login_cases.msg_ready_t()));
+        test.assert(same_hex(buf, login.ready_for_query(buf, 'E'), login_cases.msg_ready_e()));
+    }
+    var i = 0;
+    while i < login_cases.n_err() {
+        region r {
+            let buf = alloc_slice[r](login_cases.err_size(i), byte_of(0));
+            let n = login.error_response(buf, login_cases.err_severity(i), login_cases.err_state(i), login_cases.err_tag(i), login_cases.err_text(i));
+            test.assert(same_hex(buf, n, login_cases.err_hex(i)));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Who may connect (docs/m1-proxy.md D1). Hand-written addresses, on both sides of each boundary.
+fn test_loopback() -> [] int {
+    test.assert(login.is_loopback(addr.v4(127, 0, 0, 1, 5432)));
+    test.assert(login.is_loopback(addr.v4(127, 255, 255, 255, 1)));
+    test.assert(login.is_loopback(addr.v4(127, 1, 2, 3, 0)));
+    test.assert(!login.is_loopback(addr.v4(126, 255, 255, 255, 5432)));
+    test.assert(!login.is_loopback(addr.v4(128, 0, 0, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v4(0, 0, 0, 0, 5432)));
+    test.assert(!login.is_loopback(addr.v4(10, 0, 0, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v4(192, 0, 2, 2, 5432)));
+    test.assert(!login.is_loopback(addr.v4(255, 255, 255, 255, 5432)));
+    test.assert(login.is_loopback(addr.v6(0, 0, 0, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0, 0, 0, 0, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0, 0, 0, 2, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0, 0, 1, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v6(1, 0, 0, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0, 1, 0, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0x20010db8, 0, 0, 1, 5432)));
+    test.assert(login.is_loopback(addr.v6(0, 0, 0xffff, 0x7f000001, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0, 0, 0xffff, 0x0a000001, 5432)));
+    return 0;
+}

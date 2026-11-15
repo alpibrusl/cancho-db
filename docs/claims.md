@@ -39,8 +39,27 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C20 | With statements, `effect-denied` is judged on the effect set shown to be real, after `stmt-missing` and `effects-mismatch`. | `ir_effect_denied_on_the_true_effects`, `ir_order_*`; the "effects judged before the statements" mutants of both verifiers | a lying recorded set must not be what the token is judged against |
 | C21 | A malformed statement store is refused with a tag and the entry it names, before any commit is judged, after the token store and the revocation list; an unused bad entry is still an error. | `ir_stmts_*`, `ir_bad_entry_unused_is_still_an_error`, `ir_order_*_before_stmts` | as C15 |
 
+### The proxy, P0 ([`m1-proxy.md`](m1-proxy.md))
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C22 | A client gets in only with a capability token that decodes, is signed from the root key, whose holder has the last block's key, that is unexpired, and that allows the one branch served; a different branch name is refused. Each refusal is a rule tag with its SQLSTATE. | `tests/login_test.cho` (31 login cases with real signatures, 25 base64url, 26 startup, the exact tag and state of each refusal); the 40 `login:` mutants; `tests/proxy_e2e.py` (each refusal through real psql, and the SQLSTATE read off the wire) | the cases are minted by an independent Ed25519 with hand-written answers |
+| C23 | **A refused login never reaches PostgreSQL.** | `tests/proxy_e2e.py` counts the startup messages PostgreSQL receives through a wire tee: none for the six refused logins and none for any malformed packet; the mutant "a refused login still opens the upstream" | the tee sees every connection the proxy makes upstream |
+| C24 | Only loopback clients are served: any other peer is closed without a byte being read. | `login.is_loopback` at the boundary of every range (18 addresses, 8 mutants); `tests/proxy_e2e.py` with a client from the host's other address (a reset, not an answer); mutant "non-loopback clients are served" | cancho's `tcp_listen` binds every address, so this is the only thing standing between the token and the network |
+| C25 | After login the proxy forwards every message untouched, in both directions: 200,000 rows (7.9 MB) come back byte for byte as direct; errors, transactions and rollbacks are the server's own; 24 clients at once each get their own answer. | `tests/proxy_e2e.py`; mutant "forwarded bytes lose the last one" | the comparison is against psql talking to PostgreSQL directly |
+| C26 | A silent client, a silent upstream and a dead upstream each cost one client a refusal, not the loop: closed after about 10 s, `upstream-timeout` after about 5 s, `upstream-unavailable` at once. | `tests/proxy_e2e.py` with real timings; mutants "a silent client is never closed", "a silent upstream is waited for a minute" | the first draft of the proxy waited on PostgreSQL's login forever and one silent upstream froze every client: seen, fixed, now tested |
+| C28 | The proxy test can fail: ten mutants of `proxy/proxy.cho` (serve non-loopback clients, skip the token check, never close a silent client, wait a minute for a silent upstream, lose a forwarded byte, answer `S` to SSLRequest, drop application_name, use the client's role upstream, open the upstream after a refusal, skip the protocol-version check) are each caught by `tests/proxy_e2e.py`. | `PG_E2E_PORT=... python3 tests/mutants.py proxy cancho`: 10 mutants, 0 not killed. Not in `scripts/check.sh`: it takes about 20 minutes | each mutant is a real rule removed |
+| C27 | The proxy never touches the filesystem, signals, other programs or foreign code; its network authority is unbounded. | `tests/authority.sh` pins both lists | a change in either list is a decision, not a drift |
+
 ## What is *not* claimed
 
+- **P0 understands no SQL.** The proxy checks who may connect, not what they run: there is no effect check, no log and
+  no commit yet, so a valid token can run anything the upstream role can. That is P1 and P2.
+- **P0's stated limits.** Opening the connection to PostgreSQL (`tcp_connect`) blocks, so a black-holed upstream would stall
+  the loop (a down or silent one is handled); while one client's upstream login waits (up to 5 s) the others wait. The
+  upstream must use trust login. `CancelRequest` is closed, not forwarded. The token and its key travel in clear, so only
+  loopback is served. The network authority is unbounded in the report (a compiler revision limit, `m1-proxy.md` section 3).
+  Concurrency was tested at 24 clients, not more.
 - **L3.** Nothing here replays statements.
 - **Without `--stmts`, L2 judges only the recorded effect set against the token**, and a server that records less than it
   ran passes (`ir_gap_hidden_write_passes_l2_alone` is that case, kept on purpose). With `--stmts` the recorded set is

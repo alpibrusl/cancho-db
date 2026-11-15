@@ -19,7 +19,11 @@ Working name. The design is [`docs/design.md`](docs/design.md).
   [`tools/verify.py`](tools/verify.py) in Python, and [`verifiers/go/`](verifiers/go) in Go, written from the specs alone
   by a separate agent session (see its README and [`docs/claims.md`](docs/claims.md) for what that does and does not show).
 
-**Not built:** L3 replay, SQL-to-IR lowering, and M1 onward (the proxy, branches, the engine). Without `--stmts`, L2
+**M1, the proxy in front of PostgreSQL, psql first** ([`docs/m1-proxy.md`](docs/m1-proxy.md)): designed, and **P0 built**
+(`proxy/proxy.cho`, `src/login.cho`): psql connects with a capability token as its password, the proxy checks it and logs in
+to PostgreSQL itself, and everything after is forwarded untouched. It understands no SQL yet: no effect check, no log, no
+commits (P1, P2). A refused login never reaches PostgreSQL; only loopback clients are served.
+**Not built:** L3 replay, SQL-to-IR lowering, and M2 onward (branches, the engine). Without `--stmts`, L2
 checks only the commit's *recorded* effect set against its token; with it, the recorded set is shown to equal what the
 statements infer. That the store holds what was actually executed is L3's (see [`docs/claims.md`](docs/claims.md)). That file says what is claimed, what each claim rests on, and what is *not*
 claimed.
@@ -61,6 +65,17 @@ $ ./verify vectors/ir_gap_hidden_write_is_refused_with_statements.log --root $RO
     --tokens vectors/ir_gap_hidden_write_is_refused_with_statements.tokens --stmts vectors/ir_gap_hidden_write_is_refused_with_statements.stmts
 reject rule=effects-mismatch record=0
 ```
+
+## The proxy (P0)
+
+```console
+$ cancho build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho -o proxy
+$ proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres   # listen port, upstream, branch, root key, upstream role, database
+$ PGPASSWORD=$(python3 tools/mint.py password) psql -h 127.0.0.1 -p 5440 -U agent -d main -c 'select 1'
+```
+
+The password is `base64url(token ‖ the last key's seed)`; `tools/mint.py` makes one for the test keys. The database name is the
+branch, and only the configured one is served. `tests/proxy_e2e.py` is the gate, against a real PostgreSQL and the stock psql.
 
 ## Test
 

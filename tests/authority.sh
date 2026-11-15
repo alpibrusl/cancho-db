@@ -1,19 +1,32 @@
 #!/bin/sh
-# The cancho verifier reaches the log and the console and nothing else (README claim C7). `cancho authority` lists what a
-# program performs and what it never touches; this fails if the list grows or a "never touches" line goes away.
+# What each program can reach, pinned (README claim C7, docs/m1-proxy.md section 3). `cancho authority` lists what a program
+# performs and what it never touches; this fails if either list changes, so a wider authority is a decision and not a drift.
 set -eu
 CANCHO=${CANCHO:-cancho}
+
+performs_of() { printf '%s\n' "$1" | sed -n '/^performs/,/^never touches/p' | sed '1d;$d' | sed 's/^ *//; s/ *<- unbounded$//' | sort | tr '\n' ' '; }
+never_in() { printf '%s\n' "$1" | sed -n '/^never touches/,/^provably/p' | grep -q "^ *$2\$"; }
+
+# the verifier: the log and the console, and nothing else
 out=$("$CANCHO" authority src/*.cho --std)
-performs=$(printf '%s\n' "$out" | sed -n '/^performs/,/^never touches/p' | sed '1d;$d' | sed 's/^ *//' | sort | tr '\n' ' ')
+got=$(performs_of "$out")
 want='args err_write file_read fs_read("") heap io_write '
-if [ "$performs" != "$want" ]; then
-    echo "authority changed: performs [$performs], expected [$want]" >&2
-    exit 1
-fi
+[ "$got" = "$want" ] || { echo "verifier authority changed: performs [$got], expected [$want]" >&2; exit 1; }
 for never in "the network" "signals" "other programs" "foreign code"; do
-    printf '%s\n' "$out" | sed -n '/^never touches/,/^provably/p' | grep -q "^ *$never\$" || {
-        echo "authority: no longer says it never touches $never" >&2
-        exit 1
-    }
+    never_in "$out" "$never" || { echo "verifier: no longer says it never touches $never" >&2; exit 1; }
 done
-echo "authority ok: $performs"
+echo "verifier authority ok: $got"
+
+# the proxy: the network (unbounded: this compiler revision has one Net per program, so a program that listens and dials
+# cannot carry a narrowed one, docs/net-bounds.md section 1), the clock, the console, and no file, signal, program or foreign
+# code. When the report can bound the network this must change on purpose.
+out=$("$CANCHO" authority proxy/proxy.cho src/commit.cho src/token.cho src/login.cho --std)
+got=$(performs_of "$out")
+want='args clock conn_accept conn_read conn_write err_write heap io_write net_in("") net_out("") poll '
+[ "$got" = "$want" ] || { echo "proxy authority changed: performs [$got], expected [$want]" >&2; exit 1; }
+for never in "the filesystem" "signals" "other programs" "foreign code"; do
+    never_in "$out" "$never" || { echo "proxy: no longer says it never touches $never" >&2; exit 1; }
+done
+printf '%s\n' "$out" | sed -n '/^unbounded by/,/^provably/p' | grep -q 'net_out("")' ||
+    { echo "proxy: the network is no longer reported unbounded: update docs/m1-proxy.md and this test" >&2; exit 1; }
+echo "proxy authority ok: $got (network unbounded)"

@@ -1,0 +1,422 @@
+module cdb.login;
+
+import std.addr;
+import std.bytes;
+import std.ed25519;
+import cdb.commit;
+import cdb.token;
+
+// The proxy's front door, sans-io (docs/m1-proxy.md sections 3 and 4): what a client's first packet is, what the password
+// it sends means, and the few messages the proxy writes itself. Everything here is bytes in and bytes or a number out, so it
+// is tested from bytes (tests/login_test.cho) with no socket.
+//
+// It never panics: every read is bounds-checked first, and every refusal is a rule tag with a SQLSTATE (`rule_name`,
+// `sqlstate`).
+
+// ---------------------------------------------------------------- the first packet
+
+pub fn kind_ssl() -> [] int {
+    return 1;
+}
+
+pub fn kind_gss() -> [] int {
+    return 2;
+}
+
+pub fn kind_cancel() -> [] int {
+    return 3;
+}
+
+pub fn kind_startup() -> [] int {
+    return 4;
+}
+
+pub fn err_malformed() -> [] int {
+    return 0 - 1;
+}
+
+pub fn err_version() -> [] int {
+    return 0 - 2;
+}
+
+// A startup packet is a u32 length that counts itself, then the body. PostgreSQL refuses lengths under 8 and over 10000; so
+// do we. `first4` is the length field. Answers the body's size in bytes, or -1.
+pub fn startup_body_len[&d](first4: &d [byte]) -> [] int {
+    if len(first4) < 4 {
+        return 0 - 1;
+    }
+    let n = commit.be(first4, 0, 4);
+    if n < 8 || n > 10000 {
+        return 0 - 1;
+    }
+    return n - 4;
+}
+
+// What the first packet is. `msg` is the body (after the length). Answers `kind_ssl()`, `kind_gss()`, `kind_cancel()`,
+// `kind_startup()` (protocol 3.0 with a `user`), `err_version()` (another protocol version) or `err_malformed()`.
+//
+// For a startup, `out[0..6]` is where `user`, `database` and `application_name` start and how long each is, as (at, length)
+// pairs; `-1` for an absent `application_name`; an absent or empty `database` is the user, as in PostgreSQL.
+pub fn parse_startup[&d, &o](msg: &d [byte], out: &!o [int]) -> [] int {
+    var i = 0;
+    while i < 6 {
+        out[i] = 0 - 1;
+        i = i + 1;
+    }
+    if len(msg) < 4 {
+        return err_malformed();
+    }
+    let code = commit.be(msg, 0, 4);
+    if code == 80877103 {
+        if len(msg) == 4 {
+            return kind_ssl();
+        }
+        return err_malformed();
+    }
+    if code == 80877104 {
+        if len(msg) == 4 {
+            return kind_gss();
+        }
+        return err_malformed();
+    }
+    if code == 80877102 {
+        if len(msg) == 12 {
+            return kind_cancel();
+        }
+        return err_malformed();
+    }
+    if code != 196608 {
+        return err_version();
+    }
+    // parameters: key NUL value NUL, ..., and one more NUL, nothing after
+    var p = 4;
+    var done = false;
+    while !done {
+        if p >= len(msg) {
+            return err_malformed();
+        }
+        if int_of(msg[p]) == 0 {
+            if p != len(msg) - 1 {
+                return err_malformed();
+            }
+            done = true;
+        } else {
+            var k = p;
+            while k < len(msg) && int_of(msg[k]) != 0 {
+                k = k + 1;
+            }
+            if k >= len(msg) {
+                return err_malformed();
+            }
+            var v = k + 1;
+            while v < len(msg) && int_of(msg[v]) != 0 {
+                v = v + 1;
+            }
+            if v >= len(msg) {
+                return err_malformed();
+            }
+            var slot = 0 - 1;
+            if bytes.equal(msg[p..k], "user") {
+                slot = 0;
+            } else if bytes.equal(msg[p..k], "database") {
+                slot = 2;
+            } else if bytes.equal(msg[p..k], "application_name") {
+                slot = 4;
+            }
+            if slot >= 0 {
+                if out[slot] >= 0 {
+                    return err_malformed();
+                }
+                out[slot] = k + 1;
+                out[slot + 1] = v - k - 1;
+            }
+            p = v + 1;
+        }
+    }
+    if out[0] < 0 || out[1] == 0 {
+        return err_malformed();
+    }
+    if out[2] < 0 || out[3] == 0 {
+        out[2] = out[0];
+        out[3] = out[1];
+    }
+    return kind_startup();
+}
+
+// ---------------------------------------------------------------- the password is the token
+
+fn b64_value(c: int) -> [] int {
+    if c >= 'A' && c <= 'Z' {
+        return c - 'A';
+    }
+    if c >= 'a' && c <= 'z' {
+        return c - 'a' + 26;
+    }
+    if c >= '0' && c <= '9' {
+        return c - '0' + 52;
+    }
+    if c == '-' {
+        return 62;
+    }
+    if c == '_' {
+        return 63;
+    }
+    return 0 - 1;
+}
+
+// Strict base64url, RFC 4648 section 5, with **no padding**: one text for each byte string, so a token has one spelling.
+// Anything outside `A-Za-z0-9-_`, a length of 1 more than a multiple of 4, or leftover bits that are not zero is refused.
+// Writes the bytes to `out` (which must hold `len(text) * 3 / 4` of them) and answers how many, or -1.
+pub fn decode_b64url[&t, &o](text: &t [byte], out: &!o [byte]) -> [] int {
+    let n = len(text);
+    if n % 4 == 1 {
+        return 0 - 1;
+    }
+    var acc = 0;
+    var bits = 0;
+    var w = 0;
+    var i = 0;
+    while i < n {
+        let v = b64_value(int_of(text[i]));
+        if v < 0 {
+            return 0 - 1;
+        }
+        acc = acc * 64 + v;
+        bits = bits + 6;
+        if bits >= 8 {
+            bits = bits - 8;
+            let shift = if_pow2(bits);
+            out[w] = byte_of(acc / shift % 256);
+            w = w + 1;
+            acc = acc % shift;
+        }
+        i = i + 1;
+    }
+    if acc != 0 {
+        return 0 - 1;
+    }
+    return w;
+}
+
+// 2^bits for the 0, 2 and 4 bits that can be left over.
+fn if_pow2(bits: int) -> [] int {
+    if bits == 0 {
+        return 1;
+    }
+    if bits == 2 {
+        return 4;
+    }
+    return 16;
+}
+
+// The rule codes of a refused login, and their tags and SQLSTATEs.
+pub fn login_ok() -> [] int {
+    return 0;
+}
+
+pub fn login_bad_token() -> [] int {
+    return 1;
+}
+
+pub fn login_bad_signature() -> [] int {
+    return 2;
+}
+
+pub fn login_bad_proof() -> [] int {
+    return 3;
+}
+
+pub fn login_expired() -> [] int {
+    return 4;
+}
+
+pub fn login_branch_denied() -> [] int {
+    return 5;
+}
+
+pub fn login_principal_conflict() -> [] int {
+    return 6;
+}
+
+pub fn rule_name(code: int) -> [] &static [byte] {
+    if code == 1 {
+        return "login-bad-token";
+    }
+    if code == 2 {
+        return "login-bad-signature";
+    }
+    if code == 3 {
+        return "login-bad-proof";
+    }
+    if code == 4 {
+        return "login-expired";
+    }
+    if code == 5 {
+        return "login-branch-denied";
+    }
+    return "login-principal-conflict";
+}
+
+// `28P01` (invalid password) for a token that is not good, `3D000` (invalid catalog name) for a branch it does not allow,
+// `28000` (invalid authorization specification) for a token no commit could satisfy.
+pub fn sqlstate(code: int) -> [] &static [byte] {
+    if code == 5 {
+        return "3D000";
+    }
+    if code == 6 {
+        return "28000";
+    }
+    return "28P01";
+}
+
+// Whether the password `blob` (the decoded bytes: the token, then the 32-byte seed of its last key) lets a client in as
+// `database`, on a server whose one branch is `branch`, under the root key `root`, at `now_hi:now_lo` (a u64 in ms, as two
+// u32 halves). Answers `login_ok()` or the first rule it breaks, in this order (docs/m1-proxy.md D1, D2):
+//
+//   1. the token decodes (`token.md` section 1);
+//   2. every block's signature verifies, from the root key (`token.md` section 1);
+//   3. the seed derives the last block's `next_key`: the holder proves it has the key that can append a block;
+//   4. no block's expiry is before now;
+//   5. the database is the server's branch and every block's pattern allows it;
+//   6. the blocks name no two different principals.
+pub fn check[&b, &d, &n, &r](blob: &b [byte], database: &d [byte], branch: &n [byte], root: &r [byte], now_hi: int, now_lo: int) -> [] int {
+    if len(blob) < 32 + 4 {
+        return login_bad_token();
+    }
+    let tk = blob[0..len(blob) - 32];
+    let seed = blob[len(blob) - 32..len(blob)];
+    if !token.decode(tk) {
+        return login_bad_token();
+    }
+    if !token.chain_ok(tk, root) {
+        return login_bad_signature();
+    }
+    var proved = false;
+    region r {
+        let pk = alloc_slice[r](32, byte_of(0));
+        ed25519.public_key_from_seed(seed, pk);
+        let at = token.last_next_key(tk);
+        proved = bytes.equal(pk, tk[at..at + 32]);
+    }
+    if !proved {
+        return login_bad_proof();
+    }
+    if token.expired(tk, now_hi, now_lo) {
+        return login_expired();
+    }
+    if !bytes.equal(database, branch) || token.branch_denied(tk, database) {
+        return login_branch_denied();
+    }
+    var conflict = 0;
+    region p {
+        let who = alloc_slice[p](32, byte_of(0));
+        conflict = token.principal_of(tk, who);
+    }
+    if conflict != 0 {
+        return login_principal_conflict();
+    }
+    return login_ok();
+}
+
+// ---------------------------------------------------------------- who may connect
+
+// Whether a client's address is loopback: 127.0.0.0/8, or ::1. cancho's `tcp_listen` binds every address, so the proxy
+// cannot be told to listen on loopback alone; it closes any other client unread (docs/m1-proxy.md D1). An IPv4-mapped IPv6
+// address is already the IPv4 one (`std.addr`), so `::ffff:127.0.0.1` is loopback and `::ffff:10.0.0.1` is not.
+pub fn is_loopback(who: addr.Peer) -> [] bool {
+    if addr.family(who) == 4 {
+        return addr.word(who, 3) / 16777216 == 127;
+    }
+    return addr.word(who, 0) == 0 && addr.word(who, 1) == 0 && addr.word(who, 2) == 0 && addr.word(who, 3) == 1;
+}
+
+// ---------------------------------------------------------------- what the proxy says itself
+
+fn put32[&b](buf: &!b [byte], at: int, v: int) -> [] int {
+    buf[at] = byte_of(v / 16777216 % 256);
+    buf[at + 1] = byte_of(v / 65536 % 256);
+    buf[at + 2] = byte_of(v / 256 % 256);
+    buf[at + 3] = byte_of(v % 256);
+    return at + 4;
+}
+
+fn put_text[&b, &s](buf: &!b [byte], at: int, text: &s [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        buf[at + i] = text[i];
+        i = i + 1;
+    }
+    return at + len(text);
+}
+
+// `AuthenticationCleartextPassword`: 'R', length 8, code 3. Into `buf`; answers its 9 bytes' length.
+pub fn auth_cleartext[&b](buf: &!b [byte]) -> [] int {
+    buf[0] = byte_of('R');
+    put32(buf, 1, 8);
+    put32(buf, 5, 3);
+    return 9;
+}
+
+// `ReadyForQuery` with the transaction status `status` (`I`, `T` or `E`).
+pub fn ready_for_query[&b](buf: &!b [byte], status: int) -> [] int {
+    buf[0] = byte_of('Z');
+    put32(buf, 1, 5);
+    buf[5] = byte_of(status);
+    return 6;
+}
+
+// `ErrorResponse` with severity `severity` (`ERROR` or `FATAL`), the five-byte `sqlstate` and the message `tag: text`.
+// The message is cut to fit `buf` (which should hold 512 bytes or more); the result is the number of bytes written, which
+// is 0, with nothing written, if `buf` cannot hold even the fixed part.
+pub fn error_response[&b, &s, &c, &g, &t](buf: &!b [byte], severity: &s [byte], sqlstate: &c [byte], tag: &g [byte], text: &t [byte]) -> [] int {
+    var fixed = 1 + 4;
+    fixed = fixed + 2 * (1 + len(severity) + 1);
+    fixed = fixed + 1 + 5 + 1;
+    fixed = fixed + 1 + 1;
+    fixed = fixed + 1;
+    if len(buf) < fixed {
+        return 0;
+    }
+    let room = len(buf) - fixed;
+    var mlen = len(tag) + 2 + len(text);
+    if mlen > room {
+        mlen = room;
+    }
+    let total = fixed + mlen;
+    buf[0] = byte_of('E');
+    put32(buf, 1, total - 1);
+    var at = 5;
+    buf[at] = byte_of('S');
+    at = put_text(buf, at + 1, severity);
+    buf[at] = byte_of(0);
+    at = at + 1;
+    buf[at] = byte_of('V');
+    at = put_text(buf, at + 1, severity);
+    buf[at] = byte_of(0);
+    at = at + 1;
+    buf[at] = byte_of('C');
+    at = put_text(buf, at + 1, sqlstate);
+    buf[at] = byte_of(0);
+    at = at + 1;
+    buf[at] = byte_of('M');
+    at = at + 1;
+    var m = 0;
+    while m < mlen {
+        var c = 0;
+        if m < len(tag) {
+            c = int_of(tag[m]);
+        } else if m == len(tag) {
+            c = ':';
+        } else if m == len(tag) + 1 {
+            c = ' ';
+        } else {
+            c = int_of(text[m - len(tag) - 2]);
+        }
+        buf[at + m] = byte_of(c);
+        m = m + 1;
+    }
+    at = at + mlen;
+    buf[at] = byte_of(0);
+    buf[at + 1] = byte_of(0);
+    return total;
+}
