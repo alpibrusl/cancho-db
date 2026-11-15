@@ -662,6 +662,37 @@ STMT = [
     ("ddl: a default renders without its flags", "src/parse.cho", "        p = put_flags(out, p, nodes[6 * node + 4]);\n        return put_lit(out, p, \" default \");", "        return put_lit(out, p, \" default \");"),
     ("ddl: a column without a default renders without its flags", "src/parse.cho", "        if nodes[6 * node + 3] == 1 {\n            return put_flags(out, p, nodes[6 * node + 4]);\n        }\n        return p;", "        return p;"),]
 
+# ---- the lowering (src/lower.cho, tests/lower_check.py: IR bytes, effects through the verifier, refusals)
+LOWER = [
+    ("lower: = maps to <>", "src/lower.cho", "    if code == 3 {\n        return 0;", "    if code == 3 {\n        return 1;"),
+    ("lower: or maps to and", "src/lower.cho", "    if code == 1 {\n        return 7;", "    if code == 1 {\n        return 6;"),
+    ("lower: NOT IN is IN", "src/lower.cho", "                    if data == 20 {\n                        neg = 1;", "                    if false {\n                        neg = 1;"),
+    ("lower: NOT BETWEEN is BETWEEN", "src/lower.cho", "            sc[4] = 0;\n            if data == 1 {\n                r = w8(out, sc, 7);", "            sc[4] = 0;\n            if false {\n                r = w8(out, sc, 7);"),
+    ("lower: BETWEEN's low bound is > not >=", "src/lower.cho", "            if r >= 0 {\n                r = w8(out, sc, 5);\n            }\n            if r >= 0 {\n                r = w8(out, sc, 5);\n            }\n            if r < 0 {\n                return r;\n            }\n            return kids[first];", "            if r >= 0 {\n                r = w8(out, sc, 5);\n            }\n            if r >= 0 {\n                r = w8(out, sc, 4);\n            }\n            if r < 0 {\n                return r;\n            }\n            return kids[first];"),
+    ("lower: count(*) loses its star", "src/lower.cho", "            if r >= 0 && nodes[6 * node + 4] == 1 {\n                r = w8(out, sc, 6);\n            }", "            if false {\n                r = w8(out, sc, 6);\n            }"),
+    ("lower: now() is a call", "src/lower.cho", '            if parse.word_is(sql, a, l, "now") && count == 0 {', "            if false {"),
+    ("lower: random() is allowed", "src/lower.cho", 'parse.word_is(sql, a, n, "random") || ', ""),
+    ("lower: nextval() is allowed", "src/lower.cho", ' || parse.word_is(sql, a, n, "nextval")', ""),
+    ("lower: an unknown qualified column is accepted", "src/lower.cho", "        if !has_column(sql, toks, col, schema, sc[16 + 3 * entry + 2], sc) {", "        if false {"),
+    ("lower: an ambiguous column is accepted", "src/lower.cho", "        if found > 1 {", "        if false {"),
+    ("lower: an alias does not hide the table", "src/lower.cho", "        if sc[at] >= 0 {\n            by = sc[at];\n        }", "        if false {\n            by = sc[at];\n        }"),
+    ("lower: a left join is inner", "src/lower.cho", "            if nodes[6 * j + 1] == 1 {\n                kind = 2;", "            if nodes[6 * j + 1] == 1 {\n                kind = 1;"),
+    ("lower: a join's condition is the wrong child", "src/lower.cho", "            sc[48 + 3 * sc[3] + 2] = kids[nodes[6 * j + 2] + 2];", "            sc[48 + 3 * sc[3] + 2] = kids[nodes[6 * j + 2] + 1];"),
+    ("lower: DESC is ASC", "src/lower.cho", "            if nodes[6 * ord + 1] == 2 {\n                dir = 1;", "            if nodes[6 * ord + 1] == 2 {\n                dir = 0;"),
+    ("lower: ORDER BY ignores an alias", "src/lower.cho", "                if nodes[6 * it] == parse.n_item() && nodes[6 * it + 1] >= 0 && same_name(", "                if false && nodes[6 * it] == parse.n_item() && nodes[6 * it + 1] >= 0 && same_name("),
+    ("lower: an ambiguous ORDER BY name is accepted", "src/lower.cho", "nodes[6 * expr + 1], schema, sc) > 1 {", "nodes[6 * expr + 1], schema, sc) > 5 {"),
+    ("lower: an INSERT row of the wrong width is accepted", "src/lower.cho", "        if nodes[6 * rn + 3] != width {", "        if false {"),
+    ("lower: an UPDATE of an unknown column is accepted", "src/lower.cho", "            if !has_column(sql, toks, col, schema, line, sc) {\n                return fail(sc, col, e_unknown_column());\n            }\n            r0 = wname_tok(sql, toks, col, out, sc);", "            if false {\n                return fail(sc, col, e_unknown_column());\n            }\n            r0 = wname_tok(sql, toks, col, out, sc);"),
+    ("lower: an ALTER is a CREATE", "src/lower.cho", "        code = 1;\n        must_exist = true;", "        code = 0;\n        must_exist = true;"),
+    ("lower: a DROP TABLE is an ALTER", "src/lower.cho", "        code = 2;\n        must_exist = true;", "        code = 1;\n        must_exist = true;"),
+    ("lower: a DROP INDEX is a DROP TABLE", "src/lower.cho", "        code = 4;\n    }", "        code = 2;\n    }"),
+    ("lower: an index's DDL names the index", "src/lower.cho", "        table = nodes[6 * root + 5];", "        table = data;"),
+    ("lower: a name is not folded", "src/lower.cho", "        if !quoted {\n            ch = low(ch);\n        }\n        r = w8(out, sc, ch);\n        if r < 0 {\n            return r;\n        }\n        written = written + 1;", "        r = w8(out, sc, ch);\n        if r < 0 {\n            return r;\n        }\n        written = written + 1;"),
+    ("lower: every number is bytes", "src/lower.cho", "        if v >= 0 {\n            r = w8(out, sc, 1);", "        if false {\n            r = w8(out, sc, 1);"),
+    ("lower: a doubled quote stays doubled", "src/lower.cho", "        if string && ch == '\\'' && i + 1 < n {", "        if false {"),
+    ("lower: CASE x WHEN compares with <>", "src/lower.cho", "            if at == 0 {\n                r = w8(out, sc, 5);\n                if r >= 0 {\n                    r = w8(out, sc, 0);", "            if at == 0 {\n                r = w8(out, sc, 5);\n                if r >= 0 {\n                    r = w8(out, sc, 1);"),
+]
+
 
 # Mutants that cannot be killed because they change nothing observable, with the reason. Empty: every mutant above
 # changes behaviour, and the ones that looked equivalent (the count guard against the bytes left) are not listed
@@ -700,7 +731,44 @@ def run_login(cancho):
     return 1 if survivors else 0
 
 
+def run_lower(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in LOWER if not only or only in m[0]]
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "lowercheck"
+            srcs = [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho")]
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/lowercheck.cho")] + srcs + ["-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            r = subprocess.run([sys.executable, str(ROOT / "tests/lower_check.py"), str(exe), str(ROOT / "build/verify")],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                print("SURVIVED %-46s every lowering case passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in r.stdout.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d case(s), e.g. %s" % (label, len(first), first[0][5:60] if first else "a crash"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
+    if kind == "lower":
+        return run_lower(cancho)
     if kind == "login":
         return run_login(cancho)
     if kind == "lex":

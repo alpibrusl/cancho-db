@@ -771,7 +771,7 @@ fn type_code[&s](sql: &s [byte], start: int, length: int) -> [] int {
     return 11;
 }
 
-fn type_name(code: int) -> [] &static [byte] {
+pub fn type_name(code: int) -> [] &static [byte] {
     if code == 1 {
         return "smallint";
     }
@@ -1525,7 +1525,7 @@ pub fn put_name[&s, &t, &o](out: &!o [byte], at: int, sql: &s [byte], toks: &t [
 }
 
 // A type name with its modifiers: `numeric(10, 2)`.
-fn put_type[&o](out: &!o [byte], at: int, code: int, m1: int, m2: int) -> [] int {
+pub fn put_type[&o](out: &!o [byte], at: int, code: int, m1: int, m2: int) -> [] int {
     var p = put_lit(out, at, type_name(code));
     if m1 >= 0 {
         p = put_byte(out, p, '(');
