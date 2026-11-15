@@ -268,6 +268,24 @@ would be a different transaction); otherwise the **rendered** statements are sen
 flow back untouched. The token is checked against the inferred effects before the first byte is sent upstream, so **a refused
 statement never appears in PostgreSQL's log** (measured at the gate).
 
+### 5.1 The guard
+
+`guard.check` is the whole decision in one function, with no sockets: the text of one `Query` message, the schema snapshot, and
+the token in; the text to send upstream, or a refusal, out. Each statement is parsed, lowered, and its effects inferred by
+`ir.infer` and checked one by one with `token.effect_denied`, the functions the verifier runs on the log. **If any statement is
+refused the whole message is**, and what is sent is only ever the renderings, joined with `; `: a comment, an unusual spelling or
+a trailing statement hidden in a string cannot reach PostgreSQL, because none of the client's bytes does.
+
+- A refusal is answered with a SQLSTATE: PostgreSQL's own (`42P01`, `42703`, `42702`) for a name it would refuse, `42501`
+  (insufficient privilege) for an effect the token does not allow, `0A000` for everything outside the subset, with the tag in the
+  message.
+- **Checked by hand-written verdicts** (`tests/guard_check.py`, tokens minted by the test's own code): every place a column can
+  be read (`SELECT`, `WHERE`, `ORDER BY`, `GROUP BY`, `HAVING`, `ON`, `LIMIT`, `DISTINCT`'s items, `*`), writes, DDL, calls,
+  `now()`; a second statement that is denied refuses the first's message too; a statement hidden in a comment or a string is not a
+  statement; refusals of the lexer, the parser and the lowering with the right SQLSTATE. 13 mutants (an effect not checked, only
+  the first checked, the effect's encoding off by one, the `; ` lost, v1 inference) are each caught.
+- Transaction control (`BEGIN`, `COMMIT`, `ROLLBACK`) is `unsupported-statement` until P2, which tracks it itself.
+
 ## 6. The gate, and why it can fail
 
 A corpus `tests/sql/corpus.sql` of statements, each annotated by hand with: accepted or the refusal tag, and (if accepted) the
@@ -297,7 +315,8 @@ it to PostgreSQL and counting the commands it reports), has the same number of s
 | **P1b-2b** | **INSERT, UPDATE, DELETE** (`src/stmt.cho`, `stmt.statement` dispatches on the first word) | **built**: 226 hand-written cases in all (143 refusals), 60 mutants killed, the PostgreSQL plan comparison over INSERT, UPDATE and DELETE as well (section 3.3) |
 | **P1b-2c** | **the closed DDL** (`CREATE TABLE`, `DROP TABLE`, `ALTER TABLE ... ADD [COLUMN]`, `CREATE [UNIQUE] INDEX`, `DROP INDEX`) | **built**: 320 hand-written cases in all (211 refusals), 84 statement mutants killed, and `tests/ddl_diff.py`: the original and the rendering are each run in a rolled-back transaction and must leave the same catalog (section 3.4) |
 | **P1c** | **lowering** (`src/lower.cho`) to IR v2 bytes from the tree and a schema snapshot, for SELECT, INSERT, UPDATE, DELETE and the closed DDL | **built**: 73 hand-written cases (42 IR byte for byte, 42 effect sets accepted by the verifier, 31 refusals), name resolution compared with PostgreSQL's SQLSTATEs over 8,000 statements, 27 mutants killed (section 4.2); the effect check against a token is P1d |
-| **P1d** | the `Query` branch in the proxy | end to end with psql: differential (2) and the server log (3) |
+| **P1d-1** | **the query guard** (`src/guard.cho`), sans-io: lex, parse, lower, infer and check every statement of a `Query` message against the token, and answer the text to send instead, or a refusal | **built**: 51 hand-written verdicts over tokens minted outside `src/`, 13 mutants killed (section 5.1) |
+| **P1d-2** | the `Query` branch in the proxy: the schema snapshot read from the upstream database at login, the guard on every `Query`, the rendered text sent, refusals answered as `ErrorResponse` plus `ReadyForQuery`, the extended protocol refused | end to end with psql: differential (2) and the server log (3) |
 
 ## 8. Risks
 

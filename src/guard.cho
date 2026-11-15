@@ -1,0 +1,251 @@
+module cdb.guard;
+
+import std.map;
+import cdb.lex;
+import cdb.parse;
+import cdb.stmt;
+import cdb.lower;
+import cdb.ir;
+import cdb.token;
+
+// The query guard (docs/m1-lowering.md section 5: slice P1d), sans-io. It decides what the proxy does with one simple-protocol
+// `Query` message: the text of the query goes in, with the schema snapshot and the capability token of the connection, and what
+// comes out is either a refusal (a tag, a SQLSTATE, a message) or the text to send to PostgreSQL INSTEAD of what the client sent:
+// each statement rendered by `parse.render`, joined with `; `.
+//
+// Every statement of the message is lexed, parsed, lowered to IR, and its inferred effects (the verifier's own `ir.infer`) are
+// each checked against the token (`token.effect_denied`, the code L2 runs). If ANY statement is refused the WHOLE message is:
+// PostgreSQL would run the statements as one implicit transaction, so running some of them would be a different transaction. No
+// byte of a refused message is ever forwarded.
+//
+// `vd` (at least 8 ints) answers: [0] the kind of verdict: 0 allowed, 1 refused by the lexer, 2 refused by the parser or lowering,
+// 3 an effect the token does not allow; [1] the code within that kind; [2] the token of the statement it stopped at, or -1; [3]
+// how many bytes of rendered text were written to `out`; [4] which statement (from 0) was refused; [5] for kind 3, the denied
+// effect's kind (0 read, 1 write, 2 ddl, 3 call, 4 nondet).
+
+pub fn v_allowed() -> [] int {
+    return 0;
+}
+
+pub fn v_lexer() -> [] int {
+    return 1;
+}
+
+pub fn v_parse() -> [] int {
+    return 2;
+}
+
+pub fn v_denied() -> [] int {
+    return 3;
+}
+
+// The tag a refusal carries: the lexer's, the parser's and lowering's, or `effect-denied`.
+pub fn tag[&r](vd: &r [int]) -> [] &static [byte] {
+    if vd[0] == 1 {
+        return lex.error_name(vd[1]);
+    }
+    if vd[0] == 2 {
+        return lower.error_name(vd[1]);
+    }
+    if vd[0] == 3 {
+        return "effect-denied";
+    }
+    return "allowed";
+}
+
+// The SQLSTATE a refusal is sent with: PostgreSQL's own for a name it would refuse, `42501` (insufficient privilege) for a
+// denied effect, and `0A000` (feature not supported) for everything outside the subset.
+pub fn sqlstate[&r](vd: &r [int]) -> [] &static [byte] {
+    if vd[0] == 3 {
+        return "42501";
+    }
+    if vd[0] == 2 {
+        let c = vd[1];
+        if c == 20 {
+            return "42P01";
+        }
+        if c == 21 {
+            return "42703";
+        }
+        if c == 22 {
+            return "42702";
+        }
+    }
+    return "0A000";
+}
+
+fn mark[&r](vd: &!r [int], kind: int, code: int, tok: int, stmt: int) -> [] int {
+    vd[0] = kind;
+    vd[1] = code;
+    vd[2] = tok;
+    vd[4] = stmt;
+    return 0;
+}
+
+// Appends `n` bytes of `text` to `out` at `at`; answers the new position, or -1 if `out` is full.
+fn append[&o, &t](out: &!o [byte], at: int, text: &t [byte]) -> [] int {
+    if at + len(text) > len(out) {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < len(text) {
+        out[at + i] = text[i];
+        i = i + 1;
+    }
+    return at + len(text);
+}
+
+// Checks every effect of `set` against the token. Answers -1 if all are allowed, otherwise the kind of the first denied one.
+fn denied_kind[&h, &m, &k](heap: &!h Heap, set: &m map.Map[int], tk: &k [byte]) -> [] int {
+    var e = 0;
+    while e < map.entries(set) {
+        if map.is_live(set, e) {
+            let key = map.key_at(set, e);
+            // an effect as the commit encodes it: kind, a u16 length, the target
+            var denied = false;
+            region r {
+                let enc = alloc_slice[r](3 + len(key) - 1, byte_of(0));
+                enc[0] = key[0];
+                enc[1] = byte_of((len(key) - 1) / 256);
+                enc[2] = byte_of((len(key) - 1) % 256);
+                var i = 1;
+                while i < len(key) {
+                    enc[2 + i] = key[i];
+                    i = i + 1;
+                }
+                denied = token.effect_denied(tk, enc, 0, 1);
+            }
+            if denied {
+                return int_of(key[0]);
+            }
+        }
+        e = e + 1;
+    }
+    return 0 - 1;
+}
+
+// Guards one `Query` message's text. `out` receives the rendered statements (`vd[3]` bytes of it).
+pub fn check[&h, &k, &m, &q, &o, &r](heap: &!h Heap, tk: &k [byte], schema: &m [byte], sql: &q [byte], out: &!o [byte], vd: &!r [int]) -> [heap] int {
+    vd[0] = 0;
+    vd[1] = 0;
+    vd[2] = 0 - 1;
+    vd[3] = 0;
+    vd[4] = 0;
+    vd[5] = 0 - 1;
+    let cap = len(sql) + 8;
+    var tb = box_slice(heap, 4 * cap, 0);
+    var cb = box_slice(heap, 2 * cap, 0);
+    var nb = box_slice(heap, 6 * (cap + 64), 0);
+    var kb = box_slice(heap, cap + 64, 0);
+    var vb = box_slice(heap, 128, 0);
+    var ob = box_slice(heap, 4 * 128, 0);
+    var gb = box_slice(heap, cap, 0);
+    var lb = box_slice(heap, 16, 0);
+    var st = box_slice(heap, 16, 0);
+    var rb = box_slice(heap, 2 * 256, 0);
+    var sb = box_slice(heap, 256, 0);
+    var ib = box_slice(heap, 4 * cap + 4096, byte_of(0));
+    var written = 0;
+    borrow mut tb as &!tw in {
+        borrow mut cb as &!cw in {
+            borrow mut nb as &!nw in {
+                borrow mut kb as &!kw in {
+                    borrow mut vb as &!vw in {
+                        borrow mut ob as &!ow in {
+                            borrow mut gb as &!gw in {
+                                borrow mut lb as &!lw in {
+                                    borrow mut st as &!sw in {
+                                        borrow mut rb as &!rw in {
+                                            borrow mut sb as &!scw in {
+                                                borrow mut ib as &!iw in {
+                                                    let toks = contents(tw);
+                                                    let n = lex.tokenize(sql, toks);
+                                                    if n < 0 {
+                                                        mark(vd, 1, 0 - n, 0 - 1, 0);
+                                                    } else {
+                                                        let ns = lex.statements(toks, n, contents(cw));
+                                                        var i = 0;
+                                                        while i < ns && vd[0] == 0 {
+                                                            let from = contents(cw)[2 * i];
+                                                            let to = contents(cw)[2 * i + 1];
+                                                            parse.reset(contents(sw));
+                                                            let pq = stmt.statement(sql, toks, from, to, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(lw), contents(sw));
+                                                            if pq < 0 {
+                                                                mark(vd, 2, 0 - pq, contents(sw)[3], i);
+                                                            } else {
+                                                                let root = contents(sw)[2];
+                                                                let w = lower.lower(sql, toks, contents(nw), contents(kw), root, schema, contents(rw), contents(iw), contents(scw));
+                                                                if w < 0 {
+                                                                    mark(vd, 2, 0 - w, contents(scw)[1], i);
+                                                                } else {
+                                                                    var set = map.empty(heap, 16, 0, 3);
+                                                                    let (grown, good) = ir.infer(heap, set, contents(iw)[0..w], true);
+                                                                    set = grown;
+                                                                    if !good {
+                                                                        mark(vd, 2, lower.e_cannot_lower(), 0 - 1, i);
+                                                                    } else {
+                                                                        var dk = 0 - 1;
+                                                                        borrow set as &sr in {
+                                                                            dk = denied_kind(heap, sr, tk);
+                                                                        }
+                                                                        if dk >= 0 {
+                                                                            mark(vd, 3, 0, 0 - 1, i);
+                                                                            vd[5] = dk;
+                                                                        }
+                                                                    }
+                                                                    map.drop(heap, set);
+                                                                }
+                                                            }
+                                                            if vd[0] == 0 {
+                                                                // the rendering of this statement, after a `; ` if it is not the first
+                                                                if i > 0 {
+                                                                    written = append(out, written, "; ");
+                                                                }
+                                                                if written >= 0 {
+                                                                    let rl = parse.render(sql, toks, contents(nw), contents(kw), contents(sw)[2], contents(rw), out[written..len(out)]);
+                                                                    if rl < 0 {
+                                                                        mark(vd, 2, 0 - rl, 0 - 1, i);
+                                                                    } else {
+                                                                        written = written + rl;
+                                                                    }
+                                                                }
+                                                                if written < 0 {
+                                                                    mark(vd, 2, parse.e_too_big(), 0 - 1, i);
+                                                                }
+                                                            }
+                                                            i = i + 1;
+                                                        }
+                                                        if vd[0] == 0 && ns == 0 {
+                                                            // an empty query: nothing to run, nothing to forward
+                                                            written = 0;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unbox_slice(heap, tb);
+    unbox_slice(heap, cb);
+    unbox_slice(heap, nb);
+    unbox_slice(heap, kb);
+    unbox_slice(heap, vb);
+    unbox_slice(heap, ob);
+    unbox_slice(heap, gb);
+    unbox_slice(heap, lb);
+    unbox_slice(heap, st);
+    unbox_slice(heap, rb);
+    unbox_slice(heap, sb);
+    unbox_slice(heap, ib);
+    if vd[0] == 0 && written >= 0 {
+        vd[3] = written;
+    }
+    return vd[0];
+}

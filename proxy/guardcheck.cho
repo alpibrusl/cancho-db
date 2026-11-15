@@ -1,0 +1,150 @@
+import std.buffer;
+import std.io;
+import cdb.lex;
+import cdb.parse;
+import cdb.guard;
+
+// `guardcheck`: reads a token in hex on the first line, a schema snapshot, a line `---`, and one query message's text on
+// standard input; prints what the guard says: `ok <the text to send upstream>` or `refused <kind> <tag> <sqlstate> <statement>`
+// (kind 1 the lexer, 2 the parser or lowering, 3 an effect the token does not allow; the statement is counted from 0). For
+// tests/guard_check.py.
+
+fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer) -> [heap, io_read] buffer.Buffer {
+    var out = text;
+    var c = getchar(io);
+    while c >= 0 {
+        out = buffer.push(heap, out, byte_of(c));
+        c = getchar(io);
+    }
+    return out;
+}
+
+fn find_sep[&t](text: &t [byte]) -> [] int {
+    var i = 0;
+    while i + 4 <= len(text) {
+        if int_of(text[i]) == '\n' && int_of(text[i + 1]) == '-' && int_of(text[i + 2]) == '-' && int_of(text[i + 3]) == '-' && (i + 4 == len(text) || int_of(text[i + 4]) == '\n') {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn hexval(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(ffi);
+    release(fs);
+    release(args);
+    borrow mut heap as &!h in {
+        var text = buffer.empty(h, 4096);
+        borrow mut io as &!i in {
+            text = read_stdin(h, i, text);
+        }
+        var kind = 0;
+        var code = 0;
+        var stmt = 0;
+        var written = 0;
+        var out = box_slice(h, 16384, byte_of(0));
+        var tag_text = box_slice(h, 64, byte_of(0));
+        var state_text = box_slice(h, 8, byte_of(0));
+        var tag_len = 0;
+        var state_len = 0;
+        borrow text as &t in {
+            let all = buffer.bytes(t);
+            let cut = find_sep(all);
+            var eol = 0;
+            while eol < len(all) && int_of(all[eol]) != '\n' {
+                eol = eol + 1;
+            }
+            if cut >= 0 && eol < cut {
+                let hexlen = eol / 2;
+                var tk = box_slice(h, hexlen + 1, byte_of(0));
+                borrow mut tk as &!tw in {
+                    var j = 0;
+                    while j < hexlen {
+                        contents(tw)[j] = byte_of(hexval(int_of(all[2 * j])) * 16 + hexval(int_of(all[2 * j + 1])));
+                        j = j + 1;
+                    }
+                }
+                let schema = all[eol + 1..cut + 1];
+                var sql_start = cut + 5;
+                if sql_start > len(all) {
+                    sql_start = len(all);
+                }
+                let sql = all[sql_start..len(all)];
+                var vd = box_slice(h, 8, 0);
+                borrow tk as &tr in {
+                    borrow mut vd as &!rw in {
+                        borrow mut out as &!ow in {
+                            kind = guard.check(h, contents(tr)[0..hexlen], schema, sql, contents(ow), contents(rw));
+                            code = contents(rw)[1];
+                            stmt = contents(rw)[4];
+                            written = contents(rw)[3];
+                            let tg = guard.tag(contents(rw));
+                            let sq = guard.sqlstate(contents(rw));
+                            borrow mut tag_text as &!gw in {
+                                var j = 0;
+                                while j < len(tg) {
+                                    contents(gw)[j] = tg[j];
+                                    j = j + 1;
+                                }
+                                tag_len = len(tg);
+                            }
+                            borrow mut state_text as &!sw in {
+                                var j = 0;
+                                while j < len(sq) {
+                                    contents(sw)[j] = sq[j];
+                                    j = j + 1;
+                                }
+                                state_len = len(sq);
+                            }
+                        }
+                    }
+                }
+                unbox_slice(h, vd);
+                unbox_slice(h, tk);
+            } else {
+                kind = 99;
+            }
+        }
+        borrow mut io as &!o in {
+            if kind == 0 {
+                io.write_all(o, "ok ");
+                borrow out as &x in {
+                    io.write_all(o, contents(x)[0..written]);
+                }
+            } else {
+                io.write_all(o, "refused ");
+                io.print_nat(o, kind);
+                io.write_all(o, " ");
+                borrow tag_text as &y in {
+                    io.write_all(o, contents(y)[0..tag_len]);
+                }
+                io.write_all(o, " ");
+                borrow state_text as &z in {
+                    io.write_all(o, contents(z)[0..state_len]);
+                }
+                io.write_all(o, " ");
+                io.print_nat(o, stmt);
+            }
+            io.newline(o);
+        }
+        unbox_slice(h, out);
+        unbox_slice(h, tag_text);
+        unbox_slice(h, state_text);
+        buffer.drop(h, text);
+    }
+    release(io);
+    release(heap);
+    return 0;
+}
