@@ -307,8 +307,8 @@ def load_revoked(data, root):
 STMT_DOMAIN = b"cancho-db/stmt/v1\x00"
 
 
-def infer_effects(enc):
-    """The inferred effect set of one statement (ir.md §3). Raises Reject("stmt-bad-encoding") if it is malformed."""
+def infer_effects(enc, v2=False):
+    """The inferred effect set of one statement (ir.md §3, and §6 when v2). Raises Reject("stmt-bad-encoding")."""
     r = Reader(enc)
     out = set()
 
@@ -349,9 +349,31 @@ def infer_effects(enc):
                 out.add((3, f))
                 pending += argc
             elif tag == 5:
-                if r.u8() > 11:
+                if r.u8() > (17 if v2 else 11):
                     bad()
                 pending += 2
+            elif tag == 6 and v2:
+                pass                                   # Star
+            elif tag == 7 and v2:                      # Unary
+                if r.u8() > 3:
+                    bad()
+                pending += 1
+            elif tag == 8 and v2:                      # In
+                if r.u8() > 1:
+                    bad()
+                n = r.u32()
+                if n < 1:
+                    bad()
+                pending += 1 + n
+            elif tag == 9 and v2:                      # Case
+                n = r.u32()
+                has_else = r.u8()
+                if n < 1 or has_else > 1:
+                    bad()
+                pending += 2 * n + has_else
+            elif tag == 10 and v2:                     # Cast
+                name(False)
+                pending += 1
             else:
                 bad()
             if pending > len(enc) - r.at:  # every node is at least one byte
@@ -409,6 +431,34 @@ def infer_effects(enc):
             out.add((3, name(False)))
             for _ in range(cnt()):
                 expr(True)
+        elif tag == 6 and v2:
+            if r.u8() > 1:                             # distinct
+                bad()
+            for _ in range(cnt()):
+                expr(True)
+            nf = cnt()
+            if nf == 0:
+                bad()
+            for i in range(nf):
+                out.add((0, name(True)))
+                kind = r.u8()
+                if kind > 2 or (i == 0 and kind != 0):
+                    bad()
+                flag = r.u8()
+                if flag > 1 or (flag == 1) != (kind in (1, 2)):
+                    bad()
+                if flag == 1:
+                    expr(True)
+            opt()                                      # where
+            for _ in range(cnt()):                     # group by
+                expr(True)
+            opt()                                      # having
+            for _ in range(cnt()):                     # order by
+                expr(True)
+                if r.u8() > 1 or r.u8() > 2:
+                    bad()
+            opt()                                      # limit
+            opt()                                      # offset
         else:
             bad()
         if r.at != len(enc):
@@ -422,8 +472,9 @@ def load_stmts(data):
     """-> {statement id: inferred effects}. Raises Reject for a bad store (ir.md §4)."""
     if len(data) < 8:
         raise Reject("stmts-truncated")
-    if data[:8] != b"CHODBST1":
+    if data[:8] not in (b"CHODBST1", b"CHODBST2"):
         raise Reject("stmts-bad-magic")
+    v2 = data[:8] == b"CHODBST2"
     at, index, store = 8, 0, {}
     while at < len(data):
         if len(data) - at < 4:
@@ -434,7 +485,7 @@ def load_stmts(data):
         enc = data[at + 4:at + 4 + length]
         at += 4 + length
         try:
-            effects = infer_effects(enc)
+            effects = infer_effects(enc, v2)
         except Reject as e:
             raise Reject(e.rule, index)
         store[hashlib.sha256(STMT_DOMAIN + enc).digest()] = effects

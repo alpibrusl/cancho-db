@@ -22,6 +22,7 @@ type reader struct {
 	b   []byte
 	pos int
 	bad bool
+	v2  bool
 }
 
 func (r *reader) left() int { return len(r.b) - r.pos }

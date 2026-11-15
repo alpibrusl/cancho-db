@@ -119,12 +119,16 @@ pub fn run[&h, &d, &k, &t, &v, &x, &o](heap: &!h Heap, data: &d [byte], root: &k
             }
         }
 
-        // statements
+        // statements: the store's magic selects the grammar (ir.md section 4)
+        var v2 = false;
         if rule == 0 && has_stmts {
             if len(stmts) < 8 {
                 rule = commit.stmts_truncated();
-            } else if !bytes.equal(stmts[0..8], "CHODBST1") {
+            } else if !bytes.equal(stmts[0..8], "CHODBST1") && !bytes.equal(stmts[0..8], "CHODBST2") {
                 rule = commit.stmts_bad_magic();
+            }
+            if len(stmts) >= 8 {
+                v2 = bytes.equal(stmts[0..8], "CHODBST2");
             }
             let sid = alloc_slice[r](32, byte_of(0));
             var sat = 8;
@@ -139,7 +143,7 @@ pub fn run[&h, &d, &k, &t, &v, &x, &o](heap: &!h Heap, data: &d [byte], root: &k
                     } else {
                         let body = stmts[sat + 4..sat + 4 + length];
                         let scratch = map.empty(heap, 16, 0, 3);
-                        let (spent, well_formed) = ir.infer(heap, scratch, body);
+                        let (spent, well_formed) = ir.infer(heap, scratch, body, v2);
                         map.drop(heap, spent);
                         if !well_formed {
                             rule = commit.stmt_bad_encoding();
@@ -214,7 +218,7 @@ pub fn run[&h, &d, &k, &t, &v, &x, &o](heap: &!h Heap, data: &d [byte], root: &k
                         var ircode = 0;
                         if has_stmts {
                             borrow sstore as &sm in {
-                                ircode = ir.check_commit(heap, sm, stmts, enc, out);
+                                ircode = ir.check_commit(heap, sm, stmts, enc, out, v2);
                             }
                         }
                         if ircode == 1 {

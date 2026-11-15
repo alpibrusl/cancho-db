@@ -95,8 +95,11 @@ statements has the empty set.
 ## 4. The store and the check
 
 ```
-stmts = "CHODBST1" ( u32 length  Statement )*
+stmts = ( "CHODBST1" | "CHODBST2" ) ( u32 length  Statement )*
 ```
+
+The magic selects the grammar: `CHODBST1` is v1 (§2), `CHODBST2` is v2 (§6, a strict superset). Any other magic is
+`stmts-bad-magic`.
 
 A statement listed twice is the same statement (its id is the same, and the `record` of a malformed entry counts entries,
 repeats included). The verifier is given the store with `--stmts FILE` (which requires
@@ -136,8 +139,61 @@ With `--stmts` the success line is `ok commits=<N> branches=<B> level=2+ir`.
   strategy") is what covers that, at M1.
 - **Not in v1:** subqueries and anything else §1 lists, `call` expansion, row-level predicates.
 
-## 6. Vectors
+## 6. IR version 2
 
-IR vectors are L2 vectors (`token.md` §7) with a `NAME.stmts`, and an `args` line that adds `--stmts {dir}/NAME.stmts`.
+v1 (§2) cannot say what a psql user types: no `ORDER BY`, `GROUP BY`, `HAVING`, `LIMIT`, `DISTINCT`, outer joins, `IS NULL`,
+`IN`, `LIKE`, `CASE`, casts, `NOT`, or `*` as an aggregate's argument. Each matters to inference, because **a column named
+in an `ORDER BY`, a `HAVING` or a join condition is a read**, and inference that skipped them would under-report
+(`docs/m1-proxy.md` D4). v2 adds exactly those and nothing else.
+
+**v2 is a strict superset of v1, selected by the statement store's magic.** A store that starts `CHODBST2` may hold v2
+statements; one that starts `CHODBST1` holds v1 only, and a v2 tag in it is `stmt-bad-encoding`. A statement that is valid in
+v1 has the same bytes, the same meaning, the same effects and **the same id** in v2 (the id's domain string names the hash
+construction, not the grammar). So moving a store from v1 to v2 never changes a commit's `statements` hashes.
+
+**Statement.** One new tag:
+
+```
+  6 Select2   distinct:u8  items:[Expr]  from:[From]  where:Opt  group:[Expr]  having:Opt  order:[Order]  limit:Opt  offset:Opt
+From      = table:Name  kind:u8  on:Opt         // kind 0 a comma (no ON), 1 inner join, 2 left join
+Order     = Expr  dir:u8  nulls:u8              // dir 0 ascending, 1 descending; nulls 0 default, 1 first, 2 last
+```
+
+`distinct` is 0 or 1. `from` has at least one entry; the **first** has kind 0 and flag 0 (no `on`); any other entry of kind 1
+or 2 has an `on` (flag 1), and one of kind 0 has none. **`items`, `group` and `order` may be empty; only `from` may not.** A
+`Select` (tag 0) is still valid and means what it did. Every `Opt` flag, in v1 and in v2, is 0 or 1.
+
+**Expressions.** New tags, in prefix order like the old ones:
+
+```
+  6 Star                                          // the argument of count(*); no operand
+  7 Unary     op:u8  then 1 Expr                  // 0 NOT, 1 negation, 2 IS NULL, 3 IS NOT NULL
+  8 In        negated:u8  n:u32  then 1 + n Exprs // the tested expression, then the n list members
+  9 Case      n:u32  has_else:u8  then 2n + has_else Exprs   // n (condition, result) pairs, then the else
+ 10 Cast      type:Name  then 1 Expr              // the type name is free (any bytes, at least one)
+```
+
+and `Op`'s operator range grows from 0..11 to **0..17**: 12 `LIKE`, 13 `ILIKE`, 14 `NOT LIKE`, 15 `NOT ILIKE`, 16 `||`,
+17 `%`. `negated` is 0 or 1. A simple `CASE x WHEN a ...` and `x BETWEEN a AND b` have no node: lowering writes them with
+`Op` and `Case`, and inference sees the same columns. `Case` needs `n` of at least 1.
+
+**Effects.** v1's rules (§3) hold, with the same targets, and a `Col(t, c)` **anywhere in** `items`, `where`, `group`, `having`,
+`order`, `limit`, `offset` or an `on` is `read t.c`; each `from` table is `read t`. `Star`, `Unary`, `In`, `Case` and `Cast` add
+nothing of their own: **a cast is not a call**, and a type name is not an effect. A `Call` is `call fn` as before, so an
+aggregate (`count`, `sum`) or a builtin (`lower`) is a `call` the token must grant (`call *` for all of them).
+
+All the new expression nodes obey §2's owed-operand rule, and their counts come from the data (`In`'s `n`, `Case`'s `n` and
+`has_else`) as `Call`'s `argc` does: a shortfall or a surplus of operands is `stmt-bad-encoding`, as before. A `Cast`'s type
+name may contain `.` (`pg_catalog.text`): only table and column names may not. **The success line is `level=2+ir` for either
+magic**: the grammar does not show in it.
+
+**Malformations**, all `stmt-bad-encoding`, in addition to §2's: a tag or operator or `dir`/`nulls`/`kind`/`negated`/
+`has_else`/`distinct` outside its range; a first `from` entry with a kind or an `on`; a join without an `on`, a comma with
+one; a `Case` with no pairs; an `In` with no members; any count larger than the bytes left; and, in a `CHODBST1` store, any v2 tag
+or operator (a v1 store holds v1 statements only).
+
+## 7. Vectors
+
+IR vectors (v2 ones have a `CHODBST2` store) are L2 vectors (`token.md` §7) with a `NAME.stmts`, and an `args` line that adds `--stmts {dir}/NAME.stmts`.
 `tools/gen_ir.py` writes them. In each, the effects a commit records are written out **by hand** from §3, not computed by
 any inference function, as the expected lines are elsewhere.

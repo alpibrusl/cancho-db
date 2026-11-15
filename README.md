@@ -14,7 +14,7 @@ Working name. The design is [`docs/design.md`](docs/design.md).
   **L2 (authority)**: was each commit allowed by the token it presented?
 - [`docs/spec/ir.md`](docs/spec/ir.md): the **statement IR** (the bound form of a small SQL subset) and effect inference,
   so that L2 can check that a commit's recorded effects are *what its statements do*, not only what the server says.
-- [`vectors/`](vectors): 341 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
+- [`vectors/`](vectors): 428 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
 - Three verifiers that must agree on every one: [`src/`](src) in cancho (no C, no foreign call),
   [`tools/verify.py`](tools/verify.py) in Python, and [`verifiers/go/`](verifiers/go) in Go, written from the specs alone
   by a separate agent session (see its README and [`docs/claims.md`](docs/claims.md) for what that does and does not show).
