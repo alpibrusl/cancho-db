@@ -12,7 +12,8 @@ func loadStmts(d []byte) (map[string][]effect, *reject) {
 	if len(d) < 8 {
 		return nil, &reject{"stmts-truncated", -1}
 	}
-	if string(d[:8]) != "CHODBST1" {
+	v2 := string(d[:8]) == "CHODBST2"
+	if !v2 && string(d[:8]) != "CHODBST1" {
 		return nil, &reject{"stmts-bad-magic", -1}
 	}
 	out := map[string][]effect{}
@@ -28,7 +29,7 @@ func loadStmts(d []byte) (map[string][]effect, *reject) {
 		}
 		enc := d[pos : pos+int(n)]
 		pos += int(n)
-		es, ok := decodeStmt(enc)
+		es, ok := decodeStmt(enc, v2)
 		if !ok {
 			return nil, &reject{"stmt-bad-encoding", i}
 		}
@@ -105,10 +106,43 @@ func (r *reader) expr(s *effSet, allowCol bool) {
 			}
 			s.add(3, fn)
 		case 5:
-			if r.u8() > 11 {
+			max := uint8(11)
+			if r.v2 {
+				max = 17
+			}
+			if r.u8() > max {
 				r.bad = true
 			}
 			ops = 2
+		case 6:
+			r.bad = !r.v2 // Star
+		case 7:
+			if r.u8() > 3 || !r.v2 {
+				r.bad = true
+			}
+			ops = 1
+		case 8:
+			if r.u8() > 1 || !r.v2 {
+				r.bad = true
+			}
+			n := uint64(r.u32())
+			if n == 0 {
+				r.bad = true
+			}
+			ops = 1 + n
+		case 9:
+			n := uint64(r.u32())
+			he := r.u8()
+			if n == 0 || he > 1 || !r.v2 {
+				r.bad = true
+			}
+			ops = 2*n + uint64(he)
+		case 10:
+			r.name(true)
+			if !r.v2 {
+				r.bad = true
+			}
+			ops = 1
 		default:
 			r.bad = true
 		}
@@ -129,8 +163,8 @@ func (r *reader) opt(s *effSet) {
 	}
 }
 
-func decodeStmt(b []byte) ([]effect, bool) {
-	r := &reader{b: b}
+func decodeStmt(b []byte, v2 bool) ([]effect, bool) {
+	r := &reader{b: b, v2: v2}
 	s := &effSet{m: map[string]effect{}}
 	switch r.u8() {
 	case 0: // Select
@@ -203,6 +237,59 @@ func decodeStmt(b []byte) ([]effect, bool) {
 		if !r.bad {
 			s.add(3, fn)
 		}
+	case 6: // Select2
+		if !r.v2 {
+			r.bad = true
+			break
+		}
+		if r.u8() > 1 {
+			r.bad = true
+		}
+		n := r.count()
+		for i := 0; i < n && !r.bad; i++ {
+			r.expr(s, true)
+		}
+		nf := r.count()
+		if nf == 0 {
+			r.bad = true
+		}
+		for i := 0; i < nf && !r.bad; i++ {
+			t := r.name(false)
+			kind := r.u8()
+			if r.bad || kind > 2 {
+				r.bad = true
+				break
+			}
+			s.add(0, t)
+			if r.left() < 1 {
+				r.bad = true
+				break
+			}
+			hasOn := r.b[r.pos] == 1
+			if (i == 0 && (kind != 0 || hasOn)) || (kind == 0) == hasOn {
+				r.bad = true
+				break
+			}
+			r.opt(s)
+		}
+		r.opt(s)
+		ng := r.count()
+		for i := 0; i < ng && !r.bad; i++ {
+			r.expr(s, true)
+		}
+		r.opt(s)
+		no := r.count()
+		for i := 0; i < no && !r.bad; i++ {
+			r.expr(s, true)
+			if r.u8() > 1 {
+				r.bad = true
+			}
+			if r.u8() > 2 {
+				r.bad = true
+			}
+		}
+		r.opt(s)
+		r.opt(s)
 	default:
 		r.bad = true
 	}

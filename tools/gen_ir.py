@@ -220,7 +220,7 @@ def add(g):
     # ----------------------------------------------- store failures
     one_commit = commits(([sel], sel_effs))
     good = stmts_store(sel)
-    ir("ir_stmts_bad_magic", one_commit, b"CHODBST2" + good[8:], no("stmts-bad-magic", -1))
+    ir("ir_stmts_bad_magic", one_commit, b"CHODBST3" + good[8:], no("stmts-bad-magic", -1))
     ir("ir_stmts_empty_file", one_commit, b"", no("stmts-truncated", -1))
     ir("ir_stmts_short_header", one_commit, b"CHODB", no("stmts-truncated", -1))
     ir("ir_stmts_truncated_length", one_commit, good + b"\x00\x00", no("stmts-truncated", 1))
@@ -284,19 +284,19 @@ def add(g):
 
     # ----------------------------------------------- store order
     tk = tokens_store(ALL)
-    ir("ir_order_tokens_before_stmts", one_commit, b"CHODBST2", no("tokens-bad-magic", -1), tokens=b"CHODBTK2")
+    ir("ir_order_tokens_before_stmts", one_commit, b"CHODBST3", no("tokens-bad-magic", -1), tokens=b"CHODBTK2")
     rev_bad = b"CHODBRV2"
     g.vec("ir_order_revoked_before_stmts", g.log(*[g.record(e) for e in one_commit.encs]),
           no("revocations-bad-magic", -1),
           "--root " + ROOT_PK.hex() + " --tokens {dir}/ir_order_revoked_before_stmts.tokens --revoked "
           "{dir}/ir_order_revoked_before_stmts.revoked --stmts {dir}/ir_order_revoked_before_stmts.stmts",
-          {".tokens": tk, ".revoked": rev_bad, ".stmts": b"CHODBST2"})
-    ir("ir_order_stmts_before_commits", commits(([sel], sel_effs), ([sel], sel_effs)), b"CHODBST2",
+          {".tokens": tk, ".revoked": rev_bad, ".stmts": b"CHODBST3"})
+    ir("ir_order_stmts_before_commits", commits(([sel], sel_effs), ([sel], sel_effs)), b"CHODBST3",
        no("stmts-bad-magic", -1))
     bad_log = g.log(g.record(one_commit.encs[0]), g.record(one_commit.encs[0]))
-    ir("ir_order_l1_before_stmts", one_commit, b"CHODBST2", no("duplicate-commit", 1), log_bytes=bad_log)
+    ir("ir_order_l1_before_stmts", one_commit, b"CHODBST3", no("duplicate-commit", 1), log_bytes=bad_log)
     ir("ir_empty_log", commits(), good, ok(0, 0))
-    ir("ir_empty_log_bad_stmts", commits(), b"CHODBST2", no("stmts-bad-magic", -1))
+    ir("ir_empty_log_bad_stmts", commits(), b"CHODBST3", no("stmts-bad-magic", -1))
 
 
 def u16_overrun():

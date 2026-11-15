@@ -10,6 +10,7 @@ exercises: either add the vector or, if the change is behaviourally identical, s
 mutated source must contain the original text exactly once, so a mutant cannot rot silently when the source moves.
 Exit status 0 only if every mutant is killed.
 """
+import os
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,7 @@ PY = [
     ("effects: allow duplicates", "tools/verify.py", "not key > last:\n            raise Reject(\"effects-unordered\")", "key < last:\n            raise Reject(\"effects-unordered\")"),
     ("effects: unordered allowed", "tools/verify.py", "not key > last:\n            raise Reject(\"effects-unordered\")", "False:\n            raise Reject(\"effects-unordered\")"),
     ("effects: kind ignored", "tools/verify.py", "\n        key = (kind, r.b16())", "\n        key = (0, r.b16())"),
-    ("check ok up to 2", "tools/verify.py", "if r.u8() > 1:", "if r.u8() > 2:"),
+    ("check ok up to 2", "tools/verify.py", "r.b16()\n        if r.u8() > 1:", "r.b16()\n        if r.u8() > 2:"),
     ("nondet tag 3 allowed", "tools/verify.py", "        else:\n            raise Reject(\"bad-encoding\")\n    r.take(32); r.take(32)",
      "        else:\n            r.take(0)\n    r.take(32); r.take(32)"),
     ("trailing bytes allowed", "tools/verify.py", "\n    if r.at != len(enc):", "\n    if False:"),
@@ -107,6 +108,42 @@ PY = [
      '    if any(b[0] != ZERO32 and b[0] != principal for b in blocks):\n        return "principal-denied"\n    if any(b[3] != NO_EXPIRY and time > b[3] for b in blocks):\n        return "token-expired"\n    if any(b[0] != ZERO32'),
     ("L2: signature checked after revocation", "tools/verify.py", '    if not chain_valid(blocks, root):\n        return "token-bad-signature"\n    for k in range(1, len(blocks) + 1):\n        since = revoked.get(prefix_id(blocks, k))\n        if since is not None and since <= time:\n            return "token-revoked"',
      '    for k in range(1, len(blocks) + 1):\n        since = revoked.get(prefix_id(blocks, k))\n        if since is not None and since <= time:\n            return "token-revoked"\n    if not chain_valid(blocks, root):\n        return "token-bad-signature"'),
+    # ---- IR v2 (ir.md section 6)
+    ("v2: Select2 accepted in a v1 store", "tools/verify.py", "        elif tag == 6 and v2:\n            if r.u8() > 1:                             # distinct", "        elif tag == 6:\n            if r.u8() > 1:                             # distinct"),
+    ("v2: Star accepted in a v1 store", "tools/verify.py", "            elif tag == 6 and v2:\n                pass", "            elif tag == 6:\n                pass"),
+    ("v2: Unary accepted in a v1 store", "tools/verify.py", "elif tag == 7 and v2:                      # Unary", "elif tag == 7:                      # Unary"),
+    ("v2: In accepted in a v1 store", "tools/verify.py", "elif tag == 8 and v2:                      # In", "elif tag == 8:                      # In"),
+    ("v2: Case accepted in a v1 store", "tools/verify.py", "elif tag == 9 and v2:                      # Case", "elif tag == 9:                      # Case"),
+    ("v2: Cast accepted in a v1 store", "tools/verify.py", "elif tag == 10 and v2:                     # Cast", "elif tag == 10:                     # Cast"),
+    ("v2: v2 operators accepted in a v1 store", "tools/verify.py", "if r.u8() > (17 if v2 else 11):", "if r.u8() > 17:"),
+    ("v2: operator 18 accepted", "tools/verify.py", "if r.u8() > (17 if v2 else 11):", "if r.u8() > (18 if v2 else 11):"),
+    ("v2: unary operator 4 accepted", "tools/verify.py", "                if r.u8() > 3:\n                    bad()\n                pending += 1", "                if r.u8() > 4:\n                    bad()\n                pending += 1"),
+    ("v2: In with no members accepted", "tools/verify.py", "                if n < 1:\n                    bad()\n                pending += 1 + n", "                pending += 1 + n"),
+    ("v2: In negated 2 accepted", "tools/verify.py", "                if r.u8() > 1:\n                    bad()\n                n = r.u32()", "                if r.u8() > 2:\n                    bad()\n                n = r.u32()"),
+    ("v2: Case with no pairs accepted", "tools/verify.py", "if n < 1 or has_else > 1:", "if has_else > 1:"),
+    ("v2: Case else flag 2 accepted", "tools/verify.py", "if n < 1 or has_else > 1:", "if n < 1 or has_else > 2:"),
+    ("v2: a Case else is not owed", "tools/verify.py", "pending += 2 * n + has_else", "pending += 2 * n"),
+    ("v2: a Case pair owes one", "tools/verify.py", "pending += 2 * n + has_else", "pending += n + has_else"),
+    ("v2: an In owes no members", "tools/verify.py", "pending += 1 + n", "pending += 1"),
+    ("v2: a Cast type name may be empty and dotted-free", "tools/verify.py", "                name(False)\n                pending += 1\n            else:", "                r.b16()\n                pending += 1\n            else:"),
+    ("v2: a Cast is a call", "tools/verify.py", "                name(False)\n                pending += 1\n            else:", "                out.add((3, name(False)))\n                pending += 1\n            else:"),
+    ("v2: distinct 2 accepted", "tools/verify.py", "if r.u8() > 1:                             # distinct", "if r.u8() > 2:                             # distinct"),
+    ("v2: a Select2 without from accepted", "tools/verify.py", "            if nf == 0:\n                bad()\n            for i in range(nf):", "            for i in range(nf):"),
+    ("v2: the first from may be a join", "tools/verify.py", "if kind > 2 or (i == 0 and kind != 0):", "if kind > 2:"),
+    ("v2: join kind 3 accepted", "tools/verify.py", "if kind > 2 or (i == 0 and kind != 0):", "if kind > 3 or (i == 0 and kind != 0):"),
+    ("v2: a join needs no on", "tools/verify.py", "if flag > 1 or (flag == 1) != (kind in (1, 2)):", "if flag > 1:"),
+    ("v2: a comma may have an on", "tools/verify.py", "if flag > 1 or (flag == 1) != (kind in (1, 2)):", "if flag > 1 or (kind in (1, 2) and flag != 1):"),
+    ("v2: order direction 2 accepted", "tools/verify.py", "if r.u8() > 1 or r.u8() > 2:", "if r.u8() > 2 or r.u8() > 2:"),
+    ("v2: order nulls 3 accepted", "tools/verify.py", "if r.u8() > 1 or r.u8() > 2:", "if r.u8() > 1 or r.u8() > 3:"),
+    ("v2: the from table is not a read", "tools/verify.py", "            for i in range(nf):\n                out.add((0, name(True)))", "            for i in range(nf):\n                name(True)"),
+    ("v2: a join condition reads nothing", "tools/verify.py", "                if flag == 1:\n                    expr(True)", "                if flag == 1:\n                    keep = set(out)\n                    expr(True)\n                    out.intersection_update(keep)"),
+    ("v2: where reads nothing", "tools/verify.py", "            opt()                                      # where", "            keep = set(out)\n            opt()\n            out.intersection_update(keep)"),
+    ("v2: group by reads nothing", "tools/verify.py", "            for _ in range(cnt()):                     # group by\n                expr(True)", "            keep = set(out)\n            for _ in range(cnt()):\n                expr(True)\n            out.intersection_update(keep)"),
+    ("v2: having reads nothing", "tools/verify.py", "            opt()                                      # having", "            keep = set(out)\n            opt()\n            out.intersection_update(keep)"),
+    ("v2: order by reads nothing", "tools/verify.py", "            for _ in range(cnt()):                     # order by\n                expr(True)", "            keep = set(out)\n            for _ in range(cnt()):\n                expr(True)\n            out.intersection_update(keep)"),
+    ("v2: limit reads nothing", "tools/verify.py", "            opt()                                      # limit", "            keep = set(out)\n            opt()\n            out.intersection_update(keep)"),
+    ("v2: offset reads nothing", "tools/verify.py", "            opt()                                      # offset", "            keep = set(out)\n            opt()\n            out.intersection_update(keep)"),
+    ("v2: a Select2 with trailing bytes accepted", "tools/verify.py", "        if r.at != len(enc):\n            bad()\n    except Reject as e:", "        pass\n    except Reject as e:"),
     # ---- statement IR (ir.md)
     ("IR: select forgets the table read", "tools/verify.py", "            for _ in range(tables):\n                out.add((0, name(True)))", "            for _ in range(tables):\n                name(True)"),
     ("IR: column read forgets the column", "tools/verify.py", 'out.add((0, t + b"." + c))', "out.add((0, t))"),
@@ -129,11 +166,11 @@ PY = [
     ("IR: select without from allowed", "tools/verify.py", "            if tables == 0:\n                bad()", "            if False:\n                bad()"),
     ("IR: update without sets allowed", "tools/verify.py", "            if nsets == 0:\n                bad()", "            if False:\n                bad()"),
     ("IR: ddl kind 5 allowed", "tools/verify.py", "            if r.u8() > 4:\n                bad()", "            if r.u8() > 5:\n                bad()"),
-    ("IR: operator 12 allowed", "tools/verify.py", "if r.u8() > 11:", "if r.u8() > 12:"),
+    ("IR: operator 12 allowed in a v1 store", "tools/verify.py", "if r.u8() > (17 if v2 else 11):", "if r.u8() > (17 if v2 else 12):"),
     ("IR: value tag 3 allowed", "tools/verify.py", "                elif vt != 0:\n                    bad()", "                elif vt != 0:\n                    pass"),
     ("IR: optional flag 2 allowed", "tools/verify.py", "        elif flag != 0:\n            bad()", "        elif flag != 0:\n            pass"),
     ("IR: unknown expression tag allowed", "tools/verify.py", "            else:\n                bad()\n            if pending >", "            else:\n                pass\n            if pending >"),
-    ("IR: an operator owes one operand", "tools/verify.py", "                pending += 2", "                pending += 1"),
+    ("IR: an operator owes one operand", "tools/verify.py", "if r.u8() > (17 if v2 else 11):\n                    bad()\n                pending += 2", "if r.u8() > (17 if v2 else 11):\n                    bad()\n                pending += 1"),
     ("IR: a call owes no operands", "tools/verify.py", "                pending += argc", "                pass"),
     ("IR: trailing bytes allowed", "tools/verify.py", "        if r.at != len(enc):\n            bad()\n    except Reject as e:", "        pass\n    except Reject as e:"),
     ("IR: statement id without domain", "tools/verify.py", "hashlib.sha256(STMT_DOMAIN + enc).digest()", "hashlib.sha256(enc).digest()"),
@@ -143,7 +180,7 @@ PY = [
     ("IR: only the first statement counts", "tools/verify.py", "        for sid in statements:\n            if sid not in ir:", "        for sid in statements[:1]:\n            if sid not in ir:"),
     ("IR: effects judged before the statements", "tools/verify.py", '    if ir is not None:\n        inferred = set()', '    if any(not block_permits_effect(b, e) for b in blocks for e in effects):\n        return "effect-denied"\n    if ir is not None:\n        inferred = set()'),
     ("IR: mismatch before missing", "tools/verify.py", '            if sid not in ir:\n                return "stmt-missing"\n            inferred |= ir[sid]\n        if inferred != set(effects):\n            return "effects-mismatch"', '            if sid in ir:\n                inferred |= ir[sid]\n        if inferred != set(effects):\n            return "effects-mismatch"\n        if any(sid not in ir for sid in statements):\n            return "stmt-missing"'),
-    ("IR: stmts magic unchecked", "tools/verify.py", 'if data[:8] != b"CHODBST1":', "if False:"),
+    ("IR: stmts magic unchecked", "tools/verify.py", 'if data[:8] not in (b"CHODBST1", b"CHODBST2"):', "if False:"),
     ("IR: stmts short header accepted", "tools/verify.py", '    if len(data) < 8:\n        raise Reject("stmts-truncated")', '    if len(data) < 0:\n        raise Reject("stmts-truncated")'),
     ("IR: stmts truncated entry accepted", "tools/verify.py", 'if len(data) - at - 4 < length:\n            raise Reject("stmts-truncated", index)', 'if False:\n            raise Reject("stmts-truncated", index)'),
     ("IR: stmts record index off by one", "tools/verify.py", 'raise Reject(e.rule, index)\n        store[hashlib.sha256(STMT_DOMAIN', 'raise Reject(e.rule, index + 1)\n        store[hashlib.sha256(STMT_DOMAIN'),
@@ -239,8 +276,36 @@ CHO += [
 
 
 CHO += [
+    # ---- IR v2 (ir.md section 6)
+    ("v2: Select2 accepted in a v1 store", "src/ir.cho", "} else if tag == 6 && v2 {\n                // Select2", "} else if tag == 6 {\n                // Select2"),
+    ("v2: Star accepted in a v1 store", "src/ir.cho", "} else if tag == 6 && v2 {\n                // Star", "} else if tag == 6 {\n                // Star"),
+    ("v2: Unary accepted in a v1 store", "src/ir.cho", "} else if tag == 7 && v2 {", "} else if tag == 7 {"),
+    ("v2: In accepted in a v1 store", "src/ir.cho", "} else if tag == 8 && v2 {", "} else if tag == 8 {"),
+    ("v2: Case accepted in a v1 store", "src/ir.cho", "} else if tag == 9 && v2 {", "} else if tag == 9 {"),
+    ("v2: Cast accepted in a v1 store", "src/ir.cho", "} else if tag == 10 && v2 {", "} else if tag == 10 {"),
+    ("v2: v2 operators accepted in a v1 store", "src/ir.cho", "    if v2 {\n        return 17;\n    }\n    return 11;", "    return 17;"),
+    ("v2: operator 18 accepted", "src/ir.cho", "        return 17;", "        return 18;"),
+    ("v2: unary operator 4 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 3 {", "if int_of(data[cur[0]]) > 4 {"),
+    ("v2: In with no members accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 || n < 1 {", "if int_of(data[cur[0]]) > 1 {"),
+    ("v2: In negated 2 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 || n < 1 {", "if int_of(data[cur[0]]) > 2 || n < 1 {"),
+    ("v2: Case with no pairs accepted", "src/ir.cho", "if n < 1 || has_else > 1 {", "if has_else > 1 {"),
+    ("v2: Case else flag 2 accepted", "src/ir.cho", "if n < 1 || has_else > 1 {", "if n < 1 || has_else > 2 {"),
+    ("v2: a Case else is not owed", "src/ir.cho", "pending = pending + 2 * n + has_else;", "pending = pending + 2 * n;"),
+    ("v2: a Case pair owes one", "src/ir.cho", "pending = pending + 2 * n + has_else;", "pending = pending + n + has_else;"),
+    ("v2: an In owes no members", "src/ir.cho", "pending = pending + 1 + n;", "pending = pending + 1;"),
+    ("v2: a Cast operand is not owed", "src/ir.cho", "} else {\n                    pending = pending + 1;\n                }\n            } else {", "} else {\n                    pending = pending + 0;\n                }\n            } else {"),
+    ("v2: distinct 2 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 {\n                        good = false;\n                    }\n                    cur[0] = cur[0] + 1;\n                }\n                if good {\n                    let ni", "if int_of(data[cur[0]]) > 2 {\n                        good = false;\n                    }\n                    cur[0] = cur[0] + 1;\n                }\n                if good {\n                    let ni"),
+    ("v2: a Select2 without from accepted", "src/ir.cho", "                    if nf < 1 {\n                        good = false;\n                    }", "                    if nf < 0 {\n                        good = false;\n                    }"),
+    ("v2: the first from may be a join", "src/ir.cho", "if kind > 2 || fi == 0 && kind != 0 || flag > 1 || flag != joined {", "if kind > 2 || flag > 1 || flag != joined {"),
+    ("v2: join kind 3 accepted", "src/ir.cho", "if kind > 2 || fi == 0 && kind != 0 || flag > 1 || flag != joined {", "if kind > 3 || fi == 0 && kind != 0 || flag > 1 || flag != joined {"),
+    ("v2: a join needs no on", "src/ir.cho", "if kind > 2 || fi == 0 && kind != 0 || flag > 1 || flag != joined {", "if kind > 2 || fi == 0 && kind != 0 || flag > 1 {"),
+    ("v2: a comma may have an on", "src/ir.cho", "|| flag > 1 || flag != joined {", "|| flag > 1 || (joined == 1 && flag != 1) {"),
+    ("v2: order direction 2 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 || int_of(data[cur[0] + 1]) > 2 {", "if int_of(data[cur[0]]) > 2 || int_of(data[cur[0] + 1]) > 2 {"),
+    ("v2: order nulls 3 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 || int_of(data[cur[0] + 1]) > 2 {", "if int_of(data[cur[0]]) > 1 || int_of(data[cur[0] + 1]) > 3 {"),
+    ("v2: the from table is not a read", "src/ir.cho", "                        } else {\n                            m = add(heap, m, 0, data, nm[0], nm[1], false, 0, 0);\n                            if !commit.have(data, cur, 2) {", "                        } else {\n                            if !commit.have(data, cur, 2) {"),
+    ("v2: a join condition is not parsed", "src/ir.cho", "                                } else if flag == 1 {\n                                    let (grown, ok) = expr(heap, m, data, cur, nm, true, v2);\n                                    m = grown;\n                                    good = ok;\n                                }", "                                } else if flag == 1 {\n                                    good = false;\n                                }"),
     # ---- statement IR (ir.md)
-    ("IR: select forgets the table read", "src/ir.cho", "m = add(heap, m, 0, data, nm[0], nm[1], false, 0, 0);", "m = m;"),
+    ("IR: select forgets the table read", "src/ir.cho", "                        } else {\n                            m = add(heap, m, 0, data, nm[0], nm[1], false, 0, 0);\n                        }\n                        i = i + 1;", "                        } else {\n                            m = m;\n                        }\n                        i = i + 1;"),
     ("IR: column read forgets the column", "src/ir.cho", "m = add(heap, m, 0, data, t_at, t_len, true, nm[0], nm[1]);", "m = add(heap, m, 0, data, t_at, t_len, false, 0, 0);"),
     ("IR: column read forgets the table", "src/ir.cho", "data, t_at, t_len, true, nm[0], nm[1]);", "data, nm[0], nm[1], false, 0, 0);"),
     ("IR: columns are not reads", "src/ir.cho", "m = add(heap, m, 0, data, t_at, t_len, true, nm[0], nm[1]);", "m = m;"),
@@ -258,7 +323,7 @@ CHO += [
     ("IR: select without from allowed", "src/ir.cho", "if nt < 1 {", "if nt < 0 {"),
     ("IR: update without sets allowed", "src/ir.cho", "if nsets < 1 {", "if nsets < 0 {"),
     ("IR: ddl kind 5 allowed", "src/ir.cho", "if int_of(data[cur[0]]) > 4 {", "if int_of(data[cur[0]]) > 5 {"),
-    ("IR: operator 12 allowed", "src/ir.cho", "if int_of(data[cur[0]]) > 11 {", "if int_of(data[cur[0]]) > 12 {"),
+    ("IR: operator 12 allowed in a v1 store", "src/ir.cho", "        return 17;\n    }\n    return 11;", "        return 17;\n    }\n    return 12;"),
     ("IR: value tag 3 allowed", "src/ir.cho", "} else if vt != 0 {\n                        good = false;", "} else if vt != 0 {\n                        good = good;"),
     ("IR: optional flag 2 allowed", "src/ir.cho", "return (set, flag == 0);", "return (set, true);"),
     ("IR: unknown expression tag allowed", "src/ir.cho", "            } else {\n                good = false;\n            }\n            // every node", "            } else {\n                good = good;\n            }\n            // every node"),
@@ -273,7 +338,7 @@ CHO += [
     ("IR: effects judged before the statements", "src/l2.cho", "if ircode == 1 {\n                            rule = commit.stmt_missing();\n                        } else if ircode == 2 {\n                            rule = commit.effects_mismatch();\n                        } else if token.effect_denied(tk, enc, out[commit.f_effects_at()], out[commit.f_effects_n()]) {\n                            rule = commit.effect_denied();\n                        }",
      "if token.effect_denied(tk, enc, out[commit.f_effects_at()], out[commit.f_effects_n()]) {\n                            rule = commit.effect_denied();\n                        } else if ircode == 1 {\n                            rule = commit.stmt_missing();\n                        } else if ircode == 2 {\n                            rule = commit.effects_mismatch();\n                        }"),
     ("IR: mismatch reported as missing", "src/l2.cho", "rule = commit.effects_mismatch();", "rule = commit.stmt_missing();"),
-    ("IR: stmts magic unchecked", "src/l2.cho", '} else if !bytes.equal(stmts[0..8], "CHODBST1") {', "} else if false {"),
+    ("IR: stmts magic unchecked", "src/l2.cho", '} else if !bytes.equal(stmts[0..8], "CHODBST1") && !bytes.equal(stmts[0..8], "CHODBST2") {', "} else if false {"),
     ("IR: stmts truncated entry accepted", "src/l2.cho", "if len(stmts) - sat - 4 < length {", "if false {"),
     ("IR: stmts malformed entry accepted", "src/l2.cho", "if !well_formed {", "if false {"),
     ("IR: stmts record index off by one", "src/l2.cho", "bad_at = sidx;", "bad_at = sidx + 1;"),
@@ -420,6 +485,9 @@ def run(kind, cancho):
     if kind == "proxy":
         return run_proxy(cancho)
     table = PY if kind == "py" else CHO
+    only = os.environ.get("MUTANT_ONLY")
+    if only:
+        table = [m for m in table if only in m[0]]
     survivors = []
     for label, rel, old, new in table:
         with tempfile.TemporaryDirectory() as tmp:
