@@ -635,7 +635,33 @@ STMT = [
     ("dml: an assignment renders without its column", "src/parse.cho", "    if kind == n_assign() {\n        p = put_name(out, p, sql, toks, data);\n        return put_lit(out, p, \" = \");\n    }", "    if kind == n_assign() {\n        return put_lit(out, p, \" = \");\n    }"),
     ("dml: DELETE renders as SELECT FROM", "src/parse.cho", 'return put_lit(out, p, "delete from ");', 'return put_lit(out, p, "select from ");'),
     ("dml: statement parts are not separated", "src/parse.cho", "    if kind == n_select() || kind == n_insert() || kind == n_update() || kind == n_delete() {", "    if kind == n_select() {"),
-]
+
+    # ---- the closed DDL
+    ("ddl: NOT NULL sets the wrong bit", "src/stmt.cho", "            bit = 1;\n            p = p + 2;", "            bit = 4;\n            p = p + 2;"),
+    ("ddl: PRIMARY KEY is UNIQUE", "src/stmt.cho", "            bit = 2;\n            p = p + 2;", "            bit = 4;\n            p = p + 2;"),
+    ("ddl: UNIQUE is NOT NULL", "src/stmt.cho", "            bit = 4;\n            p = p + 1;", "            bit = 1;\n            p = p + 1;"),
+    ("ddl: a constraint may repeat", "src/stmt.cho", "        } else if flags / bit % 2 == 1 {\n            return parse.fail(st, p, parse.e_syntax());", "        } else if false {\n            return parse.fail(st, p, parse.e_syntax());"),
+    ("ddl: any expression is a default", "src/stmt.cho", "            } else if kind != parse.n_num() && kind != parse.n_str() && kind != parse.n_null() && kind != parse.n_true() && kind != parse.n_false() {", "            } else if false {"),
+    ("ddl: a negated string is a default", "src/stmt.cho", "                if kind != parse.n_num() {\n                    return parse.fail(st, p + 1, parse.e_unknown_construct());", "                if false {\n                    return parse.fail(st, p + 1, parse.e_unknown_construct());"),
+    ("ddl: a default is lost", "src/stmt.cho", "            flags = flags + 8;\n            p = q;", "            flags = flags + 8;\n            st[10] = st[10] - 1;\n            p = q;"),
+    ("ddl: the default sets no flag", "src/stmt.cho", "parse.n_coldef(), col, tmp[mark..st[10]], st[10] - mark, flags % 8,", "parse.n_coldef(), col, tmp[mark..st[10]], st[10] - mark, 0,"),
+    ("ddl: a column loses its name", "src/stmt.cho", "parse.n_coldef(), col,", "parse.n_coldef(), 0 - 1,"),
+    ("ddl: a table name may have a schema", "src/stmt.cho", "    if parse.punct(sql, toks, pos + 1, end, '.') {\n        return parse.fail(st, pos + 1, parse.e_unknown_construct());\n    }\n    st[9] = pos;", "    st[9] = pos;"),
+    ("ddl: CREATE TABLE may end early", "src/stmt.cho", "    pos = pos + 1;\n    if pos < end {\n        return parse.fail(st, pos, parse.e_syntax());\n    }\n    let root = close_list(nodes, kids, tmp, st, parse.n_create_table(), 0, table);", "    pos = pos + 1;\n    let root = close_list(nodes, kids, tmp, st, parse.n_create_table(), 0, table);"),
+    ("ddl: ALTER TABLE does more than ADD", "src/stmt.cho", '    if !parse.kw(sql, toks, pos, end, "add") {\n        return parse.fail(st, pos, parse.e_unsupported_statement());\n    }', '    if false {\n        return parse.fail(st, pos, parse.e_unsupported_statement());\n    }'),
+    ("ddl: ADD COLUMN requires COLUMN", "src/stmt.cho", '    if parse.kw(sql, toks, pos, end, "column") {\n        pos = pos + 1;\n    }', '    if false {\n        pos = pos + 1;\n    }'),
+    ("ddl: UNIQUE INDEX is a plain index", "src/stmt.cho", "        unique = 1;\n        pos = pos + 1;", "        unique = 0;\n        pos = pos + 1;"),
+    ("ddl: an index may have no ON", "src/stmt.cho", '    if !parse.kw(sql, toks, pos, end, "on") {\n        return parse.fail(st, pos, parse.e_syntax());\n    }', '    if false {\n        return parse.fail(st, pos, parse.e_syntax());\n    }'),
+    ("ddl: an index loses its table", "src/stmt.cho", "parse.n_create_index(), name, tmp[0..st[10]], st[10], unique, table);", "parse.n_create_index(), name, tmp[0..st[10]], st[10], unique, name);"),
+    ("ddl: DROP INDEX drops a table", "src/stmt.cho", '    if parse.kw(sql, toks, from + 1, end, "index") {\n        kind = parse.n_drop_index();', '    if false {\n        kind = parse.n_drop_index();'),
+    ("ddl: DROP TABLE takes a list", "src/stmt.cho", "    if pos < end {\n        return parse.fail(st, pos, parse.e_syntax());\n    }\n    let root = parse.mk(nodes, kids, st, kind,", "    let root = parse.mk(nodes, kids, st, kind,"),
+    ("ddl: a type's modifiers are not rendered", "src/parse.cho", "    var p = put_lit(out, at, type_name(code));\n    if m1 >= 0 {", "    var p = put_lit(out, at, type_name(code));\n    if false {"),
+    ("ddl: NOT NULL is not rendered", "src/parse.cho", '        p = put_lit(out, p, " not null");', "        p = put_lit(out, p, \"\");"),
+    ("ddl: UNIQUE is not rendered", "src/parse.cho", '        p = put_lit(out, p, " unique");', "        p = put_lit(out, p, \"\");"),
+    ("ddl: a unique index renders plain", "src/parse.cho", '        if nodes[6 * node + 4] == 1 {\n            p = put_lit(out, p, "unique ");', '        if false {\n            p = put_lit(out, p, "unique ");'),
+    ("ddl: ALTER renders without COLUMN", "src/parse.cho", 'return put_lit(out, p, " add column ");', 'return put_lit(out, p, " add ");'),
+    ("ddl: a default renders without its flags", "src/parse.cho", "        p = put_flags(out, p, nodes[6 * node + 4]);\n        return put_lit(out, p, \" default \");", "        return put_lit(out, p, \" default \");"),
+    ("ddl: a column without a default renders without its flags", "src/parse.cho", "        if nodes[6 * node + 3] == 1 {\n            return put_flags(out, p, nodes[6 * node + 4]);\n        }\n        return p;", "        return p;"),]
 
 
 # Mutants that cannot be killed because they change nothing observable, with the reason. Empty: every mutant above

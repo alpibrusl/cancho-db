@@ -706,6 +706,248 @@ pub fn delete[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
     return end;
 }
 
+// ---- the closed DDL
+
+// A plain name at `pos` (not reserved, no dots). The token is left in st[9]; answers the position after it.
+fn plain_name[&s, &t, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, st: &!x [int]) -> [] int {
+    if pos >= end {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    if parse.tkind(toks, pos) == lex.t_ident() && parse.is_reserved(sql, parse.tstart(toks, pos), parse.tlen(toks, pos)) {
+        return parse.fail(st, pos, parse.e_reserved_word());
+    }
+    if !is_name_tok(sql, toks, pos, end) {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    if parse.punct(sql, toks, pos + 1, end, '.') {
+        return parse.fail(st, pos + 1, parse.e_unknown_construct());
+    }
+    st[9] = pos;
+    return pos + 1;
+}
+
+// A column definition `name type [NOT NULL] [PRIMARY KEY] [UNIQUE] [DEFAULT literal]` (the constraints in any order, each once),
+// staged as a COLDEF. Answers the position after it.
+fn coldef[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    var p = plain_name(sql, toks, pos, end, st);
+    if p < 0 {
+        return p;
+    }
+    let col = st[9];
+    p = parse.parse_type(sql, toks, p, end, st);
+    if p < 0 {
+        return p;
+    }
+    let mark = st[10];
+    let ty = parse.mk(nodes, kids, st, parse.n_type(), st[6], tmp, 0, st[7], st[8]);
+    if ty < 0 {
+        return parse.fail(st, pos, 0 - ty);
+    }
+    var r = stage(tmp, st, ty);
+    if r < 0 {
+        return parse.fail(st, pos, 0 - r);
+    }
+    var flags = 0;
+    var more = true;
+    while more {
+        var bit = 0;
+        if parse.kw(sql, toks, p, end, "not") && parse.kw(sql, toks, p + 1, end, "null") {
+            bit = 1;
+            p = p + 2;
+        } else if parse.kw(sql, toks, p, end, "primary") && parse.kw(sql, toks, p + 1, end, "key") {
+            bit = 2;
+            p = p + 2;
+        } else if parse.kw(sql, toks, p, end, "unique") {
+            bit = 4;
+            p = p + 1;
+        } else if parse.kw(sql, toks, p, end, "default") {
+            bit = 8;
+        }
+        if bit == 0 {
+            more = false;
+        } else if flags / bit % 2 == 1 {
+            return parse.fail(st, p, parse.e_syntax());
+        } else if bit == 8 {
+            // the default is a literal: a number (optionally negative), a string, NULL, TRUE or FALSE
+            let q = parse.expr(sql, toks, p + 1, end, nodes, kids, vs, os, st);
+            if q < 0 {
+                return q;
+            }
+            let root = st[2];
+            var kind = nodes[6 * root];
+            if kind == parse.n_neg() {
+                kind = nodes[6 * kids[nodes[6 * root + 2]]];
+                if kind != parse.n_num() {
+                    return parse.fail(st, p + 1, parse.e_unknown_construct());
+                }
+            } else if kind != parse.n_num() && kind != parse.n_str() && kind != parse.n_null() && kind != parse.n_true() && kind != parse.n_false() {
+                return parse.fail(st, p + 1, parse.e_unknown_construct());
+            }
+            r = stage(tmp, st, root);
+            if r < 0 {
+                return parse.fail(st, p, 0 - r);
+            }
+            flags = flags + 8;
+            p = q;
+        } else {
+            flags = flags + bit;
+        }
+    }
+    let id = parse.mk(nodes, kids, st, parse.n_coldef(), col, tmp[mark..st[10]], st[10] - mark, flags % 8, 0 - 1);
+    st[10] = mark;
+    if id < 0 {
+        return parse.fail(st, pos, 0 - id);
+    }
+    r = stage(tmp, st, id);
+    if r < 0 {
+        return parse.fail(st, pos, 0 - r);
+    }
+    return p;
+}
+
+// CREATE TABLE t (column definition, ...)
+fn create_table[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    st[10] = 0;
+    var pos = plain_name(sql, toks, from + 2, end, st);
+    if pos < 0 {
+        return pos;
+    }
+    let table = st[9];
+    if !parse.punct(sql, toks, pos, end, '(') {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    pos = pos + 1;
+    var more = true;
+    while more {
+        pos = coldef(sql, toks, pos, end, nodes, kids, vs, os, tmp, st);
+        if pos < 0 {
+            return pos;
+        }
+        if parse.punct(sql, toks, pos, end, ',') {
+            pos = pos + 1;
+        } else {
+            more = false;
+        }
+    }
+    if !parse.punct(sql, toks, pos, end, ')') {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    pos = pos + 1;
+    if pos < end {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    let root = close_list(nodes, kids, tmp, st, parse.n_create_table(), 0, table);
+    if root < 0 {
+        return parse.fail(st, pos, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
+// ALTER TABLE t ADD [COLUMN] column definition
+fn alter_table[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    st[10] = 0;
+    var pos = plain_name(sql, toks, from + 2, end, st);
+    if pos < 0 {
+        return pos;
+    }
+    let table = st[9];
+    if !parse.kw(sql, toks, pos, end, "add") {
+        return parse.fail(st, pos, parse.e_unsupported_statement());
+    }
+    pos = pos + 1;
+    if parse.kw(sql, toks, pos, end, "column") {
+        pos = pos + 1;
+    }
+    pos = coldef(sql, toks, pos, end, nodes, kids, vs, os, tmp, st);
+    if pos < 0 {
+        return pos;
+    }
+    if pos < end {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    let root = close_list(nodes, kids, tmp, st, parse.n_alter_add(), 0, table);
+    if root < 0 {
+        return parse.fail(st, pos, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
+// CREATE [UNIQUE] INDEX name ON t (column, ...)
+fn create_index[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    st[10] = 0;
+    var pos = from + 1;
+    var unique = 0;
+    if parse.kw(sql, toks, pos, end, "unique") {
+        unique = 1;
+        pos = pos + 1;
+    }
+    pos = plain_name(sql, toks, pos + 1, end, st);
+    if pos < 0 {
+        return pos;
+    }
+    let name = st[9];
+    if !parse.kw(sql, toks, pos, end, "on") {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    pos = plain_name(sql, toks, pos + 1, end, st);
+    if pos < 0 {
+        return pos;
+    }
+    let table = st[9];
+    if !parse.punct(sql, toks, pos, end, '(') {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    pos = pos + 1;
+    var more = true;
+    while more {
+        pos = name_item(sql, toks, pos, end, nodes, kids, tmp, st);
+        if pos < 0 {
+            return pos;
+        }
+        if parse.punct(sql, toks, pos, end, ',') {
+            pos = pos + 1;
+        } else {
+            more = false;
+        }
+    }
+    if !parse.punct(sql, toks, pos, end, ')') {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    pos = pos + 1;
+    if pos < end {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    let root = parse.mk(nodes, kids, st, parse.n_create_index(), name, tmp[0..st[10]], st[10], unique, table);
+    if root < 0 {
+        return parse.fail(st, pos, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
+// DROP TABLE t, DROP INDEX name
+fn drop_object[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    var kind = parse.n_drop_table();
+    if parse.kw(sql, toks, from + 1, end, "index") {
+        kind = parse.n_drop_index();
+    }
+    let pos = plain_name(sql, toks, from + 2, end, st);
+    if pos < 0 {
+        return pos;
+    }
+    if pos < end {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    let root = parse.mk(nodes, kids, st, kind, st[9], tmp, 0, 0 - 1, 0 - 1);
+    if root < 0 {
+        return parse.fail(st, pos, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
 // One statement: the first word says which. Anything else is `unsupported-statement`.
 pub fn statement[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], st: &!x [int]) -> [] int {
     if parse.kw(sql, toks, from, end, "select") {
@@ -719,6 +961,21 @@ pub fn statement[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [i
     }
     if parse.kw(sql, toks, from, end, "delete") {
         return delete(sql, toks, from, end, nodes, kids, vs, os, tmp, clauses, st);
+    }
+    if parse.kw(sql, toks, from, end, "create") {
+        if parse.kw(sql, toks, from + 1, end, "table") {
+            return create_table(sql, toks, from, end, nodes, kids, vs, os, tmp, st);
+        }
+        if parse.kw(sql, toks, from + 1, end, "index") || parse.kw(sql, toks, from + 1, end, "unique") && parse.kw(sql, toks, from + 2, end, "index") {
+            return create_index(sql, toks, from, end, nodes, kids, tmp, st);
+        }
+        return parse.fail(st, from + 1, parse.e_unsupported_statement());
+    }
+    if parse.kw(sql, toks, from, end, "alter") && parse.kw(sql, toks, from + 1, end, "table") {
+        return alter_table(sql, toks, from, end, nodes, kids, vs, os, tmp, st);
+    }
+    if parse.kw(sql, toks, from, end, "drop") && (parse.kw(sql, toks, from + 1, end, "table") || parse.kw(sql, toks, from + 1, end, "index")) {
+        return drop_object(sql, toks, from, end, nodes, kids, tmp, st);
     }
     return parse.fail(st, from, parse.e_unsupported_statement());
 }
