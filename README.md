@@ -13,14 +13,14 @@ Working name. The design is [`docs/design.md`](docs/design.md).
 - [`docs/spec/token.md`](docs/spec/token.md): capability tokens (a chain of signed blocks that can only narrow) and
   **L2 (authority)**: was each commit allowed by the token it presented?
 - [`vectors/`](vectors): 212 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
-- Two verifiers that must agree on every one: [`src/`](src) in cancho (no C, no foreign call) and
-  [`tools/verify.py`](tools/verify.py) in Python.
+- Three verifiers that must agree on every one: [`src/`](src) in cancho (no C, no foreign call),
+  [`tools/verify.py`](tools/verify.py) in Python, and [`verifiers/go/`](verifiers/go) in Go, written from the specs alone
+  by a separate agent session (see its README and [`docs/claims.md`](docs/claims.md) for what that does and does not show).
 
 **Not built:** L3 replay, the statement IR, and M1 onward (the proxy, branches, the engine). L2 checks the commit's
 *recorded* effect set against its token; that the recorded set is what the statements do needs the IR (see
 [`docs/claims.md`](docs/claims.md)). That file says what is claimed, what each claim rests on, and what is *not*
-claimed. In particular the M0 exit criterion is **not yet met**: the second verifier was not written independently of
-the first.
+claimed.
 
 ## Use
 
@@ -55,10 +55,10 @@ reject rule=effect-denied record=0
 $ CANCHO=/path/to/cancho sh scripts/check.sh
 ```
 
-Runs what CI runs: formatting, vectors regenerate byte for byte, both verifiers on every vector, the command lines,
+Runs what CI runs: formatting, vectors regenerate byte for byte, all three verifiers on every vector, the command lines,
 the authority report, the attenuation property over thousands of random tokens, 4,500 differentially fuzzed inputs (the
 verifiers agree and none crashes), and the mutants of both verifiers (every one must make a vector fail). Needs `python3` with `cryptography`, and the cancho
-compiler at the revision in [`cancho.toml`](cancho.toml).
+compiler at the revision in [`cancho.toml`](cancho.toml), and `go`.
 
 ## Licence
 

@@ -6,9 +6,9 @@ signature whose `S` is not below the group order, and a key (or `R`) that does n
 not fail. What an implementation does with small-order or non-canonical-but-decodable keys and `R` values is **not
 specified in v1** and no vector exercises it: implementations are known to differ there, and a log's signer is trusted
 not to produce them. It does not need cancho,
-and `tools/verify.py` is meant to be written from this page (and `token.md`) alone. *Corrected:* it was written from them
-by the same author who wrote the cancho verifier and after it, so it is not yet the independent second verifier the design
-asks for ([`../claims.md`](../claims.md)).
+and a verifier should be writable from this page (and `token.md`) alone. `tools/verify.py` was written from them by their
+author, after the cancho one; `verifiers/go/` was written from them alone by a separate agent session, which is the
+independence the design asks for, with the caveats in [`../claims.md`](../claims.md).
 
 L2 (tokens and effects) is [`token.md`](token.md); L3 (replay) is in the design ([`../design.md`](../design.md)) and not
 yet specified. A log that verifies at L1 says the history was not altered or reordered by anyone without the server key, and
