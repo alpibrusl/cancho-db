@@ -21,9 +21,13 @@ pyv = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pyv)
 
 
-def py_verdict(data):
+def py_verdict(data, l2=None):
+    """The Python verifier's line for a log, and with l2=(root, tokens, revoked-or-None) for L2 as well."""
     try:
-        return pyv.verify(data, None)
+        commits, branches, infos = pyv.verify(data, None)
+        if l2 is not None:
+            pyv.verify_l2(infos, *l2)
+        return "ok commits=%d branches=%d%s" % (commits, branches, " level=2" if l2 else "")
     except pyv.Reject as e:
         return "reject rule=%s record=%d" % (e.rule, e.record)
 
@@ -83,8 +87,46 @@ def main(argv):
                 keep.write_bytes(data)
                 print("FAIL case %d: cancho=%r exit=%d stderr=%r python=%r (input kept: %s)" % (
                     n, got, p.returncode, p.stderr[:100], want, keep.name))
+        # L2: damage the log, the token store or the revocation list of an L2 vector
+        l2_cases = [(a.with_suffix(".log"), a.with_suffix(".tokens"), a.with_suffix(".revoked"),
+                     a.read_text().split()[1]) for a in sorted(vdir.glob("*.args")) if "--root" in a.read_text()]
+        token_pool = [t.read_bytes() for _, t, _, _ in l2_cases]
+        tf, rf = Path(tmp) / "case.tokens", Path(tmp) / "case.revoked"
+        l2_verdicts = {}
+        for n in range(cases // 2):
+            log_p, tok_p, rev_p, root_hex = rng.choice(l2_cases)
+            log_b, tok_b = log_p.read_bytes(), tok_p.read_bytes()
+            rev_b = rev_p.read_bytes() if rev_p.exists() else None
+            which = rng.random()
+            if which < 0.2:
+                log_b = mutate(rng, log_b, pool)
+            elif which < 0.7 or rev_b is None:
+                tok_b = mutate(rng, tok_b, token_pool)
+            else:
+                rev_b = mutate(rng, rev_b, [rev_b])
+            f.write_bytes(log_b)
+            tf.write_bytes(tok_b)
+            cmd = [exe, str(f), "--root", root_hex, "--tokens", str(tf)]
+            if rev_b is not None:
+                rf.write_bytes(rev_b)
+                cmd += ["--revoked", str(rf)]
+            p = subprocess.run(cmd, capture_output=True, timeout=30)
+            got = p.stdout.decode(errors="replace").strip()
+            want = py_verdict(log_b, (bytes.fromhex(root_hex), tok_b, rev_b))
+            rule = want.split()[1][5:] if want.startswith("reject") else "ok"
+            l2_verdicts[rule] = l2_verdicts.get(rule, 0) + 1
+            if got != want or p.returncode not in (0, 1) or p.stderr:
+                bad += 1
+                keep = ROOT / ("fuzz-failure-l2-%d-%d" % (seed, n))
+                keep.with_suffix(".log").write_bytes(log_b)
+                keep.with_suffix(".tokens").write_bytes(tok_b)
+                if rev_b is not None:
+                    keep.with_suffix(".revoked").write_bytes(rev_b)
+                print("FAIL L2 case %d: cancho=%r exit=%d stderr=%r python=%r (input kept: %s.*)" % (
+                    n, got, p.returncode, p.stderr[:100], want, keep.name))
     print("verdicts reached:", ", ".join("%s=%d" % kv for kv in sorted(verdicts.items())))
-    print("%d cases, %d failed" % (cases, bad))
+    print("L2 verdicts reached:", ", ".join("%s=%d" % kv for kv in sorted(l2_verdicts.items())))
+    print("%d cases, %d failed" % (cases + cases // 2, bad))
     return 1 if bad else 0
 
 

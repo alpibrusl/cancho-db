@@ -2,10 +2,12 @@
 
 This is the language-neutral definition of what a Cancho DB log is and what it takes for it to verify at **L1
 (integrity)**. A verifier needs this page, SHA-256 and Ed25519 (RFC 8032), and nothing else. It does not need cancho,
-and the Python verifier (`tools/verify.py`) was written from this page alone.
+and `tools/verify.py` is meant to be written from this page (and `token.md`) alone. *Corrected:* it was written from them
+by the same author who wrote the cancho verifier and after it, so it is not yet the independent second verifier the design
+asks for ([`../claims.md`](../claims.md)).
 
-L2 (tokens and effects) and L3 (replay) are in the design ([`../design.md`](../design.md)) and **not yet specified
-here**: a log that verifies at L1 says the history was not altered or reordered by anyone without the server key, and
+L2 (tokens and effects) is [`token.md`](token.md); L3 (replay) is in the design ([`../design.md`](../design.md)) and not
+yet specified. A log that verifies at L1 says the history was not altered or reordered by anyone without the server key, and
 nothing about whether each commit was allowed.
 
 The words MUST and MUST NOT are used as in RFC 2119.

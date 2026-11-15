@@ -1,0 +1,187 @@
+module cdb.l2;
+
+import std.buffer;
+import std.bytes;
+import std.map;
+import std.ed25519;
+import cdb.commit;
+import cdb.token;
+
+// L2 (docs/spec/token.md section 4), run over a log that has already passed L1: the two stores, then every commit.
+//
+// `verdict[0]` is the rule code (`commit.ok()` when everything passes) and `verdict[1]` the entry or commit it names
+// (-1 for none). `has_revoked` is false when no revocation file was given (`revoked` is then empty and ignored).
+//
+// No early `return` while the maps are alive: they are owned and dropped once, at the end, on every path.
+pub fn run[&h, &d, &k, &t, &v, &o](heap: &!h Heap, data: &d [byte], root: &k [byte], tokens: &t [byte], revoked: &v [byte], has_revoked: bool, verdict: &!o [int]) -> [heap] int {
+    var rule = 0;
+    var bad_at = 0 - 1;
+    // token id -> where the token's bytes start in `tokens`
+    var store = map.empty(heap, 16, 0, 5);
+    // token id -> index of the revocation with the earliest `since`
+    var rev = map.empty(heap, 16, 0, 9);
+
+    region r {
+        let id = alloc_slice[r](32, byte_of(0));
+        let out = alloc_slice[r](commit.out_len(), 0);
+
+        // tokens store
+        if len(tokens) < 8 {
+            rule = commit.tokens_truncated();
+        } else if !bytes.equal(tokens[0..8], "CHODBTK1") {
+            rule = commit.tokens_bad_magic();
+        }
+        var at = 8;
+        var index = 0;
+        while rule == 0 && at < len(tokens) {
+            if len(tokens) - at < 4 {
+                rule = commit.tokens_truncated();
+            } else {
+                let length = commit.be(tokens, at, 4);
+                if len(tokens) - at - 4 < length {
+                    rule = commit.tokens_truncated();
+                } else if !token.decode(tokens[at + 4..at + 4 + length]) {
+                    rule = commit.token_bad_encoding();
+                } else {
+                    let tk = tokens[at + 4..at + 4 + length];
+                    token.prefix_id(tk, token.blocks(tk), id);
+                    store = map.put(heap, store, id, at + 4);
+                    at = at + 4 + length;
+                    index = index + 1;
+                }
+            }
+            if rule != 0 && rule != commit.tokens_bad_magic() {
+                bad_at = index;
+            }
+        }
+        if rule == commit.tokens_truncated() && len(tokens) < 8 {
+            bad_at = 0 - 1;
+        }
+
+        // revocations
+        if rule == 0 && has_revoked {
+            if len(revoked) < 8 {
+                rule = commit.revocations_truncated();
+            } else if !bytes.equal(revoked[0..8], "CHODBRV1") {
+                rule = commit.revocations_bad_magic();
+            }
+            var e = 0;
+            while rule == 0 && 8 + e * 104 < len(revoked) {
+                let ra = 8 + e * 104;
+                if len(revoked) - ra < 104 {
+                    rule = commit.revocations_truncated();
+                } else {
+                    // "cancho-db/revoke/v1", 0, token id, since
+                    let msg = alloc_slice[r](60, byte_of(0));
+                    var i = 0;
+                    let tag = "cancho-db/revoke/v1";
+                    while i < len(tag) {
+                        msg[i] = tag[i];
+                        i = i + 1;
+                    }
+                    i = 0;
+                    while i < 40 {
+                        msg[20 + i] = revoked[ra + i];
+                        i = i + 1;
+                    }
+                    if ed25519.verify(root, msg, revoked[ra + 40..ra + 104]) != 1 {
+                        rule = commit.revocation_bad_signature();
+                    } else {
+                        var known = false;
+                        var old = 0 - 1;
+                        borrow rev as &m in {
+                            known = map.has(m, revoked[ra..ra + 32]);
+                            old = map.get(m, revoked[ra..ra + 32], 0 - 1);
+                        }
+                        var earlier = true;
+                        if known {
+                            let oa = 8 + old * 104;
+                            earlier = token.cmp64(commit.be(revoked, ra + 32, 4), commit.be(revoked, ra + 36, 4), commit.be(revoked, oa + 32, 4), commit.be(revoked, oa + 36, 4)) < 0;
+                        }
+                        if earlier {
+                            rev = map.put(heap, rev, revoked[ra..ra + 32], e);
+                        }
+                    }
+                }
+                if rule != 0 {
+                    bad_at = e;
+                }
+                e = e + 1;
+            }
+            if rule == commit.revocations_truncated() && len(revoked) < 8 {
+                bad_at = 0 - 1;
+            }
+            if rule == commit.revocations_bad_magic() {
+                bad_at = 0 - 1;
+            }
+        }
+
+        // commits, in log order
+        at = 40;
+        index = 0;
+        while rule == 0 && at < len(data) {
+            let length = commit.be(data, at, 4);
+            let enc = data[at + 4..at + 4 + length];
+            at = at + 4 + length + 64;
+            commit.decode(enc, out);
+            let tok_at = out[commit.f_token_at()];
+            var found = false;
+            var off = 0;
+            borrow store as &m in {
+                found = map.has(m, enc[tok_at..tok_at + 32]);
+                off = map.get(m, enc[tok_at..tok_at + 32], 0);
+            }
+            if !found {
+                rule = commit.token_missing();
+            } else {
+                let tk = tokens[off..off + commit.be(tokens, off - 4, 4)];
+                let time_at = out[commit.f_time_at()];
+                let th = commit.be(enc, time_at, 4);
+                let tl = commit.be(enc, time_at + 4, 4);
+                if !token.chain_ok(tk, root) {
+                    rule = commit.token_bad_signature();
+                } else {
+                    var is_revoked = false;
+                    var k = 1;
+                    while k <= token.blocks(tk) {
+                        token.prefix_id(tk, k, id);
+                        var e = 0 - 1;
+                        borrow rev as &m in {
+                            e = map.get(m, id, 0 - 1);
+                        }
+                        if e >= 0 {
+                            let ra = 8 + e * 104;
+                            if token.cmp64(commit.be(revoked, ra + 32, 4), commit.be(revoked, ra + 36, 4), th, tl) <= 0 {
+                                is_revoked = true;
+                            }
+                        }
+                        k = k + 1;
+                    }
+                    let pat = out[commit.f_principal_at()];
+                    let bat = out[commit.f_branch_at()];
+                    if is_revoked {
+                        rule = commit.token_revoked();
+                    } else if token.expired(tk, th, tl) {
+                        rule = commit.token_expired();
+                    } else if token.principal_denied(tk, enc[pat..pat + 32]) {
+                        rule = commit.principal_denied();
+                    } else if token.branch_denied(tk, enc[bat..bat + out[commit.f_branch_len()]]) {
+                        rule = commit.branch_denied();
+                    } else if token.effect_denied(tk, enc, out[commit.f_effects_at()], out[commit.f_effects_n()]) {
+                        rule = commit.effect_denied();
+                    }
+                }
+            }
+            if rule != 0 {
+                bad_at = index;
+            }
+            index = index + 1;
+        }
+    }
+
+    verdict[0] = rule;
+    verdict[1] = bad_at;
+    map.drop(heap, store);
+    map.drop(heap, rev);
+    return 0;
+}

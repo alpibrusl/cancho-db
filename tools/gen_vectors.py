@@ -130,12 +130,12 @@ def main_chain(n):
 def rejects(rule, at): return "reject rule=%s record=%d" % (rule, at)
 
 
-V = {}  # name -> (log bytes, expect line, args)
+V = {}  # name -> (log bytes, expect line, args, {suffix: bytes})
 
 
-def vec(name, data, expect, args=""):
+def vec(name, data, expect, args="", files=None):
     assert name not in V, name
-    V[name] = (data, expect, args)
+    V[name] = (data, expect, args, files or {})
 
 
 # ------------------------------------------------------------------ valid
@@ -354,16 +354,20 @@ vec("first_failure_wins", log(recs[0], record(commit(seq=7), sk=OTHER), record(c
 def write(out):
     out.mkdir(parents=True, exist_ok=True)
     for old in out.iterdir():
-        if old.suffix in (".log", ".expect", ".args"):
+        if old.suffix in (".log", ".expect", ".args", ".tokens", ".revoked"):
             old.unlink()
-    for name, (data, expect, args) in sorted(V.items()):
+    for name, (data, expect, args, files) in sorted(V.items()):
         (out / (name + ".log")).write_bytes(data)
         (out / (name + ".expect")).write_text(expect + "\n")
         if args:
             (out / (name + ".args")).write_text(args + "\n")
+        for suffix, blob in files.items():
+            (out / (name + suffix)).write_bytes(blob)
     return len(V)
 
 
 if __name__ == "__main__":
+    import gen_l2
+    gen_l2.add(sys.modules[__name__])
     target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "vectors"
     print("wrote %d vectors to %s" % (write(target), target))

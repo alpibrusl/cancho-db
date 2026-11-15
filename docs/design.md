@@ -97,7 +97,8 @@ signature = Sign(server_key, id)     // optional client co-signature
 | L2 Authority | Token is valid and unrevoked; inferred effects are within its grants | Needs tokens and statement IR |
 | L3 Replay | Re-executing statements with the recorded `nondet` reproduces `changes` and `state` | Needs full data and an executor |
 
-The byte-level definition of the format is [`spec/commit.md`](spec/commit.md).
+The byte-level definition of the format is [`spec/commit.md`](spec/commit.md); tokens and L2 are
+[`spec/token.md`](spec/token.md).
 
 ## Query path
 
@@ -228,11 +229,11 @@ The largest risk is losing data, and the mitigation is staying on Postgres stora
 - [ ] Merge semantics: three-way by primary key with constraint re-check is the proposal; what is the conflict policy?
 - [ ] Row-level capabilities in v1 or later.
 - [ ] Which product goes on it first: cancho-sheets or cancho-forge.
-- [ ] Licence.
+- [x] Licence. **Decided 2026-11-15: EUPL-1.2**, as the other cancho repositories (`LICENSE`).
 
 ## Build status
 
 | Milestone | Status |
 |---|---|
-| M0 Spec and verifier | **L1 built**: spec, vectors, two verifiers ([`README.md`](../README.md)). Token spec and L2 not yet. |
+| M0 Spec and verifier | **L1 and L2 built**: both specs, 209 vectors, two verifiers ([`README.md`](../README.md)). L2 checks the recorded effect set against the token, not against the statements (no IR yet). Exit criterion **not met**: the second verifier is not independent ([`claims.md`](claims.md)). |
 | M1 to M4 | Not started. |

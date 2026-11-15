@@ -18,6 +18,7 @@ import std.map;
 import std.crypto;
 import std.ed25519;
 import cdb.commit;
+import cdb.l2;
 
 // One named file, read whole through a handle (`examples/seek`'s `read_file`). `-1` on a failure.
 fn read_file[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte], text: buffer.Buffer) -> [heap, fs_read(""), file_read] (buffer.Buffer, int) {
@@ -269,6 +270,18 @@ fn crypto_ok[&k, &m, &s](pk: &k [byte], id: &m [byte], sig: &s [byte]) -> [] int
     return ed25519.verify(pk, id, sig);
 }
 
+// One named file into a buffer, or a message on standard error and `false`. The buffer comes back either way.
+fn load[&h, &f, &i, &p](heap: &!h Heap, fs: &f Fs(""), io: &!i Io, path: &p [byte], text: buffer.Buffer) -> [heap, fs_read(""), file_read, err_write] (buffer.Buffer, bool) {
+    let (grown, got) = read_file(heap, fs, path, text);
+    if got < 0 {
+        io.error_all(io, "verify: cannot read: ");
+        io.error_all(io, path);
+        io.error_all(io, "\n");
+        return (grown, false);
+    }
+    return (grown, true);
+}
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
     release(ffi);
@@ -277,6 +290,12 @@ fn main(world: World) -> [] int {
     var have_path = false;
     var expect_text: &static [byte] = "";
     var have_expect = false;
+    var root_text: &static [byte] = "";
+    var have_root = false;
+    var tokens_path: &static [byte] = "";
+    var have_tokens = false;
+    var revoked_path: &static [byte] = "";
+    var have_revoked = false;
     var usage = false;
     var status = 0;
 
@@ -297,6 +316,21 @@ fn main(world: World) -> [] int {
                             c = after;
                             expect_text = given;
                             have_expect = true;
+                        } else if flags.named(name, "root") && !have_root {
+                            let (after, given) = flags.value(g, c);
+                            c = after;
+                            root_text = given;
+                            have_root = true;
+                        } else if flags.named(name, "tokens") && !have_tokens {
+                            let (after, given) = flags.value(g, c);
+                            c = after;
+                            tokens_path = given;
+                            have_tokens = true;
+                        } else if flags.named(name, "revoked") && !have_revoked {
+                            let (after, given) = flags.value(g, c);
+                            c = after;
+                            revoked_path = given;
+                            have_revoked = true;
                         } else {
                             usage = true;
                         }
@@ -316,19 +350,29 @@ fn main(world: World) -> [] int {
             }
         }
 
-        if !have_path {
+        if !have_path || !have_root && (have_tokens || have_revoked) || have_root && !have_tokens {
             usage = true;
         }
 
-        // `--expect` as 32 bytes, or empty when there is none
+        // `--expect` and `--root` as 32 bytes each, or empty when absent
         var expect_bytes = buffer.empty(h, 32);
-        if have_expect && !usage {
+        var root_bytes = buffer.empty(h, 32);
+        if !usage {
             region x {
                 let tmp = alloc_slice[x](32, byte_of(0));
-                if parse_hex32(expect_text, tmp) {
-                    expect_bytes = buffer.append(h, expect_bytes, tmp);
-                } else {
-                    usage = true;
+                if have_expect {
+                    if parse_hex32(expect_text, tmp) {
+                        expect_bytes = buffer.append(h, expect_bytes, tmp);
+                    } else {
+                        usage = true;
+                    }
+                }
+                if have_root {
+                    if parse_hex32(root_text, tmp) {
+                        root_bytes = buffer.append(h, root_bytes, tmp);
+                    } else {
+                        usage = true;
+                    }
                 }
             }
         }
@@ -336,29 +380,47 @@ fn main(world: World) -> [] int {
         if usage {
             status = 2;
             borrow mut io as &!e in {
-                io.error_all(e, "usage: verify LOG [--expect <64 hex digits>]\n");
+                io.error_all(e, "usage: verify LOG [--expect <64 hex digits>] [--root <64 hex digits> --tokens FILE [--revoked FILE]]\n");
             }
         } else {
             var text = buffer.empty(h, 65536);
-            var got = 0;
+            var tokens_text = buffer.empty(h, 16);
+            var revoked_text = buffer.empty(h, 16);
+            var good = true;
             borrow fs as &f in {
-                let (grown, n) = read_file(h, f, path, text);
-                text = grown;
-                got = n;
-            }
-            if got < 0 {
-                status = 2;
                 borrow mut io as &!e in {
-                    io.error_all(e, "verify: cannot read: ");
-                    io.error_all(e, path);
-                    io.error_all(e, "\n");
+                    let (a, ok_log) = load(h, f, e, path, text);
+                    text = a;
+                    good = ok_log;
+                    if good && have_tokens {
+                        let (b, ok_tokens) = load(h, f, e, tokens_path, tokens_text);
+                        tokens_text = b;
+                        good = ok_tokens;
+                    }
+                    if good && have_revoked {
+                        let (b, ok_revoked) = load(h, f, e, revoked_path, revoked_text);
+                        revoked_text = b;
+                        good = ok_revoked;
+                    }
                 }
+            }
+            if !good {
+                status = 2;
             } else {
                 region x {
                     let verdict = alloc_slice[x](4, 0);
                     borrow text as &t in {
                         borrow expect_bytes as &eb in {
                             verify(h, buffer.bytes(t), buffer.bytes(eb), verdict);
+                        }
+                        if verdict[0] == 0 && have_root {
+                            borrow root_bytes as &rb in {
+                                borrow tokens_text as &tt in {
+                                    borrow revoked_text as &rt in {
+                                        l2.run(h, buffer.bytes(t), buffer.bytes(rb), buffer.bytes(tt), buffer.bytes(rt), have_revoked, verdict);
+                                    }
+                                }
+                            }
                         }
                     }
                     borrow mut io as &!o in {
@@ -367,6 +429,9 @@ fn main(world: World) -> [] int {
                             io.print_nat(o, verdict[2]);
                             io.write_all(o, " branches=");
                             io.print_nat(o, verdict[3]);
+                            if have_root {
+                                io.write_all(o, " level=2");
+                            }
                             io.newline(o);
                         } else {
                             status = 1;
@@ -380,8 +445,11 @@ fn main(world: World) -> [] int {
                 }
             }
             buffer.drop(h, text);
+            buffer.drop(h, tokens_text);
+            buffer.drop(h, revoked_text);
         }
         buffer.drop(h, expect_bytes);
+        buffer.drop(h, root_bytes);
     }
 
     release(args);

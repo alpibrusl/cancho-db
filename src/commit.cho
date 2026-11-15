@@ -66,6 +66,59 @@ pub fn expected_missing() -> [] int {
     return 14;
 }
 
+// L2 (docs/spec/token.md)
+pub fn token_missing() -> [] int {
+    return 15;
+}
+
+pub fn token_bad_signature() -> [] int {
+    return 16;
+}
+
+pub fn token_revoked() -> [] int {
+    return 17;
+}
+
+pub fn token_expired() -> [] int {
+    return 18;
+}
+
+pub fn principal_denied() -> [] int {
+    return 19;
+}
+
+pub fn branch_denied() -> [] int {
+    return 20;
+}
+
+pub fn effect_denied() -> [] int {
+    return 21;
+}
+
+pub fn tokens_bad_magic() -> [] int {
+    return 22;
+}
+
+pub fn tokens_truncated() -> [] int {
+    return 23;
+}
+
+pub fn token_bad_encoding() -> [] int {
+    return 24;
+}
+
+pub fn revocations_bad_magic() -> [] int {
+    return 25;
+}
+
+pub fn revocations_truncated() -> [] int {
+    return 26;
+}
+
+pub fn revocation_bad_signature() -> [] int {
+    return 27;
+}
+
 // The spec's tag for a rule code.
 pub fn rule_name(code: int) -> [] &static [byte] {
     if code == 1 {
@@ -107,12 +160,51 @@ pub fn rule_name(code: int) -> [] &static [byte] {
     if code == 13 {
         return "parent-mismatch";
     }
-    return "expected-missing";
+    if code == 14 {
+        return "expected-missing";
+    }
+    if code == 15 {
+        return "token-missing";
+    }
+    if code == 16 {
+        return "token-bad-signature";
+    }
+    if code == 17 {
+        return "token-revoked";
+    }
+    if code == 18 {
+        return "token-expired";
+    }
+    if code == 19 {
+        return "principal-denied";
+    }
+    if code == 20 {
+        return "branch-denied";
+    }
+    if code == 21 {
+        return "effect-denied";
+    }
+    if code == 22 {
+        return "tokens-bad-magic";
+    }
+    if code == 23 {
+        return "tokens-truncated";
+    }
+    if code == 24 {
+        return "token-bad-encoding";
+    }
+    if code == 25 {
+        return "revocations-bad-magic";
+    }
+    if code == 26 {
+        return "revocations-truncated";
+    }
+    return "revocation-bad-signature";
 }
 
 // Indexes into the `out` slice `decode` fills.
 pub fn out_len() -> [] int {
-    return 6;
+    return 11;
 }
 
 pub fn f_branch_at() -> [] int {
@@ -139,6 +231,27 @@ pub fn f_parents() -> [] int {
 
 pub fn f_parents_at() -> [] int {
     return 5;
+}
+
+// For L2: where the token id and the principal are, where the effects start and how many, and where `time` is.
+pub fn f_token_at() -> [] int {
+    return 6;
+}
+
+pub fn f_principal_at() -> [] int {
+    return 7;
+}
+
+pub fn f_effects_at() -> [] int {
+    return 8;
+}
+
+pub fn f_effects_n() -> [] int {
+    return 9;
+}
+
+pub fn f_time_at() -> [] int {
+    return 10;
 }
 
 // A big-endian unsigned integer of `n` bytes at `at`, for `n` up to 4 (no overflow in a 64-bit int).
@@ -247,6 +360,8 @@ pub fn decode[&d, &o](data: &d [byte], out: &!o [int]) -> [] int {
         if ne < 0 {
             return bad_encoding();
         }
+        out[f_effects_at()] = cur[0];
+        out[f_effects_n()] = ne;
         var seen_one = false;
         var last_kind = 0;
         var last_at = 0;
@@ -283,6 +398,8 @@ pub fn decode[&d, &o](data: &d [byte], out: &!o [int]) -> [] int {
         }
 
         // token, principal, code
+        out[f_token_at()] = cur[0];
+        out[f_principal_at()] = cur[0] + 32;
         if !skip(data, cur, 64) || !skip_hashes(data, cur) {
             return bad_encoding();
         }
@@ -346,6 +463,7 @@ pub fn decode[&d, &o](data: &d [byte], out: &!o [int]) -> [] int {
         }
 
         // time, and nothing after it
+        out[f_time_at()] = cur[0];
         if !skip(data, cur, 8) || cur[0] != len(data) {
             return bad_encoding();
         }
@@ -354,7 +472,7 @@ pub fn decode[&d, &o](data: &d [byte], out: &!o [int]) -> [] int {
 }
 
 // Unsigned lexicographic comparison of two runs of `data`, a prefix first: negative, zero or positive.
-fn compare_at[&d](data: &d [byte], a: int, alen: int, b: int, blen: int) -> [] int {
+pub fn compare_at[&d](data: &d [byte], a: int, alen: int, b: int, blen: int) -> [] int {
     var i = 0;
     while i < alen && i < blen {
         let x = int_of(data[a + i]);

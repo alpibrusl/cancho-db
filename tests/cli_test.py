@@ -28,6 +28,30 @@ cases = [
     ([bad], 1, "reject rule=bad-magic record=-1\n"),
     ([str(vdir)], 2, ""),  # a directory is not a log
 ]
+# L2 (docs/spec/token.md section 6)
+root = (vdir / "l2_ok_basic.args").read_text().split()[1]
+tok = str(vdir / "l2_ok_basic.tokens")
+l2log = str(vdir / "l2_ok_basic.log")
+rev = str(vdir / "l2_ok_revoked_later.revoked")
+l2ok = "ok commits=3 branches=1 level=2\n"
+cases += [
+    ([l2log, "--root", root, "--tokens", tok], 0, l2ok),
+    (["--tokens", tok, l2log, "--root", root], 0, l2ok),
+    ([l2log, "--root", root.upper(), "--tokens", tok], 0, l2ok),
+    ([l2log, "--root", root, "--tokens", tok, "--revoked", rev], 0, l2ok),
+    ([l2log, "--tokens", tok], 2, ""),                                  # tokens without a root
+    ([l2log, "--revoked", rev], 2, ""),                                 # revoked without a root
+    ([l2log, "--root", root], 2, ""),                                   # a root without tokens
+    ([l2log, "--root", root[:-1], "--tokens", tok], 2, ""),
+    ([l2log, "--root", "zz" * 32, "--tokens", tok], 2, ""),
+    ([l2log, "--root", root, "--root", root, "--tokens", tok], 2, ""),  # repeated
+    ([l2log, "--root", root, "--tokens", tok, "--tokens", tok], 2, ""),
+    ([l2log, "--root", root, "--tokens", "nope-no-such-file"], 2, ""),
+    ([l2log, "--root", root, "--tokens", tok, "--revoked", "nope-no-such-file"], 2, ""),
+    ([l2log, "--root", root, "--tokens", str(vdir)], 2, ""),            # a directory is not a token store
+    ([l2log, "--root", root, "--tokens", tok, "--expect", "00" * 32], 1, "reject rule=expected-missing record=-1\n"),
+    ([bad, "--root", root, "--tokens", tok], 1, "reject rule=bad-magic record=-1\n"),  # L1 first
+]
 failed = 0
 for name, cmd in (("cancho", [cho]), ("python", py)):
     for args, status, out in cases:

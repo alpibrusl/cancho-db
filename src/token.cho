@@ -1,0 +1,305 @@
+module cdb.token;
+
+import std.bytes;
+import std.crypto;
+import std.ed25519;
+import cdb.commit;
+
+// Capability tokens (docs/spec/token.md): decoding, the chain of signatures, and the rules a commit is checked against.
+//
+// A token is a slice `tk` of its encoding. `decode` validates it once; every other function here assumes a token that
+// decoded, so it walks the blocks without re-checking bounds. Times are u64 and cancho's int is signed, so a time is
+// carried as two u32 halves and compared by `cmp64`; nothing here adds or multiplies a value from the input beyond what
+// 64-bit ints hold.
+
+// A block's fixed parts: principal (32), then `branch` (u16 length), `effects`, `expiry` (8), `next_key` (32),
+// `signature` (64).
+fn tail() -> [] int {
+    return 96;
+}
+
+// The end of the payload of the block at `at` (just after `expiry`), or -1 if the bytes are not a well-formed block
+// payload: effects strictly ascending, kinds 0 to 4, nothing running past the token.
+fn payload_end[&t](tk: &t [byte], at: int) -> [] int {
+    var p = at + 34;
+    if p > len(tk) {
+        return 0 - 1;
+    }
+    p = p + commit.be(tk, at + 32, 2);
+    if p + 4 > len(tk) {
+        return 0 - 1;
+    }
+    let ne = commit.be(tk, p, 4);
+    p = p + 4;
+    if ne > len(tk) - p {
+        return 0 - 1;
+    }
+    var last_kind = 0;
+    var last_at = 0;
+    var last_len = 0;
+    var i = 0;
+    while i < ne {
+        if p + 3 > len(tk) {
+            return 0 - 1;
+        }
+        let kind = int_of(tk[p]);
+        if kind > 4 {
+            return 0 - 1;
+        }
+        let tl = commit.be(tk, p + 1, 2);
+        let s = p + 3;
+        if s + tl > len(tk) {
+            return 0 - 1;
+        }
+        if i > 0 {
+            var c = kind - last_kind;
+            if c == 0 {
+                c = commit.compare_at(tk, s, tl, last_at, last_len);
+            }
+            if c <= 0 {
+                return 0 - 1;
+            }
+        }
+        last_kind = kind;
+        last_at = s;
+        last_len = tl;
+        p = s + tl;
+        i = i + 1;
+    }
+    if p + 8 > len(tk) {
+        return 0 - 1;
+    }
+    return p + 8;
+}
+
+// Whether `tk` is exactly one well-formed token: at least one block, every block whole, nothing after the last.
+pub fn decode[&t](tk: &t [byte]) -> [] bool {
+    if len(tk) < 4 {
+        return false;
+    }
+    let n = commit.be(tk, 0, 4);
+    if n == 0 || n > len(tk) {
+        return false;
+    }
+    var at = 4;
+    var i = 0;
+    while i < n {
+        let pe = payload_end(tk, at);
+        if pe < 0 {
+            return false;
+        }
+        at = pe + tail();
+        if at > len(tk) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return at == len(tk);
+}
+
+pub fn blocks[&t](tk: &t [byte]) -> [] int {
+    return commit.be(tk, 0, 4);
+}
+
+// The offset of block `i`'s first byte.
+fn block_at[&t](tk: &t [byte], i: int) -> [] int {
+    var at = 4;
+    var k = 0;
+    while k < i {
+        at = payload_end(tk, at) + tail();
+        k = k + 1;
+    }
+    return at;
+}
+
+// Copies `src` into `dst` from `at`; answers the offset after it.
+fn put[&d, &s](dst: &!d [byte], at: int, src: &s [byte]) -> [] int {
+    var i = 0;
+    while i < len(src) {
+        dst[at + i] = src[i];
+        i = i + 1;
+    }
+    return at + len(src);
+}
+
+// The id of the prefix of `k` blocks: SHA-256 of "cancho-db/token/v1", 0, u32(k) and those blocks (§1). Into `out[0..32]`.
+pub fn prefix_id[&t, &o](tk: &t [byte], k: int, out: &!o [byte]) -> [] int {
+    let end = block_at(tk, k);
+    region r {
+        let sha = alloc_slice[r](crypto.sha256_state_len(), 0);
+        let head = alloc_slice[r](5, byte_of(0));
+        head[1] = byte_of(k / 16777216 % 256);
+        head[2] = byte_of(k / 65536 % 256);
+        head[3] = byte_of(k / 256 % 256);
+        head[4] = byte_of(k % 256);
+        crypto.sha256_init(sha);
+        crypto.sha256_update(sha, "cancho-db/token/v1");
+        crypto.sha256_update(sha, head[0..1]);
+        crypto.sha256_update(sha, head[1..5]);
+        crypto.sha256_update(sha, tk[4..end]);
+        crypto.sha256_final(sha, out);
+    }
+    return 0;
+}
+
+// Whether every block's signature verifies under the key the chain expects: `root` for the first, the previous block's
+// `next_key` after that (§1). A key that is not a point verifies nothing.
+pub fn chain_ok[&t, &k](tk: &t [byte], root: &k [byte]) -> [] bool {
+    let n = blocks(tk);
+    var good = true;
+    region r {
+        // the key the chain expects: the root first, then each block's `next_key`
+        let key = alloc_slice[r](32, byte_of(0));
+        put(key, 0, root);
+        var at = 4;
+        var i = 0;
+        while i < n && good {
+            let pe = payload_end(tk, at);
+            let msg = alloc_slice[r](25 + (pe - at) + 32, byte_of(0));
+            var m = put(msg, 0, "cancho-db/token-block/v1");
+            m = m + 1;
+            m = put(msg, m, tk[at..pe + 32]);
+            if ed25519.verify(key, msg, tk[pe + 32..pe + 96]) != 1 {
+                good = false;
+            }
+            put(key, 0, tk[pe..pe + 32]);
+            at = pe + tail();
+            i = i + 1;
+        }
+    }
+    return good;
+}
+
+// -1, 0 or 1: the u64 `ah:al` against `bh:bl`, each a pair of u32 halves.
+pub fn cmp64(ah: int, al: int, bh: int, bl: int) -> [] int {
+    if ah != bh {
+        if ah < bh {
+            return 0 - 1;
+        }
+        return 1;
+    }
+    if al < bl {
+        return 0 - 1;
+    }
+    if al > bl {
+        return 1;
+    }
+    return 0;
+}
+
+// §4 check 4: some block has an expiry (not 2^64-1) that the commit's time `th:tl` is past.
+pub fn expired[&t](tk: &t [byte], th: int, tl: int) -> [] bool {
+    let n = blocks(tk);
+    var at = 4;
+    var i = 0;
+    var hit = false;
+    while i < n {
+        let pe = payload_end(tk, at);
+        let eh = commit.be(tk, pe - 8, 4);
+        let el = commit.be(tk, pe - 4, 4);
+        if !(eh == 4294967295 && el == 4294967295) && cmp64(th, tl, eh, el) > 0 {
+            hit = true;
+        }
+        at = pe + tail();
+        i = i + 1;
+    }
+    return hit;
+}
+
+// §4 check 5: some block names a principal (not all zeros) other than `principal`.
+pub fn principal_denied[&t, &p](tk: &t [byte], principal: &p [byte]) -> [] bool {
+    let n = blocks(tk);
+    var at = 4;
+    var i = 0;
+    var hit = false;
+    while i < n {
+        let pe = payload_end(tk, at);
+        var zero = true;
+        var j = 0;
+        while j < 32 {
+            if int_of(tk[at + j]) != 0 {
+                zero = false;
+            }
+            j = j + 1;
+        }
+        if !zero && !bytes.equal(tk[at..at + 32], principal) {
+            hit = true;
+        }
+        at = pe + tail();
+        i = i + 1;
+    }
+    return hit;
+}
+
+// A pattern matches a value (§2): a pattern ending in `*` is a prefix match on the rest, anything else is equality.
+fn matches[&p, &v](pattern: &p [byte], value: &v [byte]) -> [] bool {
+    let n = len(pattern);
+    if n > 0 && int_of(pattern[n - 1]) == '*' {
+        return bytes.starts_with(value, pattern[0..n - 1]);
+    }
+    return bytes.equal(pattern, value);
+}
+
+// §4 check 6: some block's branch pattern does not match `branch`.
+pub fn branch_denied[&t, &b](tk: &t [byte], branch: &b [byte]) -> [] bool {
+    let n = blocks(tk);
+    var at = 4;
+    var i = 0;
+    var hit = false;
+    while i < n {
+        let pe = payload_end(tk, at);
+        let bl = commit.be(tk, at + 32, 2);
+        if !matches(tk[at + 34..at + 34 + bl], branch) {
+            hit = true;
+        }
+        at = pe + tail();
+        i = i + 1;
+    }
+    return hit;
+}
+
+// Whether the block whose effects start at `eat` (`ne` of them) permits the effect (`kind`, `target`).
+fn block_permits[&t, &g](tk: &t [byte], eat: int, ne: int, kind: int, target: &g [byte]) -> [] bool {
+    var p = eat;
+    var i = 0;
+    var found = false;
+    while i < ne && !found {
+        let k = int_of(tk[p]);
+        let tl = commit.be(tk, p + 1, 2);
+        if k == kind && matches(tk[p + 3..p + 3 + tl], target) {
+            found = true;
+        }
+        p = p + 3 + tl;
+        i = i + 1;
+    }
+    return found;
+}
+
+// §4 check 7: some block permits none of the commit's effect `j` for some `j`. The commit's effects are `en` entries
+// from `eat` in `enc` (already validated by `commit.decode`).
+pub fn effect_denied[&t, &c](tk: &t [byte], enc: &c [byte], eat: int, en: int) -> [] bool {
+    let n = blocks(tk);
+    var at = 4;
+    var i = 0;
+    var hit = false;
+    while i < n && !hit {
+        let pe = payload_end(tk, at);
+        let bl = commit.be(tk, at + 32, 2);
+        let ecount_at = at + 34 + bl;
+        let ne = commit.be(tk, ecount_at, 4);
+        var q = eat;
+        var j = 0;
+        while j < en && !hit {
+            let kind = int_of(enc[q]);
+            let tl = commit.be(enc, q + 1, 2);
+            if !block_permits(tk, ecount_at + 4, ne, kind, enc[q + 3..q + 3 + tl]) {
+                hit = true;
+            }
+            q = q + 3 + tl;
+            j = j + 1;
+        }
+        at = pe + tail();
+        i = i + 1;
+    }
+    return hit;
+}

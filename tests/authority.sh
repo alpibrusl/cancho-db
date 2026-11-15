@@ -3,7 +3,7 @@
 # program performs and what it never touches; this fails if the list grows or a "never touches" line goes away.
 set -eu
 CANCHO=${CANCHO:-cancho}
-out=$("$CANCHO" authority src/commit.cho src/verify.cho --std)
+out=$("$CANCHO" authority src/*.cho --std)
 performs=$(printf '%s\n' "$out" | sed -n '/^performs/,/^never touches/p' | sed '1d;$d' | sed 's/^ *//' | sort | tr '\n' ' ')
 want='args err_write file_read fs_read("") heap io_write '
 if [ "$performs" != "$want" ]; then

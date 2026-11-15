@@ -3,7 +3,7 @@
 
     run_vectors.py [--jobs N] VECTORS_DIR -- COMMAND [ARG...]
 
-COMMAND is run as `COMMAND NAME.log [NAME.args...]`. A vector passes when stdout is exactly the expected line and the
+COMMAND is run as `COMMAND NAME.log [the words of NAME.args, with {dir} replaced by the vectors directory]`. A vector passes when stdout is exactly the expected line and the
 exit status is 0 for `ok ...` and 1 for `reject ...`. Exit status of this script: 0 all pass, 1 any failed.
 """
 import concurrent.futures
@@ -15,7 +15,7 @@ from pathlib import Path
 def run_one(log, cmd):
     expect = log.with_suffix(".expect").read_text()
     args_file = log.with_suffix(".args")
-    extra = args_file.read_text().split() if args_file.exists() else []
+    extra = args_file.read_text().replace("{dir}", str(log.parent)).split() if args_file.exists() else []
     p = subprocess.run(cmd + [str(log)] + extra, capture_output=True, timeout=60)
     want_status = 0 if expect.startswith("ok") else 1
     out = p.stdout.decode(errors="replace")
