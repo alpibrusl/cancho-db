@@ -65,7 +65,7 @@ def decode(enc):
         raise Reject("bad-encoding")
     seq = r.u64()
     r.take(32)                                    # schema
-    for _ in range(r.count()): r.take(32)         # statements
+    statements = [r.take(32) for _ in range(r.count())]
     last = None
     effects = []
     for _ in range(r.count()):                    # effects
@@ -98,7 +98,7 @@ def decode(enc):
     time = r.u64()
     if r.at != len(enc):
         raise Reject("bad-encoding")
-    return branch, seq, parents, (branch, principal, token, effects, time)
+    return branch, seq, parents, (branch, principal, token, effects, time, statements)
 
 
 def verify(data, expect):
@@ -233,9 +233,10 @@ def block_permits_effect(block, effect):
     return any(k == effect[0] and pattern_matches(t, effect[1]) for k, t in block[2])
 
 
-def l2_denial(blocks, root, info, revoked):
-    """The first L2 rule the commit `info` breaks under the token `blocks`, or None. (§4, commit checks 2 to 7)"""
-    branch, principal, _token, effects, time = info
+def l2_denial(blocks, root, info, revoked, ir=None):
+    """The first L2 rule the commit `info` breaks under the token `blocks`, or None. (token.md §4, commit checks 2 to 7;
+    with `ir` (id -> inferred effects) ir.md §4: stmt-missing and effects-mismatch come before effect-denied)"""
+    branch, principal, _token, effects, time, statements = info
     if not chain_valid(blocks, root):
         return "token-bad-signature"
     for k in range(1, len(blocks) + 1):
@@ -248,6 +249,14 @@ def l2_denial(blocks, root, info, revoked):
         return "principal-denied"
     if any(not pattern_matches(b[1], branch) for b in blocks):
         return "branch-denied"
+    if ir is not None:
+        inferred = set()
+        for sid in statements:
+            if sid not in ir:
+                return "stmt-missing"
+            inferred |= ir[sid]
+        if inferred != set(effects):
+            return "effects-mismatch"
     if any(not block_permits_effect(b, e) for b in blocks for e in effects):
         return "effect-denied"
     return None
@@ -294,19 +303,160 @@ def load_revoked(data, root):
     return revoked
 
 
-def verify_l2(infos, root, tokens_data, revoked_data):
+# ------------------------------------------------------------ statement IR (docs/spec/ir.md)
+STMT_DOMAIN = b"cancho-db/stmt/v1\x00"
+
+
+def infer_effects(enc):
+    """The inferred effect set of one statement (ir.md §3). Raises Reject("stmt-bad-encoding") if it is malformed."""
+    r = Reader(enc)
+    out = set()
+
+    def bad():
+        raise Reject("stmt-bad-encoding")
+
+    def name(ident):
+        n = r.b16()
+        if len(n) == 0 or (ident and b"." in n):
+            bad()
+        return n
+
+    def expr(allow_col):
+        pending = 1
+        while pending > 0:
+            tag = r.u8()
+            pending -= 1
+            if tag == 0:
+                t, c = name(True), name(True)
+                if not allow_col:
+                    bad()
+                out.add((0, t + b"." + c))
+            elif tag == 1:
+                vt = r.u8()
+                if vt == 1:
+                    r.take(8)
+                elif vt == 2:
+                    r.take(r.u32())
+                elif vt != 0:
+                    bad()
+            elif tag == 2:
+                r.take(4)
+            elif tag == 3:
+                out.add((4, name(False)))
+            elif tag == 4:
+                f = name(False)
+                argc = r.u32()
+                out.add((3, f))
+                pending += argc
+            elif tag == 5:
+                if r.u8() > 11:
+                    bad()
+                pending += 2
+            else:
+                bad()
+            if pending > len(enc) - r.at:  # every node is at least one byte
+                bad()
+
+    def opt():
+        flag = r.u8()
+        if flag == 1:
+            expr(True)
+        elif flag != 0:
+            bad()
+
+    def cnt():
+        return r.count()
+
+    try:
+        tag = r.u8()
+        if tag == 0:
+            for _ in range(cnt()):
+                expr(True)
+            tables = cnt()
+            if tables == 0:
+                bad()
+            for _ in range(tables):
+                out.add((0, name(True)))
+            opt()
+        elif tag == 1:
+            t = name(True)
+            out.add((1, t))
+            ncols = cnt()
+            for _ in range(ncols):
+                name(True)
+            for _ in range(cnt()):
+                if cnt() != ncols:
+                    bad()
+                for _ in range(ncols):
+                    expr(False)
+        elif tag == 2:
+            out.add((1, name(True)))
+            nsets = cnt()
+            if nsets == 0:
+                bad()
+            for _ in range(nsets):
+                name(True)
+                expr(True)
+            opt()
+        elif tag == 3:
+            out.add((1, name(True)))
+            opt()
+        elif tag == 4:
+            if r.u8() > 4:
+                bad()
+            out.add((2, name(True)))
+        elif tag == 5:
+            out.add((3, name(False)))
+            for _ in range(cnt()):
+                expr(True)
+        else:
+            bad()
+        if r.at != len(enc):
+            bad()
+    except Reject as e:
+        raise Reject("stmt-bad-encoding")
+    return frozenset(out)
+
+
+def load_stmts(data):
+    """-> {statement id: inferred effects}. Raises Reject for a bad store (ir.md §4)."""
+    if len(data) < 8:
+        raise Reject("stmts-truncated")
+    if data[:8] != b"CHODBST1":
+        raise Reject("stmts-bad-magic")
+    at, index, store = 8, 0, {}
+    while at < len(data):
+        if len(data) - at < 4:
+            raise Reject("stmts-truncated", index)
+        (length,) = struct.unpack(">I", data[at:at + 4])
+        if len(data) - at - 4 < length:
+            raise Reject("stmts-truncated", index)
+        enc = data[at + 4:at + 4 + length]
+        at += 4 + length
+        try:
+            effects = infer_effects(enc)
+        except Reject as e:
+            raise Reject(e.rule, index)
+        store[hashlib.sha256(STMT_DOMAIN + enc).digest()] = effects
+        index += 1
+    return store
+
+
+def verify_l2(infos, root, tokens_data, revoked_data, stmts_data=None):
     store = load_tokens(tokens_data)
     revoked = load_revoked(revoked_data, root) if revoked_data is not None else {}
+    ir = load_stmts(stmts_data) if stmts_data is not None else None
     for index, info in enumerate(infos):
         blocks = store.get(info[2])
-        why = "token-missing" if blocks is None else l2_denial(blocks, root, info, revoked)
+        why = "token-missing" if blocks is None else l2_denial(blocks, root, info, revoked, ir)
         if why:
             raise Reject(why, index)
 
 
 def main(argv):
-    usage = "usage: verify.py LOG [--expect <64 hex digits>] [--root <64 hex digits> --tokens FILE [--revoked FILE]]"
-    path, expect, root, tokens, revoked, i = None, None, None, None, None, 1
+    usage = ("usage: verify.py LOG [--expect <64 hex digits>] "
+             "[--root <64 hex digits> --tokens FILE [--revoked FILE] [--stmts FILE]]")
+    path, expect, root, tokens, revoked, stmts, i = None, None, None, None, None, None, 1
 
     def hex32(text):
         ok = len(text) == 64 and all(c in "0123456789abcdefABCDEF" for c in text)
@@ -324,11 +474,14 @@ def main(argv):
             else:
                 root = v
             i += 2
-        elif a in ("--tokens", "--revoked") and i + 1 < len(argv) and (tokens if a == "--tokens" else revoked) is None:
+        elif a in ("--tokens", "--revoked", "--stmts") and i + 1 < len(argv) and (
+                {"--tokens": tokens, "--revoked": revoked, "--stmts": stmts}[a] is None):
             if a == "--tokens":
                 tokens = argv[i + 1]
-            else:
+            elif a == "--revoked":
                 revoked = argv[i + 1]
+            else:
+                stmts = argv[i + 1]
             i += 2
         elif not a.startswith("-") and path is None:
             path = a
@@ -336,7 +489,7 @@ def main(argv):
         else:
             print(usage, file=sys.stderr)
             return 2
-    if path is None or (root is None and (tokens is not None or revoked is not None)) or (
+    if path is None or (root is None and (tokens is not None or revoked is not None or stmts is not None)) or (
             root is not None and tokens is None):
         print(usage, file=sys.stderr)
         return 2
@@ -345,14 +498,16 @@ def main(argv):
             data = f.read()
         tokens_data = open(tokens, "rb").read() if tokens else None
         revoked_data = open(revoked, "rb").read() if revoked else None
+        stmts_data = open(stmts, "rb").read() if stmts else None
     except OSError as e:
         print("verify.py: cannot read %s: %s" % (e.filename, e.strerror), file=sys.stderr)
         return 2
     try:
         commits, branches, infos = verify(data, expect)
         if root is not None:
-            verify_l2(infos, root, tokens_data, revoked_data)
-        print("ok commits=%d branches=%d%s" % (commits, branches, " level=2" if root is not None else ""))
+            verify_l2(infos, root, tokens_data, revoked_data, stmts_data)
+        level = "" if root is None else (" level=2+ir" if stmts_data is not None else " level=2")
+        print("ok commits=%d branches=%d%s" % (commits, branches, level))
         return 0
     except Reject as e:
         print("reject rule=%s record=%d" % (e.rule, e.record))

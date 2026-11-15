@@ -5,6 +5,7 @@ import std.bytes;
 import std.map;
 import std.ed25519;
 import cdb.commit;
+import cdb.ir;
 import cdb.token;
 
 // L2 (docs/spec/token.md section 4), run over a log that has already passed L1: the two stores, then every commit.
@@ -13,13 +14,15 @@ import cdb.token;
 // (-1 for none). `has_revoked` is false when no revocation file was given (`revoked` is then empty and ignored).
 //
 // No early `return` while the maps are alive: they are owned and dropped once, at the end, on every path.
-pub fn run[&h, &d, &k, &t, &v, &o](heap: &!h Heap, data: &d [byte], root: &k [byte], tokens: &t [byte], revoked: &v [byte], has_revoked: bool, verdict: &!o [int]) -> [heap] int {
+pub fn run[&h, &d, &k, &t, &v, &x, &o](heap: &!h Heap, data: &d [byte], root: &k [byte], tokens: &t [byte], revoked: &v [byte], has_revoked: bool, stmts: &x [byte], has_stmts: bool, verdict: &!o [int]) -> [heap] int {
     var rule = 0;
     var bad_at = 0 - 1;
     // token id -> where the token's bytes start in `tokens`
     var store = map.empty(heap, 16, 0, 5);
     // token id -> index of the revocation with the earliest `since`
     var rev = map.empty(heap, 16, 0, 9);
+    // statement id -> where the statement's bytes start in `stmts` (docs/spec/ir.md)
+    var sstore = map.empty(heap, 16, 0, 17);
 
     region r {
         let id = alloc_slice[r](32, byte_of(0));
@@ -116,6 +119,44 @@ pub fn run[&h, &d, &k, &t, &v, &o](heap: &!h Heap, data: &d [byte], root: &k [by
             }
         }
 
+        // statements
+        if rule == 0 && has_stmts {
+            if len(stmts) < 8 {
+                rule = commit.stmts_truncated();
+            } else if !bytes.equal(stmts[0..8], "CHODBST1") {
+                rule = commit.stmts_bad_magic();
+            }
+            let sid = alloc_slice[r](32, byte_of(0));
+            var sat = 8;
+            var sidx = 0;
+            while rule == 0 && sat < len(stmts) {
+                if len(stmts) - sat < 4 {
+                    rule = commit.stmts_truncated();
+                } else {
+                    let length = commit.be(stmts, sat, 4);
+                    if len(stmts) - sat - 4 < length {
+                        rule = commit.stmts_truncated();
+                    } else {
+                        let body = stmts[sat + 4..sat + 4 + length];
+                        let scratch = map.empty(heap, 16, 0, 3);
+                        let (spent, well_formed) = ir.infer(heap, scratch, body);
+                        map.drop(heap, spent);
+                        if !well_formed {
+                            rule = commit.stmt_bad_encoding();
+                        } else {
+                            ir.id(body, sid);
+                            sstore = map.put(heap, sstore, sid, sat + 4);
+                            sat = sat + 4 + length;
+                        }
+                    }
+                }
+                if rule != 0 {
+                    bad_at = sidx;
+                }
+                sidx = sidx + 1;
+            }
+        }
+
         // commits, in log order
         at = 40;
         index = 0;
@@ -167,8 +208,22 @@ pub fn run[&h, &d, &k, &t, &v, &o](heap: &!h Heap, data: &d [byte], root: &k [by
                         rule = commit.principal_denied();
                     } else if token.branch_denied(tk, enc[bat..bat + out[commit.f_branch_len()]]) {
                         rule = commit.branch_denied();
-                    } else if token.effect_denied(tk, enc, out[commit.f_effects_at()], out[commit.f_effects_n()]) {
-                        rule = commit.effect_denied();
+                    } else {
+                        // with statements: every one must be in the store and infer exactly the recorded effects,
+                        // and only then are the effects judged against the token (ir.md section 4)
+                        var ircode = 0;
+                        if has_stmts {
+                            borrow sstore as &sm in {
+                                ircode = ir.check_commit(heap, sm, stmts, enc, out);
+                            }
+                        }
+                        if ircode == 1 {
+                            rule = commit.stmt_missing();
+                        } else if ircode == 2 {
+                            rule = commit.effects_mismatch();
+                        } else if token.effect_denied(tk, enc, out[commit.f_effects_at()], out[commit.f_effects_n()]) {
+                            rule = commit.effect_denied();
+                        }
                     }
                 }
             }
@@ -183,5 +238,6 @@ pub fn run[&h, &d, &k, &t, &v, &o](heap: &!h Heap, data: &d [byte], root: &k [by
     verdict[1] = bad_at;
     map.drop(heap, store);
     map.drop(heap, rev);
+    map.drop(heap, sstore);
     return 0;
 }

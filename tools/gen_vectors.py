@@ -266,6 +266,22 @@ vec("decode_error_second", log(record(chain3.encs[0]), record(commit(version=9))
 vec("decode_before_signature", log(record(commit(effects=[effect(5, b"t")]), sig=bytes(64))),
     rejects("bad-encoding", 0))
 
+# Inside the effects list, elements are judged one at a time, in order (commit.md section 5): the first violation met wins
+unordered_pair = effect(0, b"orders") + effect(0, b"order\x00")  # the second sorts before the first
+head = u16(1) + lst([]) + b16(b"main") + u64(0) + h("s") + lst([])
+tail = h("t") + h("p") + lst([]) + lst([]) + h("c") + h("st") + lst([]) + u64(0)
+def with_effects(count, raw): return head + u32(count) + raw + tail
+vec("effects_unordered_then_bad_kind", log(record(with_effects(3, unordered_pair + bytes([9]) + b16(b"x")))),
+    rejects("effects-unordered", 0))
+vec("effects_unordered_then_target_overrun", log(record(with_effects(3, unordered_pair + bytes([0]) + u16(60000) + b"x"))),
+    rejects("effects-unordered", 0))
+vec("effects_bad_kind_then_unordered", log(record(with_effects(3, bytes([9]) + b16(b"x") + unordered_pair))),
+    rejects("bad-encoding", 0))
+vec("effects_count_overrun_after_unordered_pair", log(record(with_effects(1000, unordered_pair))),
+    rejects("bad-encoding", 0))
+vec("effects_unordered_in_third_position", log(record(with_effects(3, effect(0, b"a") + effect(0, b"b") + effect(0, b"a")))),
+    rejects("effects-unordered", 0))
+
 # ----------------------------------------------------------- duplicate/sig
 vec("duplicate_commit", log(r0, r0), rejects("duplicate-commit", 1))
 vec("duplicate_not_adjacent", log(*[record(e) for e in chain3.encs], r0), rejects("duplicate-commit", 3))
@@ -373,7 +389,9 @@ def write(out):
 
 
 if __name__ == "__main__":
+    import gen_ir
     import gen_l2
     gen_l2.add(sys.modules[__name__])
+    gen_ir.add(sys.modules[__name__])
     target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "vectors"
     print("wrote %d vectors to %s" % (write(target), target))

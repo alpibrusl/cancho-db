@@ -333,7 +333,12 @@ def add(g):
     l2("l2_token_bad_entry_unused_is_still_an_error", one, store(enc(basic), b"\x00\x01"),
        no("token-bad-encoding", 1))
 
+    # entries are judged one at a time: an earlier bad entry beats a later truncated one (token.md section 4)
+    l2("l2_tokens_bad_entry_before_truncated_entry", one, store(enc(basic), b"\x00\x01") + u32(0xFFFFFFFF),
+       no("token-bad-encoding", 1))
     rgood = revoked(revocation(g.h("x"), 5))
+    l2("l2_revoked_bad_signature_before_truncated_entry", one, good, no("revocation-bad-signature", 0),
+       revoked(revocation(g.h("x"), 5, signer=FOREIGN)) + b"short")
     l2("l2_revoked_bad_magic", one, good, no("revocations-bad-magic", -1), b"CHODBRV2" + rgood[8:])
     l2("l2_revoked_empty_file", one, good, no("revocations-truncated", -1), b"")
     l2("l2_revoked_short_header", one, good, no("revocations-truncated", -1), b"CHODB")

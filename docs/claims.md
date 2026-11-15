@@ -29,13 +29,30 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C15 | A malformed token store or revocation list is refused with a tag and the entry it names, before any commit is judged; L1 is judged before L2. | `l2_tokens_*`, `l2_token_*`, `l2_revoked_bad_*`, `l2_revoked_truncated_*`, `l2_l1_failure_*`, `l2_stores_checked_before_commits` | the order is part of the spec, so two verifiers cannot disagree |
 | C16 | Neither verifier crashes or prints anything but its line on damaged L2 inputs, and they agree. | `tests/fuzz.py` (damages log, token store and revocation list), `tests/cli_test.py` | as C8 |
 
+### Statement IR and effect inference ([`spec/ir.md`](spec/ir.md))
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C17 | A statement has one reading: names, operands, counts and tags that an encoder would not produce are refused, expressions in prefix order are well formed exactly when no operand is owed or left over, and `.` cannot appear in a table or column name. | `ir_bad_*` vectors (39); the IR decode mutants of both verifiers | a name with a dot would make `read a.b` ambiguous; an operand miscount would let two readings share bytes |
+| C18 | Each kind of statement yields exactly the effects of `ir.md` §3: a select reads each `from` table and each column it names, a write records the table, a call records the function, a `now()` or sequence records a nondet. | `ir_ok_*` vectors, whose recorded effect sets are written out by hand, never computed; the "forgets ..." mutants | the expected set of every vector is a literal |
+| C19 | **A commit's recorded effects must equal the inferred effects of its statements**, a hidden effect and an invented one alike, and every statement it names must be in the store. A server that records less than it ran passes L2 alone and is refused with `--stmts`. | `ir_mismatch_*`, `ir_stmt_missing_*`, **`ir_gap_hidden_write_passes_l2_alone`** and **`ir_gap_hidden_write_is_refused_with_statements`** (the same log, with and without the store); the "recorded may be smaller / larger" and "only the first statement" mutants | equality is checked in both directions |
+| C20 | With statements, `effect-denied` is judged on the effect set shown to be real, after `stmt-missing` and `effects-mismatch`. | `ir_effect_denied_on_the_true_effects`, `ir_order_*`; the "effects judged before the statements" mutants of both verifiers | a lying recorded set must not be what the token is judged against |
+| C21 | A malformed statement store is refused with a tag and the entry it names, before any commit is judged, after the token store and the revocation list; an unused bad entry is still an error. | `ir_stmts_*`, `ir_bad_entry_unused_is_still_an_error`, `ir_order_*_before_stmts` | as C15 |
+
 ## What is *not* claimed
 
-- **L3.** Nothing here replays statements. And **L2 here checks the commit's *recorded* effect set against its token,
-  not that the recorded set is what the statements do.** The design's L2 "needs tokens and statement IR", and the IR is
-  not specified yet, so a server that records a smaller effect set than it executed passes this check. Closing that is
-  M1's effect inference plus the IR format; until then the claim is "the log is consistent with the tokens", not "the
-  statements were within the tokens".
+- **L3.** Nothing here replays statements.
+- **Without `--stmts`, L2 judges only the recorded effect set against the token**, and a server that records less than it
+  ran passes (`ir_gap_hidden_write_passes_l2_alone` is that case, kept on purpose). With `--stmts` the recorded set is
+  shown to be exactly what the statement store infers. What that does **not** show: that the store holds the statements
+  the server actually executed (the log commits to their hashes; whether the server ran that IR is its honesty again, and
+  L3 is what checks execution); that the server lowered the client's SQL to that IR faithfully (an alias resolved to the
+  wrong table gives an IR consistent with its own effects and wrong about the SQL; differential testing against Postgres
+  at M1 is what covers that); and anything the v1 IR cannot express (subqueries, `RETURNING`, CTEs), which a server cannot
+  run until a new IR version.
+- **Two stated gaps in the effect model.** `call fn` is recorded but not expanded into what the stored function does
+  (that needs the function's declared effects, M1). An `Update` or `Delete` does not record `read table` for its row
+  count, the writer already holding `write table`.
 - **The server key and the root key are trusted.** A holder of the server key can write a valid log of anything, and of
   the root key can mint any token. L1 and L2 detect tampering and overreach by everyone else.
 - **`time` is the server's claim** (`token.md` §4). Expiry and revocation bind a server with an honest clock.
@@ -51,9 +68,18 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
   wrote the file and ran the vectors. It is the same model family as the author, so a misreading the family shares would be
   shared. What it did show: one bug of its own on the first run (66 of 209 vectors, a missing `next_key` in a signed message
   that the spec states plainly), and seven places where the spec left a careful implementer to decide, now written into the
-  specs. Three implementations use three different Ed25519 code bases (cancho's own, OpenSSL's, Go's). **The M0 exit
-  criterion** (every verifier agrees on every vector and rejects every tampered chain) **is met for L1 and L2** by
+  specs. It was later extended to the statement IR the same way (the IR spec and the new vectors only; all 121 IR vectors
+  passed without a fix; eight open points reported and now written into `ir.md`). Three implementations use three different Ed25519 code bases (cancho's own, OpenSSL's, Go's). **The M0 exit
+  criterion** (every verifier agrees on every vector and rejects every tampered chain) **is met for L1, L2 and the IR** by
   these three, on the strength of that caveat.
+- **What the three-way fuzz found.** Fuzzing all three verifiers against each other found one disagreement the vectors and
+  the independent reading had both missed: whether `effects-unordered` or `bad-encoding` wins when an out-of-order effect is
+  followed by a malformed one. The spec said "judged when its field has been read" and did not say whether a list is the
+  field or each element. That was a spec ambiguity, not a bug in any verifier: it is now decided (per element, in order,
+  `commit.md` §5), five vectors pin it, and the Go verifier was changed by the agent that wrote it, from the clarified
+  text. The agent was then asked to look for the same ambiguity elsewhere by reading; it named three more (the order
+  of entries inside the token, revocation and statement stores), now written into `token.md` §4 and `ir.md` §4 and pinned by
+  three vectors. A spec sentence is not counted as settled until a vector separates the two readings.
 - **Ed25519 edge cases are unspecified.** Small-order and non-canonical-but-decodable keys and `R` values are
   implementation-defined in v1 and no vector exercises them (`commit.md` header).
 - **Mutants are the ones listed.** `tests/mutants.py` shows the vectors fail for those changes, not for every possible
@@ -62,6 +88,12 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
   empty pattern (`*_empty_pattern`), duplicate revocations listed latest first
   (`l2_revoked_twice_earliest_wins_later_first`) and u64 compares across the 32-bit boundary
   (`*_across_32_bit_carry`).
+- **The IR mutants found one gap** while this was written: a row whose declared count differs from the number of columns
+  was only ever caught by a truncation or trailing bytes, never by its own rule
+  (`ir_bad_insert_row_count_*`). Two mutants are not listed because their change is not observable in a verdict: the
+  check that a count fits the bytes left (every read is bounds-checked anyway, so only the allocation is unbounded) and
+  `size <= ne` for `size == ne` in the cancho set comparison (with every recorded effect required to be inferred, they are
+  the same test).
 - **The L2 fuzzing is shallow in the finest rules.** Damaging a token changes its id, so most damaged inputs end in
   `token-missing` or `token-bad-encoding`; the fuzzer shows agreement and no crashes, and the vectors (not the fuzzer) are
   what pin the individual denial rules.

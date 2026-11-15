@@ -40,19 +40,25 @@ Expr      = tag body, in PREFIX order (the operator first, then its operands):
   5 Op       op:u8 (0 to 11)     then 2 Exprs              // eq ne lt le gt ge and or add sub mul div
 ```
 
-`Name`s of tables and columns (every `Name` except a `Call`'s `fn` and a `Nondet`'s `source`) MUST NOT contain the byte
-`.` (0x2E): effect targets join a table and a column with it (§3), and a name that held one would make two different
-reads look the same. A name of length 0, or one that breaks this, is `stmt-bad-encoding`.
+Every `Name` is at least one byte. `Name`s of tables and columns (every `Name` except a `Call`'s `fn` and a `Nondet`'s
+`source`) MUST ALSO NOT contain the byte `.` (0x2E): effect targets join a table and a column with it (§3), and a name that
+held one would make two different reads look the same. A name of length 0, or a table or column name that breaks this, is
+`stmt-bad-encoding`. A function or source name may contain a `.` (`pg.round`).
 
 **Prefix order is what makes this checkable without recursion.** An expression is well formed if reading it leaves no
 operand missing and none over: keep a count of operands still owed, start it at 1, and at each node subtract 1 and add
-that node's operand count (0 for `Col`, `Const`, `Param`, `Nondet`; `argc` for `Call`; 2 for `Op`); the expression ends
-exactly when the count reaches 0, and it MUST NOT reach 0 before the last node of the expression or still be above 0 where
-the expression's bytes end. A count that would be larger than the bytes left is malformed (every node is at least one byte).
+that node's operand count (0 for `Col`, `Const`, `Param`, `Nondet`; `argc` for `Call`; 2 for `Op`). **An expression is
+exactly the shortest prefix of the bytes at which the count reaches 0**: what follows belongs to whatever comes next, and if
+the bytes run out while the count is above 0 the statement is malformed. A count larger than the bytes left is malformed
+(every node is at least one byte), so no number is ever trusted to size anything.
 
-Other malformations, all `stmt-bad-encoding`: an unknown tag, kind, op or flag; an `Insert` row of a different length than
-`columns`, or one containing a `Col` (a column reference means nothing in `VALUES`); a `Select` with no `from`; an `Update`
-with no `sets`; any count larger than the bytes left; bytes after the end of the statement.
+Other malformations, all `stmt-bad-encoding` (and, being one tag, in no order a verifier could be caught out on): an unknown
+tag, kind, op, flag or `Const` value tag; an `Insert` row whose own `u32` count differs from the number of `columns`, or
+one containing a `Col` (a column reference means nothing in `VALUES`); a `Select` with no `from`; an `Update` with no `sets`;
+any count larger than the bytes left; bytes after the end of the statement. **Not malformed:** an `Insert` with no columns
+or no rows, a `Select` with no items, and a `Col` whose table is not in the statement's `from` (this IR has no scope check:
+the lowering resolves names, and inference records the reads of whatever is named, so `read t.c` is recorded and `read t` is
+not).
 
 **Identity.** `id = SHA-256("cancho-db/stmt/v1" || 0x00 || encoding(statement))`. This is what `statements` lists, in
 execution order.
@@ -92,11 +98,13 @@ statements has the empty set.
 stmts = "CHODBST1" ( u32 length  Statement )*
 ```
 
-A statement listed twice is the same statement. The verifier is given the store with `--stmts FILE` (which requires
+A statement listed twice is the same statement (its id is the same, and the `record` of a malformed entry counts entries,
+repeats included). The verifier is given the store with `--stmts FILE` (which requires
 `--root`: this is a further check on L2, `token.md` §6).
 
 **The store** is read after the token store and the revocation list and before any commit (`token.md` §4), with, as
-there, `record` the index of the entry, or `-1` for the header: fewer than 8 bytes `stmts-truncated`; the magic differs
+there, `record` the index of the entry, or `-1` for the header, and entries read and judged one at a time, in order, the
+first failure being the verdict (an earlier malformed statement beats a later truncated entry): fewer than 8 bytes `stmts-truncated`; the magic differs
 `stmts-bad-magic`; an entry whose `length` runs past the end `stmts-truncated`; a statement that does not decode
 `stmt-bad-encoding`.
 

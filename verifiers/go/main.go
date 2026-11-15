@@ -87,7 +87,9 @@ type effect struct {
 	target []byte
 }
 
-// readEffects reads [Effect] and reports whether it is strictly ascending.
+// readEffects reads [Effect] one element at a time, judging each as it is
+// read. It stops at the first out-of-order effect (ordered=false) without
+// reading the rest; a malformed element sets r.bad.
 func readEffects(r *reader) ([]effect, bool) {
 	n := r.count()
 	var es []effect
@@ -101,22 +103,22 @@ func readEffects(r *reader) ([]effect, bool) {
 			r.bad = true
 			break
 		}
+		if i > 0 {
+			p := es[i-1]
+			if p.kind > k || (p.kind == k && bytes.Compare(p.target, t) >= 0) {
+				return es, false
+			}
+		}
 		es = append(es, effect{k, t})
 	}
-	ordered := true
-	for i := 1; i < len(es); i++ {
-		a, b := es[i-1], es[i]
-		if a.kind > b.kind || (a.kind == b.kind && bytes.Compare(a.target, b.target) >= 0) {
-			ordered = false
-		}
-	}
-	return es, ordered
+	return es, true
 }
 
 type commit struct {
 	parents   [][]byte
 	branch    []byte
 	seq       uint64
+	stmts     [][]byte
 	effects   []effect
 	token     []byte
 	principal []byte
@@ -161,7 +163,9 @@ func decodeCommit(b []byte) (*commit, string) {
 	c.seq = r.u64()
 	r.take(32) // schema
 	ns := r.count()
-	r.take(ns * 32)
+	for i := 0; i < ns && !r.bad; i++ {
+		c.stmts = append(c.stmts, r.take(32))
+	}
 	if r.bad {
 		return nil, "bad-encoding"
 	}
@@ -377,7 +381,7 @@ func matches(pat, v []byte) bool {
 	return bytes.Equal(pat, v)
 }
 
-func verifyL2(info *logInfo, root ed25519.PublicKey, tokData, revData []byte, haveRev bool) *reject {
+func verifyL2(info *logInfo, root ed25519.PublicKey, tokData, revData []byte, haveRev bool, stmtData []byte, haveStmts bool) *reject {
 	if len(tokData) < 8 {
 		return &reject{"tokens-truncated", -1}
 	}
@@ -426,6 +430,13 @@ func verifyL2(info *logInfo, root ed25519.PublicKey, tokData, revData []byte, ha
 			revoked[string(id)] = append(revoked[string(id)], binary.BigEndian.Uint64(since))
 		}
 	}
+	stmts := map[string][]effect{}
+	if haveStmts {
+		var rj *reject
+		if stmts, rj = loadStmts(stmtData); rj != nil {
+			return rj
+		}
+	}
 	for i, c := range info.commits {
 		t := tokens[string(c.token)]
 		if t == nil {
@@ -460,6 +471,19 @@ func verifyL2(info *logInfo, root ed25519.PublicKey, tokData, revData []byte, ha
 		for _, b := range t.blocks {
 			if !matches(b.branch, c.branch) {
 				return &reject{"branch-denied", i}
+			}
+		}
+		if haveStmts {
+			var all []effect
+			for _, h := range c.stmts {
+				es, ok := stmts[string(h)]
+				if !ok {
+					return &reject{"stmt-missing", i}
+				}
+				all = append(all, es...)
+			}
+			if !sameSet(all, c.effects) {
+				return &reject{"effects-mismatch", i}
 			}
 		}
 		for _, b := range t.blocks {
@@ -497,8 +521,8 @@ func usage() {
 
 func main() {
 	args := os.Args[1:]
-	var path, expectS, rootS, tokPath, revPath string
-	var haveExpect, haveRoot, haveTok, haveRev, havePath bool
+	var path, expectS, rootS, tokPath, revPath, stmtPath string
+	var haveExpect, haveRoot, haveTok, haveRev, havePath, haveStmts bool
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		next := func() string {
@@ -529,6 +553,11 @@ func main() {
 				usage()
 			}
 			haveRev, revPath = true, next()
+		case "--stmts":
+			if haveStmts {
+				usage()
+			}
+			haveStmts, stmtPath = true, next()
 		default:
 			if havePath {
 				usage()
@@ -549,17 +578,22 @@ func main() {
 		if root = parseHex32(rootS); root == nil || !haveTok {
 			usage()
 		}
-	} else if haveTok || haveRev {
+	} else if haveTok || haveRev || haveStmts {
 		usage()
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		usage()
 	}
-	var tokData, revData []byte
+	var tokData, revData, stmtData []byte
 	if haveRoot {
 		if tokData, err = os.ReadFile(tokPath); err != nil {
 			usage()
+		}
+		if haveStmts {
+			if stmtData, err = os.ReadFile(stmtPath); err != nil {
+				usage()
+			}
 		}
 		if haveRev {
 			if revData, err = os.ReadFile(revPath); err != nil {
@@ -569,13 +603,15 @@ func main() {
 	}
 	info, rj := verifyLog(data, expect)
 	if rj == nil && haveRoot {
-		rj = verifyL2(info, ed25519.PublicKey(root), tokData, revData, haveRev)
+		rj = verifyL2(info, ed25519.PublicKey(root), tokData, revData, haveRev, stmtData, haveStmts)
 	}
 	if rj != nil {
 		fmt.Printf("reject rule=%s record=%d\n", rj.rule, rj.rec)
 		os.Exit(1)
 	}
-	if haveRoot {
+	if haveStmts {
+		fmt.Printf("ok commits=%d branches=%d level=2+ir\n", len(info.commits), info.branches)
+	} else if haveRoot {
 		fmt.Printf("ok commits=%d branches=%d level=2\n", len(info.commits), info.branches)
 	} else {
 		fmt.Printf("ok commits=%d branches=%d\n", len(info.commits), info.branches)

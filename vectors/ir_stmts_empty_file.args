@@ -1,0 +1,1 @@
+--root 6d64139a74f69cb633026c359707c289aeb2c1bfb34b93210b6d1e0e2f743fd0 --tokens {dir}/ir_stmts_empty_file.tokens --stmts {dir}/ir_stmts_empty_file.stmts

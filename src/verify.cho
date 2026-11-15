@@ -296,6 +296,8 @@ fn main(world: World) -> [] int {
     var have_tokens = false;
     var revoked_path: &static [byte] = "";
     var have_revoked = false;
+    var stmts_path: &static [byte] = "";
+    var have_stmts = false;
     var usage = false;
     var status = 0;
 
@@ -326,6 +328,11 @@ fn main(world: World) -> [] int {
                             c = after;
                             tokens_path = given;
                             have_tokens = true;
+                        } else if flags.named(name, "stmts") && !have_stmts {
+                            let (after, given) = flags.value(g, c);
+                            c = after;
+                            stmts_path = given;
+                            have_stmts = true;
                         } else if flags.named(name, "revoked") && !have_revoked {
                             let (after, given) = flags.value(g, c);
                             c = after;
@@ -350,7 +357,7 @@ fn main(world: World) -> [] int {
             }
         }
 
-        if !have_path || !have_root && (have_tokens || have_revoked) || have_root && !have_tokens {
+        if !have_path || !have_root && (have_tokens || have_revoked || have_stmts) || have_root && !have_tokens {
             usage = true;
         }
 
@@ -380,12 +387,13 @@ fn main(world: World) -> [] int {
         if usage {
             status = 2;
             borrow mut io as &!e in {
-                io.error_all(e, "usage: verify LOG [--expect <64 hex digits>] [--root <64 hex digits> --tokens FILE [--revoked FILE]]\n");
+                io.error_all(e, "usage: verify LOG [--expect <64 hex digits>] [--root <64 hex digits> --tokens FILE [--revoked FILE] [--stmts FILE]]\n");
             }
         } else {
             var text = buffer.empty(h, 65536);
             var tokens_text = buffer.empty(h, 16);
             var revoked_text = buffer.empty(h, 16);
+            var stmts_text = buffer.empty(h, 16);
             var good = true;
             borrow fs as &f in {
                 borrow mut io as &!e in {
@@ -402,6 +410,11 @@ fn main(world: World) -> [] int {
                         revoked_text = b;
                         good = ok_revoked;
                     }
+                    if good && have_stmts {
+                        let (b, ok_stmts) = load(h, f, e, stmts_path, stmts_text);
+                        stmts_text = b;
+                        good = ok_stmts;
+                    }
                 }
             }
             if !good {
@@ -417,7 +430,9 @@ fn main(world: World) -> [] int {
                             borrow root_bytes as &rb in {
                                 borrow tokens_text as &tt in {
                                     borrow revoked_text as &rt in {
-                                        l2.run(h, buffer.bytes(t), buffer.bytes(rb), buffer.bytes(tt), buffer.bytes(rt), have_revoked, verdict);
+                                        borrow stmts_text as &st in {
+                                            l2.run(h, buffer.bytes(t), buffer.bytes(rb), buffer.bytes(tt), buffer.bytes(rt), have_revoked, buffer.bytes(st), have_stmts, verdict);
+                                        }
                                     }
                                 }
                             }
@@ -429,7 +444,9 @@ fn main(world: World) -> [] int {
                             io.print_nat(o, verdict[2]);
                             io.write_all(o, " branches=");
                             io.print_nat(o, verdict[3]);
-                            if have_root {
+                            if have_stmts {
+                                io.write_all(o, " level=2+ir");
+                            } else if have_root {
                                 io.write_all(o, " level=2");
                             }
                             io.newline(o);
@@ -447,6 +464,7 @@ fn main(world: World) -> [] int {
             buffer.drop(h, text);
             buffer.drop(h, tokens_text);
             buffer.drop(h, revoked_text);
+            buffer.drop(h, stmts_text);
         }
         buffer.drop(h, expect_bytes);
         buffer.drop(h, root_bytes);

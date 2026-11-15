@@ -52,6 +52,22 @@ cases += [
     ([l2log, "--root", root, "--tokens", tok, "--expect", "00" * 32], 1, "reject rule=expected-missing record=-1\n"),
     ([bad, "--root", root, "--tokens", tok], 1, "reject rule=bad-magic record=-1\n"),  # L1 first
 ]
+# the statement IR (docs/spec/ir.md section 4)
+iroot = (vdir / "ir_ok_select.args").read_text().split()[1]
+itok, istm = str(vdir / "ir_ok_select.tokens"), str(vdir / "ir_ok_select.stmts")
+ilog = str(vdir / "ir_ok_select.log")
+iok = "ok commits=1 branches=1 level=2+ir\n"
+cases += [
+    ([ilog, "--root", iroot, "--tokens", itok, "--stmts", istm], 0, iok),
+    (["--stmts", istm, "--tokens", itok, "--root", iroot, ilog], 0, iok),
+    ([ilog, "--root", iroot, "--tokens", itok], 0, "ok commits=1 branches=1 level=2\n"),  # no --stmts: L2 alone
+    ([ilog, "--stmts", istm], 2, ""),                                                    # statements without a root
+    ([ilog, "--root", iroot, "--stmts", istm], 2, ""),                                   # ... and without tokens
+    ([ilog, "--root", iroot, "--tokens", itok, "--stmts"], 2, ""),
+    ([ilog, "--root", iroot, "--tokens", itok, "--stmts", istm, "--stmts", istm], 2, ""),
+    ([ilog, "--root", iroot, "--tokens", itok, "--stmts", "nope-no-such-file"], 2, ""),
+    ([ilog, "--root", iroot, "--tokens", itok, "--stmts", str(vdir)], 2, ""),
+]
 failed = 0
 import os
 extra = [("extra:" + e, [e]) for e in os.environ.get("FUZZ_EXTRA", "").split()]

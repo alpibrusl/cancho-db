@@ -108,7 +108,10 @@ order; the first that fails is the verdict, so that two verifiers agree on the r
    the end. In particular a `parents` count is first checked against the bytes left (`bad-encoding` if `count * 32`
    does not fit) and only then against 2, so three parents with fewer than 96 bytes behind them are `bad-encoding`,
    and with all 96 `parent-count`; and an out-of-order `effects` list is `effects-unordered` even if a later field is
-   malformed.
+   malformed. **Inside a list the elements are read and judged one at a time, in order**: an effect that is out of
+   order is `effects-unordered` at that effect, even if a *later* effect of the same list is malformed (a bad `kind`, a
+   target running past the end), and an earlier malformed effect is `bad-encoding` even if a later one is out of order.
+   A list is not read whole and then judged.
 3. **Duplicate**: the id was already seen in this log: `duplicate-commit`.
 4. **Signature**: `bad-signature`. (Before the chain rules: an unsigned record claims nothing, so nothing it says can be
    wrong.)

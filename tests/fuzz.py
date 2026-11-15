@@ -30,7 +30,8 @@ def py_verdict(data, l2=None):
         commits, branches, infos = pyv.verify(data, None)
         if l2 is not None:
             pyv.verify_l2(infos, *l2)
-        return "ok commits=%d branches=%d%s" % (commits, branches, " level=2" if l2 else "")
+        level = "" if not l2 else (" level=2+ir" if l2[3] is not None else " level=2")
+        return "ok commits=%d branches=%d%s" % (commits, branches, level)
     except pyv.Reject as e:
         return "reject rule=%s record=%d" % (e.rule, e.record)
 
@@ -98,32 +99,38 @@ def main(argv):
                 keep.write_bytes(data)
                 print("FAIL case %d: cancho=%r exit=%d stderr=%r python=%r others=%r (input kept: %s)" % (
                     n, got, p.returncode, p.stderr[:100], want, more, keep.name))
-        # L2: damage the log, the token store or the revocation list of an L2 vector
-        l2_cases = [(a.with_suffix(".log"), a.with_suffix(".tokens"), a.with_suffix(".revoked"),
-                     a.read_text().split()[1]) for a in sorted(vdir.glob("*.args")) if "--root" in a.read_text()]
-        token_pool = [t.read_bytes() for _, t, _, _ in l2_cases]
-        tf, rf = Path(tmp) / "case.tokens", Path(tmp) / "case.revoked"
+        # L2 and the IR: damage the log, the token store, the revocation list or the statement store of a vector
+        def parse(args_file):
+            words = args_file.read_text().replace("{dir}", str(vdir)).split()
+            opts = {words[k]: words[k + 1] for k in range(0, len(words), 2)}
+            return opts
+
+        l2_cases = [(a.with_suffix(".log"), parse(a)) for a in sorted(vdir.glob("*.args")) if "--root" in a.read_text()]
+        pools = {"--tokens": [], "--revoked": [], "--stmts": []}
+        for _, o in l2_cases:
+            for k in pools:
+                if k in o:
+                    pools[k].append(Path(o[k]).read_bytes())
         l2_verdicts = {}
         for n in range(cases // 2):
-            log_p, tok_p, rev_p, root_hex = rng.choice(l2_cases)
-            log_b, tok_b = log_p.read_bytes(), tok_p.read_bytes()
-            rev_b = rev_p.read_bytes() if rev_p.exists() else None
-            which = rng.random()
-            if which < 0.2:
-                log_b = mutate(rng, log_b, pool)
-            elif which < 0.7 or rev_b is None:
-                tok_b = mutate(rng, tok_b, token_pool)
-            else:
-                rev_b = mutate(rng, rev_b, [rev_b])
-            f.write_bytes(log_b)
-            tf.write_bytes(tok_b)
-            cmd = [exe, str(f), "--root", root_hex, "--tokens", str(tf)]
-            if rev_b is not None:
-                rf.write_bytes(rev_b)
-                cmd += ["--revoked", str(rf)]
+            log_p, opts = rng.choice(l2_cases)
+            blobs = {"log": log_p.read_bytes()}
+            for k in pools:
+                if k in opts:
+                    blobs[k] = Path(opts[k]).read_bytes()
+            target = rng.choice(["log"] + [k for k in pools if k in opts] * 3)
+            blobs[target] = mutate(rng, blobs[target], pool if target == "log" else pools[target])
+            f.write_bytes(blobs["log"])
+            cmd = [exe, str(f), "--root", opts["--root"]]
+            for k in pools:
+                if k in blobs:
+                    path = Path(tmp) / ("case" + k.replace("--", "."))
+                    path.write_bytes(blobs[k])
+                    cmd += [k, str(path)]
             p = subprocess.run(cmd, capture_output=True, timeout=30)
             got = p.stdout.decode(errors="replace").strip()
-            want = py_verdict(log_b, (bytes.fromhex(root_hex), tok_b, rev_b))
+            want = py_verdict(blobs["log"], (bytes.fromhex(opts["--root"]), blobs["--tokens"], blobs.get("--revoked"),
+                                             blobs.get("--stmts")))
             rule = want.split()[1][5:] if want.startswith("reject") else "ok"
             l2_verdicts[rule] = l2_verdicts.get(rule, 0) + 1
             more = [(q.stdout.decode(errors="replace").strip(), q.returncode, q.stderr) for q in others(cmd)]
@@ -131,10 +138,8 @@ def main(argv):
                     m[0] != want or m[1] not in (0, 1) or m[2] for m in more):
                 bad += 1
                 keep = ROOT / ("fuzz-failure-l2-%d-%d" % (seed, n))
-                keep.with_suffix(".log").write_bytes(log_b)
-                keep.with_suffix(".tokens").write_bytes(tok_b)
-                if rev_b is not None:
-                    keep.with_suffix(".revoked").write_bytes(rev_b)
+                for k, blob in blobs.items():
+                    keep.with_name(keep.name + "." + k.replace("--", "")).write_bytes(blob)
                 print("FAIL L2 case %d: cancho=%r exit=%d stderr=%r python=%r others=%r (input kept: %s.*)" % (
                     n, got, p.returncode, p.stderr[:100], want, more, keep.name))
     print("verdicts reached:", ", ".join("%s=%d" % kv for kv in sorted(verdicts.items())))

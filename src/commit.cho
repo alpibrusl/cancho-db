@@ -119,6 +119,27 @@ pub fn revocation_bad_signature() -> [] int {
     return 27;
 }
 
+// the statement IR (docs/spec/ir.md)
+pub fn stmt_missing() -> [] int {
+    return 28;
+}
+
+pub fn effects_mismatch() -> [] int {
+    return 29;
+}
+
+pub fn stmts_bad_magic() -> [] int {
+    return 30;
+}
+
+pub fn stmts_truncated() -> [] int {
+    return 31;
+}
+
+pub fn stmt_bad_encoding() -> [] int {
+    return 32;
+}
+
 // The spec's tag for a rule code.
 pub fn rule_name(code: int) -> [] &static [byte] {
     if code == 1 {
@@ -199,12 +220,27 @@ pub fn rule_name(code: int) -> [] &static [byte] {
     if code == 26 {
         return "revocations-truncated";
     }
-    return "revocation-bad-signature";
+    if code == 27 {
+        return "revocation-bad-signature";
+    }
+    if code == 28 {
+        return "stmt-missing";
+    }
+    if code == 29 {
+        return "effects-mismatch";
+    }
+    if code == 30 {
+        return "stmts-bad-magic";
+    }
+    if code == 31 {
+        return "stmts-truncated";
+    }
+    return "stmt-bad-encoding";
 }
 
 // Indexes into the `out` slice `decode` fills.
 pub fn out_len() -> [] int {
-    return 11;
+    return 13;
 }
 
 pub fn f_branch_at() -> [] int {
@@ -254,6 +290,15 @@ pub fn f_time_at() -> [] int {
     return 10;
 }
 
+// For the IR check: where the statement hashes start and how many.
+pub fn f_stmts_at() -> [] int {
+    return 11;
+}
+
+pub fn f_stmts_n() -> [] int {
+    return 12;
+}
+
 // A big-endian unsigned integer of `n` bytes at `at`, for `n` up to 4 (no overflow in a 64-bit int).
 pub fn be[&d](data: &d [byte], at: int, n: int) -> [] int {
     var v = 0;
@@ -266,11 +311,11 @@ pub fn be[&d](data: &d [byte], at: int, n: int) -> [] int {
 }
 
 // `cur[0]` is the read position. A read of `n` bytes that is not wholly inside the record is `false`.
-fn have[&d, &c](data: &d [byte], cur: &!c [int], n: int) -> [] bool {
+pub fn have[&d, &c](data: &d [byte], cur: &!c [int], n: int) -> [] bool {
     return n >= 0 && n <= len(data) - cur[0];
 }
 
-fn skip[&d, &c](data: &d [byte], cur: &!c [int], n: int) -> [] bool {
+pub fn skip[&d, &c](data: &d [byte], cur: &!c [int], n: int) -> [] bool {
     if !have(data, cur, n) {
         return false;
     }
@@ -280,7 +325,7 @@ fn skip[&d, &c](data: &d [byte], cur: &!c [int], n: int) -> [] bool {
 
 // A `u32` count whose elements are each at least one byte: more than the bytes left is malformed, so nothing is ever
 // sized from a count the record cannot back. `-1` is malformed.
-fn count[&d, &c](data: &d [byte], cur: &!c [int]) -> [] int {
+pub fn count[&d, &c](data: &d [byte], cur: &!c [int]) -> [] int {
     if !have(data, cur, 4) {
         return 0 - 1;
     }
@@ -351,9 +396,15 @@ pub fn decode[&d, &o](data: &d [byte], out: &!o [int]) -> [] int {
         cur[0] = cur[0] + 8;
 
         // schema, statements
-        if !skip(data, cur, 32) || !skip_hashes(data, cur) {
+        if !skip(data, cur, 32) {
             return bad_encoding();
         }
+        let nst = count(data, cur);
+        if nst < 0 || !skip(data, cur, nst * 32) {
+            return bad_encoding();
+        }
+        out[f_stmts_at()] = cur[0] - nst * 32;
+        out[f_stmts_n()] = nst;
 
         // effects: strictly ascending by (kind, target)
         let ne = count(data, cur);

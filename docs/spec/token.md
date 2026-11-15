@@ -92,7 +92,10 @@ The verifier is given the **root public key** and both files. Which root key is 
 
 After L1 has passed for the whole log:
 
-**Stores** (in this order; `record` is the index of the entry in that file, or `-1` for a failure in the header):
+**Stores** (in this order; `record` is the index of the entry in that file, or `-1` for a failure in the header). **Entries
+are read and judged one at a time, in order, and the first failure is the verdict**: an earlier bad entry beats a later
+truncated one, and within one entry its length is checked against the bytes left before its contents are decoded or its
+signature checked:
 
 1. `tokens`: fewer than 8 bytes: `tokens-truncated`; magic differs: `tokens-bad-magic`; for each entry, fewer than 4 bytes
    left for the length or fewer than `length` bytes left: `tokens-truncated`; the token does not decode:
@@ -149,7 +152,13 @@ ok commits=<N> branches=<B> level=2
 and a rejection is `reject rule=<tag> record=<i>` as before, with the L2 tags of §4. Without `--root` nothing changes: the
 line, the tags and the exit statuses are those of `commit.md`.
 
-## 7. Vectors
+## 7. The statement IR
+
+`ir.md` adds `--stmts FILE` and two checks, `stmt-missing` and `effects-mismatch`, that run before `effect-denied`, so the
+effects judged against the token are shown to be those the commit's statements infer. Without `--stmts` this page is the whole
+of L2, and the recorded effect set is taken at the server's word.
+
+## 8. Vectors
 
 L2 vectors are `NAME.log` with `NAME.tokens`, optionally `NAME.revoked`, and an `NAME.args` that points at them (`{dir}` is
 the vectors directory). `tools/gen_l2.py` writes them next to the L1 ones, and the same rules hold: the expected line of each

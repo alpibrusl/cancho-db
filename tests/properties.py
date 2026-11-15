@@ -84,7 +84,7 @@ def main(argv):
         assert len(decoded) == len(blocks)
         info = (rng.choice(BRANCHES), rng.choice(principals + [bytes(32)]), None,
                 sorted(set((rng.randrange(5), rng.choice(TARGETS)) for _ in range(rng.randrange(0, 4)))),
-                rng.choice(TIMES))
+                rng.choice(TIMES), [])
         revoked = {}
         if rng.random() < 0.3:
             k = rng.randrange(1, len(blocks) + 1)

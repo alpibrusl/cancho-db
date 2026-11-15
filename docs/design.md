@@ -235,5 +235,5 @@ The largest risk is losing data, and the mitigation is staying on Postgres stora
 
 | Milestone | Status |
 |---|---|
-| M0 Spec and verifier | **L1 and L2 built**: both specs, 212 vectors, three verifiers ([`README.md`](../README.md)). L2 checks the recorded effect set against the token, not against the statements (no IR yet). Three verifiers agree on every vector, the third (Go) written from the specs alone by a separate agent session, so the exit criterion is met for L1 and L2 with the caveats in [`claims.md`](claims.md). |
+| M0 Spec and verifier | **L1, L2 and the statement IR built**: three specs, 341 vectors, three verifiers ([`README.md`](../README.md)). With the statement store L2 checks that the recorded effect set is what the statements infer; without it, only against the token. Not built: SQL lowering, `call` expansion, subqueries. Three verifiers agree on every vector, the third (Go) written from the specs alone by a separate agent session, so the exit criterion is met for L1, L2 and the IR with the caveats in [`claims.md`](claims.md). |
 | M1 to M4 | Not started. |

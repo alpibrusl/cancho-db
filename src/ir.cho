@@ -1,0 +1,412 @@
+module cdb.ir;
+
+import std.bytes;
+import std.crypto;
+import std.map;
+import cdb.commit;
+
+// The statement IR and its effect inference (docs/spec/ir.md).
+//
+// `infer` reads one statement's bytes: it answers whether they are exactly a well-formed statement and adds every effect
+// of section 3 to a set. Expressions are in prefix order, so reading one is a loop with a count of operands still owed and
+// no recursion; the count is checked against the bytes left, so nothing is sized from a number the statement cannot back.
+//
+// An effect is kept in a map keyed by its bytes, `kind` then `target`, so a set has no repeats and two sets are equal when
+// they have the same size and one holds every member of the other.
+
+// Adds the effect (`kind`, `a` followed, if `dot`, by `.` and `b`) to the set. `a` and `b` are runs of `data`.
+fn add[&h, &d](heap: &!h Heap, set: map.Map[int], kind: int, data: &d [byte], a_at: int, a_len: int, dot: bool, b_at: int, b_len: int) -> [heap] map.Map[int] {
+    var m = set;
+    region r {
+        var n = 1 + a_len;
+        if dot {
+            n = n + 1 + b_len;
+        }
+        let key = alloc_slice[r](n, byte_of(0));
+        key[0] = byte_of(kind);
+        var i = 0;
+        while i < a_len {
+            key[1 + i] = data[a_at + i];
+            i = i + 1;
+        }
+        if dot {
+            key[1 + a_len] = byte_of('.');
+            i = 0;
+            while i < b_len {
+                key[2 + a_len + i] = data[b_at + i];
+                i = i + 1;
+            }
+        }
+        m = map.put(heap, m, key, 1);
+    }
+    return m;
+}
+
+// A `Name` at the cursor (a u16 length of at least 1). `ident` names may not contain `.`. Puts where it starts and how long
+// it is in `nm[0]` and `nm[1]` and moves the cursor past it; `false` if it is not one.
+fn name[&d, &c, &n](data: &d [byte], cur: &!c [int], nm: &!n [int], ident: bool) -> [] bool {
+    if !commit.have(data, cur, 2) {
+        return false;
+    }
+    let l = commit.be(data, cur[0], 2);
+    cur[0] = cur[0] + 2;
+    if l == 0 || !commit.have(data, cur, l) {
+        return false;
+    }
+    if ident {
+        var i = 0;
+        while i < l {
+            if int_of(data[cur[0] + i]) == '.' {
+                return false;
+            }
+            i = i + 1;
+        }
+    }
+    nm[0] = cur[0];
+    nm[1] = l;
+    cur[0] = cur[0] + l;
+    return true;
+}
+
+// One expression in prefix order (spec section 2). `allow_col` is false inside `VALUES`.
+fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur: &!c [int], nm: &!n [int], allow_col: bool) -> [heap] (map.Map[int], bool) {
+    var m = set;
+    var good = true;
+    var pending = 1;
+    while pending > 0 && good {
+        if !commit.have(data, cur, 1) {
+            good = false;
+        } else {
+            let tag = int_of(data[cur[0]]);
+            cur[0] = cur[0] + 1;
+            pending = pending - 1;
+            if tag == 0 {
+                if !allow_col || !name(data, cur, nm, true) {
+                    good = false;
+                } else {
+                    let t_at = nm[0];
+                    let t_len = nm[1];
+                    if !name(data, cur, nm, true) {
+                        good = false;
+                    } else {
+                        m = add(heap, m, 0, data, t_at, t_len, true, nm[0], nm[1]);
+                    }
+                }
+            } else if tag == 1 {
+                if !commit.have(data, cur, 1) {
+                    good = false;
+                } else {
+                    let vt = int_of(data[cur[0]]);
+                    cur[0] = cur[0] + 1;
+                    if vt == 1 {
+                        good = commit.skip(data, cur, 8);
+                    } else if vt == 2 {
+                        if !commit.have(data, cur, 4) {
+                            good = false;
+                        } else {
+                            let vl = commit.be(data, cur[0], 4);
+                            cur[0] = cur[0] + 4;
+                            good = commit.skip(data, cur, vl);
+                        }
+                    } else if vt != 0 {
+                        good = false;
+                    }
+                }
+            } else if tag == 2 {
+                good = commit.skip(data, cur, 4);
+            } else if tag == 3 {
+                if !name(data, cur, nm, false) {
+                    good = false;
+                } else {
+                    m = add(heap, m, 4, data, nm[0], nm[1], false, 0, 0);
+                }
+            } else if tag == 4 {
+                if !name(data, cur, nm, false) {
+                    good = false;
+                } else {
+                    m = add(heap, m, 3, data, nm[0], nm[1], false, 0, 0);
+                    if !commit.have(data, cur, 4) {
+                        good = false;
+                    } else {
+                        pending = pending + commit.be(data, cur[0], 4);
+                        cur[0] = cur[0] + 4;
+                    }
+                }
+            } else if tag == 5 {
+                if !commit.have(data, cur, 1) {
+                    good = false;
+                } else {
+                    if int_of(data[cur[0]]) > 11 {
+                        good = false;
+                    }
+                    cur[0] = cur[0] + 1;
+                    pending = pending + 2;
+                }
+            } else {
+                good = false;
+            }
+            // every node is at least one byte: more operands owed than bytes left cannot be satisfied
+            if good && pending > len(data) - cur[0] {
+                good = false;
+            }
+        }
+    }
+    return (m, good);
+}
+
+// An optional expression: a flag byte, 0 or 1, then an expression if 1.
+fn opt[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur: &!c [int], nm: &!n [int]) -> [heap] (map.Map[int], bool) {
+    if !commit.have(data, cur, 1) {
+        return (set, false);
+    }
+    let flag = int_of(data[cur[0]]);
+    cur[0] = cur[0] + 1;
+    if flag == 1 {
+        return expr(heap, set, data, cur, nm, true);
+    }
+    return (set, flag == 0);
+}
+
+// `n` expressions.
+fn exprs[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur: &!c [int], nm: &!n [int], count: int, allow_col: bool) -> [heap] (map.Map[int], bool) {
+    var m = set;
+    var good = true;
+    var i = 0;
+    while i < count && good {
+        let (grown, ok) = expr(heap, m, data, cur, nm, allow_col);
+        m = grown;
+        good = ok;
+        i = i + 1;
+    }
+    return (m, good);
+}
+
+// One statement: adds its effects to `set` and answers whether it is well formed (spec sections 2 and 3).
+pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte]) -> [heap] (map.Map[int], bool) {
+    var m = set;
+    var good = true;
+    region r {
+        let cur = alloc_slice[r](1, 0);
+        let nm = alloc_slice[r](2, 0);
+        if len(data) < 1 {
+            good = false;
+        } else {
+            let tag = int_of(data[0]);
+            cur[0] = 1;
+            if tag == 0 {
+                // Select
+                let ni = commit.count(data, cur);
+                if ni < 0 {
+                    good = false;
+                } else {
+                    let (grown, ok) = exprs(heap, m, data, cur, nm, ni, true);
+                    m = grown;
+                    good = ok;
+                }
+                if good {
+                    let nt = commit.count(data, cur);
+                    if nt < 1 {
+                        good = false;
+                    }
+                    var i = 0;
+                    while i < nt && good {
+                        if !name(data, cur, nm, true) {
+                            good = false;
+                        } else {
+                            m = add(heap, m, 0, data, nm[0], nm[1], false, 0, 0);
+                        }
+                        i = i + 1;
+                    }
+                }
+                if good {
+                    let (grown, ok) = opt(heap, m, data, cur, nm);
+                    m = grown;
+                    good = ok;
+                }
+            } else if tag == 1 {
+                // Insert
+                if !name(data, cur, nm, true) {
+                    good = false;
+                } else {
+                    m = add(heap, m, 1, data, nm[0], nm[1], false, 0, 0);
+                    let ncols = commit.count(data, cur);
+                    if ncols < 0 {
+                        good = false;
+                    }
+                    var i = 0;
+                    while i < ncols && good {
+                        good = name(data, cur, nm, true);
+                        i = i + 1;
+                    }
+                    var nrows = 0 - 1;
+                    if good {
+                        nrows = commit.count(data, cur);
+                        if nrows < 0 {
+                            good = false;
+                        }
+                    }
+                    var row = 0;
+                    while row < nrows && good {
+                        let rc = commit.count(data, cur);
+                        if rc != ncols {
+                            good = false;
+                        } else {
+                            let (grown, ok) = exprs(heap, m, data, cur, nm, rc, false);
+                            m = grown;
+                            good = ok;
+                        }
+                        row = row + 1;
+                    }
+                }
+            } else if tag == 2 {
+                // Update
+                if !name(data, cur, nm, true) {
+                    good = false;
+                } else {
+                    m = add(heap, m, 1, data, nm[0], nm[1], false, 0, 0);
+                    let nsets = commit.count(data, cur);
+                    if nsets < 1 {
+                        good = false;
+                    }
+                    var i = 0;
+                    while i < nsets && good {
+                        if !name(data, cur, nm, true) {
+                            good = false;
+                        } else {
+                            let (grown, ok) = expr(heap, m, data, cur, nm, true);
+                            m = grown;
+                            good = ok;
+                        }
+                        i = i + 1;
+                    }
+                    if good {
+                        let (grown, ok) = opt(heap, m, data, cur, nm);
+                        m = grown;
+                        good = ok;
+                    }
+                }
+            } else if tag == 3 {
+                // Delete
+                if !name(data, cur, nm, true) {
+                    good = false;
+                } else {
+                    m = add(heap, m, 1, data, nm[0], nm[1], false, 0, 0);
+                    let (grown, ok) = opt(heap, m, data, cur, nm);
+                    m = grown;
+                    good = ok;
+                }
+            } else if tag == 4 {
+                // Ddl
+                if !commit.have(data, cur, 1) {
+                    good = false;
+                } else {
+                    if int_of(data[cur[0]]) > 4 {
+                        good = false;
+                    }
+                    cur[0] = cur[0] + 1;
+                    if good && !name(data, cur, nm, true) {
+                        good = false;
+                    } else if good {
+                        m = add(heap, m, 2, data, nm[0], nm[1], false, 0, 0);
+                    }
+                }
+            } else if tag == 5 {
+                // Call
+                if !name(data, cur, nm, false) {
+                    good = false;
+                } else {
+                    m = add(heap, m, 3, data, nm[0], nm[1], false, 0, 0);
+                    let na = commit.count(data, cur);
+                    if na < 0 {
+                        good = false;
+                    } else {
+                        let (grown, ok) = exprs(heap, m, data, cur, nm, na, true);
+                        m = grown;
+                        good = ok;
+                    }
+                }
+            } else {
+                good = false;
+            }
+            if good && cur[0] != len(data) {
+                good = false;
+            }
+        }
+    }
+    return (m, good);
+}
+
+// The id of a statement: SHA-256 of "cancho-db/stmt/v1", 0 and its bytes (spec section 2). Into `out[0..32]`.
+pub fn id[&d, &o](data: &d [byte], out: &!o [byte]) -> [] int {
+    region r {
+        let sha = alloc_slice[r](crypto.sha256_state_len(), 0);
+        let nul = alloc_slice[r](1, byte_of(0));
+        crypto.sha256_init(sha);
+        crypto.sha256_update(sha, "cancho-db/stmt/v1");
+        crypto.sha256_update(sha, nul);
+        crypto.sha256_update(sha, data);
+        crypto.sha256_final(sha, out);
+    }
+    return 0;
+}
+
+// The IR checks of one commit (spec section 4): `0` if its statements are all in the store and the effects it records are
+// exactly the effects they infer, `1` for `stmt-missing`, `2` for `effects-mismatch`.
+//
+// `store` maps a statement id to where that statement's bytes start in `stmts` (its length is the u32 before it). `enc` is
+// the commit and `out` what `commit.decode` found in it.
+pub fn check_commit[&h, &m, &s, &e, &o](heap: &!h Heap, store: &m map.Map[int], stmts: &s [byte], enc: &e [byte], out: &!o [int]) -> [heap] int {
+    var verdict = 0;
+    var set = map.empty(heap, 16, 0, 3);
+    let n = out[commit.f_stmts_n()];
+    let at = out[commit.f_stmts_at()];
+    var i = 0;
+    while i < n && verdict == 0 {
+        var off = 0 - 1;
+        off = map.get(store, enc[at + i * 32..at + i * 32 + 32], 0 - 1);
+        if off < 0 {
+            verdict = 1;
+        } else {
+            let (grown, ok) = infer(heap, set, stmts[off..off + commit.be(stmts, off - 4, 4)]);
+            set = grown;
+        }
+        i = i + 1;
+    }
+    if verdict == 0 {
+        // equal sets: the recorded effects are strictly ascending, so no repeats; same size and every one inferred
+        let ne = out[commit.f_effects_n()];
+        var size = 0;
+        borrow set as &sr in {
+            size = map.size(sr);
+        }
+        var same = size == ne;
+        var p = out[commit.f_effects_at()];
+        var j = 0;
+        while j < ne && same {
+            let tl = commit.be(enc, p + 1, 2);
+            region r {
+                let key = alloc_slice[r](1 + tl, byte_of(0));
+                key[0] = enc[p];
+                var k = 0;
+                while k < tl {
+                    key[1 + k] = enc[p + 3 + k];
+                    k = k + 1;
+                }
+                var found = false;
+                borrow set as &sr in {
+                    found = map.has(sr, key);
+                }
+                if !found {
+                    same = false;
+                }
+            }
+            p = p + 3 + tl;
+            j = j + 1;
+        }
+        if !same {
+            verdict = 2;
+        }
+    }
+    map.drop(heap, set);
+    return verdict;
+}

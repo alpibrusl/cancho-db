@@ -12,14 +12,16 @@ Working name. The design is [`docs/design.md`](docs/design.md).
   verification, written so a verifier needs only SHA-256 and Ed25519.
 - [`docs/spec/token.md`](docs/spec/token.md): capability tokens (a chain of signed blocks that can only narrow) and
   **L2 (authority)**: was each commit allowed by the token it presented?
-- [`vectors/`](vectors): 212 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
+- [`docs/spec/ir.md`](docs/spec/ir.md): the **statement IR** (the bound form of a small SQL subset) and effect inference,
+  so that L2 can check that a commit's recorded effects are *what its statements do*, not only what the server says.
+- [`vectors/`](vectors): 341 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
 - Three verifiers that must agree on every one: [`src/`](src) in cancho (no C, no foreign call),
   [`tools/verify.py`](tools/verify.py) in Python, and [`verifiers/go/`](verifiers/go) in Go, written from the specs alone
   by a separate agent session (see its README and [`docs/claims.md`](docs/claims.md) for what that does and does not show).
 
-**Not built:** L3 replay, the statement IR, and M1 onward (the proxy, branches, the engine). L2 checks the commit's
-*recorded* effect set against its token; that the recorded set is what the statements do needs the IR (see
-[`docs/claims.md`](docs/claims.md)). That file says what is claimed, what each claim rests on, and what is *not*
+**Not built:** L3 replay, SQL-to-IR lowering, and M1 onward (the proxy, branches, the engine). Without `--stmts`, L2
+checks only the commit's *recorded* effect set against its token; with it, the recorded set is shown to equal what the
+statements infer. That the store holds what was actually executed is L3's (see [`docs/claims.md`](docs/claims.md)). That file says what is claimed, what each claim rests on, and what is *not*
 claimed.
 
 ## Use
@@ -38,7 +40,8 @@ Exit status 0 for `ok`, 1 for `reject`, 2 for a usage error or a file that canno
 takes the same arguments and prints the same lines. A log is *not* shown to be complete by verifying: pass `--expect`
 the last commit id you were given, or a removed tail goes unnoticed ([spec §5](docs/spec/commit.md)).
 
-L2 is switched on by naming the root key and the token store (and, optionally, the signed revocation list):
+L2 is switched on by naming the root key and the token store (and, optionally, the signed revocation list and, for the
+statement IR, `--stmts`):
 
 ```console
 $ ./verify vectors/l2_ok_basic.log --root $ROOT --tokens vectors/l2_ok_basic.tokens
@@ -48,6 +51,16 @@ reject rule=effect-denied record=0
 ```
 
 (`$ROOT` is the key in the vector's `.args` file; the vectors' keys are derived from fixed strings, for testing only.)
+
+With the statement store, a server that hides what it did is refused (`ir_gap_*` is this case, with and without it):
+
+```console
+$ ./verify vectors/ir_gap_hidden_write_passes_l2_alone.log --root $ROOT --tokens vectors/ir_gap_hidden_write_passes_l2_alone.tokens
+ok commits=1 branches=1 level=2
+$ ./verify vectors/ir_gap_hidden_write_is_refused_with_statements.log --root $ROOT \
+    --tokens vectors/ir_gap_hidden_write_is_refused_with_statements.tokens --stmts vectors/ir_gap_hidden_write_is_refused_with_statements.stmts
+reject rule=effects-mismatch record=0
+```
 
 ## Test
 
