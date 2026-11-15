@@ -130,6 +130,32 @@ recurses; every stack and arena has a limit that is a tagged refusal (`nested-to
   Types come from a closed list (`smallint integer bigint text boolean numeric varchar date timestamp timestamptz real`, with `int`,
   `bool` and `decimal` as spellings); anything else is `unknown-type`, since a type can be user-defined.
 
+### 3.3 SELECT
+
+`src/stmt.cho` reads a `SELECT` over the expression parser and the same arrays, and `parse.render` renders it
+(`select distinct "a" as "x", ... from "t" as "u" inner join "v" on (...) where ... group by ... having ... order by "a" desc
+limit 5 offset 2`). Joins are left-deep and rendered without parentheses, which is exact, and re-parses to the same tree.
+
+- **Checked the same way**: `tests/stmt_diff.py` compares PostgreSQL's `EXPLAIN (VERBOSE, COSTS OFF)` for the original and for
+  the rendering over a grammar of statements (one to three tables, the joins read, every clause present or absent, expressions
+  from the generator of `tests/pgdiff.py` inside) and a fuzzer over clause words: 12,000 cases over three seeds, **0
+  disagreements**; about 1,650 per 4,000 are valid statements that plan identically, about 1,000 more are errors with one
+  SQLSTATE on both sides (ambiguous columns, type errors). Its teeth: seven deliberate breakages (a left join rendered as inner,
+  `where` as `having`, `asc` and `desc` swapped, DISTINCT dropped, joins' operands swapped, LIMIT and OFFSET exchanged) are each
+  caught (54 to 687 disagreements in 2,500 cases); dropping an alias is caught only twice, because aliases hardly show in a plan,
+  and the hand cases are what pin them.
+- **What the differential found**: PostgreSQL refuses `select nulls first` (it reads `nulls` followed by `first` as one
+  lookahead token, never a name), and a bare select-list label may not be one of eleven non-reserved words (`day hour minute month
+  second year filter over varying within without`), which continue an expression instead (`1 day`). Both were accepted at first
+  and are refused now; the word list is from `pg_get_keywords()` (`barelabel` false). A first failure of the check itself: it
+  counted `42601` as a syntax error, but PostgreSQL also uses it for "non-integer constant in ORDER BY"; the test now looks at the
+  message.
+- **Another**: `GROUP BY ROLLUP (a)` and `CUBE (a)` are grouping sets in PostgreSQL, and were parsed as calls; refused.
+- **Refused with a tag**: set operations (`set-operation`), `RIGHT/FULL/CROSS/NATURAL` joins and `USING` (`unsupported-join`),
+  schema-qualified or function tables and `(t)` (`unknown-construct`), sub-selects (`subquery`), `NULLS FIRST/LAST`, `OFFSET`
+  before `LIMIT`, `FOR UPDATE`, `FETCH`, `WINDOW`, `DISTINCT ON`; a statement that is not a `SELECT` is
+  `unsupported-statement` (P1b-2b).
+
 ## 4. Lowering
 
 - **Aliases** (`FROM orders o`) are resolved to base tables: the IR names `orders`, never `o`.
@@ -178,7 +204,8 @@ it to PostgreSQL and counting the commands it reports), has the same number of s
 | IR v2 | `ir.md` section 6, three verifiers | built; 428 vectors agree |
 | **P1a** | the lexer and statement splitter, with the refusals of section 3 | **built** (`src/lex.cho`): 167 hand-written cases (54 refusals), 35 mutants killed, and a differential against PostgreSQL itself (section 3.1) |
 | **P1b-1** | **the expression parser and the renderer** (`src/parse.cho`): precedence climbing over explicit stacks, a tree in caller arrays, and the parenthesised rendering | **built**: 265 hand-written cases (123 refusals), each accepted one a fixed point of parse-then-render; PostgreSQL's plan for the original equal to its plan for the rendering over 12,000 generated expressions (section 3.2); 56 mutants killed |
-| **P1b-2** | the statement forms (SELECT, INSERT, UPDATE, DELETE, the closed DDL) over the same parser | the same two checks, on whole statements |
+| **P1b-2a** | **SELECT** (`src/stmt.cho`): items and aliases, `FROM` with comma lists and `[INNER|LEFT [OUTER]] JOIN ... ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY [ASC|DESC]`, `LIMIT`, `OFFSET` | **built**: 146 hand-written cases (83 refusals, each accepted one a fixed point), 34 mutants killed, PostgreSQL's plans for the original and the rendering equal over 12,000 generated statements (section 3.3) |
+| **P1b-2b** | INSERT, UPDATE, DELETE and the closed DDL | the same checks |
 | **P1c** | lowering, the schema snapshot, the effect check | lowering gate (1); refusals (3) |
 | **P1d** | the `Query` branch in the proxy | end to end with psql: differential (2) and the server log (3) |
 
