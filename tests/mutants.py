@@ -566,7 +566,7 @@ PARSE = [
     ("parse: the operand stack has no limit", "src/parse.cho", "    if st[4] >= len(vs) {\n        return 0 - e_nested_too_deep();\n    }\n", "    if false {\n        return 0 - e_nested_too_deep();\n    }\n"),
     ("parse: the operator stack limit is off by one", "src/parse.cho", "if 4 * st[5] + 4 > len(os) {", "if 4 * st[5] + 4 > len(os) + 4 {"),
     ("parse: the node arena limit is off by one", "src/parse.cho", "if 6 * id + 6 > len(nodes) {", "if 6 * id + 6 > len(nodes) + 6 {"),
-    ("parse: the kids limit is off by one", "src/parse.cho", "if st[1] + count > len(kids) {", "if st[1] + count > len(kids) + 1 {"),
+    ("parse: the kids limit is off by one", "src/parse.cho", "    if st[1] + count > len(kids) {\n        return 0 - e_too_big();\n    }\n    let first = st[1];\n    var i = 0;\n    while i < count {\n        kids[first + i] = vs[", "    if st[1] + count > len(kids) + 1 {\n        return 0 - e_too_big();\n    }\n    let first = st[1];\n    var i = 0;\n    while i < count {\n        kids[first + i] = vs["),
     ("parse: the traversal stack limit is off by one", "src/parse.cho", "if 2 * sp + 2 > len(rs) {", "if 2 * sp + 2 > len(rs) + 2 {"),
     ("parse: the output limit is off by one", "src/parse.cho", "if at < 0 || at >= len(out) {", "if at < 0 || at > len(out) {"),
     ("parse: an overrun of the output goes unnoticed", "src/parse.cho", "    if p < 0 {\n        return 0 - e_too_big();\n    }\n    return p;", "    return p;"),
