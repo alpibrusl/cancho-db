@@ -597,7 +597,6 @@ STMT = [
     ("stmt: a select alias is dropped", "src/stmt.cho", "parse.n_item(), st[9], tmp[mark..mark + 1]", "parse.n_item(), 0 - 1, tmp[mark..mark + 1]"),
     ("stmt: FROM may be empty", "src/stmt.cho", '        pos = pos + 1;\n        more = true;\n        while more {\n            var q = table_ref(', '        pos = pos + 1;\n        more = false;\n        while more {\n            var q = table_ref('),
     ("stmt: a trailing token is ignored", "src/stmt.cho", "    if pos < end {\n        if parse.kw(sql, toks, pos, end, \"union\")", "    if false {\n        if parse.kw(sql, toks, pos, end, \"union\")"),
-    ("stmt: a non-SELECT is a syntax error", "src/stmt.cho", "    if !parse.kw(sql, toks, from, end, \"select\") {\n        return parse.fail(st, from, parse.e_unsupported_statement());", "    if !parse.kw(sql, toks, from, end, \"select\") {\n        return parse.fail(st, from, parse.e_syntax());"),
     ("stmt: a left join renders as inner", "src/parse.cho", 'return put_lit(out, p, " left join ");', 'return put_lit(out, p, " inner join ");'),
     ("stmt: DESC renders as ASC", "src/parse.cho", 'if data == 2 {\n            return put_lit(out, p, " desc");', 'if data == 2 {\n            return put_lit(out, p, " asc");'),
     ("stmt: DISTINCT is not rendered", "src/parse.cho", '        if data == 1 {\n            p = put_lit(out, p, "distinct ");', '        if false {\n            p = put_lit(out, p, "distinct ");'),

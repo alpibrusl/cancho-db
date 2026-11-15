@@ -78,7 +78,7 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | # | Claim | Enforced by | Fails when the claim is false because |
 |---|---|---|---|
 | C47 | **The rendering of a DDL statement does what the original does**: run in a rolled-back transaction, both leave the same columns, constraints and indexes, or fail with the same SQLSTATE; nothing accepted is a syntax error to PostgreSQL. | `tests/ddl_diff.py`, 5,000 cases over two seeds, 0 disagreements; four rendering breakages each caught | the proxy runs the rendering, and a renderer that drops `PRIMARY KEY` would run a different schema change |
-| C48 | The DDL grammar is closed and everything else is refused: 320 hand cases in all (211 refusals); 85 statement mutants, none surviving (one survived at first: `DEFAULT -'x'`). | `tests/stmt_test.cho`, `tests/mutants.py stmt` | the IR's `Ddl` names only the table, so what is accepted must be fully reproduced |
+| C48 | The DDL grammar is closed and everything else is refused: 320 hand cases in all (211 refusals); 84 statement mutants, none surviving (one survived at first: `DEFAULT -'x'`). | `tests/stmt_test.cho`, `tests/mutants.py stmt` | the IR's `Ddl` names only the table, so what is accepted must be fully reproduced |
 
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
