@@ -286,6 +286,33 @@ a trailing statement hidden in a string cannot reach PostgreSQL, because none of
   the first checked, the effect's encoding off by one, the `; ` lost, v1 inference) are each caught.
 - Transaction control (`BEGIN`, `COMMIT`, `ROLLBACK`) is `unsupported-statement` until P2, which tracks it itself.
 
+### 5.2 P1d-2, decided before it is built
+
+How the guard gets into the event loop (`proxy/proxy.cho`), written before the code:
+
+- **Framing, client to server only.** A paired client's bytes are no longer copied in chunks: they are collected per connection
+  until a whole frontend message is there (a type byte and a 4-byte length). The server's answers still flow back untouched.
+  A message longer than 64 KiB is refused and the connection closed (a bound, like every other in the proxy).
+- **What each message does.** `Q` (simple query): the guard (section 5.1); on success the proxy sends a **new** `Q` whose text is the
+  guard's rendering (the client's message is dropped); on refusal it answers the client itself, with an `ErrorResponse`
+  (severity `ERROR`, the guard's SQLSTATE, the tag in the message) and `ReadyForQuery('I')`, and sends nothing upstream. `X`
+  (terminate): forwarded. Everything else (`P`, `B`, `E`, `D`, `S`, `H`, `F`, `C` and the copy messages, which are the extended
+  protocol and `COPY`) is refused the same way with `0A000` `unsupported-sql: extended-protocol`, the connection staying
+  open: `psql` and every driver in simple mode use only `Q`. A message type that is not in the protocol closes the connection.
+- **The token** the client logged in with is kept for its connection (the login already decodes it) and is what the guard
+  checks; it is dropped with the connection.
+- **The schema snapshot is read fresh for each `Q`**, from the catalog, over one dedicated upstream connection the proxy keeps
+  for the purpose (`information_schema.columns` and `pg_indexes` for the public schema, in one simple query, bounded by the
+  same `login_ms()` wait as the login). Fresh means a DDL that went through the proxy, or around it, is visible to the next
+  statement, with no invalidation to get wrong; the price is one local round trip a query, stated as P1d's cost and measured at the
+  gate. If the catalog connection fails the query is refused (`catalog-unavailable`, `08006`): the guard cannot resolve names without
+  it, and a guess would not be a check.
+- **Transaction control** (`BEGIN`, `COMMIT`, `ROLLBACK`) is still `unsupported-statement`: P2 owns it.
+- **Gate** (section 6, 3): `psql` through the proxy against a server with `log_statement=all`: an allowed query appears in the server's
+  log **as the rendering, not as typed** (a comment or an unusual case is not in it); a refused one **does not appear at all**; the
+  results of allowed queries through the proxy equal the results direct, as a diff, for the accepted corpus; an extended-protocol
+  client (`psycopg`'s prepared statements, `psql`'s `\bind`) gets the refusal and a working connection.
+
 ## 6. The gate, and why it can fail
 
 A corpus `tests/sql/corpus.sql` of statements, each annotated by hand with: accepted or the refusal tag, and (if accepted) the
