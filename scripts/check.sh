@@ -55,6 +55,12 @@ quiet 2 python3 tests/stmt_diff.py build/stmtcheck 4000 1
 quiet 2 python3 tests/stmt_diff.py build/stmtcheck 4000 2
 echo "== the DDL parser against PostgreSQL (what the original and the rendering leave in the catalog)"
 quiet 2 python3 tests/ddl_diff.py build/stmtcheck 3000 1
+echo "== the lowering: hand-written IR bytes, effects through the verifier, refusals"
+"$CANCHO" build --std proxy/lowercheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho -o build/lowercheck
+quiet 2 python3 tests/lower_check.py build/lowercheck build/verify
+echo "== name resolution in the lowering against PostgreSQL (42P01, 42703, 42702)"
+quiet 2 python3 tests/lower_diff.py build/lowercheck 4000 1
+quiet 2 python3 tests/lower_diff.py build/lowercheck 4000 2
 echo "== command lines";             python3 tests/cli_test.py vectors build/verify
 echo "== attenuation property";       python3 tests/properties.py 4000 1
 echo "== fuzz (three verifiers, no crash)"; python3 tests/fuzz.py vectors build/verify 3000 1
@@ -64,4 +70,5 @@ echo "== mutants, login";            quiet 1 python3 tests/mutants.py login "$CA
 echo "== mutants, lexer";            quiet 1 python3 tests/mutants.py lex "$CANCHO"
 echo "== mutants, parser";          quiet 1 python3 tests/mutants.py parse "$CANCHO"
 echo "== mutants, statements";      quiet 1 python3 tests/mutants.py stmt "$CANCHO"
+echo "== mutants, lowering";        quiet 1 python3 tests/mutants.py lower "$CANCHO"
 echo "all green"

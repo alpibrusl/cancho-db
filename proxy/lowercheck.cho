@@ -1,0 +1,168 @@
+import std.buffer;
+import std.io;
+import cdb.lex;
+import cdb.parse;
+import cdb.stmt;
+import cdb.lower;
+
+// `lowercheck`: reads a schema snapshot, a line `---`, and one SQL statement on standard input; prints `ok <hex of the IR>` or
+// `refused <tag>`. For tests/lower_check.py, which compares the bytes with hand-written ones and gives them to the verifier.
+
+fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer) -> [heap, io_read] buffer.Buffer {
+    var out = text;
+    var c = getchar(io);
+    while c >= 0 {
+        out = buffer.push(heap, out, byte_of(c));
+        c = getchar(io);
+    }
+    return out;
+}
+
+// Where the line `---` starts, or -1.
+fn find_sep[&t](text: &t [byte]) -> [] int {
+    var i = 0;
+    while i + 4 <= len(text) {
+        if int_of(text[i]) == '\n' && int_of(text[i + 1]) == '-' && int_of(text[i + 2]) == '-' && int_of(text[i + 3]) == '-' && (i + 4 == len(text) || int_of(text[i + 4]) == '\n') {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn hexdigit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(ffi);
+    release(fs);
+    release(args);
+    borrow mut heap as &!h in {
+        var text = buffer.empty(h, 4096);
+        borrow mut io as &!i in {
+            text = read_stdin(h, i, text);
+        }
+        var answer = 0;
+        var tag = 0;
+        var hex = box_slice(h, 8192, byte_of(0));
+        var made = 0;
+        borrow text as &t in {
+            let all = buffer.bytes(t);
+            let cut = find_sep(all);
+            if cut < 0 {
+                answer = 0 - parse.e_syntax();
+                tag = 2;
+            } else {
+                let schema = all[0..cut + 1];
+                var sql_start = cut + 5;
+                if sql_start > len(all) {
+                    sql_start = len(all);
+                }
+                let sql = all[sql_start..len(all)];
+                let cap = len(sql) + 4;
+                var tb = box_slice(h, 4 * cap, 0);
+                var nb = box_slice(h, 6 * (cap + 64), 0);
+                var kb = box_slice(h, cap + 64, 0);
+                var vb = box_slice(h, 64, 0);
+                var ob = box_slice(h, 4 * 64, 0);
+                var rb = box_slice(h, 2 * 256, 0);
+                var st = box_slice(h, 16, 0);
+                var gb = box_slice(h, cap, 0);
+                var cb = box_slice(h, 16, 0);
+                var sb = box_slice(h, 256, 0);
+                var irb = box_slice(h, 4096, byte_of(0));
+                borrow mut tb as &!tw in {
+                    borrow mut nb as &!nw in {
+                        borrow mut kb as &!kw in {
+                            borrow mut vb as &!vw in {
+                                borrow mut ob as &!ow in {
+                                    borrow mut rb as &!rw in {
+                                        borrow mut st as &!sw in {
+                                            borrow mut gb as &!gw in {
+                                                borrow mut cb as &!cw in {
+                                                    borrow mut sb as &!scw in {
+                                                        borrow mut irb as &!irw in {
+                                                            let n = lex.tokenize(sql, contents(tw));
+                                                            if n < 0 {
+                                                                answer = n;
+                                                                tag = 1;
+                                                            } else {
+                                                                parse.reset(contents(sw));
+                                                                let q = stmt.statement(sql, contents(tw), 0, n, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(cw), contents(sw));
+                                                                if q < 0 {
+                                                                    answer = q;
+                                                                    tag = 2;
+                                                                } else {
+                                                                    let root = contents(sw)[2];
+                                                                    let w = lower.lower(sql, contents(tw), contents(nw), contents(kw), root, schema, contents(rw), contents(irw), contents(scw));
+                                                                    if w < 0 {
+                                                                        answer = w;
+                                                                        tag = 3;
+                                                                    } else {
+                                                                        made = w;
+                                                                        var j = 0;
+                                                                        borrow mut hex as &!hw in {
+                                                                            while j < w {
+                                                                                let b = int_of(contents(irw)[j]);
+                                                                                contents(hw)[2 * j] = byte_of(hexdigit(b / 16));
+                                                                                contents(hw)[2 * j + 1] = byte_of(hexdigit(b % 16));
+                                                                                j = j + 1;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                unbox_slice(h, tb);
+                unbox_slice(h, nb);
+                unbox_slice(h, kb);
+                unbox_slice(h, vb);
+                unbox_slice(h, ob);
+                unbox_slice(h, rb);
+                unbox_slice(h, st);
+                unbox_slice(h, gb);
+                unbox_slice(h, cb);
+                unbox_slice(h, sb);
+                unbox_slice(h, irb);
+            }
+        }
+        borrow mut io as &!o in {
+            if tag == 1 {
+                io.write_all(o, "refused ");
+                io.write_all(o, lex.error_name(0 - answer));
+            } else if tag == 2 {
+                io.write_all(o, "refused ");
+                io.write_all(o, parse.error_name(0 - answer));
+            } else if tag == 3 {
+                io.write_all(o, "refused ");
+                io.write_all(o, lower.error_name(0 - answer));
+            } else {
+                io.write_all(o, "ok ");
+                borrow hex as &x in {
+                    io.write_all(o, contents(x)[0..2 * made]);
+                }
+            }
+            io.newline(o);
+        }
+        unbox_slice(h, hex);
+        buffer.drop(h, text);
+    }
+    release(io);
+    release(heap);
+    return 0;
+}

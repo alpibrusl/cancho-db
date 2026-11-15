@@ -80,6 +80,16 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C47 | **The rendering of a DDL statement does what the original does**: run in a rolled-back transaction, both leave the same columns, constraints and indexes, or fail with the same SQLSTATE; nothing accepted is a syntax error to PostgreSQL. | `tests/ddl_diff.py`, 5,000 cases over two seeds, 0 disagreements; four rendering breakages each caught | the proxy runs the rendering, and a renderer that drops `PRIMARY KEY` would run a different schema change |
 | C48 | The DDL grammar is closed and everything else is refused: 320 hand cases in all (211 refusals); 84 statement mutants, none surviving (one survived at first: `DEFAULT -'x'`). | `tests/stmt_test.cho`, `tests/mutants.py stmt` | the IR's `Ddl` names only the table, so what is accepted must be fully reproduced |
 
+### The lowering, P1c ([`m1-lowering.md`](m1-lowering.md) sections 4.1 and 4.2)
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C49 | **The lowering produces the IR a person would write for the statement**: aliases resolved to base tables, unqualified columns to the one table that has them, `*` expanded in order, `BETWEEN` and a simple `CASE` written with `Op`, `now()` as `Nondet`. | `tests/lower_check.py`: 42 statements whose IR bytes are built by hand with the test's own encoder and compared byte for byte | the IR's id and effects come from these bytes |
+| C50 | **The effects of the lowered statement are the hand-written ones**, as the verifier sees them: a commit recording exactly the hand-written set verifies (`level=2+ir`), one with an effect fewer or one more is refused `effects-mismatch`. | the same 42 cases, run through `build/verify --stmts`; 126 refusals of the altered sets | a lowering that read a column it did not record, or the reverse, is the whole point of the IR |
+| C51 | **A name the lowering resolves, PostgreSQL resolves the same way**, and one it refuses is one PostgreSQL does not accept: unknown tables, unknown and ambiguous columns, `ORDER BY` output names. | `tests/lower_diff.py`: 20,000 generated statements against PostgreSQL's `42P01`, `42703`, `42702`, 0 disagreements | the IR would name something other than what runs |
+| C52 | **What the log could not reproduce is refused**: `random`, `clock_timestamp`, `nextval`, `gen_random_uuid`, `setseed`, `txid_current`, `timeofday`, `statement_timestamp`, `transaction_timestamp`, `currval`, `lastval` (`nondeterministic`); `now()` is recorded as `Nondet now`. | refusal cases; the mutants that allow `random()` or `nextval()`, and that make `now()` a plain call | a value the server chose, not in the log |
+| C53 | 73 cases, 27 mutants of the lowering killed, none surviving. | `tests/lower_check.py`, `tests/mutants.py lower` | |
+
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
 | # | Claim | Enforced by | Fails when the claim is false because |
@@ -152,11 +162,14 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 - **IR v2 independence:** the Go verifier was extended to v2 by the same separate agent, from the spec and the vectors only,
   and passed all 428 without a fix; I re-ran its code and its tool-call log shows no read outside its directory. Same
   caveats as before (instruction-enforced, same model family). Its six open points are written into `ir.md` section 6.
-- **The parser reads expressions, SELECT, INSERT, UPDATE, DELETE and the closed DDL.** Nothing resolves a
-  name or lowers to the IR (P1c), and the proxy does not call it (P1d). The schema of the SELECT differential is three small tables;
-  plans for them show joins and clauses, not every alias or name. The statement-count differential cannot see a lexing error that keeps statement boundaries (for
-  example, a doubled quote ending a string preserves quote parity); the unit cases cover that, and each check is claimed for
-  what it covers. The fuzzer's alphabet is finite and its statements are harmless selects.
+- **The lowering is not the proxy.** The parser reads expressions, SELECT, INSERT, UPDATE, DELETE and the closed DDL, and
+  `src/lower.cho` turns them into IR; the proxy calls neither, so no query is checked against a token yet (P1d). A `SELECT`
+  with no `FROM` cannot be lowered, the schema snapshot is written by hand (nothing reads `information_schema` yet), and the
+  lowering does not type-check.
+- **The statement parser's differentials are as good as their generators.** The plan comparison for SELECT and DML runs over three
+  small tables, and plans show joins and clauses, not every alias or name. The statement-count differential of the lexer cannot
+  see a lexing error that keeps statement boundaries (for example, a doubled quote ending a string preserves quote parity); the
+  unit cases cover that, and each check is claimed for what it covers. The fuzzers' alphabets are finite.
 - **The expression differential is as good as its generator.** Expressions are type-correct by construction in the grammar
   half and mostly not in the fuzzer half; a case where both sides fail with the same SQLSTATE is counted as agreeing, so a wrong
   parse that also fails to type-check is invisible there (the hand cases cover precedence either way). The planner folds constant

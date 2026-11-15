@@ -1,0 +1,1444 @@
+module cdb.lower;
+
+import cdb.lex;
+import cdb.parse;
+
+// Lowering (docs/m1-lowering.md section 4 and 4.1: slice P1c), sans-io: the tree of src/parse.cho and src/stmt.cho in, the bytes
+// of an IR v2 statement (docs/spec/ir.md section 6) out, given a SCHEMA SNAPSHOT.
+//
+// The snapshot is text, one table a line, lower-case names:
+//
+//     orders: id customer total
+//     customers: id name
+//     index orders_customer on orders
+//
+// Lowering resolves what the IR must not leave open: an alias becomes its table, an unqualified column the one table of the
+// statement that has it, `*` the columns of the snapshot. It refuses what PostgreSQL would refuse (`unknown-table`,
+// `unknown-column`, `ambiguous-column`) and what the log could not hold (`nondeterministic`). Nothing here infers effects: the
+// bytes go to `ir.infer`, the code the verifier runs, so the lowering has no rule of its own for what a statement reads.
+//
+// Scratch layout, in the ints slice `sc` (at least 128): [0] the output position, [1] the token a refusal is at, [2] the
+// number of tables in scope, [3] the number of flattened FROM entries, [4] "this was the last step" for the walker, [5]
+// the number of select items; the scope from 16 (three ints an entry: alias token or -1, table token, the table's line in the
+// snapshot), the flattened FROM from 48 (three ints: kind, table node, condition node or 0), the join walk from 96.
+
+pub fn e_unknown_table() -> [] int {
+    return 20;
+}
+
+pub fn e_unknown_column() -> [] int {
+    return 21;
+}
+
+pub fn e_ambiguous_column() -> [] int {
+    return 22;
+}
+
+pub fn e_nondeterministic() -> [] int {
+    return 23;
+}
+
+pub fn e_cannot_lower() -> [] int {
+    return 24;
+}
+
+// The tag of a refusal: this module's, or the parser's.
+pub fn error_name(code: int) -> [] &static [byte] {
+    if code == 20 {
+        return "unknown-table";
+    }
+    if code == 21 {
+        return "unknown-column";
+    }
+    if code == 22 {
+        return "ambiguous-column";
+    }
+    if code == 23 {
+        return "nondeterministic";
+    }
+    if code == 24 {
+        return "cannot-lower";
+    }
+    return parse.error_name(code);
+}
+
+fn fail[&c](sc: &!c [int], tok: int, code: int) -> [] int {
+    sc[1] = tok;
+    return 0 - code;
+}
+
+fn low(c: int) -> [] int {
+    if c >= 'A' && c <= 'Z' {
+        return c + 32;
+    }
+    return c;
+}
+
+// ---- writing
+
+fn w8[&o, &c](out: &!o [byte], sc: &!c [int], v: int) -> [] int {
+    let at = sc[0];
+    if at >= len(out) {
+        return 0 - parse.e_too_big();
+    }
+    out[at] = byte_of(v);
+    sc[0] = at + 1;
+    return 0;
+}
+
+fn wn[&o, &c](out: &!o [byte], sc: &!c [int], v: int, bytes: int) -> [] int {
+    var i = bytes - 1;
+    while i >= 0 {
+        var d = v;
+        var k = 0;
+        while k < i {
+            d = d / 256;
+            k = k + 1;
+        }
+        let r = w8(out, sc, d % 256);
+        if r < 0 {
+            return r;
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+fn w32[&o, &c](out: &!o [byte], sc: &!c [int], v: int) -> [] int {
+    return wn(out, sc, v, 4);
+}
+
+fn patch[&o](out: &!o [byte], at: int, v: int, bytes: int) -> [] int {
+    var i = 0;
+    while i < bytes {
+        var d = v;
+        var k = 0;
+        while k < bytes - 1 - i {
+            d = d / 256;
+            k = k + 1;
+        }
+        out[at + i] = byte_of(d % 256);
+        i = i + 1;
+    }
+    return 0;
+}
+
+// A name: a u16 length, then the bytes of `text` (a token of the SQL: an unquoted name folded to lower case, a quoted one kept
+// with its doubled quotes made single).
+fn wname_tok[&s, &t, &o, &c](sql: &s [byte], toks: &t [int], tok: int, out: &!o [byte], sc: &!c [int]) -> [] int {
+    let at = sc[0];
+    var r = wn(out, sc, 0, 2);
+    if r < 0 {
+        return r;
+    }
+    let start = parse.tstart(toks, tok);
+    let n = parse.tlen(toks, tok);
+    let quoted = parse.tkind(toks, tok) == lex.t_quoted();
+    var i = 0;
+    var written = 0;
+    while i < n {
+        var ch = int_of(sql[start + i]);
+        if quoted && ch == '"' && i + 1 < n {
+            i = i + 1;
+        }
+        if !quoted {
+            ch = low(ch);
+        }
+        r = w8(out, sc, ch);
+        if r < 0 {
+            return r;
+        }
+        written = written + 1;
+        i = i + 1;
+    }
+    if written == 0 {
+        return 0 - parse.e_syntax();
+    }
+    return patch(out, at, written, 2);
+}
+
+// A name from literal text.
+fn wname_lit[&o, &c](out: &!o [byte], sc: &!c [int], text: &static [byte]) -> [] int {
+    var r = wn(out, sc, len(text), 2);
+    var i = 0;
+    while i < len(text) && r >= 0 {
+        r = w8(out, sc, int_of(text[i]));
+        i = i + 1;
+    }
+    return r;
+}
+
+// A name from the snapshot: `len` bytes at `at`.
+fn wname_sch[&m, &o, &c](schema: &m [byte], at: int, length: int, out: &!o [byte], sc: &!c [int]) -> [] int {
+    var r = wn(out, sc, length, 2);
+    var i = 0;
+    while i < length && r >= 0 {
+        r = w8(out, sc, int_of(schema[at + i]));
+        i = i + 1;
+    }
+    return r;
+}
+
+// ---- the snapshot
+
+fn is_name_byte(c: int) -> [] bool {
+    return c != ' ' && c != '\n' && c != ':';
+}
+
+// Does the token's text, folded, equal the `length` bytes of the snapshot at `at`?
+fn tok_is[&s, &t, &m](sql: &s [byte], toks: &t [int], tok: int, schema: &m [byte], at: int, length: int) -> [] bool {
+    let n = parse.tlen(toks, tok);
+    if n != length {
+        return false;
+    }
+    let start = parse.tstart(toks, tok);
+    let fold = parse.tkind(toks, tok) == lex.t_ident();
+    var i = 0;
+    while i < n {
+        var ch = int_of(sql[start + i]);
+        if fold {
+            ch = low(ch);
+        }
+        if ch != int_of(schema[at + i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn line_end[&m](schema: &m [byte], from: int) -> [] int {
+    var i = from;
+    while i < len(schema) && int_of(schema[i]) != '\n' {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn starts_with[&m](schema: &m [byte], at: int, word: &static [byte]) -> [] bool {
+    if at + len(word) > len(schema) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if int_of(schema[at + i]) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The line of the table the token names, or -1. Index lines (`index ...`) are not tables.
+fn find_table[&s, &t, &m](sql: &s [byte], toks: &t [int], tok: int, schema: &m [byte]) -> [] int {
+    var at = 0;
+    while at < len(schema) {
+        let e = line_end(schema, at);
+        if !starts_with(schema, at, "index ") {
+            var n = 0;
+            while at + n < e && is_name_byte(int_of(schema[at + n])) {
+                n = n + 1;
+            }
+            if n > 0 && tok_is(sql, toks, tok, schema, at, n) {
+                return at;
+            }
+        }
+        at = e + 1;
+    }
+    return 0 - 1;
+}
+
+// The table an index is on (its line, in the snapshot), or -1: `index NAME on TABLE`.
+fn find_index_table[&s, &t, &m](sql: &s [byte], toks: &t [int], tok: int, schema: &m [byte]) -> [] int {
+    var at = 0;
+    while at < len(schema) {
+        let e = line_end(schema, at);
+        if starts_with(schema, at, "index ") {
+            var n = 0;
+            while at + 6 + n < e && is_name_byte(int_of(schema[at + 6 + n])) {
+                n = n + 1;
+            }
+            if n > 0 && tok_is(sql, toks, tok, schema, at + 6, n) {
+                // " on " then the table's name
+                let table_at = at + 6 + n + 4;
+                var m = 0;
+                while table_at + m < e && is_name_byte(int_of(schema[table_at + m])) {
+                    m = m + 1;
+                }
+                var look = 0;
+                while look < len(schema) {
+                    let le = line_end(schema, look);
+                    if !starts_with(schema, look, "index ") {
+                        var k = 0;
+                        while look + k < le && is_name_byte(int_of(schema[look + k])) {
+                            k = k + 1;
+                        }
+                        if k == m && starts_with_at(schema, look, table_at, m) {
+                            return look;
+                        }
+                    }
+                    look = le + 1;
+                }
+            }
+        }
+        at = e + 1;
+    }
+    return 0 - 1;
+}
+
+fn starts_with_at[&m](schema: &m [byte], a: int, b: int, n: int) -> [] bool {
+    var i = 0;
+    while i < n {
+        if int_of(schema[a + i]) != int_of(schema[b + i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The position of the table name at a snapshot line, and its length.
+fn table_name_len[&m](schema: &m [byte], line: int) -> [] int {
+    var n = 0;
+    while line + n < len(schema) && is_name_byte(int_of(schema[line + n])) {
+        n = n + 1;
+    }
+    return n;
+}
+
+// The `n`th column (from 0) of the table at `line`: its position in the snapshot, or -1; its length in `sc[6]`.
+fn nth_column[&m, &c](schema: &m [byte], line: int, n: int, sc: &!c [int]) -> [] int {
+    let e = line_end(schema, line);
+    var at = line + table_name_len(schema, line);
+    // skip ": "
+    while at < e && (int_of(schema[at]) == ':' || int_of(schema[at]) == ' ') {
+        at = at + 1;
+    }
+    var k = 0;
+    while at < e {
+        var l = 0;
+        while at + l < e && int_of(schema[at + l]) != ' ' {
+            l = l + 1;
+        }
+        if k == n {
+            sc[6] = l;
+            return at;
+        }
+        k = k + 1;
+        at = at + l + 1;
+    }
+    return 0 - 1;
+}
+
+fn column_count[&m, &c](schema: &m [byte], line: int, sc: &!c [int]) -> [] int {
+    var n = 0;
+    while nth_column(schema, line, n, sc) >= 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+// Is the token a column of the table at `line`?
+fn has_column[&s, &t, &m, &c](sql: &s [byte], toks: &t [int], tok: int, schema: &m [byte], line: int, sc: &!c [int]) -> [] bool {
+    var n = 0;
+    var at = nth_column(schema, line, n, sc);
+    while at >= 0 {
+        if tok_is(sql, toks, tok, schema, at, sc[6]) {
+            return true;
+        }
+        n = n + 1;
+        at = nth_column(schema, line, n, sc);
+    }
+    return false;
+}
+
+// ---- the scope: a statement's tables by alias
+
+// Adds a TABLE node to the scope; refuses an unknown table.
+fn scope_add[&s, &t, &n, &m, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], node: int, schema: &m [byte], sc: &!c [int]) -> [] int {
+    let table = nodes[6 * node + 1];
+    let alias = nodes[6 * node + 4];
+    let line = find_table(sql, toks, table, schema);
+    if line < 0 {
+        return fail(sc, table, e_unknown_table());
+    }
+    let at = 16 + 3 * sc[2];
+    if sc[2] >= 10 {
+        return fail(sc, table, e_cannot_lower());
+    }
+    sc[at] = alias;
+    sc[at + 1] = table;
+    sc[at + 2] = line;
+    sc[2] = sc[2] + 1;
+    return 0;
+}
+
+// The scope entry a table or alias name refers to, or -1.
+fn scope_find[&s, &t, &m, &c](sql: &s [byte], toks: &t [int], tok: int, schema: &m [byte], sc: &!c [int]) -> [] int {
+    var i = 0;
+    while i < sc[2] {
+        let at = 16 + 3 * i;
+        var by = sc[at + 1];
+        if sc[at] >= 0 {
+            by = sc[at];
+        }
+        let line = sc[at + 2];
+        // compare the two tokens' folded text: the name in the statement against the alias or table's own token
+        if same_name(sql, toks, tok, by) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn same_name[&s, &t](sql: &s [byte], toks: &t [int], a: int, b: int) -> [] bool {
+    let n = parse.tlen(toks, a);
+    if n != parse.tlen(toks, b) {
+        return false;
+    }
+    let sa = parse.tstart(toks, a);
+    let sb = parse.tstart(toks, b);
+    let fa = parse.tkind(toks, a) == lex.t_ident();
+    let fb = parse.tkind(toks, b) == lex.t_ident();
+    var i = 0;
+    while i < n {
+        var x = int_of(sql[sa + i]);
+        var y = int_of(sql[sb + i]);
+        if fa {
+            x = low(x);
+        }
+        if fb {
+            y = low(y);
+        }
+        if x != y {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Writes a column reference: its table (the base table's name, never the alias) and column. `tab` is a token naming a scope
+// entry, or -1 for an unqualified column; `col` the column token.
+fn emit_col[&s, &t, &m, &o, &c](sql: &s [byte], toks: &t [int], tab: int, col: int, schema: &m [byte], out: &!o [byte], sc: &!c [int]) -> [] int {
+    var entry = 0 - 1;
+    if tab >= 0 {
+        entry = scope_find(sql, toks, tab, schema, sc);
+        if entry < 0 {
+            return fail(sc, tab, e_unknown_table());
+        }
+        if !has_column(sql, toks, col, schema, sc[16 + 3 * entry + 2], sc) {
+            return fail(sc, col, e_unknown_column());
+        }
+    } else {
+        var found = 0;
+        var i = 0;
+        while i < sc[2] {
+            if has_column(sql, toks, col, schema, sc[16 + 3 * i + 2], sc) {
+                found = found + 1;
+                entry = i;
+            }
+            i = i + 1;
+        }
+        if found == 0 {
+            return fail(sc, col, e_unknown_column());
+        }
+        if found > 1 {
+            return fail(sc, col, e_ambiguous_column());
+        }
+    }
+    var r = w8(out, sc, 0);
+    if r < 0 {
+        return r;
+    }
+    let line = sc[16 + 3 * entry + 2];
+    r = wname_sch(schema, line, table_name_len(schema, line), out, sc);
+    if r < 0 {
+        return r;
+    }
+    return wname_tok(sql, toks, col, out, sc);
+}
+
+// ---- constants
+
+// The decimal value of a literal made of digits only and short enough to fit, or -1.
+fn int_literal[&s, &t](sql: &s [byte], toks: &t [int], tok: int) -> [] int {
+    let n = parse.tlen(toks, tok);
+    if n > 18 {
+        return 0 - 1;
+    }
+    var v = 0;
+    var i = 0;
+    while i < n {
+        let ch = int_of(sql[parse.tstart(toks, tok) + i]);
+        if ch < '0' || ch > '9' {
+            return 0 - 1;
+        }
+        v = v * 10 + ch - '0';
+        i = i + 1;
+    }
+    return v;
+}
+
+// A `Const bytes`: tag 1, a u32 length, the bytes (a string's `''` made `'`).
+fn emit_bytes_const[&s, &t, &o, &c](sql: &s [byte], toks: &t [int], tok: int, string: bool, out: &!o [byte], sc: &!c [int]) -> [] int {
+    var r = w8(out, sc, 1);
+    if r < 0 {
+        return r;
+    }
+    r = w8(out, sc, 2);
+    if r < 0 {
+        return r;
+    }
+    let at = sc[0];
+    r = wn(out, sc, 0, 4);
+    if r < 0 {
+        return r;
+    }
+    let start = parse.tstart(toks, tok);
+    let n = parse.tlen(toks, tok);
+    var written = 0;
+    var i = 0;
+    while i < n {
+        let ch = int_of(sql[start + i]);
+        if string && ch == '\'' && i + 1 < n {
+            i = i + 1;
+        }
+        r = w8(out, sc, ch);
+        if r < 0 {
+            return r;
+        }
+        written = written + 1;
+        i = i + 1;
+    }
+    return patch(out, at, written, 4);
+}
+
+fn emit_lit_const[&o, &c](out: &!o [byte], sc: &!c [int], text: &static [byte]) -> [] int {
+    var r = w8(out, sc, 1);
+    if r < 0 {
+        return r;
+    }
+    r = w8(out, sc, 2);
+    if r < 0 {
+        return r;
+    }
+    r = wn(out, sc, len(text), 4);
+    var i = 0;
+    while i < len(text) && r >= 0 {
+        r = w8(out, sc, int_of(text[i]));
+        i = i + 1;
+    }
+    return r;
+}
+
+// ---- expressions
+
+// The IR operator of a parser operator code (parse.cho: 1 or, 2 and, 3 = ... 14 ||, 15 to 18 like and ilike, plain and negated).
+fn ir_op(code: int) -> [] int {
+    if code == 1 {
+        return 7;
+    }
+    if code == 2 {
+        return 6;
+    }
+    if code == 3 {
+        return 0;
+    }
+    if code == 4 {
+        return 1;
+    }
+    if code == 5 {
+        return 2;
+    }
+    if code == 6 {
+        return 3;
+    }
+    if code == 7 {
+        return 4;
+    }
+    if code == 8 {
+        return 5;
+    }
+    if code == 9 {
+        return 8;
+    }
+    if code == 10 {
+        return 9;
+    }
+    if code == 11 {
+        return 10;
+    }
+    if code == 12 {
+        return 11;
+    }
+    if code == 13 {
+        return 17;
+    }
+    if code == 14 {
+        return 16;
+    }
+    if code == 15 {
+        return 12;
+    }
+    if code == 16 {
+        return 14;
+    }
+    if code == 17 {
+        return 13;
+    }
+    return 15;
+}
+
+// A call whose value the log could not reproduce.
+fn is_nondeterministic[&s, &t](sql: &s [byte], toks: &t [int], tok: int) -> [] bool {
+    let a = parse.tstart(toks, tok);
+    let n = parse.tlen(toks, tok);
+    return parse.word_is(sql, a, n, "random") || parse.word_is(sql, a, n, "clock_timestamp") || parse.word_is(sql, a, n, "nextval") || parse.word_is(sql, a, n, "gen_random_uuid") || parse.word_is(sql, a, n, "setseed") || parse.word_is(sql, a, n, "txid_current") || parse.word_is(sql, a, n, "timeofday") || parse.word_is(sql, a, n, "statement_timestamp") || parse.word_is(sql, a, n, "transaction_timestamp") || parse.word_is(sql, a, n, "currval") || parse.word_is(sql, a, n, "lastval");
+}
+
+// One step of the prefix walk over the expression at `node`: writes what the step writes, answers the child the step visits
+// (0 for none), and sets sc[4] to 1 on the node's last step. The walk is `emit_expr`'s loop; a node is a short script of steps.
+fn visit[&s, &t, &n, &k, &m, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], node: int, step: int, schema: &m [byte], out: &!o [byte], sc: &!c [int]) -> [] int {
+    let kind = nodes[6 * node];
+    let data = nodes[6 * node + 1];
+    let first = nodes[6 * node + 2];
+    let count = nodes[6 * node + 3];
+    sc[4] = 1;
+    var r = 0;
+    if kind == parse.n_num() {
+        let v = int_literal(sql, toks, data);
+        if v >= 0 {
+            r = w8(out, sc, 1);
+            if r >= 0 {
+                r = w8(out, sc, 1);
+            }
+            if r >= 0 {
+                r = wn(out, sc, v, 8);
+            }
+        } else {
+            r = emit_bytes_const(sql, toks, data, false, out, sc);
+        }
+        return r;
+    }
+    if kind == parse.n_str() {
+        return emit_bytes_const(sql, toks, data, true, out, sc);
+    }
+    if kind == parse.n_null() {
+        r = w8(out, sc, 1);
+        if r >= 0 {
+            r = w8(out, sc, 0);
+        }
+        return r;
+    }
+    if kind == parse.n_true() {
+        return emit_lit_const(out, sc, "true");
+    }
+    if kind == parse.n_false() {
+        return emit_lit_const(out, sc, "false");
+    }
+    if kind == parse.n_col() {
+        var tab = 0 - 1;
+        var col = data;
+        if nodes[6 * node + 4] >= 0 {
+            tab = data;
+            col = nodes[6 * node + 4];
+        }
+        return emit_col(sql, toks, tab, col, schema, out, sc);
+    }
+    if kind == parse.n_bin() {
+        if data == 19 || data == 20 {
+            // IN: the tested expression, then the members, which are the children of the LIST
+            let list = kids[first + 1];
+            let n_members = nodes[6 * list + 3];
+            if step == 0 {
+                sc[4] = 0;
+                r = w8(out, sc, 8);
+                if r >= 0 {
+                    var neg = 0;
+                    if data == 20 {
+                        neg = 1;
+                    }
+                    r = w8(out, sc, neg);
+                }
+                if r >= 0 {
+                    r = w32(out, sc, n_members);
+                }
+                if r < 0 {
+                    return r;
+                }
+                return kids[first];
+            }
+            if step == n_members {
+                sc[4] = 1;
+            } else {
+                sc[4] = 0;
+            }
+            return kids[nodes[6 * list + 2] + step - 1];
+        }
+        if step == 0 {
+            sc[4] = 0;
+            r = w8(out, sc, 5);
+            if r >= 0 {
+                r = w8(out, sc, ir_op(data));
+            }
+            if r < 0 {
+                return r;
+            }
+            return kids[first];
+        }
+        return kids[first + 1];
+    }
+    if kind == parse.n_not() || kind == parse.n_neg() || kind == parse.n_isnull() {
+        var op = 0;
+        if kind == parse.n_neg() {
+            op = 1;
+        }
+        if kind == parse.n_isnull() {
+            op = 2 + data;
+        }
+        r = w8(out, sc, 7);
+        if r >= 0 {
+            r = w8(out, sc, op);
+        }
+        if r < 0 {
+            return r;
+        }
+        return kids[first];
+    }
+    if kind == parse.n_between() {
+        // x BETWEEN lo AND hi is (x >= lo) AND (x <= hi), under a NOT for NOT BETWEEN
+        if step == 0 {
+            sc[4] = 0;
+            if data == 1 {
+                r = w8(out, sc, 7);
+                if r >= 0 {
+                    r = w8(out, sc, 0);
+                }
+            }
+            if r >= 0 {
+                r = w8(out, sc, 5);
+            }
+            if r >= 0 {
+                r = w8(out, sc, 6);
+            }
+            if r >= 0 {
+                r = w8(out, sc, 5);
+            }
+            if r >= 0 {
+                r = w8(out, sc, 5);
+            }
+            if r < 0 {
+                return r;
+            }
+            return kids[first];
+        }
+        if step == 1 {
+            sc[4] = 0;
+            return kids[first + 1];
+        }
+        if step == 2 {
+            sc[4] = 0;
+            r = w8(out, sc, 5);
+            if r >= 0 {
+                r = w8(out, sc, 3);
+            }
+            if r < 0 {
+                return r;
+            }
+            return kids[first];
+        }
+        return kids[first + 2];
+    }
+    if kind == parse.n_cast() {
+        r = w8(out, sc, 10);
+        if r < 0 {
+            return r;
+        }
+        let at = sc[0];
+        r = wn(out, sc, 0, 2);
+        if r < 0 {
+            return r;
+        }
+        let end = parse.put_type(out, sc[0], data, nodes[6 * node + 4], nodes[6 * node + 5]);
+        if end < 0 {
+            return 0 - parse.e_too_big();
+        }
+        r = patch(out, at, end - at - 2, 2);
+        sc[0] = end;
+        if r < 0 {
+            return r;
+        }
+        return kids[first];
+    }
+    if kind == parse.n_call() {
+        if step == 0 {
+            if is_nondeterministic(sql, toks, data) {
+                return fail(sc, data, e_nondeterministic());
+            }
+            let a = parse.tstart(toks, data);
+            let l = parse.tlen(toks, data);
+            if parse.word_is(sql, a, l, "now") && count == 0 {
+                r = w8(out, sc, 3);
+                if r >= 0 {
+                    r = wname_lit(out, sc, "now");
+                }
+                return r;
+            }
+            r = w8(out, sc, 4);
+            if r >= 0 {
+                r = wname_tok(sql, toks, data, out, sc);
+            }
+            if r >= 0 {
+                var argc = count;
+                if nodes[6 * node + 4] == 1 {
+                    argc = 1;
+                }
+                r = w32(out, sc, argc);
+            }
+            if r >= 0 && nodes[6 * node + 4] == 1 {
+                r = w8(out, sc, 6);
+            }
+            if r < 0 {
+                return r;
+            }
+            // no arguments: that was the whole node; otherwise they are the steps that follow
+            if count > 0 {
+                sc[4] = 0;
+            }
+            return 0;
+        }
+        if step == count {
+            sc[4] = 1;
+        } else {
+            sc[4] = 0;
+        }
+        return kids[first + step - 1];
+    }
+    if kind == parse.n_case() {
+        let operand = nodes[6 * node + 4];
+        let has_else = nodes[6 * node + 5];
+        let pairs = (count - operand - has_else) / 2;
+        var per = 2;
+        if operand == 1 {
+            per = 3;
+        }
+        let total = 1 + per * pairs + has_else;
+        if step == 0 {
+            r = w8(out, sc, 9);
+            if r >= 0 {
+                r = w32(out, sc, pairs);
+            }
+            if r >= 0 {
+                r = w8(out, sc, has_else);
+            }
+            sc[4] = 0;
+            return r;
+        }
+        if step == total - 1 {
+            sc[4] = 1;
+        } else {
+            sc[4] = 0;
+        }
+        if has_else == 1 && step == total - 1 {
+            return kids[first + count - 1];
+        }
+        let rel = step - 1;
+        let pair = rel / per;
+        let at = rel % per;
+        if operand == 1 {
+            if at == 0 {
+                r = w8(out, sc, 5);
+                if r >= 0 {
+                    r = w8(out, sc, 0);
+                }
+                if r < 0 {
+                    return r;
+                }
+                return kids[first];
+            }
+            return kids[first + 1 + 2 * pair + at - 1];
+        }
+        return kids[first + 2 * pair + at];
+    }
+    return fail(sc, 0, e_cannot_lower());
+}
+
+// Writes the expression at `root` in prefix order. `rs` is the walk's stack, two ints a level.
+fn emit_expr[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
+    if len(rs) < 2 {
+        return 0 - parse.e_nested_too_deep();
+    }
+    rs[0] = root;
+    rs[1] = 0;
+    var sp = 1;
+    while sp > 0 {
+        let node = rs[2 * (sp - 1)];
+        let step = rs[2 * (sp - 1) + 1];
+        let child = visit(sql, toks, nodes, kids, node, step, schema, out, sc);
+        if child < 0 {
+            return child;
+        }
+        if sc[4] == 1 {
+            sp = sp - 1;
+        } else {
+            rs[2 * (sp - 1) + 1] = step + 1;
+        }
+        if child > 0 {
+            if 2 * sp + 2 > len(rs) {
+                return 0 - parse.e_nested_too_deep();
+            }
+            rs[2 * sp] = child;
+            rs[2 * sp + 1] = 0;
+            sp = sp + 1;
+        }
+    }
+    return 0;
+}
+
+// ---- statements
+
+// An optional expression: a flag, then the expression if there is one.
+fn emit_opt[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], clause: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
+    if clause == 0 {
+        return w8(out, sc, 0);
+    }
+    let rr = w8(out, sc, 1);
+    if rr < 0 {
+        return rr;
+    }
+    return emit_expr(sql, toks, nodes, kids, kids[nodes[6 * clause + 2]], schema, rs, out, sc);
+}
+
+// The clause node of `kind` among a statement's children, or 0.
+fn clause_of[&n, &k](nodes: &n [int], kids: &k [int], stmt: int, kind: int, from: int) -> [] int {
+    var i = from;
+    while i < nodes[6 * stmt + 3] {
+        let c = kids[nodes[6 * stmt + 2] + i];
+        if nodes[6 * c] == kind {
+            return c;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Flattens a FROM clause into sc[48..]: (kind, TABLE node, ON node) in order, the first of each source kind 0, and builds the
+// scope. A JOIN is left-deep, so the chain is walked down its left side and written back in reverse.
+fn flatten_from[&s, &t, &n, &k, &m, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], from: int, schema: &m [byte], sc: &!c [int]) -> [] int {
+    sc[2] = 0;
+    sc[3] = 0;
+    if from == 0 {
+        return 0;
+    }
+    var i = 0;
+    while i < nodes[6 * from + 3] {
+        var src = kids[nodes[6 * from + 2] + i];
+        var depth = 0;
+        while nodes[6 * src] == parse.n_join() {
+            if depth >= 16 {
+                return fail(sc, 0, e_cannot_lower());
+            }
+            sc[96 + depth] = src;
+            depth = depth + 1;
+            src = kids[nodes[6 * src + 2]];
+        }
+        if sc[3] >= 16 {
+            return fail(sc, 0, e_cannot_lower());
+        }
+        sc[48 + 3 * sc[3]] = 0;
+        sc[48 + 3 * sc[3] + 1] = src;
+        sc[48 + 3 * sc[3] + 2] = 0;
+        sc[3] = sc[3] + 1;
+        var d = depth - 1;
+        while d >= 0 {
+            let j = sc[96 + d];
+            if sc[3] >= 16 {
+                return fail(sc, 0, e_cannot_lower());
+            }
+            var kind = 1;
+            if nodes[6 * j + 1] == 1 {
+                kind = 2;
+            }
+            sc[48 + 3 * sc[3]] = kind;
+            sc[48 + 3 * sc[3] + 1] = kids[nodes[6 * j + 2] + 1];
+            sc[48 + 3 * sc[3] + 2] = kids[nodes[6 * j + 2] + 2];
+            sc[3] = sc[3] + 1;
+            d = d - 1;
+        }
+        i = i + 1;
+    }
+    var e = 0;
+    while e < sc[3] {
+        let r = scope_add(sql, toks, nodes, sc[48 + 3 * e + 1], schema, sc);
+        if r < 0 {
+            return r;
+        }
+        e = e + 1;
+    }
+    return 0;
+}
+
+// How many DIFFERENT output columns of the select list the token names, capped at 2: an alias, the column a bare reference or a
+// cast of one names, or a column a `*` expands to. PostgreSQL's ORDER BY takes an output name first and refuses one that
+// two outputs have, but not when they are the same expression (`SELECT t.*, * ... ORDER BY b`): two plain references to one
+// column are one output here too; anything else (an alias, a cast) is its own.
+fn count_outputs[&s, &t, &n, &k, &m, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], items: int, name: int, schema: &m [byte], sc: &!c [int]) -> [] int {
+    var found = 0;
+    var first = 0;
+    var i = 0;
+    while i < nodes[6 * items + 3] {
+        let it = kids[nodes[6 * items + 2] + i];
+        var ident = 0 - 1 - i;
+        var hit = false;
+        if nodes[6 * it] == parse.n_star() {
+            var e = 0;
+            var last = sc[2];
+            if nodes[6 * it + 1] >= 0 {
+                e = scope_find(sql, toks, nodes[6 * it + 1], schema, sc);
+                last = e + 1;
+            }
+            while e >= 0 && e < last {
+                let line = sc[16 + 3 * e + 2];
+                var c = 0;
+                var at = nth_column(schema, line, c, sc);
+                while at >= 0 {
+                    if tok_is(sql, toks, name, schema, at, sc[6]) {
+                        let id = 65536 * (e + 1) + at;
+                        if found == 0 {
+                            found = 1;
+                            first = id;
+                        } else if id != first {
+                            found = 2;
+                        }
+                    }
+                    c = c + 1;
+                    at = nth_column(schema, line, c, sc);
+                }
+                e = e + 1;
+            }
+        } else if nodes[6 * it + 1] >= 0 {
+            hit = same_name(sql, toks, name, nodes[6 * it + 1]);
+        } else {
+            var x = kids[nodes[6 * it + 2]];
+            var plain = true;
+            while nodes[6 * x] == parse.n_cast() {
+                x = kids[nodes[6 * x + 2]];
+                plain = false;
+            }
+            if nodes[6 * x] == parse.n_col() {
+                var col = nodes[6 * x + 1];
+                var tab = 0 - 1;
+                if nodes[6 * x + 4] >= 0 {
+                    col = nodes[6 * x + 4];
+                    tab = nodes[6 * x + 1];
+                }
+                hit = same_name(sql, toks, name, col);
+                if hit && plain {
+                    // the same table and column as a star's or another reference's: identify them by (scope entry, snapshot position)
+                    var e = 0 - 1;
+                    if tab >= 0 {
+                        e = scope_find(sql, toks, tab, schema, sc);
+                    } else {
+                        var j = 0;
+                        while j < sc[2] && e < 0 {
+                            if has_column(sql, toks, col, schema, sc[16 + 3 * j + 2], sc) {
+                                e = j;
+                            }
+                            j = j + 1;
+                        }
+                    }
+                    if e >= 0 {
+                        var c = 0;
+                        var at = nth_column(schema, sc[16 + 3 * e + 2], c, sc);
+                        while at >= 0 {
+                            if tok_is(sql, toks, col, schema, at, sc[6]) {
+                                ident = 65536 * (e + 1) + at;
+                            }
+                            c = c + 1;
+                            at = nth_column(schema, sc[16 + 3 * e + 2], c, sc);
+                        }
+                    }
+                }
+            }
+        }
+        if hit {
+            if found == 0 {
+                found = 1;
+                first = ident;
+            } else if ident != first {
+                found = 2;
+            }
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+// A SELECT: Select2 (ir.md section 6).
+fn lower_select[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
+    let items = clause_of(nodes, kids, root, parse.n_items(), 0);
+    let from = clause_of(nodes, kids, root, parse.n_from(), 0);
+    let wh = clause_of(nodes, kids, root, parse.n_where(), 0);
+    let group = clause_of(nodes, kids, root, parse.n_group(), 0);
+    let having = clause_of(nodes, kids, root, parse.n_having(), 0);
+    let order = clause_of(nodes, kids, root, parse.n_orderby(), 0);
+    let limit = clause_of(nodes, kids, root, parse.n_limit(), 0);
+    let offset = clause_of(nodes, kids, root, parse.n_offset(), 0);
+    var r0 = flatten_from(sql, toks, nodes, kids, from, schema, sc);
+    if r0 < 0 {
+        return r0;
+    }
+    if from != 0 && sc[3] == 0 {
+        return fail(sc, 0, e_cannot_lower());
+    }
+    if from == 0 {
+        // a SELECT with no FROM has no table: the IR requires at least one
+        return fail(sc, 0, e_cannot_lower());
+    }
+    r0 = w8(out, sc, 6);
+    if r0 < 0 {
+        return r0;
+    }
+    r0 = w8(out, sc, nodes[6 * root + 1]);
+    if r0 < 0 {
+        return r0;
+    }
+    // the items, with * expanded: first how many, then each
+    var n_items = 0;
+    var i = 0;
+    while i < nodes[6 * items + 3] {
+        let it = kids[nodes[6 * items + 2] + i];
+        if nodes[6 * it] == parse.n_star() {
+            if nodes[6 * it + 1] < 0 {
+                var e = 0;
+                while e < sc[2] {
+                    n_items = n_items + column_count(schema, sc[16 + 3 * e + 2], sc);
+                    e = e + 1;
+                }
+            } else {
+                let en = scope_find(sql, toks, nodes[6 * it + 1], schema, sc);
+                if en < 0 {
+                    return fail(sc, nodes[6 * it + 1], e_unknown_table());
+                }
+                n_items = n_items + column_count(schema, sc[16 + 3 * en + 2], sc);
+            }
+        } else {
+            n_items = n_items + 1;
+        }
+        i = i + 1;
+    }
+    r0 = w32(out, sc, n_items);
+    if r0 < 0 {
+        return r0;
+    }
+    i = 0;
+    while i < nodes[6 * items + 3] {
+        let it = kids[nodes[6 * items + 2] + i];
+        if nodes[6 * it] == parse.n_star() {
+            var e = 0;
+            var last = sc[2];
+            if nodes[6 * it + 1] >= 0 {
+                e = scope_find(sql, toks, nodes[6 * it + 1], schema, sc);
+                last = e + 1;
+            }
+            while e < last {
+                let line = sc[16 + 3 * e + 2];
+                var c = 0;
+                var at = nth_column(schema, line, c, sc);
+                while at >= 0 {
+                    r0 = w8(out, sc, 0);
+                    if r0 >= 0 {
+                        r0 = wname_sch(schema, line, table_name_len(schema, line), out, sc);
+                    }
+                    if r0 >= 0 {
+                        r0 = wname_sch(schema, at, sc[6], out, sc);
+                    }
+                    if r0 < 0 {
+                        return r0;
+                    }
+                    c = c + 1;
+                    at = nth_column(schema, line, c, sc);
+                }
+                e = e + 1;
+            }
+        } else {
+            r0 = emit_expr(sql, toks, nodes, kids, kids[nodes[6 * it + 2]], schema, rs, out, sc);
+            if r0 < 0 {
+                return r0;
+            }
+        }
+        i = i + 1;
+    }
+    // FROM
+    r0 = w32(out, sc, sc[3]);
+    if r0 < 0 {
+        return r0;
+    }
+    var f = 0;
+    while f < sc[3] {
+        let table = sc[48 + 3 * f + 1];
+        let line = sc[16 + 3 * f + 2];
+        r0 = wname_sch(schema, line, table_name_len(schema, line), out, sc);
+        if r0 >= 0 {
+            r0 = w8(out, sc, sc[48 + 3 * f]);
+        }
+        if r0 >= 0 {
+            if sc[48 + 3 * f] == 0 {
+                r0 = w8(out, sc, 0);
+            } else {
+                r0 = w8(out, sc, 1);
+                if r0 >= 0 {
+                    r0 = emit_expr(sql, toks, nodes, kids, sc[48 + 3 * f + 2], schema, rs, out, sc);
+                }
+            }
+        }
+        if r0 < 0 {
+            return r0;
+        }
+        f = f + 1;
+    }
+    r0 = emit_opt(sql, toks, nodes, kids, wh, schema, rs, out, sc);
+    if r0 < 0 {
+        return r0;
+    }
+    // GROUP BY
+    var ng = 0;
+    if group != 0 {
+        ng = nodes[6 * group + 3];
+    }
+    r0 = w32(out, sc, ng);
+    i = 0;
+    while i < ng && r0 >= 0 {
+        r0 = emit_expr(sql, toks, nodes, kids, kids[nodes[6 * group + 2] + i], schema, rs, out, sc);
+        i = i + 1;
+    }
+    if r0 < 0 {
+        return r0;
+    }
+    r0 = emit_opt(sql, toks, nodes, kids, having, schema, rs, out, sc);
+    if r0 < 0 {
+        return r0;
+    }
+    // ORDER BY: a bare name equal to a select item's alias is that item
+    var no = 0;
+    if order != 0 {
+        no = nodes[6 * order + 3];
+    }
+    r0 = w32(out, sc, no);
+    i = 0;
+    while i < no && r0 >= 0 {
+        let ord = kids[nodes[6 * order + 2] + i];
+        var expr = kids[nodes[6 * ord + 2]];
+        if nodes[6 * expr] == parse.n_col() && nodes[6 * expr + 4] < 0 {
+            // a name that two output columns have is ambiguous, as in PostgreSQL (which refuses it)
+            if count_outputs(sql, toks, nodes, kids, items, nodes[6 * expr + 1], schema, sc) > 1 {
+                return fail(sc, nodes[6 * expr + 1], e_ambiguous_column());
+            }
+            var j = 0;
+            while j < nodes[6 * items + 3] {
+                let it = kids[nodes[6 * items + 2] + j];
+                if nodes[6 * it] == parse.n_item() && nodes[6 * it + 1] >= 0 && same_name(sql, toks, nodes[6 * expr + 1], nodes[6 * it + 1]) {
+                    expr = kids[nodes[6 * it + 2]];
+                }
+                j = j + 1;
+            }
+        }
+        r0 = emit_expr(sql, toks, nodes, kids, expr, schema, rs, out, sc);
+        if r0 >= 0 {
+            var dir = 0;
+            if nodes[6 * ord + 1] == 2 {
+                dir = 1;
+            }
+            r0 = w8(out, sc, dir);
+        }
+        if r0 >= 0 {
+            r0 = w8(out, sc, 0);
+        }
+        i = i + 1;
+    }
+    if r0 < 0 {
+        return r0;
+    }
+    r0 = emit_opt(sql, toks, nodes, kids, limit, schema, rs, out, sc);
+    if r0 < 0 {
+        return r0;
+    }
+    return emit_opt(sql, toks, nodes, kids, offset, schema, rs, out, sc);
+}
+
+// INSERT: Insert (ir.md section 2): the table, the columns (the snapshot's, in order, if none were listed) and the rows.
+fn lower_insert[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
+    let target = kids[nodes[6 * root + 2]];
+    let cols = clause_of(nodes, kids, root, parse.n_cols(), 1);
+    let values = clause_of(nodes, kids, root, parse.n_values(), 1);
+    let table = nodes[6 * target + 1];
+    let line = find_table(sql, toks, table, schema);
+    if line < 0 {
+        return fail(sc, table, e_unknown_table());
+    }
+    sc[2] = 0;
+    var r0 = w8(out, sc, 1);
+    if r0 >= 0 {
+        r0 = wname_tok(sql, toks, table, out, sc);
+    }
+    if r0 < 0 {
+        return r0;
+    }
+    var width = 0;
+    if cols == 0 {
+        width = column_count(schema, line, sc);
+        r0 = w32(out, sc, width);
+        var c = 0;
+        while c < width && r0 >= 0 {
+            let at = nth_column(schema, line, c, sc);
+            r0 = wname_sch(schema, at, sc[6], out, sc);
+            c = c + 1;
+        }
+    } else {
+        width = nodes[6 * cols + 3];
+        r0 = w32(out, sc, width);
+        var c = 0;
+        while c < width && r0 >= 0 {
+            let tok = nodes[6 * kids[nodes[6 * cols + 2] + c] + 1];
+            if !has_column(sql, toks, tok, schema, line, sc) {
+                return fail(sc, tok, e_unknown_column());
+            }
+            r0 = wname_tok(sql, toks, tok, out, sc);
+            c = c + 1;
+        }
+    }
+    if r0 < 0 {
+        return r0;
+    }
+    r0 = w32(out, sc, nodes[6 * values + 3]);
+    var row = 0;
+    while row < nodes[6 * values + 3] && r0 >= 0 {
+        let rn = kids[nodes[6 * values + 2] + row];
+        if nodes[6 * rn + 3] != width {
+            return fail(sc, 0, parse.e_syntax());
+        }
+        r0 = w32(out, sc, width);
+        var e = 0;
+        while e < width && r0 >= 0 {
+            r0 = emit_expr(sql, toks, nodes, kids, kids[nodes[6 * rn + 2] + e], schema, rs, out, sc);
+            e = e + 1;
+        }
+        row = row + 1;
+    }
+    return r0;
+}
+
+// UPDATE and DELETE: the table, the assignments (UPDATE), and the WHERE; the scope is the one table, by alias.
+fn lower_write[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
+    let target = kids[nodes[6 * root + 2]];
+    let update = nodes[6 * root] == parse.n_update();
+    var r0 = scope_add(sql, toks, nodes, target, schema, sc);
+    if r0 < 0 {
+        return r0;
+    }
+    let line = sc[16 + 2];
+    var tag = 3;
+    if update {
+        tag = 2;
+    }
+    r0 = w8(out, sc, tag);
+    if r0 >= 0 {
+        r0 = wname_tok(sql, toks, nodes[6 * target + 1], out, sc);
+    }
+    if r0 < 0 {
+        return r0;
+    }
+    if update {
+        let set = clause_of(nodes, kids, root, parse.n_set(), 1);
+        r0 = w32(out, sc, nodes[6 * set + 3]);
+        var a = 0;
+        while a < nodes[6 * set + 3] && r0 >= 0 {
+            let asg = kids[nodes[6 * set + 2] + a];
+            let col = nodes[6 * asg + 1];
+            if !has_column(sql, toks, col, schema, line, sc) {
+                return fail(sc, col, e_unknown_column());
+            }
+            r0 = wname_tok(sql, toks, col, out, sc);
+            if r0 >= 0 {
+                r0 = emit_expr(sql, toks, nodes, kids, kids[nodes[6 * asg + 2]], schema, rs, out, sc);
+            }
+            a = a + 1;
+        }
+        if r0 < 0 {
+            return r0;
+        }
+    }
+    return emit_opt(sql, toks, nodes, kids, clause_of(nodes, kids, root, parse.n_where(), 1), schema, rs, out, sc);
+}
+
+// DDL: a kind and the table (ir.md section 2). For DROP INDEX the table is the one the snapshot says the index is on.
+fn lower_ddl[&s, &t, &n, &m, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], root: int, schema: &m [byte], out: &!o [byte], sc: &!c [int]) -> [] int {
+    let kind = nodes[6 * root];
+    let data = nodes[6 * root + 1];
+    var code = 0;
+    var table = data;
+    var must_exist = false;
+    if kind == parse.n_alter_add() {
+        code = 1;
+        must_exist = true;
+    }
+    if kind == parse.n_drop_table() {
+        code = 2;
+        must_exist = true;
+    }
+    if kind == parse.n_drop_index() {
+        code = 4;
+    }
+    if kind == parse.n_create_index() {
+        code = 3;
+        table = nodes[6 * root + 5];
+        must_exist = true;
+    }
+    var r0 = w8(out, sc, 4);
+    if r0 >= 0 {
+        r0 = w8(out, sc, code);
+    }
+    if r0 < 0 {
+        return r0;
+    }
+    if kind == parse.n_drop_index() {
+        let line = find_index_table(sql, toks, data, schema);
+        if line < 0 {
+            return fail(sc, data, e_unknown_table());
+        }
+        return wname_sch(schema, line, table_name_len(schema, line), out, sc);
+    }
+    if must_exist && find_table(sql, toks, table, schema) < 0 {
+        return fail(sc, table, e_unknown_table());
+    }
+    return wname_tok(sql, toks, table, out, sc);
+}
+
+// Lowers the statement at `root` into `out`: answers the number of bytes written, or `0 - code` (sc[1] the token). `rs` is the
+// expression walk's stack (two ints a level), `sc` the scratch of this file's header (at least 128 ints).
+pub fn lower[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
+    sc[0] = 0;
+    sc[1] = 0;
+    sc[2] = 0;
+    sc[3] = 0;
+    sc[4] = 0;
+    let kind = nodes[6 * root];
+    var r0 = 0;
+    if kind == parse.n_select() {
+        r0 = lower_select(sql, toks, nodes, kids, root, schema, rs, out, sc);
+    } else if kind == parse.n_insert() {
+        r0 = lower_insert(sql, toks, nodes, kids, root, schema, rs, out, sc);
+    } else if kind == parse.n_update() || kind == parse.n_delete() {
+        r0 = lower_write(sql, toks, nodes, kids, root, schema, rs, out, sc);
+    } else if kind == parse.n_create_table() || kind == parse.n_alter_add() || kind == parse.n_drop_table() || kind == parse.n_create_index() || kind == parse.n_drop_index() {
+        r0 = lower_ddl(sql, toks, nodes, root, schema, out, sc);
+    } else {
+        r0 = fail(sc, 0, e_cannot_lower());
+    }
+    if r0 < 0 {
+        return r0;
+    }
+    return sc[0];
+}

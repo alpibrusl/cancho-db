@@ -197,6 +197,68 @@ rendering that loses `PRIMARY KEY`, a unique index written plain, a lost numeric
 - **Function names are recorded as written** (`call lower`), not resolved through `search_path`. A user function that shadows a
   builtin is a known gap (`m1-proxy.md` section 8); qualifying calls is future work.
 
+### 4.1 P1c, decided before it is built
+
+The parser's tree (section 3) is lowered to IR v2 bytes (`ir.md` section 6) by `src/lower.cho`, given a **schema snapshot**. What
+follows is written before the code; a claim that proves false is corrected here.
+
+- **The snapshot** is plain text, one table a line, lower-case names: `orders: id customer total`, and for DROP INDEX one line
+  `index i1 on orders`. The proxy will build it from `information_schema` (P1d); the tests write it by hand. A statement naming a
+  table the snapshot lacks is `unknown-table` (`42P01`), a column it lacks `unknown-column` (`42703`), a bare column two scope
+  tables have `ambiguous-column` (`42702`): PostgreSQL would refuse all three, so this is the same answer sooner and never a
+  refusal of something valid. `CREATE TABLE` of a table that exists is left to PostgreSQL.
+- **Scope**: the tables of a statement's `FROM` (or its single target), by alias if it has one; a name qualified by a table that
+  is not in scope is `unknown-table`. Names fold as the renderer folds them (unquoted to lower case, quoted as written).
+- **`*` and `t.*`** become the snapshot's columns in order, as `Col` items; a `SELECT` with no `FROM` has no scope.
+- **`ORDER BY`** takes an output name first, as PostgreSQL does: a bare name equal to a select item's alias is that item's
+  expression (lowered again, so its reads are recorded once more, harmlessly); any other name is an input column. `GROUP BY` and
+  `HAVING` read input columns only (an output alias there is `unknown-column`: refused where PostgreSQL would accept, the safe
+  direction). An ordinal (`ORDER BY 2`) is a constant.
+- **Constants**: an integer literal that fits an `i64` is `Const int`; everything else (decimals, exponents, strings, `TRUE`,
+  `FALSE`) is `Const bytes` of its value: a string's content with `''` undoubled, a number's text, `true` or `false`. The IR's id is
+  therefore not a function of the rendering; it never needs to be (lowering is not specified, `ir.md` section 5).
+- **Operators**: `or and = <> < <= > >= + - * / % || like ilike` and their `NOT` forms map to the `Op` codes of `ir.md` section 6;
+  `x BETWEEN a AND b` is `(x >= a) AND (x <= b)`, `NOT BETWEEN` the negation of that, a simple `CASE x WHEN a THEN ...` has
+  `x = a` conditions: all write `x` more than once, which adds no effect (`ir.md` section 6). `!=` is `<>` (the renderer already
+  says so).
+- **Calls**: `count(*)` is `Call count (Star)`; any other call is `Call name args` with the name as written, lower-cased. **`now()`
+  is `Nondet now`** (recorded in the commit's `nondet` list, `m1-proxy.md` D8). `random`, `clock_timestamp`, `nextval`,
+  `gen_random_uuid`, `setseed`, `txid_current` and `timeofday` are `nondeterministic` refusals, never a `Call`: their value would
+  not be in the log.
+- **Statements**: `Select2` for every `SELECT` (the v1 `Select` is never written); `Insert` with the column list (the snapshot's
+  columns if none was given, a row of the wrong length refused as `syntax`); `Update`, `Delete`, and `Ddl` with the kind of
+  `ir.md` section 2 and the table (for `DROP INDEX`, the table the snapshot says the index is on).
+- **No second inference.** The effect check calls `ir.infer` on the lowered bytes, the code the verifier already runs; the
+  lowering has no rule of its own for which columns a statement reads. The gate (section 6, 1) therefore compares **two hand
+  writings**: the IR bytes a case expects, built by an encoder in the test generator, and the effect set it expects, each written
+  from the statement by hand; the code under test must reproduce the first byte for byte and `ir.infer` must give the second.
+- **Slices**: P1c-1 the lowering of expressions and the four DML statements; P1c-2 DDL, the refusals by name, and the effect
+  check against a token; the plan differential cannot see the IR, so what covers the lowering against PostgreSQL is that every
+  name it resolves was resolved the way the server's own error messages say it would be (an unknown or ambiguous column is
+  compared with PostgreSQL's `42703` and `42702` in the same differential run).
+
+### 4.2 What the lowering gate found
+
+- **The two hand writings agree with the code, and the verifier is the oracle for the second.** For each case the test builds the
+  IR from the statement by hand with its own encoder, and writes the effect set by hand from `ir.md` section 3. The bytes
+  must be identical to what `lowercheck` prints; then the real verifier (`build/verify --stmts`) is given a commit that records
+  that hand-written set over the lowered statement and must say `ok ... level=2+ir`, and the same commit with one effect removed
+  and with one added must be refused `effects-mismatch`: the check can fail, so passing it means something.
+- **Bugs this found in the first run (both mine)**: a call with arguments visited its first argument twice (an off-by-one in the walk's
+  steps), and `DROP INDEX` was written with the kind of `CREATE TABLE`.
+- **Name resolution against PostgreSQL** (`tests/lower_diff.py`): the generator of `tests/stmt_diff.py`'s statements, a snapshot
+  written to match the temporary tables, and PostgreSQL's own `42P01`, `42703` and `42702`. A lowering that refuses a name
+  must not be refused for a different reason by PostgreSQL or accepted by it, and one that accepts must not draw a name error. 20,000
+  statements, 0 disagreements after one fix: `ORDER BY` takes an **output name first** and refuses one that two **different**
+  outputs have (`SELECT (a)::int::boolean, t.* ... ORDER BY a` is ambiguous in PostgreSQL, and was lowered as `a` the
+  input column); two plain references to the same column (`SELECT t.*, * ... ORDER BY b`) are not different, and were refused
+  at first for it. Both are cases the generator reached by chance.
+- **Limits, stated**: a `SELECT` with no `FROM` (`select 1`, `select now()`) is refused `cannot-lower` because the IR requires a table;
+  an expression's implicit output name is only known for column references and casts of them, so `ORDER BY` of any other
+  implicit name (`ORDER BY count`) is looked up as an input column and refused if it is none (the safe direction); a scope
+  of more than 10 tables or 16 `FROM` entries is refused. The lowering does not type-check, and an `ON` condition may name
+  a table that appears later in the `FROM`, which PostgreSQL refuses: the IR then over-reports, never under-reports.
+
 ## 5. Where it goes in the proxy
 
 A new `Query` branch in the message loop (P0's `step` forwards untouched today): the whole message is lexed and lowered; if any
@@ -234,7 +296,7 @@ it to PostgreSQL and counting the commands it reports), has the same number of s
 | **P1b-2a** | **SELECT** (`src/stmt.cho`): items and aliases, `FROM` with comma lists and `[INNER|LEFT [OUTER]] JOIN ... ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY [ASC|DESC]`, `LIMIT`, `OFFSET` | **built**: 146 hand-written cases (83 refusals, each accepted one a fixed point), 34 mutants killed (now part of the 226 and 60 of P1b-2b), PostgreSQL's plans for the original and the rendering equal over 12,000 generated statements (section 3.3) |
 | **P1b-2b** | **INSERT, UPDATE, DELETE** (`src/stmt.cho`, `stmt.statement` dispatches on the first word) | **built**: 226 hand-written cases in all (143 refusals), 60 mutants killed, the PostgreSQL plan comparison over INSERT, UPDATE and DELETE as well (section 3.3) |
 | **P1b-2c** | **the closed DDL** (`CREATE TABLE`, `DROP TABLE`, `ALTER TABLE ... ADD [COLUMN]`, `CREATE [UNIQUE] INDEX`, `DROP INDEX`) | **built**: 320 hand-written cases in all (211 refusals), 84 statement mutants killed, and `tests/ddl_diff.py`: the original and the rendering are each run in a rolled-back transaction and must leave the same catalog (section 3.4) |
-| **P1c** | lowering, the schema snapshot, the effect check | lowering gate (1); refusals (3) |
+| **P1c** | **lowering** (`src/lower.cho`) to IR v2 bytes from the tree and a schema snapshot, for SELECT, INSERT, UPDATE, DELETE and the closed DDL | **built**: 73 hand-written cases (42 IR byte for byte, 42 effect sets accepted by the verifier, 31 refusals), name resolution compared with PostgreSQL's SQLSTATEs over 8,000 statements, 27 mutants killed (section 4.2); the effect check against a token is P1d |
 | **P1d** | the `Query` branch in the proxy | end to end with psql: differential (2) and the server log (3) |
 
 ## 8. Risks
