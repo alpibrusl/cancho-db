@@ -312,9 +312,70 @@ LOGIN = [
     ("login: error has no V field", "src/login.cho", "buf[at] = byte_of('V');", "buf[at] = byte_of('v');"),
     ("login: error message not cut", "src/login.cho", "if mlen > room {", "if false {"),
     ("login: error written into a buffer too small", "src/login.cho", "if len(buf) < fixed {", "if len(buf) < 0 {"),
+    ("login: 127.x is not all loopback", "src/login.cho", "return addr.word(who, 3) / 16777216 == 127;", "return addr.word(who, 3) == 2130706433;"),
+    ("login: 126.x is loopback", "src/login.cho", "return addr.word(who, 3) / 16777216 == 127;", "return addr.word(who, 3) / 16777216 >= 126 && addr.word(who, 3) / 16777216 <= 127;"),
+    ("login: 128.x is loopback", "src/login.cho", "return addr.word(who, 3) / 16777216 == 127;", "return addr.word(who, 3) / 16777216 >= 127 && addr.word(who, 3) / 16777216 <= 128;"),
+    ("login: every IPv4 is loopback", "src/login.cho", "return addr.word(who, 3) / 16777216 == 127;", "return true;"),
+    ("login: ::1 is not loopback", "src/login.cho", "&& addr.word(who, 3) == 1;", "&& addr.word(who, 3) == 2;"),
+    ("login: any ::x is loopback", "src/login.cho", "&& addr.word(who, 3) == 1;", "&& addr.word(who, 3) >= 1;"),
+    ("login: the first IPv6 word ignored", "src/login.cho", "return addr.word(who, 0) == 0 && addr.word(who, 1) == 0", "return addr.word(who, 1) == 0"),
+    ("login: the third IPv6 word ignored", "src/login.cho", "&& addr.word(who, 2) == 0 && addr.word(who, 3) == 1;", "&& addr.word(who, 3) == 1;"),
     ("login: refusal tag changed", "src/login.cho", 'return "login-bad-proof";', 'return "login-bad-proofs";'),
     ("login: branch denied is not 3D000", "src/login.cho", 'return "3D000";', 'return "28P01";'),
 ]
+
+PROXY = [
+    # ---- the event loop (proxy/proxy.cho), judged by tests/proxy_e2e.py against a real PostgreSQL
+    ("proxy: non-loopback clients are served", "proxy/proxy.cho", "if !is_loopback(ct, a) {", "if false {"),
+    ("proxy: the token is not checked", "proxy/proxy.cho", "if rule != login.login_ok() {", "if false {"),
+    ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > hello_ms()", "false"),
+    ("proxy: a silent upstream is waited for a minute", "proxy/proxy.cho", "fn login_ms() -> [] int {\n    return 5000;", "fn login_ms() -> [] int {\n    return 60000;"),
+    ("proxy: forwarded bytes lose the last one", "proxy/proxy.cho", "if send(tab, core, peer, rb[0..got]) {", "if send(tab, core, peer, rb[0..got - 1]) {"),
+    ("proxy: SSLRequest is not answered N", "proxy/proxy.cho", "let no = alloc_slice[r](1, byte_of('N'));", "let no = alloc_slice[r](1, byte_of('S'));"),
+    ("proxy: the client's application_name is dropped", "proxy/proxy.cho", "if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {", "if false {"),
+    ("proxy: the upstream role is the client's", "proxy/proxy.cho", "at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "at = put_cstr(msg, at, hb[k * hello_size() + 4 + 5..k * hello_size() + 4 + 5 + 5]);"),
+    ("proxy: a refused login still opens the upstream", "proxy/proxy.cho", "refuse(tab, core, k, \"FATAL\", login.sqlstate(rule), login.rule_name(rule), \"the capability token was refused\");", "st[p] = 5;"),
+    ("proxy: protocol versions are not checked", "proxy/proxy.cho", "} else if kind == login.err_version() {", "} else if false {"),
+]
+
+def run_proxy(cancho):
+    survivors = []
+    for label, rel, old, new in PROXY:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            for d in ("src", "proxy", "tools", "tests"):
+                shutil.copytree(ROOT / d, work / d, ignore=shutil.ignore_patterns("__pycache__"))
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-52s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "proxy_mutant"
+            b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
+                                str(work / "src/token.cho"), str(work / "src/login.cho"), "-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]))
+                survivors.append(label)
+                continue
+            try:
+                r = subprocess.run([sys.executable, str(work / "tests/proxy_e2e.py"), str(exe)], capture_output=True,
+                                   text=True, timeout=420)
+                out = r.stdout + r.stderr
+                code = r.returncode
+            except subprocess.TimeoutExpired as e:
+                out, code = "timed out", 1
+            if code == 0:
+                print("SURVIVED %-50s every end-to-end check passes" % label)
+                survivors.append(label)
+            else:
+                failed = [l[5:].strip() for l in out.splitlines() if l.startswith("FAIL")]
+                print("killed   %-50s by: %s" % (label, (failed[0] if failed else out.strip().splitlines()[-1])[:90]))
+    print("%d mutants, %d not killed" % (len(PROXY), len(survivors)))
+    return 1 if survivors else 0
+
 
 # Mutants that cannot be killed because they change nothing observable, with the reason. Empty: every mutant above
 # changes behaviour, and the ones that looked equivalent (the count guard against the bytes left) are not listed
@@ -356,6 +417,8 @@ def run_login(cancho):
 def run(kind, cancho):
     if kind == "login":
         return run_login(cancho)
+    if kind == "proxy":
+        return run_proxy(cancho)
     table = PY if kind == "py" else CHO
     survivors = []
     for label, rel, old, new in table:

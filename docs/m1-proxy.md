@@ -51,8 +51,9 @@ if one the design rests on stops holding. The ones that decide something:
 | `now()` read inside a transaction | equals the `now()` that a later statement in it used (`DEFAULT now()`), while `statement_timestamp()` differs | The transaction's `now()` can be recorded by one extra `SELECT now()` before commit (D8). |
 | Cost of the two-phase path | 0.82 and 0.86 ms per commit against 0.48 and 0.43 ms for an autocommit insert: **1.7 to 2.0 times**, over two runs | Acceptable for M1; the log's own `fsync` is on top and is measured at P2. |
 
-**Not measured, and said so:** the cost on a real disk (this is a sandbox), concurrency (one client at a time), and how long
-a password psql will send (a token with several blocks is a few hundred bytes of hex per block; measured at P0).
+**Not measured, and said so:** the cost on a real disk (this is a sandbox) and concurrency beyond a few dozen clients. (How
+long a password psql will send was measured at P0: a token of 2, 3 and 5 blocks is a password of 440, 636 and 1,028
+characters, about 196 per block, and psql sent all of them; see §7.)
 
 ## 3. How it works
 
@@ -64,7 +65,12 @@ psql ── 1 listener ── 2 startup + token ── 3 message loop ───�
 ```
 
 1. **Listener.** One thread and one event loop on `std.conns`, as `cancho-pg`'s pooler (`pooler/proxy.cho`); `cancho authority`
-   on the proxy names the network, the log directory and the heap and nothing else.
+   on the proxy reports the network, the clock, the console and the heap, and that it never touches the filesystem,
+   signals, other programs or foreign code. *Corrected at P0:* this said "names the network" as if bounded. It is **not**:
+   this compiler revision has one `Net` per program and narrowing consumes it, so a program that both listens and dials
+   cannot carry a narrowed one (`cancho/docs/net-bounds.md` §1), and the report says `net_in("")` and `net_out("")`
+   *unbounded*. Which upstream the proxy dials is therefore enforced by its configuration, not shown by its report. P2
+   adds the log directory, and with it a filesystem row.
 2. **Startup.** `SSLRequest` is answered `N`; the startup message is parsed; the server asks for a **cleartext password**,
    which carries the token (D1). The proxy verifies the token against the root key (`token.md`), checks that the database
    name is a branch the token allows, opens the upstream connection with its own configured credentials, and relays the
@@ -86,7 +92,11 @@ where `seed` is the 32-byte private key of the token's last block; the proxy che
 private key of the last block"), in the form Biscuit calls an open token: the holder presents the key. *Chosen over* SCRAM,
 which needs the server to know the secret in advance and cannot verify a token it has never seen, and over a challenge
 signature, which needs a protocol change psql would not follow. *Cost, stated:* the token and its key cross the wire in
-clear, so M1 listens on loopback only until TLS exists, and the proxy, having seen the key, could attenuate on the holder's
+clear, so until TLS exists M1 serves loopback clients only. *Corrected at P0:* this said the proxy "listens on loopback
+only". It cannot be told to: cancho's `tcp_listen` binds every address (measured: a client on the host's other address
+connects). The rule is enforced where the connection is accepted instead: a peer that is not 127.0.0.0/8 or `::1` is closed
+without a byte being read (measured: the client sees a reset, which is what closing with unread data does;
+`login.is_loopback` is unit-tested at the boundary of every range). The proxy, having seen the key, could attenuate on the holder's
 behalf (it is trusted with the root key's verification anyway).
 
 **D2. The database name is the branch, and M1 serves exactly one.** The configured branch name is the only one accepted
@@ -198,7 +208,7 @@ Each is one change with its own gate, and a gate is a test that fails when the s
 
 | Slice | Delivers | Gate |
 |---|---|---|
-| **P0** | listener, `SSLRequest` answered, startup parsed, token login (D1, D2), upstream relay of the login, then every message forwarded untouched with framing. **Built so far: the sans-io half** (`src/login.cho`: startup packet, strict base64url, the token checks in D1's order, the messages the proxy writes), tested from bytes by `tests/login_test.cho` with 32 mutants killed. **Not built: the event loop** and so none of the gate below is met yet | psql connects with a valid token and runs `select 1` against a real PostgreSQL; a wrong token, a bad key proof and a branch outside the token are each refused at login and **no connection reaches PostgreSQL** (checked in the server's log); `cancho authority` on it; the measured password length of a token |
+| **P0** | listener, `SSLRequest` answered, startup parsed, token login (D1, D2), upstream relay of the login, then every message forwarded untouched with framing. **Built** (`src/login.cho`, `proxy/proxy.cho`); the gate below is `tests/proxy_e2e.py`, run against a real PostgreSQL 16 and psql 16, and what it shows and does not show is in `claims.md` C22 to C27 | psql connects with a valid token and runs `select 1` against a real PostgreSQL; a wrong token, a bad key proof and a branch outside the token are each refused at login and **no connection reaches PostgreSQL** (checked in the server's log); `cancho authority` on it; the measured password length of a token |
 | **IR v2** | `ir.md` v2: the constructs of D4, effect rules, vectors with hand-written expected sets, all three verifiers | the same gates as v1: three verifiers agree, mutants killed |
 | **P1** | lexer, parser, lowering, schema snapshot, effect check, refusals with rule tags | a corpus of statements: each lowers to IR whose id and effects equal hand-written ones; **a refused statement never appears in PostgreSQL's log** (`log_statement=all`); psql output through the proxy equals psql output direct, for every accepted statement, as a diff |
 | **P2** | transaction tracking, commit builder, three files, two-phase commit, recovery, `now()` | after a psql session, all three verifiers accept the files at L2+IR with `--expect` the last commit id; **fault injection** at each window of §6 leaves PostgreSQL's rows and the log's commits equal in number and identity |
@@ -212,7 +222,7 @@ Each is one change with its own gate, and a gate is a test that fails when the s
   decision from the project's owner before P3.**
 - **IR v2 is the largest slice.** A SQL parser and lowering is more code than everything built so far; the corpus measures
   progress and nothing else does. If it proves much larger than the rest, the answer is a smaller subset, not a looser check.
-- **Password length.** Unmeasured until P0.
+- **Password length.** Measured at P0: 440, 636 and 1,028 characters for tokens of 2, 3 and 5 blocks (about 196 per block), all sent by psql; the proxy's login buffer allows about 80 blocks.
 - **Nondeterministic defaults** (D8) make M1 unfriendly to `serial` keys; whether a demo can live with that is the demand
   test's business.
 - **Concurrency.** One event loop and one upstream connection per client; many clients committing at once are serialised by

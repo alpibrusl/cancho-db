@@ -1,0 +1,923 @@
+edition 5;
+
+import std.buffer;
+import std.conns;
+import std.io;
+import std.addr;
+import std.bytes;
+import cdb.commit;
+import cdb.token;
+import cdb.login;
+
+// `proxy` -- slice P0 of the cancho-db proxy (`docs/m1-proxy.md`): the front door in front of PostgreSQL.
+//
+//     proxy <listen port> <upstream host> <upstream port> <branch> <root key, 64 hex digits> <upstream user> <upstream database>
+//
+// A client connects, is asked for a password, and the password must be a capability token (`src/login.cho`, D1 and D2): it
+// is checked against the root key and must allow the one branch this server serves. Only then does the proxy open a
+// connection to PostgreSQL as the configured upstream role (trust login), relay the login to the client, and from there
+// forward every message untouched, in both directions. P0 understands nothing of the SQL; that is P1.
+//
+// One thread, one poller, every connection in one `std.conns` table: the structure of `cancho-pg`'s `pooler/proxy.cho`
+// (the same author and licence), with a handshake phase before a client is paired with its server connection. `cancho`'s
+// `tcp_listen` binds every address, so "loopback only" (D1) is enforced where the connection is accepted: a peer that is
+// not a loopback address is closed before a byte is read from it.
+//
+// One thing is blocking and is P0's stated limit: opening the connection to PostgreSQL (`tcp_connect`), which is fine for a
+// local upstream and would stall the loop for a black-holed one. Its login answer is waited for at most `login_ms()`, and a
+// client that does not finish its own login in `hello_ms()` is closed.
+
+fn max_clients() -> [] int {
+    return 64;
+}
+
+fn chunk() -> [] int {
+    return 32768;
+}
+
+fn queue_size() -> [] int {
+    return 65536;
+}
+
+// The most a client may send before it is paired: its startup packet and its password message together.
+fn hello_size() -> [] int {
+    return 16384;
+}
+
+// How long a client may take over its login.
+fn hello_ms() -> [] int {
+    return 10000;
+}
+
+// How long the proxy waits for PostgreSQL's login answer before it gives up on it.
+fn login_ms() -> [] int {
+    return 5000;
+}
+
+// The most of PostgreSQL's login answer (parameter statuses, key data, ready) the proxy will hold to relay.
+fn relay_max() -> [] int {
+    return 16384;
+}
+
+// Per connection `k`, `state[12k..12k+12]` is:
+//
+//     0  kind: 0 free, 1 client sending its startup, 2 client sending its password, 5 login accepted (waiting to be
+//        paired), 3 paired (forwarding)
+//     1  its peer's slot (paired), or -1
+//     2  bytes waiting to be sent to it
+//     3  what it is watched for (1 to read, 2 to write, 3 both, 0 neither)
+//     4  1 if it closes once its queue has gone
+//     5  bytes held in its login buffer
+//     6  where the database name starts in the login buffer (kinds 2 and 5), and 7 how long it is
+//     8  where application_name starts (-1 if absent), and 9 how long it is
+//     10 where the password message starts in the login buffer (the startup packet is before it)
+//     11 when it was accepted (monotonic ms)
+fn stride() -> [] int {
+    return 12;
+}
+
+res struct Core {
+    poller: Poller,
+    events: Box[[int]],
+    state: Box[[int]],
+    rbuf: Box[[byte]],
+    pends: Box[[byte]],
+    hbuf: Box[[byte]],
+    // The configuration: the root key (32 bytes), then the branch, the upstream user and the upstream database, each
+    // NUL-ended, with where each starts in `cfgi`: [branch_at, branch_len, user_at, user_len, db_at, db_len].
+    cfg: Box[[byte]],
+    cfgi: Box[[int]],
+}
+
+// ------------------------------------------------------------------------------------------------ sending
+
+// Hand `data` to the kernel without waiting for room, and keep what it did not take. Answers the new number of bytes
+// queued, or -1 if the queue cannot hold the rest or the connection has failed (`cancho-pg`'s `emit`).
+fn emit[&c, &d, &e](table: &!c conns.Table, slot: int, data: &d [byte], pend: &!e [byte], pending: int) -> [conn_write] int {
+    var at = 0;
+    if pending == 0 {
+        match conns.write(table, slot, data) {
+            Sent::Wrote(n) => {
+                at = n;
+            }
+            Sent::Again => {
+            }
+            Sent::Failed(e) => {
+                return 0 - 1;
+            }
+        }
+    }
+    if at >= len(data) {
+        return pending;
+    }
+    if pending + len(data) - at > len(pend) {
+        return 0 - 1;
+    }
+    var i = at;
+    while i < len(data) {
+        pend[pending + i - at] = data[i];
+        i = i + 1;
+    }
+    return pending + len(data) - at;
+}
+
+fn shut[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [] int {
+    let st = contents(core.state);
+    conns.close(tab, k);
+    st[stride() * k] = 0;
+    return 0;
+}
+
+// Watch `k` for what it now waits on.
+fn settle[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [poll] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    if st[p] == 0 {
+        return 0;
+    }
+    var want = 0;
+    if st[p] == 1 || st[p] == 2 {
+        // still logging in: read while it is not closing
+        if st[p + 4] == 0 {
+            want = 1;
+        }
+    } else if st[p] == 3 {
+        if st[p + 4] == 0 && st[stride() * st[p + 1] + 2] + chunk() <= queue_size() {
+            want = 1;
+        }
+    }
+    if st[p + 2] > 0 {
+        want = want + 2;
+    }
+    if want != st[p + 3] {
+        conns.rewatch(tab, core.poller, k, k + 1, want);
+        st[p + 3] = want;
+    }
+    return 0;
+}
+
+// `k` closes once what is queued for it has been sent.
+fn close_after[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [poll] int {
+    let st = contents(core.state);
+    if st[stride() * k + 2] == 0 {
+        shut(tab, core, k);
+    } else {
+        st[stride() * k + 4] = 1;
+        settle(tab, core, k);
+    }
+    return 0;
+}
+
+// `k` is finished (the peer closed, or it failed). Close it; a paired peer goes once what is queued for it has been sent.
+fn finish[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [poll] int {
+    let st = contents(core.state);
+    let peer = st[stride() * k + 1];
+    let paired = st[stride() * k] == 3;
+    shut(tab, core, k);
+    if paired && peer >= 0 && st[stride() * peer] == 3 {
+        close_after(tab, core, peer);
+    }
+    return 0;
+}
+
+// Connection `k` can be written to: send what is queued for it.
+fn drain[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let pd = contents(core.pends);
+    let p = stride() * k;
+    let obase = k * queue_size();
+    match conns.write(tab, k, pd[obase..obase + st[p + 2]]) {
+        Sent::Wrote(sent) => {
+            var at = 0;
+            while at < st[p + 2] - sent {
+                pd[obase + at] = pd[obase + sent + at];
+                at = at + 1;
+            }
+            st[p + 2] = st[p + 2] - sent;
+            if st[p + 2] == 0 && st[p + 4] == 1 {
+                shut(tab, core, k);
+            } else {
+                settle(tab, core, k);
+                if st[p] == 3 {
+                    settle(tab, core, st[p + 1]);
+                }
+            }
+        }
+        Sent::Again => {
+        }
+        Sent::Failed(e) => {
+            finish(tab, core, k);
+        }
+    }
+    return 0;
+}
+
+// Queue `data` for `k`; false if it cannot be (the connection is then closed).
+fn send[&t, &c, &d](tab: &!t conns.Table, core: &!c Core, k: int, data: &d [byte]) -> [conn_write, poll] bool {
+    let st = contents(core.state);
+    let pd = contents(core.pends);
+    let q = stride() * k;
+    let pending = emit(tab, k, data, pd[k * queue_size()..k * queue_size() + queue_size()], st[q + 2]);
+    if pending < 0 {
+        shut(tab, core, k);
+        return false;
+    }
+    st[q + 2] = pending;
+    settle(tab, core, k);
+    return true;
+}
+
+// Tell client `k` it is refused (`ErrorResponse`, severity and SQLSTATE and the tag `login.cho` or this file gives) and
+// close it once that has been sent. Nothing has reached PostgreSQL.
+fn refuse[&t, &c, &a, &b, &d, &e](tab: &!t conns.Table, core: &!c Core, k: int, severity: &a [byte], sqlstate: &b [byte], tag: &d [byte], text: &e [byte]) -> [conn_write, poll] int {
+    region r {
+        let buf = alloc_slice[r](512, byte_of(0));
+        let n = login.error_response(buf, severity, sqlstate, tag, text);
+        if send(tab, core, k, buf[0..n]) {
+            close_after(tab, core, k);
+        }
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------------------------------------------ the login
+
+fn put_first(c: int) -> [] int {
+    return c;
+}
+
+// Everything in client `k`'s login buffer that can be decided is decided: the startup packet (answering `SSLRequest` and
+// `GSSENCRequest` with `N`), then the password. A refusal is sent and `k` closed; a good password makes it kind 5.
+fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int) -> [conn_write, poll, clock] int {
+    let st = contents(core.state);
+    let hb = contents(core.hbuf);
+    let cfg = contents(core.cfg);
+    let ci = contents(core.cfgi);
+    let p = stride() * k;
+    let base = k * hello_size();
+    var going = true;
+    while going && st[p] != 0 && st[p + 4] == 0 {
+        going = false;
+        if st[p] == 1 {
+            // a startup-phase packet at the start of the buffer
+            if st[p + 5] >= 4 {
+                let bl = login.startup_body_len(hb[base..base + 4]);
+                if bl < 0 {
+                    refuse(tab, core, k, "FATAL", "08P01", "startup-length", "invalid length of startup packet");
+                } else if st[p + 5] >= 4 + bl {
+                    region r {
+                        let out = alloc_slice[r](6, 0);
+                        let kind = login.parse_startup(hb[base + 4..base + 4 + bl], out);
+                        if kind == login.kind_ssl() || kind == login.kind_gss() {
+                            // plain only: answer N and take the next packet from where this one ended
+                            let no = alloc_slice[r](1, byte_of('N'));
+                            if send(tab, core, k, no) {
+                                var i = 0;
+                                while i < st[p + 5] - 4 - bl {
+                                    hb[base + i] = hb[base + 4 + bl + i];
+                                    i = i + 1;
+                                }
+                                st[p + 5] = st[p + 5] - 4 - bl;
+                                going = true;
+                            }
+                        } else if kind == login.kind_cancel() {
+                            shut(tab, core, k);
+                        } else if kind == login.kind_startup() {
+                            st[p + 6] = 4 + out[2];
+                            st[p + 7] = out[3];
+                            st[p + 8] = 0 - 1;
+                            st[p + 9] = 0;
+                            if out[4] >= 0 {
+                                st[p + 8] = 4 + out[4];
+                                st[p + 9] = out[5];
+                            }
+                            st[p + 10] = 4 + bl;
+                            let ask = alloc_slice[r](9, byte_of(0));
+                            let n = login.auth_cleartext(ask);
+                            if send(tab, core, k, ask[0..n]) {
+                                st[p] = 2;
+                                going = true;
+                            }
+                        } else if kind == login.err_version() {
+                            refuse(tab, core, k, "FATAL", "0A000", "unsupported-protocol", "only protocol 3.0 is supported");
+                        } else {
+                            refuse(tab, core, k, "FATAL", "08P01", "startup-malformed", "invalid startup packet");
+                        }
+                    }
+                }
+            }
+        } else if st[p] == 2 {
+            let h0 = st[p + 10];
+            if st[p + 5] >= h0 + 5 {
+                let ln = commit.be(hb, base + h0 + 1, 4);
+                if int_of(hb[base + h0]) != 'p' || ln < 5 || h0 + 1 + ln > hello_size() {
+                    refuse(tab, core, k, "FATAL", "08P01", "password-malformed", "expected a password message");
+                } else if st[p + 5] >= h0 + 1 + ln {
+                    let text = hb[base + h0 + 5..base + h0 + 1 + ln - 1];
+                    if int_of(hb[base + h0 + ln]) != 0 {
+                        refuse(tab, core, k, "FATAL", "08P01", "password-malformed", "password is not terminated");
+                    } else {
+                        region r {
+                            let blob = alloc_slice[r](len(text) + 4, byte_of(0));
+                            let n = login.decode_b64url(text, blob);
+                            var rule = login.login_bad_token();
+                            if n >= 0 {
+                                var now = 0;
+                                now = clock_unix_ms(clk);
+                                let database = hb[base + st[p + 6]..base + st[p + 6] + st[p + 7]];
+                                rule = login.check(blob[0..n], database, cfg[32 + ci[0]..32 + ci[0] + ci[1]], cfg[0..32], now / 4294967296, now % 4294967296);
+                            }
+                            if rule != login.login_ok() {
+                                refuse(tab, core, k, "FATAL", login.sqlstate(rule), login.rule_name(rule), "the capability token was refused");
+                            } else {
+                                st[p] = 5;
+                                st[p + 4] = 0;
+                                settle(tab, core, k);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// Client `k` (kind 1 or 2) has something to read.
+fn hello_read[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int) -> [conn_read, conn_write, poll, clock] int {
+    let st = contents(core.state);
+    let hb = contents(core.hbuf);
+    let p = stride() * k;
+    let base = k * hello_size();
+    if st[p + 5] >= hello_size() {
+        refuse(tab, core, k, "FATAL", "08P01", "login-too-long", "login message too long");
+        return 0;
+    }
+    match conns.read(tab, k, hb[base + st[p + 5]..base + hello_size()]) {
+        Received::Data(got) => {
+            st[p + 5] = st[p + 5] + got;
+            hello_progress(tab, core, clk, k);
+        }
+        Received::End => {
+            shut(tab, core, k);
+        }
+        Received::Again => {
+        }
+        Received::Failed(e) => {
+            shut(tab, core, k);
+        }
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------------------------------------------ forwarding
+
+// Connection `k` (paired) can be read: take a chunk and pass it to the peer.
+fn forward[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let rb = contents(core.rbuf);
+    let p = stride() * k;
+    let peer = st[p + 1];
+    match conns.read(tab, k, rb[0..chunk()]) {
+        Received::Data(got) => {
+            if send(tab, core, peer, rb[0..got]) {
+                settle(tab, core, k);
+            }
+        }
+        Received::End => {
+            finish(tab, core, k);
+        }
+        Received::Again => {
+        }
+        Received::Failed(e) => {
+            finish(tab, core, k);
+        }
+    }
+    return 0;
+}
+
+// The poller said connection `k` is ready.
+fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int, readiness: int) -> [conn_read, conn_write, poll, clock] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    if readiness % 4 >= 2 && st[p + 2] > 0 {
+        drain(tab, core, k);
+    }
+    if st[p] != 0 && readiness % 2 == 1 {
+        if st[p] == 1 || st[p] == 2 {
+            if st[p + 4] == 0 {
+                hello_read(tab, core, clk, k);
+            } else {
+                shut(tab, core, k);
+            }
+        } else if st[p] == 3 {
+            if st[p + 3] % 2 == 1 {
+                forward(tab, core, k);
+            } else {
+                finish(tab, core, k);
+            }
+        }
+    }
+    return 0;
+}
+
+// ------------------------------------------------------------------------------------------------ accepting and pairing
+
+// Whether the peer of the connection in `slot` is a loopback address: 127.0.0.0/8 or ::1.
+fn is_loopback[&t](tab: &!t conns.Table, slot: int) -> [] bool {
+    match conns.peer(tab, slot) {
+        conns.Peered::Known(who) => {
+            return login.is_loopback(who);
+        }
+        conns.Peered::Unavailable(e) => {
+            return false;
+        }
+    }
+}
+
+// Take every client waiting on the listener: loopback ones start their login, others are closed unread.
+fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l Listener, core: &!c Core, clk: &k Clock) -> [heap, conn_accept, poll, clock] conns.Table {
+    let st = contents(core.state);
+    var table = conn;
+    var more = true;
+    while more {
+        match tcp_accept(listener) {
+            Accepted::Ok(client) => {
+                var held = 0;
+                borrow table as &tt in {
+                    held = conns.live(tt);
+                }
+                if held + 2 > 2 * max_clients() {
+                    conn_close(client);
+                } else {
+                    let (t1, a) = conns.put(heap, table, client);
+                    table = t1;
+                    if a >= 0 {
+                        borrow mut table as &!ct in {
+                            if !is_loopback(ct, a) {
+                                conns.close(ct, a);
+                            } else {
+                                let p = stride() * a;
+                                st[p] = 1;
+                                st[p + 1] = 0 - 1;
+                                st[p + 2] = 0;
+                                st[p + 3] = 1;
+                                st[p + 4] = 0;
+                                st[p + 5] = 0;
+                                st[p + 11] = clock_ms(clk);
+                                if conns.nonblocking(ct, a) != 0 || conns.nodelay(ct, a) != 0 || conns.watch(ct, core.poller, a, a + 1, 1) != 0 {
+                                    shut(ct, core, a);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Accepted::Again => {
+                more = false;
+            }
+            Accepted::Failed(e) => {
+                more = false;
+            }
+        }
+    }
+    return table;
+}
+
+// Put `b` after `x` into `out` as a NUL-ended string at `at`; answers where it ends.
+fn put_cstr[&o, &s](out: &!o [byte], at: int, text: &s [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        out[at + i] = text[i];
+        i = i + 1;
+    }
+    out[at + len(text)] = byte_of(0);
+    return at + len(text) + 1;
+}
+
+// Read what the connection in `slot` has to say within `wait_ms`, into `into`: the number of bytes (more than 0), 0 if
+// nothing came in time, -1 if the connection ended or failed. A private poller bounds the wait, so a silent upstream
+// costs one client a refusal and not the loop its attention.
+fn login_read[&t, &b](tab: &!t conns.Table, slot: int, into: &!b [byte], wait_ms: int) -> [conn_read, poll] int {
+    match poller_new() {
+        Polling::Ok(p) => {
+            var poller = p;
+            var answer = 0 - 1;
+            region r {
+                let ev = alloc_slice[r](8, 0);
+                borrow mut poller as &!pw in {
+                    if conns.watch(tab, pw, slot, 1, 1) == 0 {
+                        let n = poller_wait(pw, ev, wait_ms);
+                        if n > 0 {
+                            match conns.read(tab, slot, into) {
+                                Received::Data(g) => {
+                                    answer = g;
+                                }
+                                Received::End => {
+                                    answer = 0 - 1;
+                                }
+                                Received::Again => {
+                                    answer = 0;
+                                }
+                                Received::Failed(e) => {
+                                    answer = 0 - 1;
+                                }
+                            }
+                        } else if n == 0 {
+                            answer = 0;
+                        }
+                    }
+                }
+            }
+            poller_close(poller);
+            return answer;
+        }
+        Polling::Failed(e) => {
+            return 0 - 1;
+        }
+    }
+}
+
+// Open the connection to PostgreSQL for client `k` (kind 5), log in to it (trust), and pair them. Blocking, and the one
+// place that is: PostgreSQL is local and trusted (docs/m1-proxy.md section 3, P0's limit). The server's login answer is
+// relayed to the client as it is.
+fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+    let st = contents(core.state);
+    let cfg = contents(core.cfg);
+    let ci = contents(core.cfgi);
+    let hb = contents(core.hbuf);
+    let rb = contents(core.rbuf);
+    let p = stride() * k;
+    var table = tab;
+    var failed = 0;
+    var detail = 0;
+    match tcp_connect(net, host, port) {
+        Dialed::Ok(server) => {
+            let (t1, b) = conns.put(heap, table, server);
+            table = t1;
+            if b < 0 {
+                failed = 1;
+            } else {
+                // StartupMessage, protocol 3.0, as the configured role: the client chooses nothing about this session
+                region r {
+                    let msg = alloc_slice[r](1024, byte_of(0));
+                    var at = 8;
+                    at = put_cstr(msg, at, "user");
+                    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);
+                    at = put_cstr(msg, at, "database");
+                    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
+                    at = put_cstr(msg, at, "application_name");
+                    if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {
+                        at = put_cstr(msg, at, hb[k * hello_size() + st[p + 8]..k * hello_size() + st[p + 8] + st[p + 9]]);
+                    } else {
+                        at = put_cstr(msg, at, "cancho-db");
+                    }
+                    msg[at] = byte_of(0);
+                    at = at + 1;
+                    msg[0] = byte_of(at / 16777216 % 256);
+                    msg[1] = byte_of(at / 65536 % 256);
+                    msg[2] = byte_of(at / 256 % 256);
+                    msg[3] = byte_of(at % 256);
+                    msg[4] = byte_of(0);
+                    msg[5] = byte_of(3);
+                    msg[6] = byte_of(0);
+                    msg[7] = byte_of(0);
+                    borrow mut table as &!tw in {
+                        var sent = 0;
+                        while sent < at && failed == 0 {
+                            match conns.write(tw, b, msg[sent..at]) {
+                                Sent::Wrote(x) => {
+                                    sent = sent + x;
+                                }
+                                Sent::Again => {
+                                }
+                                Sent::Failed(e) => {
+                                    failed = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                // read PostgreSQL's answer up to and including ReadyForQuery
+                var fill = 0;
+                var done = false;
+                while failed == 0 && !done {
+                    var got = 0 - 1;
+                    borrow mut table as &!tw in {
+                        got = login_read(tw, b, rb[fill..relay_max()], login_ms());
+                    }
+                    if got < 0 {
+                        failed = 1;
+                    } else if got == 0 {
+                        failed = 4;
+                    } else {
+                        fill = fill + got;
+                    }
+                    var pos = 0;
+                    var more = true;
+                    var first = true;
+                    while more && failed == 0 && !done {
+                        if pos + 5 > fill {
+                            more = false;
+                        } else {
+                            let ln = commit.be(rb, pos + 1, 4);
+                            if ln < 4 || ln > relay_max() {
+                                failed = 1;
+                            } else if pos + 1 + ln > fill {
+                                more = false;
+                            } else {
+                                let t = int_of(rb[pos]);
+                                if t == 'R' && pos == 0 && commit.be(rb, 5, 4) != 0 {
+                                    failed = 2;
+                                } else if t == 'E' {
+                                    failed = 3;
+                                } else if t == 'Z' {
+                                    done = true;
+                                }
+                                pos = pos + 1 + ln;
+                            }
+                        }
+                    }
+                    if fill >= relay_max() && !done {
+                        failed = 1;
+                    }
+                }
+                if failed == 0 {
+                    // pair: the relay goes to the client, and from here both are forwarded
+                    let q = stride() * b;
+                    st[q] = 3;
+                    st[q + 1] = k;
+                    st[q + 2] = 0;
+                    st[q + 3] = 0;
+                    st[q + 4] = 0;
+                    st[p] = 3;
+                    st[p + 1] = b;
+                    borrow mut table as &!ct in {
+                        if conns.nonblocking(ct, b) != 0 || conns.nodelay(ct, b) != 0 || conns.watch(ct, core.poller, b, b + 1, 1) != 0 {
+                            shut(ct, core, b);
+                            shut(ct, core, k);
+                        } else {
+                            st[q + 3] = 1;
+                            send(ct, core, k, rb[0..fill]);
+                            settle(ct, core, k);
+                        }
+                    }
+                } else {
+                    // PostgreSQL did not accept the proxy's own login (or answered with an error): the client is told, and
+                    // an error PostgreSQL sent is relayed as it is.
+                    detail = b;
+                    borrow mut table as &!ct in {
+                        conns.close(ct, b);
+                        if failed == 3 {
+                            if send(ct, core, k, rb[0..fill]) {
+                                close_after(ct, core, k);
+                            }
+                        } else if failed == 2 {
+                            refuse(ct, core, k, "FATAL", "28000", "upstream-auth-unsupported", "the database requires a password the proxy does not have");
+                        } else if failed == 4 {
+                            refuse(ct, core, k, "FATAL", "08006", "upstream-timeout", "the database did not answer in time");
+                        } else {
+                            refuse(ct, core, k, "FATAL", "08006", "upstream-unavailable", "the database closed the connection during login");
+                        }
+                    }
+                }
+            }
+        }
+        Dialed::Failed(e) => {
+            borrow mut table as &!ct in {
+                refuse(ct, core, k, "FATAL", "08006", "upstream-unavailable", "cannot reach the database");
+            }
+        }
+    }
+    if failed == 1 && st[p] == 5 {
+        borrow mut table as &!ct in {
+            refuse(ct, core, k, "FATAL", "08006", "upstream-unavailable", "cannot reach the database");
+        }
+    }
+    return table;
+}
+
+// Pair every client whose login has been accepted.
+fn pair_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+    var table = tab;
+    var k = 0;
+    while k < 2 * max_clients() {
+        let kind = contents(core.state)[stride() * k];
+        if kind == 5 {
+            table = pair_one(heap, table, core, net, host, port, k);
+        }
+        k = k + 1;
+    }
+    return table;
+}
+
+// Close clients that have taken too long over their login.
+fn sweep[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock) -> [clock] int {
+    let st = contents(core.state);
+    let now = clock_ms(clk);
+    var k = 0;
+    while k < 2 * max_clients() {
+        let p = stride() * k;
+        if (st[p] == 1 || st[p] == 2) && now - st[p + 11] > hello_ms() {
+            shut(tab, core, k);
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), clk: &k Clock, host: &n [byte], port: int, cfg: Box[[byte]], cfgi: Box[[int]]) -> [heap, conn_accept, conn_read, conn_write, net_out(""), poll, clock] int {
+    match poller_new() {
+        Polling::Ok(p) => {
+            var poller = p;
+            borrow mut poller as &!pw in {
+                poller_add_listener(pw, listener, 0);
+            }
+            let slots = 2 * max_clients();
+            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi };
+            var tab = conns.empty(heap, 64);
+            while true {
+                var ready = 0 - 1;
+                borrow mut core as &!cw in {
+                    ready = poller_wait(cw.poller, contents(cw.events), 1000);
+                }
+                var j = 0;
+                while j < ready {
+                    var token = 0 - 1;
+                    var readiness = 0;
+                    borrow core as &cr in {
+                        token = contents(cr.events)[2 * j];
+                        readiness = contents(cr.events)[2 * j + 1];
+                    }
+                    if token == 0 {
+                        borrow mut core as &!cw in {
+                            tab = accept_all(heap, tab, listener, cw, clk);
+                        }
+                    } else {
+                        borrow mut tab as &!tw in {
+                            borrow mut core as &!cw in {
+                                if contents(cw.state)[stride() * (token - 1)] != 0 {
+                                    step(tw, cw, clk, token - 1, readiness);
+                                }
+                            }
+                        }
+                    }
+                    j = j + 1;
+                }
+                borrow mut core as &!cw in {
+                    tab = pair_all(heap, tab, cw, net, host, port);
+                    borrow mut tab as &!tw in {
+                        sweep(tw, cw, clk);
+                    }
+                }
+            }
+            conns.drop(heap, tab);
+            let Core { poller, events, state, rbuf, pends, hbuf, cfg, cfgi } = core;
+            poller_close(poller);
+            unbox_slice(heap, events);
+            unbox_slice(heap, state);
+            unbox_slice(heap, rbuf);
+            unbox_slice(heap, pends);
+            unbox_slice(heap, hbuf);
+            unbox_slice(heap, cfg);
+            unbox_slice(heap, cfgi);
+            return 0;
+        }
+        Polling::Failed(e) => {
+            unbox_slice(heap, cfg);
+            unbox_slice(heap, cfgi);
+            return 4;
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ the command line
+
+fn number_of[&t](text: &t [byte]) -> [] int {
+    if len(text) == 0 || len(text) > 5 {
+        return 0 - 1;
+    }
+    var n = 0;
+    var i = 0;
+    while i < len(text) {
+        let c = int_of(text[i]);
+        if c < '0' || c > '9' {
+            return 0 - 1;
+        }
+        n = n * 10 + (c - '0');
+        i = i + 1;
+    }
+    return n;
+}
+
+fn hexval(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    if c >= 'A' && c <= 'F' {
+        return c - 'A' + 10;
+    }
+    return 0 - 1;
+}
+
+// Copies `text` into `dst` at `at`; answers where it ended.
+fn copy_in[&d, &s](dst: &!d [byte], at: int, text: &s [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        dst[at + i] = text[i];
+        i = i + 1;
+    }
+    return at + len(text);
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+    release(fs);
+    release(ffi);
+    var status = 2;
+    var listen_port = 0 - 1;
+    var server_port = 0 - 1;
+    var good = false;
+    borrow args as &g in {
+        if arg_count(g) == 8 {
+            listen_port = number_of(arg(g, 1));
+            server_port = number_of(arg(g, 3));
+            good = listen_port > 0 && listen_port < 65536 && server_port > 0 && server_port < 65536 && len(arg(g, 4)) > 0 && len(arg(g, 5)) == 64 && len(arg(g, 6)) > 0 && len(arg(g, 7)) > 0;
+            var i = 0;
+            while good && i < 64 {
+                if hexval(int_of(arg(g, 5)[i])) < 0 {
+                    good = false;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    if !good {
+        borrow mut io as &!e in {
+            io.error_all(e, "usage: proxy <listen port> <upstream host> <upstream port> <branch> <root key, 64 hex digits> <upstream user> <upstream database>\n");
+        }
+    } else {
+        status = 3;
+        borrow args as &g in {
+            let branch = arg(g, 4);
+            let user = arg(g, 6);
+            let dbname = arg(g, 7);
+            borrow mut heap as &!h in {
+                var cfg = box_slice(h, 32 + len(branch) + len(user) + len(dbname), byte_of(0));
+                var cfgi = box_slice(h, 6, 0);
+                borrow mut cfg as &!cb in {
+                    borrow mut cfgi as &!ib in {
+                        let c = contents(cb);
+                        let ci = contents(ib);
+                        var j = 0;
+                        while j < 32 {
+                            c[j] = byte_of(hexval(int_of(arg(g, 5)[2 * j])) * 16 + hexval(int_of(arg(g, 5)[2 * j + 1])));
+                            j = j + 1;
+                        }
+                        var at = 0;
+                        ci[0] = at;
+                        ci[1] = len(branch);
+                        at = copy_in(c, 32 + at, branch) - 32;
+                        ci[2] = at;
+                        ci[3] = len(user);
+                        at = copy_in(c, 32 + at, user) - 32;
+                        ci[4] = at;
+                        ci[5] = len(dbname);
+                        at = copy_in(c, 32 + at, dbname) - 32;
+                    }
+                }
+                borrow net as &nn in {
+                    match tcp_listen(nn, listen_port, 1024, 0) {
+                        Listening::Ok(l) => {
+                            var listener = l;
+                            borrow mut listener as &!lh in {
+                                listener_nonblocking(lh);
+                                borrow mut io as &!o in {
+                                    io.write_all(o, "listening\n");
+                                }
+                                borrow clock as &ck in {
+                                    status = run(h, lh, nn, ck, arg(g, 2), server_port, cfg, cfgi);
+                                }
+                            }
+                            listener_close(listener);
+                        }
+                        Listening::Failed(e) => {
+                            unbox_slice(h, cfg);
+                            unbox_slice(h, cfgi);
+                            status = 3;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    release(net);
+    release(clock);
+    release(args);
+    release(io);
+    release(heap);
+    return status;
+}

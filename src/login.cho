@@ -1,5 +1,6 @@
 module cdb.login;
 
+import std.addr;
 import std.bytes;
 import std.ed25519;
 import cdb.commit;
@@ -315,6 +316,18 @@ pub fn check[&b, &d, &n, &r](blob: &b [byte], database: &d [byte], branch: &n [b
         return login_principal_conflict();
     }
     return login_ok();
+}
+
+// ---------------------------------------------------------------- who may connect
+
+// Whether a client's address is loopback: 127.0.0.0/8, or ::1. cancho's `tcp_listen` binds every address, so the proxy
+// cannot be told to listen on loopback alone; it closes any other client unread (docs/m1-proxy.md D1). An IPv4-mapped IPv6
+// address is already the IPv4 one (`std.addr`), so `::ffff:127.0.0.1` is loopback and `::ffff:10.0.0.1` is not.
+pub fn is_loopback(who: addr.Peer) -> [] bool {
+    if addr.family(who) == 4 {
+        return addr.word(who, 3) / 16777216 == 127;
+    }
+    return addr.word(who, 0) == 0 && addr.word(who, 1) == 0 && addr.word(who, 2) == 0 && addr.word(who, 3) == 1;
 }
 
 // ---------------------------------------------------------------- what the proxy says itself

@@ -1,4 +1,5 @@
 import std.test;
+import std.addr;
 import std.bytes;
 import cdb.commit;
 import cdb.login;
@@ -156,5 +157,28 @@ fn test_messages() -> [] int {
         }
         i = i + 1;
     }
+    return 0;
+}
+
+// Who may connect (docs/m1-proxy.md D1). Hand-written addresses, on both sides of each boundary.
+fn test_loopback() -> [] int {
+    test.assert(login.is_loopback(addr.v4(127, 0, 0, 1, 5432)));
+    test.assert(login.is_loopback(addr.v4(127, 255, 255, 255, 1)));
+    test.assert(login.is_loopback(addr.v4(127, 1, 2, 3, 0)));
+    test.assert(!login.is_loopback(addr.v4(126, 255, 255, 255, 5432)));
+    test.assert(!login.is_loopback(addr.v4(128, 0, 0, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v4(0, 0, 0, 0, 5432)));
+    test.assert(!login.is_loopback(addr.v4(10, 0, 0, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v4(192, 0, 2, 2, 5432)));
+    test.assert(!login.is_loopback(addr.v4(255, 255, 255, 255, 5432)));
+    test.assert(login.is_loopback(addr.v6(0, 0, 0, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0, 0, 0, 0, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0, 0, 0, 2, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0, 0, 1, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v6(1, 0, 0, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0, 1, 0, 1, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0x20010db8, 0, 0, 1, 5432)));
+    test.assert(login.is_loopback(addr.v6(0, 0, 0xffff, 0x7f000001, 5432)));
+    test.assert(!login.is_loopback(addr.v6(0, 0, 0xffff, 0x0a000001, 5432)));
     return 0;
 }
