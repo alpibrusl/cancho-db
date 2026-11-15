@@ -66,6 +66,13 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C43 | Every clause, alias, join kind and direction the subset reads is pinned by hand: 146 cases (83 refusals with exact tags), each accepted statement a fixed point of parse-then-render; 34 mutants of the statement parser and its half of the renderer killed. | `tests/stmt_test.cho`, `tools/gen_stmt.py --check`, `tests/mutants.py stmt` | the differential cannot see what a plan does not show (aliases) |
 | C44 | Words PostgreSQL treats specially are not taken for names: `nulls first`, the eleven non-bare-label words as a label without `AS`, `ROLLUP` and `CUBE` in `GROUP BY`. | cases for each, and the differential that found the first two | a statement PostgreSQL would reject, or read differently, would run |
 
+### INSERT, UPDATE and DELETE, P1b-2b ([`m1-lowering.md`](m1-lowering.md) section 3.3)
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C45 | **A DML statement's rendering means what the original means**: PostgreSQL's `EXPLAIN` plan for INSERT, UPDATE and DELETE (which plans, never runs) is identical for the original and the rendering, and nothing accepted is a syntax error to PostgreSQL. | `tests/stmt_diff.py` with DML in 30% of the statements, 12,000 statements over three seeds, 0 disagreements | the proxy runs the rendering |
+| C46 | The forms outside the subset carry their own tag: `insert-select`, `returning`, `on-conflict`; the rest are refused as `syntax`, `reserved-word` or `unknown-construct`. 226 hand cases in all (143 refusals); 60 mutants of the statement parser and renderer, none surviving (four survived at first: a skipped `VALUES`, `SET` or `FROM`, a row without its parenthesis; each had a gap in the cases). | `tests/stmt_test.cho`, `tests/mutants.py stmt` | a guard that only skips a token is invisible to cases that fail anyway |
+
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
 | # | Claim | Enforced by | Fails when the claim is false because |
@@ -138,7 +145,7 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 - **IR v2 independence:** the Go verifier was extended to v2 by the same separate agent, from the spec and the vectors only,
   and passed all 428 without a fix; I re-ran its code and its tool-call log shows no read outside its directory. Same
   caveats as before (instruction-enforced, same model family). Its six open points are written into `ir.md` section 6.
-- **The parser reads expressions and SELECT only.** INSERT, UPDATE, DELETE and DDL are not parsed yet (P1b-2b), nothing resolves a
+- **The parser reads expressions, SELECT, INSERT, UPDATE and DELETE.** DDL is not parsed yet (P1b-2c), nothing resolves a
   name or lowers to the IR (P1c), and the proxy does not call it (P1d). The schema of the SELECT differential is three small tables;
   plans for them show joins and clauses, not every alias or name. The statement-count differential cannot see a lexing error that keeps statement boundaries (for
   example, a doubled quote ending a string preserves quote parity); the unit cases cover that, and each check is claimed for

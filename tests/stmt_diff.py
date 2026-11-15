@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""The SELECT parser against PostgreSQL itself: does the rendering mean what the original means?
+"""The statement parser against PostgreSQL itself: does the rendering mean what the original means?
 (docs/m1-lowering.md section 6, gate 2, for statements)
 
     PG_E2E_PORT=5532 python3 tests/stmt_diff.py STMTCHECK_BINARY [CASES] [SEED]
 
-As tests/parse_diff.py, for whole SELECT statements: `EXPLAIN (VERBOSE, COSTS OFF) <statement>` for the original and for the
+As tests/parse_diff.py, for whole statements (SELECT, INSERT, UPDATE, DELETE): `EXPLAIN (VERBOSE, COSTS OFF) <statement>` for the original and for the
 rendering must be identical (or both errors with one SQLSTATE), and nothing the parser accepts may be a syntax error (42601)
 to PostgreSQL. The statements come from a grammar (items with and without aliases, one to three tables with the joins the
 parser reads, and each clause present or not, with the expression generator of tests/pgdiff.py inside) and from a fuzzer over
@@ -66,9 +66,41 @@ class SGen:
             return name + self.r.choice([" as ", " "]) + {"t": "tt", "u": "uu", "v": "vv"}[name]
         return name
 
+    def typed(self, col, d):
+        g = self.g
+        return {"a": g.i, "b": g.i, "c": g.t, "d": g.b}[col](d)
+
+    def dml(self):
+        r = self.r
+        g = self.g
+        g.prefix = ""
+        kind = r.random()
+        cols = ["a", "b", "c", "d"]
+        if kind < 0.4:
+            if r.random() < 0.3:
+                names, listed = cols, ""
+            else:
+                names = r.sample(cols, r.randint(1, 4))
+                listed = " (" + ", ".join(names) + ")" if r.random() < 0.9 else "(" + ",".join(names) + ")"
+            rows = ", ".join("(" + ", ".join(self.typed(c, r.randint(0, 2)) for c in names) + ")" for _ in range(r.randint(1, 3)))
+            return "insert into " + self.source("t", 0.15) + listed + " values " + rows
+        if kind < 0.8:
+            chosen = r.sample(cols, r.randint(1, 3))
+            sets = ", ".join(c + r.choice([" = ", "=", " =  "]) + self.typed(c, r.randint(0, 2)) for c in chosen)
+            s = "update " + self.source("t", 0.3) + " set " + sets
+            if r.random() < 0.6:
+                s += " where " + g.b(r.randint(1, 3))
+            return s
+        s = "delete from " + self.source("t", 0.3)
+        if r.random() < 0.7:
+            s += " where " + g.b(r.randint(1, 3))
+        return s
+
     def statement(self):
         r = self.r
         g = self.g
+        if r.random() < 0.3:
+            return self.dml()
         # a plain table most of the time, and the joins the parser reads now and then
         shape = r.random()
         if shape < 0.55:
@@ -116,8 +148,13 @@ WORDS = ["select", "distinct", "from", "where", "group by", "having", "order by"
          "for update", "with", "by", "x", "'s'", "like", "in", "is null", "case when a then 1 end"]
 
 
+STARTS = ["select ", "select ", "insert into t ", "insert into t (a, b) values ", "update t set ", "delete from t ", "update t x set a = ", ""]
+WORDS += ["insert into", "values", "update", "set", "delete from", "returning", "on conflict", "default", "default values", "(1, 2)",
+          "a = 1", "(a, b)", "t as x", "do nothing"]
+
+
 def fuzz(rng):
-    return ("select " if rng.random() < 0.6 else "") + " ".join(rng.choice(WORDS) for _ in range(rng.randint(1, 12)))
+    return rng.choice(STARTS) + " ".join(rng.choice(WORDS) for _ in range(rng.randint(1, 12)))
 
 
 def main():

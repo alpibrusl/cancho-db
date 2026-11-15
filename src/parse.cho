@@ -151,6 +151,42 @@ pub fn n_offset() -> [] int {
     return 29;
 }
 
+pub fn n_insert() -> [] int {
+    return 30;
+}
+
+pub fn n_cols() -> [] int {
+    return 31;
+}
+
+pub fn n_name() -> [] int {
+    return 32;
+}
+
+pub fn n_values() -> [] int {
+    return 33;
+}
+
+pub fn n_row() -> [] int {
+    return 34;
+}
+
+pub fn n_update() -> [] int {
+    return 35;
+}
+
+pub fn n_set() -> [] int {
+    return 36;
+}
+
+pub fn n_assign() -> [] int {
+    return 37;
+}
+
+pub fn n_delete() -> [] int {
+    return 38;
+}
+
 // The ways a parse is refused: `expr` answers `0 - code`, and `st[3]` is the token index it stopped at.
 pub fn e_syntax() -> [] int {
     return 1;
@@ -196,6 +232,18 @@ pub fn e_unsupported_statement() -> [] int {
     return 11;
 }
 
+pub fn e_insert_select() -> [] int {
+    return 12;
+}
+
+pub fn e_returning() -> [] int {
+    return 13;
+}
+
+pub fn e_on_conflict() -> [] int {
+    return 14;
+}
+
 pub fn error_name(code: int) -> [] &static [byte] {
     if code == 1 {
         return "syntax";
@@ -226,6 +274,15 @@ pub fn error_name(code: int) -> [] &static [byte] {
     }
     if code == 11 {
         return "unsupported-statement";
+    }
+    if code == 12 {
+        return "insert-select";
+    }
+    if code == 13 {
+        return "returning";
+    }
+    if code == 14 {
+        return "on-conflict";
     }
     return "subquery";
 }
@@ -1530,6 +1587,28 @@ fn emit_open[&s, &t, &n, &o](out: &!o [byte], at: int, sql: &s [byte], toks: &t 
     if kind == n_offset() {
         return put_lit(out, p, "offset ");
     }
+    if kind == n_insert() {
+        return put_lit(out, p, "insert into ");
+    }
+    if kind == n_values() {
+        return put_lit(out, p, "values ");
+    }
+    if kind == n_update() {
+        return put_lit(out, p, "update ");
+    }
+    if kind == n_set() {
+        return put_lit(out, p, "set ");
+    }
+    if kind == n_delete() {
+        return put_lit(out, p, "delete from ");
+    }
+    if kind == n_name() {
+        return put_name(out, p, sql, toks, data);
+    }
+    if kind == n_assign() {
+        p = put_name(out, p, sql, toks, data);
+        return put_lit(out, p, " = ");
+    }
     if kind == n_items() || kind == n_item() || kind == n_order() || kind == n_join() {
         return p;
     }
@@ -1545,7 +1624,7 @@ fn emit_sep[&o, &n](out: &!o [byte], at: int, nodes: &n [int], node: int, k: int
         p = put_lit(out, p, op_text(data));
         return put_byte(out, p, ' ');
     }
-    if kind == n_select() {
+    if kind == n_select() || kind == n_insert() || kind == n_update() || kind == n_delete() {
         return put_byte(out, p, ' ');
     }
     if kind == n_join() {
@@ -1605,6 +1684,9 @@ fn emit_close[&s, &t, &o, &n](out: &!o [byte], at: int, sql: &s [byte], toks: &t
             return put_lit(out, p, " desc");
         }
         return p;
+    }
+    if kind == n_cols() || kind == n_row() {
+        return put_byte(out, p, ')');
     }
     if kind >= n_select() {
         return p;

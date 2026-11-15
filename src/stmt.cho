@@ -47,7 +47,7 @@ fn bare_label_ok[&s, &t](sql: &s [byte], toks: &t [int], i: int) -> [] bool {
 }
 
 // An optional `[AS] name` at `pos`. Answers the token index of the name or -1 in st[9], and the position after it.
-fn alias[&s, &t, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, select_item: bool, st: &!x [int]) -> [] int {
+fn alias[&s, &t, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, mode: int, st: &!x [int]) -> [] int {
     st[9] = 0 - 1;
     var p = pos;
     if parse.kw(sql, toks, p, end, "as") {
@@ -64,7 +64,12 @@ fn alias[&s, &t, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, select_
         st[9] = p;
         return p + 1;
     }
-    if is_name_tok(sql, toks, p, end) && (!select_item || bare_label_ok(sql, toks, p)) {
+    // `UPDATE t SET ...`: SET is not a keyword PostgreSQL reserves, but it is never an alias there
+    if mode != 1 && parse.kw(sql, toks, p, end, "set") {
+        return p;
+    }
+    // mode 0: a table alias, bare or after AS; 1: a select-list label; 2: AS is required (INSERT INTO t AS a)
+    if mode != 2 && is_name_tok(sql, toks, p, end) && (mode != 1 || bare_label_ok(sql, toks, p)) {
         st[9] = p;
         return p + 1;
     }
@@ -82,7 +87,7 @@ fn stage[&t, &x](tmp: &!t [int], st: &!x [int], id: int) -> [] int {
 }
 
 // A table reference `name [[AS] alias]`, as a TABLE leaf, staged. Answers the position after it.
-fn table_ref[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+fn table_ref[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, allow_paren: bool, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
     if pos >= end {
         return parse.fail(st, pos, parse.e_syntax());
     }
@@ -98,10 +103,14 @@ fn table_ref[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], pos: int, e
     if !is_name_tok(sql, toks, pos, end) {
         return parse.fail(st, pos, parse.e_syntax());
     }
-    if parse.punct(sql, toks, pos + 1, end, '.') || parse.punct(sql, toks, pos + 1, end, '(') {
+    if parse.punct(sql, toks, pos + 1, end, '.') || !allow_paren && parse.punct(sql, toks, pos + 1, end, '(') {
         return parse.fail(st, pos + 1, parse.e_unknown_construct());
     }
-    let q = alias(sql, toks, pos + 1, end, false, st);
+    var amode = 0;
+    if allow_paren {
+        amode = 2;
+    }
+    let q = alias(sql, toks, pos + 1, end, amode, st);
     if q < 0 {
         return q;
     }
@@ -184,7 +193,7 @@ pub fn select[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
             if q < 0 {
                 return q;
             }
-            q = alias(sql, toks, q, end, true, st);
+            q = alias(sql, toks, q, end, 1, st);
             if q < 0 {
                 return q;
             }
@@ -217,7 +226,7 @@ pub fn select[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
         pos = pos + 1;
         more = true;
         while more {
-            var q = table_ref(sql, toks, pos, end, nodes, kids, tmp, st);
+            var q = table_ref(sql, toks, pos, end, false, nodes, kids, tmp, st);
             if q < 0 {
                 return q;
             }
@@ -247,7 +256,7 @@ pub fn select[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
                 if kind < 0 {
                     joining = false;
                 } else {
-                    q = table_ref(sql, toks, pos, end, nodes, kids, tmp, st);
+                    q = table_ref(sql, toks, pos, end, false, nodes, kids, tmp, st);
                     if q < 0 {
                         return q;
                     }
@@ -433,4 +442,283 @@ pub fn select[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
     }
     st[2] = root;
     return end;
+}
+
+// ---- INSERT, UPDATE, DELETE
+
+// A name token (a column), as a NAME leaf, staged. Answers the position after it.
+fn name_item[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    if pos >= end {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    if parse.tkind(toks, pos) == lex.t_ident() && parse.is_reserved(sql, parse.tstart(toks, pos), parse.tlen(toks, pos)) {
+        return parse.fail(st, pos, parse.e_reserved_word());
+    }
+    if !is_name_tok(sql, toks, pos, end) {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    let id = parse.mk(nodes, kids, st, parse.n_name(), pos, tmp, 0, 0 - 1, 0 - 1);
+    if id < 0 {
+        return parse.fail(st, pos, 0 - id);
+    }
+    let r = stage(tmp, st, id);
+    if r < 0 {
+        return parse.fail(st, pos, 0 - r);
+    }
+    return pos + 1;
+}
+
+// After a complete statement: what may follow it is refused with the tag of what it is.
+fn leftover[&s, &t, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, st: &!x [int]) -> [] int {
+    if parse.kw(sql, toks, pos, end, "returning") {
+        return parse.fail(st, pos, parse.e_returning());
+    }
+    if parse.kw(sql, toks, pos, end, "on") {
+        return parse.fail(st, pos, parse.e_on_conflict());
+    }
+    return parse.fail(st, pos, parse.e_syntax());
+}
+
+// An optional WHERE at `pos`, appended to `clauses` at `n`. Answers the position after it, and the new count in st[11].
+fn where_clause[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], count: int, st: &!x [int]) -> [] int {
+    st[11] = count;
+    if !parse.kw(sql, toks, pos, end, "where") {
+        return pos;
+    }
+    let q = expr_item(sql, toks, pos + 1, end, nodes, kids, vs, os, tmp, st);
+    if q < 0 {
+        return q;
+    }
+    let id = close_list(nodes, kids, tmp, st, parse.n_where(), 0, 0);
+    if id < 0 {
+        return parse.fail(st, pos, 0 - id);
+    }
+    clauses[count] = id;
+    st[11] = count + 1;
+    return q;
+}
+
+// INSERT INTO t [(c, ...)] VALUES (e, ...) [, (e, ...)]...
+pub fn insert[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], st: &!x [int]) -> [] int {
+    st[10] = 0;
+    var pos = from + 1;
+    if !parse.kw(sql, toks, pos, end, "into") {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    pos = table_ref(sql, toks, pos + 1, end, true, nodes, kids, tmp, st);
+    if pos < 0 {
+        return pos;
+    }
+    clauses[0] = tmp[0];
+    st[10] = 0;
+    var n = 1;
+    if parse.punct(sql, toks, pos, end, '(') {
+        if parse.kw(sql, toks, pos + 1, end, "select") || parse.kw(sql, toks, pos + 1, end, "with") || parse.kw(sql, toks, pos + 1, end, "values") {
+            return parse.fail(st, pos + 1, parse.e_subquery());
+        }
+        pos = pos + 1;
+        var more = true;
+        while more {
+            let q = name_item(sql, toks, pos, end, nodes, kids, tmp, st);
+            if q < 0 {
+                return q;
+            }
+            pos = q;
+            if parse.punct(sql, toks, pos, end, ',') {
+                pos = pos + 1;
+            } else {
+                more = false;
+            }
+        }
+        if !parse.punct(sql, toks, pos, end, ')') {
+            return parse.fail(st, pos, parse.e_syntax());
+        }
+        pos = pos + 1;
+        let id = close_list(nodes, kids, tmp, st, parse.n_cols(), 0, 0);
+        if id < 0 {
+            return parse.fail(st, pos, 0 - id);
+        }
+        clauses[n] = id;
+        n = n + 1;
+    }
+    if parse.kw(sql, toks, pos, end, "select") || parse.kw(sql, toks, pos, end, "with") {
+        return parse.fail(st, pos, parse.e_insert_select());
+    }
+    if !parse.kw(sql, toks, pos, end, "values") {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    pos = pos + 1;
+    var rows = true;
+    while rows {
+        if !parse.punct(sql, toks, pos, end, '(') {
+            return parse.fail(st, pos, parse.e_syntax());
+        }
+        if parse.kw(sql, toks, pos + 1, end, "select") || parse.kw(sql, toks, pos + 1, end, "with") {
+            return parse.fail(st, pos + 1, parse.e_subquery());
+        }
+        pos = pos + 1;
+        let mark = st[10];
+        var items = true;
+        while items {
+            let q = expr_item(sql, toks, pos, end, nodes, kids, vs, os, tmp, st);
+            if q < 0 {
+                return q;
+            }
+            pos = q;
+            if parse.punct(sql, toks, pos, end, ',') {
+                pos = pos + 1;
+            } else {
+                items = false;
+            }
+        }
+        if !parse.punct(sql, toks, pos, end, ')') {
+            return parse.fail(st, pos, parse.e_syntax());
+        }
+        pos = pos + 1;
+        let row = close_list(nodes, kids, tmp, st, parse.n_row(), mark, 0);
+        if row < 0 {
+            return parse.fail(st, pos, 0 - row);
+        }
+        let r = stage(tmp, st, row);
+        if r < 0 {
+            return parse.fail(st, pos, 0 - r);
+        }
+        if parse.punct(sql, toks, pos, end, ',') {
+            pos = pos + 1;
+        } else {
+            rows = false;
+        }
+    }
+    let values = close_list(nodes, kids, tmp, st, parse.n_values(), 0, 0);
+    if values < 0 {
+        return parse.fail(st, pos, 0 - values);
+    }
+    clauses[n] = values;
+    n = n + 1;
+    if pos < end {
+        return leftover(sql, toks, pos, end, st);
+    }
+    let root = parse.mk(nodes, kids, st, parse.n_insert(), 0, clauses[0..n], n, 0 - 1, 0 - 1);
+    if root < 0 {
+        return parse.fail(st, pos, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
+// UPDATE t [[AS] a] SET c = e [, c = e]... [WHERE e]
+pub fn update[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], st: &!x [int]) -> [] int {
+    st[10] = 0;
+    var pos = table_ref(sql, toks, from + 1, end, false, nodes, kids, tmp, st);
+    if pos < 0 {
+        return pos;
+    }
+    clauses[0] = tmp[0];
+    st[10] = 0;
+    if !parse.kw(sql, toks, pos, end, "set") {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    pos = pos + 1;
+    var more = true;
+    while more {
+        let mark = st[10];
+        var q = name_item(sql, toks, pos, end, nodes, kids, tmp, st);
+        if q < 0 {
+            return q;
+        }
+        if !parse.opr(sql, toks, q, end, "=") {
+            return parse.fail(st, q, parse.e_syntax());
+        }
+        // the column and the expression are staged; they become one ASSIGN node: its data is the column's token, its child the value
+        let column = tmp[mark];
+        let col_tok = nodes[6 * column + 1];
+        st[10] = mark;
+        q = expr_item(sql, toks, q + 1, end, nodes, kids, vs, os, tmp, st);
+        if q < 0 {
+            return q;
+        }
+        let id = parse.mk(nodes, kids, st, parse.n_assign(), col_tok, tmp[mark..mark + 1], 1, 0 - 1, 0 - 1);
+        if id < 0 {
+            return parse.fail(st, pos, 0 - id);
+        }
+        st[10] = mark;
+        let r = stage(tmp, st, id);
+        if r < 0 {
+            return parse.fail(st, pos, 0 - r);
+        }
+        pos = q;
+        if parse.punct(sql, toks, pos, end, ',') {
+            pos = pos + 1;
+        } else {
+            more = false;
+        }
+    }
+    let assigns = close_list(nodes, kids, tmp, st, parse.n_set(), 0, 0);
+    if assigns < 0 {
+        return parse.fail(st, pos, 0 - assigns);
+    }
+    clauses[1] = assigns;
+    pos = where_clause(sql, toks, pos, end, nodes, kids, vs, os, tmp, clauses, 2, st);
+    if pos < 0 {
+        return pos;
+    }
+    let n = st[11];
+    if pos < end {
+        return leftover(sql, toks, pos, end, st);
+    }
+    let root = parse.mk(nodes, kids, st, parse.n_update(), 0, clauses[0..n], n, 0 - 1, 0 - 1);
+    if root < 0 {
+        return parse.fail(st, pos, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
+// DELETE FROM t [[AS] a] [WHERE e]
+pub fn delete[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], st: &!x [int]) -> [] int {
+    st[10] = 0;
+    var pos = from + 1;
+    if !parse.kw(sql, toks, pos, end, "from") {
+        return parse.fail(st, pos, parse.e_syntax());
+    }
+    pos = table_ref(sql, toks, pos + 1, end, false, nodes, kids, tmp, st);
+    if pos < 0 {
+        return pos;
+    }
+    clauses[0] = tmp[0];
+    st[10] = 0;
+    pos = where_clause(sql, toks, pos, end, nodes, kids, vs, os, tmp, clauses, 1, st);
+    if pos < 0 {
+        return pos;
+    }
+    let n = st[11];
+    if pos < end {
+        if parse.kw(sql, toks, pos, end, "using") {
+            return parse.fail(st, pos, parse.e_unknown_construct());
+        }
+        return leftover(sql, toks, pos, end, st);
+    }
+    let root = parse.mk(nodes, kids, st, parse.n_delete(), 0, clauses[0..n], n, 0 - 1, 0 - 1);
+    if root < 0 {
+        return parse.fail(st, pos, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
+// One statement: the first word says which. Anything else is `unsupported-statement`.
+pub fn statement[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], st: &!x [int]) -> [] int {
+    if parse.kw(sql, toks, from, end, "select") {
+        return select(sql, toks, from, end, nodes, kids, vs, os, tmp, clauses, st);
+    }
+    if parse.kw(sql, toks, from, end, "insert") {
+        return insert(sql, toks, from, end, nodes, kids, vs, os, tmp, clauses, st);
+    }
+    if parse.kw(sql, toks, from, end, "update") {
+        return update(sql, toks, from, end, nodes, kids, vs, os, tmp, clauses, st);
+    }
+    if parse.kw(sql, toks, from, end, "delete") {
+        return delete(sql, toks, from, end, nodes, kids, vs, os, tmp, clauses, st);
+    }
+    return parse.fail(st, from, parse.e_unsupported_statement());
 }

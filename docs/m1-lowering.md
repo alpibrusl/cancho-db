@@ -156,6 +156,14 @@ limit 5 offset 2`). Joins are left-deep and rendered without parentheses, which 
   before `LIMIT`, `FOR UPDATE`, `FETCH`, `WINDOW`, `DISTINCT ON`; a statement that is not a `SELECT` is
   `unsupported-statement` (P1b-2b).
 
+- **INSERT, UPDATE, DELETE** are read the same way: `INSERT INTO t [AS a] [(c, ...)] VALUES (e, ...), ...`, `UPDATE t [[AS] a] SET c = e, ... [WHERE e]`,
+  `DELETE FROM t [[AS] a] [WHERE e]`. `EXPLAIN` plans them without running them, so the same differential applies (30% of the
+  generated statements are DML: random column subsets, typed values, one to three rows, aliases). Found: PostgreSQL requires `AS` for an
+  INSERT alias (`insert into t x ...` is a syntax error there, and was accepted here), and `SET` must never be taken as the alias in
+  `UPDATE t SET`. Refused with their own tags: `insert-select`, `returning`, `on-conflict`; `DEFAULT`, `DEFAULT VALUES`, `UPDATE ... FROM`,
+  `DELETE ... USING`, `ONLY`, row-valued `SET (a, b) = ...` and schema-qualified names fall out as `reserved-word`, `syntax` or
+  `unknown-construct`.
+
 ## 4. Lowering
 
 - **Aliases** (`FROM orders o`) are resolved to base tables: the IR names `orders`, never `o`.
@@ -204,8 +212,9 @@ it to PostgreSQL and counting the commands it reports), has the same number of s
 | IR v2 | `ir.md` section 6, three verifiers | built; 428 vectors agree |
 | **P1a** | the lexer and statement splitter, with the refusals of section 3 | **built** (`src/lex.cho`): 167 hand-written cases (54 refusals), 35 mutants killed, and a differential against PostgreSQL itself (section 3.1) |
 | **P1b-1** | **the expression parser and the renderer** (`src/parse.cho`): precedence climbing over explicit stacks, a tree in caller arrays, and the parenthesised rendering | **built**: 265 hand-written cases (123 refusals), each accepted one a fixed point of parse-then-render; PostgreSQL's plan for the original equal to its plan for the rendering over 12,000 generated expressions (section 3.2); 56 mutants killed |
-| **P1b-2a** | **SELECT** (`src/stmt.cho`): items and aliases, `FROM` with comma lists and `[INNER|LEFT [OUTER]] JOIN ... ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY [ASC|DESC]`, `LIMIT`, `OFFSET` | **built**: 146 hand-written cases (83 refusals, each accepted one a fixed point), 34 mutants killed, PostgreSQL's plans for the original and the rendering equal over 12,000 generated statements (section 3.3) |
-| **P1b-2b** | INSERT, UPDATE, DELETE and the closed DDL | the same checks |
+| **P1b-2a** | **SELECT** (`src/stmt.cho`): items and aliases, `FROM` with comma lists and `[INNER|LEFT [OUTER]] JOIN ... ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY [ASC|DESC]`, `LIMIT`, `OFFSET` | **built**: 146 hand-written cases (83 refusals, each accepted one a fixed point), 34 mutants killed (now part of the 226 and 60 of P1b-2b), PostgreSQL's plans for the original and the rendering equal over 12,000 generated statements (section 3.3) |
+| **P1b-2b** | **INSERT, UPDATE, DELETE** (`src/stmt.cho`, `stmt.statement` dispatches on the first word) | **built**: 226 hand-written cases in all (143 refusals), 60 mutants killed, the PostgreSQL plan comparison over INSERT, UPDATE and DELETE as well (section 3.3) |
+| **P1b-2c** | the closed DDL (`CREATE TABLE`, `DROP TABLE`, `ALTER TABLE ... ADD COLUMN`, `CREATE/DROP INDEX`) | hand cases and mutants; no plan to compare, so the renderer is checked by executing the original and the rendering on two empty databases and comparing `pg_catalog` |
 | **P1c** | lowering, the schema snapshot, the effect check | lowering gate (1); refusals (3) |
 | **P1d** | the `Query` branch in the proxy | end to end with psql: differential (2) and the server log (3) |
 

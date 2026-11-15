@@ -42,7 +42,7 @@ fn run[&s, &t, &n, &k, &v, &o, &g, &c, &x, &r, &w](sql: &s [byte], toks: &!t [in
     let n = lex.tokenize(sql, toks);
     test.assert(n >= 0);
     parse.reset(st);
-    let q = stmt.select(sql, toks, 0, n, nodes, kids, vs, os, tmp, clauses, st);
+    let q = stmt.statement(sql, toks, 0, n, nodes, kids, vs, os, tmp, clauses, st);
     if q < 0 {
         return q;
     }
@@ -105,7 +105,7 @@ fn test_every_case() -> [] int {
 // Every refusal has a tag.
 fn test_every_refusal_has_a_tag() -> [] int {
     var code = 1;
-    while code <= 11 {
+    while code <= 14 {
         test.assert(len(parse.error_name(code)) > 3);
         code = code + 1;
     }
