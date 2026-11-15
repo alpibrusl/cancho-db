@@ -512,6 +512,66 @@ def run_unit(table, test_files, src_names, cancho):
     print("%d mutants, %d not killed" % (len(table), len(survivors)))
     return 1 if survivors else 0
 
+# ---- the SQL expression parser (src/parse.cho, tests/parse_test.cho)
+PARSE = [
+    ("parse: AND binds like OR", "src/parse.cho", "if code == o_and() {\n        return 2;", "if code == o_and() {\n        return 1;"),
+    ("parse: NOT binds tighter than comparison", "src/parse.cho", "if code == o_not() {\n        return 3;", "if code == o_not() {\n        return 6;"),
+    ("parse: || binds like +", "src/parse.cho", "if code == o_concat() {\n        return 7;", "if code == o_concat() {\n        return 8;"),
+    ("parse: || binds tighter than *", "src/parse.cho", "if code == o_concat() {\n        return 7;", "if code == o_concat() {\n        return 10;"),
+    ("parse: + binds like *", "src/parse.cho", "if code == o_add() || code == o_sub() {\n        return 8;", "if code == o_add() || code == o_sub() {\n        return 9;"),
+    ("parse: - is looser than +", "src/parse.cho", "if code == o_add() || code == o_sub() {", "if code == o_add() {"),
+    ("parse: unary minus is loose", "src/parse.cho", "    return 11;\n}\n\nfn nonassoc", "    return 7;\n}\n\nfn nonassoc"),
+    ("parse: comparisons associate", "src/parse.cho", "return prec == 5 || prec == 6;", "return prec == 6;"),
+    ("parse: LIKE associates", "src/parse.cho", "return prec == 5 || prec == 6;", "return prec == 5;"),
+    ("parse: comparisons bind like LIKE", "src/parse.cho", "if code >= o_eq() && code <= o_ge() {\n        return 5;", "if code >= o_eq() && code <= o_ge() {\n        return 6;"),
+    ("parse: IN is looser than comparison", "src/parse.cho", "if code >= o_like() && code <= o_nin() || code == o_between() || code == o_nbetween() {\n        return 6;", "if code >= o_like() && code <= o_nin() || code == o_between() || code == o_nbetween() {\n        return 4;"),
+    ("parse: IN waits for its operand", "src/parse.cho", "            r = reduce_one(nodes, kids, vs, os, st);\n        }\n    } else if code == f_paren() {", "        }\n    } else if code == f_paren() {"),
+    ("parse: the first operator is reduced too late", "src/parse.cho", "let r = reduce_while(nodes, kids, vs, os, st, prec, na);", "let r = reduce_while(nodes, kids, vs, os, st, prec + 1, na);"),
+    ("parse: IS does not reduce first", "src/parse.cho", "r = reduce_while(nodes, kids, vs, os, st, 4, 0 - 2);", "r = reduce_while(nodes, kids, vs, os, st, 99, 0 - 2);"),
+    ("parse: IS reduces too much", "src/parse.cho", "r = reduce_while(nodes, kids, vs, os, st, 4, 0 - 2);", "r = reduce_while(nodes, kids, vs, os, st, 1, 0 - 2);"),
+    ("parse: BETWEEN's AND is a logical AND", "src/parse.cho", "&& (os[top] == o_between() || os[top] == o_nbetween()) && os[top + 3] == 0 {", "&& false {"),
+    ("parse: BETWEEN may be left open", "src/parse.cho", "        if b != 1 {\n            return 0 - e_syntax();\n        }\n        var neg = 0;", "        var neg = 0;"),
+    ("parse: NOT BETWEEN is BETWEEN", "src/parse.cho", "var code = o_between();\n                        if neg {\n                            code = o_nbetween();", "var code = o_between();\n                        if false {\n                            code = o_nbetween();"),
+    ("parse: NOT IN is IN", "src/parse.cho", "var code = o_in();\n                        if neg {\n                            code = o_nin();", "var code = o_in();\n                        if false {\n                            code = o_nin();"),
+    ("parse: NOT LIKE is LIKE", "src/parse.cho", "var code = o_like();\n                        if neg {\n                            code = o_nlike();", "var code = o_like();\n                        if false {\n                            code = o_nlike();"),
+    ("parse: NOT ILIKE is ILIKE", "src/parse.cho", "var code = o_ilike();\n                        if neg {\n                            code = o_nilike();", "var code = o_ilike();\n                        if false {\n                            code = o_nilike();"),
+    ("parse: IS TRUE is IS NULL", "src/parse.cho", "if !kw(sql, toks, q, end, \"null\") {\n                            return fail(st, q, e_unknown_construct());\n                        }", "if false {\n                            return fail(st, q, e_unknown_construct());\n                        }"),
+    ("parse: IS NOT NULL is IS NULL", "src/parse.cho", "build(nodes, kids, vs, st, n_isnull(), isneg, 1, 0 - 1, 0 - 1)", "build(nodes, kids, vs, st, n_isnull(), 0, 1, 0 - 1, 0 - 1)"),
+    ("parse: != is not <>", "src/parse.cho", 'if word_is(sql, a, n, "<>") || word_is(sql, a, n, "!=") {', 'if word_is(sql, a, n, "<>") {'),
+    ("parse: a reserved word is a name", "src/parse.cho", "} else if is_reserved(sql, a, l) {", "} else if false {"),
+    ("parse: a reserved word after a dot is a name", "src/parse.cho", "if is_reserved(sql, tstart(toks, pos + 2), tlen(toks, pos + 2)) {", "if false {"),
+    ("parse: the keyword match is case sensitive", "src/parse.cho", "if lower(int_of(sql[start + i])) != int_of(lit[i]) {", "if int_of(sql[start + i]) != int_of(lit[i]) {"),
+    ("parse: the reserved list is case sensitive", "src/parse.cho", "if lower(int_of(sql[start + i])) != int_of(words[at + i]) {", "if int_of(sql[start + i]) != int_of(words[at + i]) {"),
+    ("parse: the reserved list's last word is lost", "src/parse.cho", "while i <= len(words) {", "while i < len(words) {"),
+    ("parse: a name is not folded", "src/parse.cho", "p = put_text(out, p, sql, tstart(toks, tok), tlen(toks, tok), tkind(toks, tok) == lex.t_ident());", "p = put_text(out, p, sql, tstart(toks, tok), tlen(toks, tok), false);"),
+    ("parse: a quoted name is folded", "src/parse.cho", "p = put_text(out, p, sql, tstart(toks, tok), tlen(toks, tok), tkind(toks, tok) == lex.t_ident());", "p = put_text(out, p, sql, tstart(toks, tok), tlen(toks, tok), true);"),
+    ("parse: a sub-select is not refused in parentheses", "src/parse.cho", "if starts_query(sql, toks, pos + 1, end) {", "if false {"),
+    ("parse: a sub-select is not refused in IN", "src/parse.cho", "if starts_query(sql, toks, at + 2, end) {", "if false {"),
+    ("parse: a sub-select is not refused in a call", "src/parse.cho", "if starts_query(sql, toks, pos + 2, end) {", "if false {"),
+    ("parse: an unknown type is accepted", "src/parse.cho", "    if !known {\n        return fail(st, pos, e_unknown_type());\n    }", "    if false {\n        return fail(st, pos, e_unknown_type());\n    }"),
+    ("parse: a quoted type name is accepted", "src/parse.cho", "    if tkind(toks, pos) == lex.t_quoted() {\n        return fail(st, pos, e_unknown_type());\n    }", "    if false {\n        return fail(st, pos, e_unknown_type());\n    }"),
+    ("parse: decimal is not numeric", "src/parse.cho", 'if word_is(sql, start, length, "numeric") || word_is(sql, start, length, "decimal") {', 'if word_is(sql, start, length, "numeric") {'),
+    ("parse: a modifier on text is accepted", "src/parse.cho", "        } else {\n            return fail(st, p, e_unknown_construct());\n        }\n        if p + 1 >= end", "        } else {\n            mods = 1;\n        }\n        if p + 1 >= end"),
+    ("parse: a numeric has one modifier", "src/parse.cho", "            mods = 2;\n        } else if code == 7 {", "            mods = 1;\n        } else if code == 7 {"),
+    ("parse: CASE needs no ELSE flag", "src/parse.cho", "build(nodes, kids, vs, st, n_case(), 0, st[4] - base, operand, has_else)", "build(nodes, kids, vs, st, n_case(), 0, st[4] - base, operand, 0)"),
+    ("parse: CASE forgets its operand", "src/parse.cho", "build(nodes, kids, vs, st, n_case(), 0, st[4] - base, operand, has_else)", "build(nodes, kids, vs, st, n_case(), 0, st[4] - base, 0, has_else)"),
+    ("parse: CASE may END after WHEN", "src/parse.cho", "if state != 3 && state != 4 {", "if state != 3 && state != 4 && state != 2 {"),
+    ("parse: CASE may have two ELSEs", "src/parse.cho", "        if state != 3 {\n            return fail(st, pos, e_syntax());\n        }\n        os[at + 3] = 4 + 8 * operand;", "        os[at + 3] = 4 + 8 * operand;"),
+    ("parse: THEN may follow anything", "src/parse.cho", "        if state != 2 {\n            return fail(st, pos, e_syntax());\n        }\n        os[at + 3] = 3 + 8 * operand;", "        os[at + 3] = 3 + 8 * operand;"),
+    ("parse: count(*) is any function", "src/parse.cho", '&& punct(sql, toks, pos + 3, end, \')\') && word_is(sql, a, l, "count") {', "&& punct(sql, toks, pos + 3, end, ')') {"),
+    ("parse: a call renders without its name folded", "src/parse.cho", "p = put_text(out, p, sql, tstart(toks, data), tlen(toks, data), true);\n        p = put_byte(out, p, '(');", "p = put_text(out, p, sql, tstart(toks, data), tlen(toks, data), false);\n        p = put_byte(out, p, '(');"),
+    ("parse: unary plus is accepted", "src/parse.cho", '} else if word_is(sql, a, l, "+") {\n                    return fail(st, pos, e_unknown_construct());', '} else if word_is(sql, a, l, "+") {\n                    pos = pos + 1;'),
+    ("parse: a third name part is accepted", "src/parse.cho", "        if punct(sql, toks, next, end, '.') {\n            return fail(st, next, e_unknown_construct());\n        }", "        if false {\n            return fail(st, next, e_unknown_construct());\n        }"),
+    ("parse: a leftover token is not an error at the top", "src/parse.cho", "if r >= 0 && (st[5] != 0 || st[4] != 1) {", "if r >= 0 && st[4] != 1 {"),
+    ("parse: the operand stack has no limit", "src/parse.cho", "    if st[4] >= len(vs) {\n        return 0 - e_nested_too_deep();\n    }\n", "    if false {\n        return 0 - e_nested_too_deep();\n    }\n"),
+    ("parse: the operator stack limit is off by one", "src/parse.cho", "if 4 * st[5] + 4 > len(os) {", "if 4 * st[5] + 4 > len(os) + 4 {"),
+    ("parse: the node arena limit is off by one", "src/parse.cho", "if 6 * id + 6 > len(nodes) {", "if 6 * id + 6 > len(nodes) + 6 {"),
+    ("parse: the kids limit is off by one", "src/parse.cho", "if st[1] + count > len(kids) {", "if st[1] + count > len(kids) + 1 {"),
+    ("parse: the traversal stack limit is off by one", "src/parse.cho", "if 2 * sp + 2 > len(rs) {", "if 2 * sp + 2 > len(rs) + 2 {"),
+    ("parse: the output limit is off by one", "src/parse.cho", "if at < 0 || at >= len(out) {", "if at < 0 || at > len(out) {"),
+    ("parse: an overrun of the output goes unnoticed", "src/parse.cho", "    if p < 0 {\n        return 0 - e_too_big();\n    }\n    return p;", "    return p;"),
+]
+
 
 # Mutants that cannot be killed because they change nothing observable, with the reason. Empty: every mutant above
 # changes behaviour, and the ones that looked equivalent (the count guard against the bytes left) are not listed
@@ -555,6 +615,8 @@ def run(kind, cancho):
         return run_login(cancho)
     if kind == "lex":
         return run_unit(LEX, ["tests/lex_test.cho", "tests/lex_cases.cho"], ["lex.cho"], cancho)
+    if kind == "parse":
+        return run_unit(PARSE, ["tests/parse_test.cho", "tests/parse_cases.cho"], ["lex.cho", "parse.cho"], cancho)
     if kind == "proxy":
         return run_proxy(cancho)
     table = PY if kind == "py" else CHO

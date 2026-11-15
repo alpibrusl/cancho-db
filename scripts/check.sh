@@ -25,6 +25,8 @@ echo "== login cases are reproducible"; python3 tools/gen_login.py --check
 echo "== login tests (the proxy's front door, from bytes)"; quiet 2 "$CANCHO" test tests/login_test.cho tests/login_cases.cho src/commit.cho src/token.cho src/login.cho --std
 echo "== lexer cases are reproducible"; python3 tools/gen_lex.py --check
 echo "== lexer tests (from bytes)"; quiet 2 "$CANCHO" test tests/lex_test.cho tests/lex_cases.cho src/lex.cho --std
+echo "== parser cases are reproducible"; python3 tools/gen_parse.py --check
+echo "== parser tests (from bytes)"; quiet 2 "$CANCHO" test tests/parse_test.cho tests/parse_cases.cho src/lex.cho src/parse.cho --std
 echo "== build";                     "$CANCHO" build --std src/*.cho -o build/verify
 echo "== go verifier";               (cd verifiers/go && gofmt -l . | (! grep .) && go vet ./... && go build -o ../../build/verify-go .)
 export FUZZ_EXTRA="build/verify-go"
@@ -41,6 +43,10 @@ quiet 3 python3 tests/proxy_e2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"
 "$CANCHO" build --std proxy/lexcheck.cho src/lex.cho -o build/lexcheck
 quiet 4 python3 tests/lex_diff.py build/lexcheck 4000 1
+echo "== the expression parser against PostgreSQL (the plan of the original and of the rendering)"
+"$CANCHO" build --std proxy/exprcheck.cho src/lex.cho src/parse.cho -o build/exprcheck
+quiet 2 python3 tests/parse_diff.py build/exprcheck 4000 1
+quiet 2 python3 tests/parse_diff.py build/exprcheck 4000 2
 echo "== command lines";             python3 tests/cli_test.py vectors build/verify
 echo "== attenuation property";       python3 tests/properties.py 4000 1
 echo "== fuzz (three verifiers, no crash)"; python3 tests/fuzz.py vectors build/verify 3000 1
@@ -48,4 +54,5 @@ echo "== mutants, python";           quiet 1 python3 tests/mutants.py py
 echo "== mutants, cancho";           quiet 1 python3 tests/mutants.py cho "$CANCHO"
 echo "== mutants, login";            quiet 1 python3 tests/mutants.py login "$CANCHO"
 echo "== mutants, lexer";            quiet 1 python3 tests/mutants.py lex "$CANCHO"
+echo "== mutants, parser";          quiet 1 python3 tests/mutants.py parse "$CANCHO"
 echo "all green"

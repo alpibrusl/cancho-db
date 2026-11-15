@@ -48,6 +48,16 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C35 | **Everything not understood is refused with a tag**: `E''`, `U&''`, bit and hex strings, `$$` and `$tag$`, `$1`, non-ASCII outside strings and comments, NUL, form feed, vertical tab, unknown characters, a number followed by identifier characters (`1abc`, `1_000`, `0x1F`), an unterminated string, comment or identifier. | 54 refusal cases with their exact tags; 35 mutants of the lexer, none surviving | the default is refusal, so a form not named is an error |
 | C36 | An identifier over 63 bytes is refused: PostgreSQL truncates it silently, so two different long names would be one. | measured on PostgreSQL (a `NOTICE`, then `column ... specified more than once`); cases at 63 and 64 bytes, quoted, unquoted and with doubled quotes | a name checked as one thing would run as another |
 
+### The expression parser, P1b-1 ([`m1-lowering.md`](m1-lowering.md) section 3.2)
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C37 | **The rendering means what the original means**: PostgreSQL's plan for `SELECT <original> FROM t` and for `SELECT <rendering> FROM t` are identical, or both are errors with the same SQLSTATE. | `tests/parse_diff.py`: 12,000 expressions over three seeds (a typed grammar with random parentheses, spacing, case and comments; operator chains with no parentheses; a token fuzzer), 0 disagreements. Its teeth: parsers with AND binding like OR, `\|\|` above `+`, unary minus loosened, comparisons made associative are each caught (2, 8, 26 and 44 disagreements in 1,200 to 3,000 cases) | the proxy forwards the rendering, so a parse that differs from PostgreSQL's is a different statement run |
+| C38 | **The parser accepts nothing PostgreSQL calls a syntax error.** | the same run: an accepted expression whose original is `42601` is a failure; none occurred | a statement nobody could have run would run |
+| C39 | PostgreSQL's operator precedence and non-associativity are what the parser implements: `OR < AND < NOT < IS < comparisons < BETWEEN IN LIKE ILIKE < \|\| < + - < * / % < unary minus`, with `a < b < c` refused. | 265 hand-written cases from the documented table (each pair that matters, in both orders); 56 parser mutants killed | the differential covers it too, but a hand case says *why* an answer is right |
+| C40 | **Everything outside the subset is refused with a tag**: other operators (`^ @> ~ ->`), unary `+`, `IS TRUE/DISTINCT FROM`, row constructors, sub-selects (`subquery`), `ESCAPE`, `SIMILAR TO`, array syntax, a third name part, a quoted function name, every PostgreSQL reserved, function-name or column-name keyword as a bare name, any type outside the closed list. | 123 refusal cases with exact tags; the reserved-word list is PostgreSQL's `pg_get_keywords()` | a word PostgreSQL rejects must not be quietly quoted into one it accepts |
+| C41 | **A limit is a refusal, never a trap**: operator and value stack depth, node and child arenas, the rendering stack and the output buffer each have a case at the limit and one under it. | the `limits` cases; one found a real trap (the renderer wrote at index -1 into a full buffer) | an input must never reach a panic |
+
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
 | # | Claim | Enforced by | Fails when the claim is false because |
@@ -120,10 +130,16 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 - **IR v2 independence:** the Go verifier was extended to v2 by the same separate agent, from the spec and the vectors only,
   and passed all 428 without a fix; I re-ran its code and its tool-call log shows no read outside its directory. Same
   caveats as before (instruction-enforced, same model family). Its six open points are written into `ir.md` section 6.
-- **The lexer is not the parser.** It reads tokens and statement boundaries; nothing yet builds an expression, resolves a name or
-  renders SQL (P1b to P1d). The statement-count differential cannot see a lexing error that keeps statement boundaries (for
+- **The parser is expressions only.** `src/parse.cho` reads and renders an expression; no statement (`SELECT`, `INSERT`, DDL) is
+  parsed yet (P1b-2), nothing resolves a name or lowers to the IR (P1c), and the proxy does not call it (P1d). The statement-count differential cannot see a lexing error that keeps statement boundaries (for
   example, a doubled quote ending a string preserves quote parity); the unit cases cover that, and each check is claimed for
   what it covers. The fuzzer's alphabet is finite and its statements are harmless selects.
+- **The expression differential is as good as its generator.** Expressions are type-correct by construction in the grammar
+  half and mostly not in the fuzzer half; a case where both sides fail with the same SQLSTATE is counted as agreeing, so a wrong
+  parse that also fails to type-check is invisible there (the hand cases cover precedence either way). The planner folds constant
+  subtrees, so a mistake confined to constants (`1 + 2 * 3`) can be hidden; the columns `a b c d` keep most trees unfolded.
+  About 0.6% of valid expressions are refused (one deliberate class is `BETWEEN` bounds holding comparisons); that is counted in
+  every run, not hidden. Only PostgreSQL 16 was compared.
 - **No SQL is lowered to v2 yet.** The IR can say what a psql user types; nothing produces it from SQL (P1, `m1-lowering.md`).
 - **Ed25519 edge cases are unspecified.** Small-order and non-canonical-but-decodable keys and `R` values are
   implementation-defined in v1 and no vector exercises them (`commit.md` header).
