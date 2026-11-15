@@ -73,6 +73,13 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C45 | **A DML statement's rendering means what the original means**: PostgreSQL's `EXPLAIN` plan for INSERT, UPDATE and DELETE (which plans, never runs) is identical for the original and the rendering, and nothing accepted is a syntax error to PostgreSQL. | `tests/stmt_diff.py` with DML in 30% of the statements, 12,000 statements over three seeds, 0 disagreements | the proxy runs the rendering |
 | C46 | The forms outside the subset carry their own tag: `insert-select`, `returning`, `on-conflict`; the rest are refused as `syntax`, `reserved-word` or `unknown-construct`. 226 hand cases in all (143 refusals); 60 mutants of the statement parser and renderer, none surviving (four survived at first: a skipped `VALUES`, `SET` or `FROM`, a row without its parenthesis; each had a gap in the cases). | `tests/stmt_test.cho`, `tests/mutants.py stmt` | a guard that only skips a token is invisible to cases that fail anyway |
 
+### The closed DDL, P1b-2c ([`m1-lowering.md`](m1-lowering.md) section 3.4)
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C47 | **The rendering of a DDL statement does what the original does**: run in a rolled-back transaction, both leave the same columns, constraints and indexes, or fail with the same SQLSTATE; nothing accepted is a syntax error to PostgreSQL. | `tests/ddl_diff.py`, 5,000 cases over two seeds, 0 disagreements; four rendering breakages each caught | the proxy runs the rendering, and a renderer that drops `PRIMARY KEY` would run a different schema change |
+| C48 | The DDL grammar is closed and everything else is refused: 320 hand cases in all (211 refusals); 85 statement mutants, none surviving (one survived at first: `DEFAULT -'x'`). | `tests/stmt_test.cho`, `tests/mutants.py stmt` | the IR's `Ddl` names only the table, so what is accepted must be fully reproduced |
+
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
 | # | Claim | Enforced by | Fails when the claim is false because |
@@ -145,7 +152,7 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 - **IR v2 independence:** the Go verifier was extended to v2 by the same separate agent, from the spec and the vectors only,
   and passed all 428 without a fix; I re-ran its code and its tool-call log shows no read outside its directory. Same
   caveats as before (instruction-enforced, same model family). Its six open points are written into `ir.md` section 6.
-- **The parser reads expressions, SELECT, INSERT, UPDATE and DELETE.** DDL is not parsed yet (P1b-2c), nothing resolves a
+- **The parser reads expressions, SELECT, INSERT, UPDATE, DELETE and the closed DDL.** Nothing resolves a
   name or lowers to the IR (P1c), and the proxy does not call it (P1d). The schema of the SELECT differential is three small tables;
   plans for them show joins and clauses, not every alias or name. The statement-count differential cannot see a lexing error that keeps statement boundaries (for
   example, a doubled quote ending a string preserves quote parity); the unit cases cover that, and each check is claimed for

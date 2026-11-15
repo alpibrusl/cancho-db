@@ -164,6 +164,25 @@ limit 5 offset 2`). Joins are left-deep and rendered without parentheses, which 
   `DELETE ... USING`, `ONLY`, row-valued `SET (a, b) = ...` and schema-qualified names fall out as `reserved-word`, `syntax` or
   `unknown-construct`.
 
+### 3.4 The closed DDL
+
+DDL has no plan, so the check is behavioural: `tests/ddl_diff.py` runs the original and the rendering, each in a transaction rolled
+back after the same prelude, and compares what is left in the catalog (every column's name, type with modifiers, NOT NULL and
+default expression; every constraint through `pg_get_constraintdef`; every index through `pg_indexes.indexdef`), or the SQLSTATE
+if both fail. 5,000 cases over two seeds (a grammar of column definitions with the constraints in random order, plus a fuzzer
+over DDL words): **0 disagreements**, about 1,500 of them statements that run and leave an identical catalog. Its teeth: a
+rendering that loses `PRIMARY KEY`, a unique index written plain, a lost numeric scale, and a swapped NOT NULL bit are caught
+(13 to 48 disagreements in 1,500 cases).
+
+- **The grammar is closed**: `CREATE TABLE t (name type [NOT NULL] [PRIMARY KEY] [UNIQUE] [DEFAULT literal], ...)`, the
+  constraints in any order and each once, written back in one order; the type from the closed list of section 3.2; a default
+  only a number (optionally negated), a string, `NULL`, `TRUE` or `FALSE`. No table constraints, `REFERENCES`, `CHECK`,
+  identity columns, `IF [NOT] EXISTS`, `CASCADE`, `TEMP`, partial, expression or `USING` indexes, and no schema-qualified names:
+  each is refused (`syntax`, `reserved-word`, `unknown-construct`, `unsupported-statement`), because the IR's `Ddl` carries only
+  the table and the renderer must reproduce what it accepts completely.
+- **A side effect on the expression parser**: `x NOT NULL` is not an expression, so a `NOT` that is not `NOT IN/LIKE/ILIKE/BETWEEN`
+  now ends an expression (the caller sees the leftover token and refuses) instead of being a parse error there.
+
 ## 4. Lowering
 
 - **Aliases** (`FROM orders o`) are resolved to base tables: the IR names `orders`, never `o`.
@@ -214,7 +233,7 @@ it to PostgreSQL and counting the commands it reports), has the same number of s
 | **P1b-1** | **the expression parser and the renderer** (`src/parse.cho`): precedence climbing over explicit stacks, a tree in caller arrays, and the parenthesised rendering | **built**: 265 hand-written cases (123 refusals), each accepted one a fixed point of parse-then-render; PostgreSQL's plan for the original equal to its plan for the rendering over 12,000 generated expressions (section 3.2); 56 mutants killed |
 | **P1b-2a** | **SELECT** (`src/stmt.cho`): items and aliases, `FROM` with comma lists and `[INNER|LEFT [OUTER]] JOIN ... ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY [ASC|DESC]`, `LIMIT`, `OFFSET` | **built**: 146 hand-written cases (83 refusals, each accepted one a fixed point), 34 mutants killed (now part of the 226 and 60 of P1b-2b), PostgreSQL's plans for the original and the rendering equal over 12,000 generated statements (section 3.3) |
 | **P1b-2b** | **INSERT, UPDATE, DELETE** (`src/stmt.cho`, `stmt.statement` dispatches on the first word) | **built**: 226 hand-written cases in all (143 refusals), 60 mutants killed, the PostgreSQL plan comparison over INSERT, UPDATE and DELETE as well (section 3.3) |
-| **P1b-2c** | the closed DDL (`CREATE TABLE`, `DROP TABLE`, `ALTER TABLE ... ADD COLUMN`, `CREATE/DROP INDEX`) | hand cases and mutants; no plan to compare, so the renderer is checked by executing the original and the rendering on two empty databases and comparing `pg_catalog` |
+| **P1b-2c** | **the closed DDL** (`CREATE TABLE`, `DROP TABLE`, `ALTER TABLE ... ADD [COLUMN]`, `CREATE [UNIQUE] INDEX`, `DROP INDEX`) | **built**: 320 hand-written cases in all (211 refusals), 85 statement mutants killed, and `tests/ddl_diff.py`: the original and the rendering are each run in a rolled-back transaction and must leave the same catalog (section 3.4) |
 | **P1c** | lowering, the schema snapshot, the effect check | lowering gate (1); refusals (3) |
 | **P1d** | the `Query` branch in the proxy | end to end with psql: differential (2) and the server log (3) |
 
