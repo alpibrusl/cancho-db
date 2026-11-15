@@ -90,6 +90,14 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C52 | **What the log could not reproduce is refused**: `random`, `clock_timestamp`, `nextval`, `gen_random_uuid`, `setseed`, `txid_current`, `timeofday`, `statement_timestamp`, `transaction_timestamp`, `currval`, `lastval` (`nondeterministic`); `now()` is recorded as `Nondet now`. | refusal cases; the mutants that allow `random()` or `nextval()`, and that make `now()` a plain call | a value the server chose, not in the log |
 | C53 | 73 cases, 27 mutants of the lowering killed, none surviving. | `tests/lower_check.py`, `tests/mutants.py lower` | |
 
+### The query guard, P1d-1 ([`m1-lowering.md`](m1-lowering.md) section 5.1)
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C54 | **A statement is allowed only if every effect it has is allowed by the token**, wherever a column is read: select list, `WHERE`, `ORDER BY`, `GROUP BY`, `HAVING`, `ON`, `*`. | `tests/guard_check.py`: 51 hand-written verdicts over tokens minted outside `src/`; mutants "denied effects are not checked", "only the first effect is checked", "a denied effect is allowed to pass", "the effect's length is off" | the log's L2 check is about what ran: what the guard lets through must be what the verifier would accept |
+| C55 | **A message is allowed only if every statement in it is**, and nothing of a refused message is forwarded. | cases with the denied or unparsable statement second or third; the second statement of `select ...; insert ...` refuses both | PostgreSQL runs a message as one implicit transaction |
+| C56 | **Only the rendering is sent**: a comment, a spelling, a `;` inside a string or a trailing statement hidden in a comment never reaches PostgreSQL. | cases `select 'a;b'`, `/* ; drop table orders */`, `-- ; drop ...`, `SELECT Id FROM Orders` and their exact outputs | forwarding the client's bytes is only as safe as the guard's parser is equal to PostgreSQL's |
+
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
 | # | Claim | Enforced by | Fails when the claim is false because |

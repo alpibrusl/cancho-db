@@ -693,6 +693,23 @@ LOWER = [
     ("lower: CASE x WHEN compares with <>", "src/lower.cho", "            if at == 0 {\n                r = w8(out, sc, 5);\n                if r >= 0 {\n                    r = w8(out, sc, 0);", "            if at == 0 {\n                r = w8(out, sc, 5);\n                if r >= 0 {\n                    r = w8(out, sc, 1);"),
 ]
 
+# ---- the query guard (src/guard.cho, tests/guard_check.py)
+GUARD = [
+    ("guard: denied effects are not checked", "src/guard.cho", "                                                                        if dk >= 0 {", "                                                                        if false {"),
+    ("guard: only the first effect is checked", "src/guard.cho", "    while e < map.entries(set) {\n        if map.is_live(set, e) {", "    while e < 1 {\n        if map.is_live(set, e) {"),
+    ("guard: a denied effect is allowed to pass", "src/guard.cho", "                denied = token.effect_denied(tk, enc, 0, 1);", "                denied = false;"),
+    ("guard: the effect's length is off", "src/guard.cho", "                enc[2] = byte_of((len(key) - 1) % 256);", "                enc[2] = byte_of((len(key) - 2) % 256);"),
+    ("guard: statements are not separated", "src/guard.cho", "                                                                if i > 0 {", "                                                                if i > 1 {"),
+    ("guard: the effects are inferred as v1", "src/guard.cho", "ir.infer(heap, set, contents(iw)[0..w], true)", "ir.infer(heap, set, contents(iw)[0..w], false)"),
+    ("guard: a lexer refusal is a parser refusal", "src/guard.cho", "mark(vd, 1, 0 - n, 0 - 1, 0);", "mark(vd, 2, 0 - n, 0 - 1, 0);"),
+    ("guard: the refused statement is not counted", "src/guard.cho", "mark(vd, 2, 0 - pq, contents(sw)[3], i);", "mark(vd, 2, 0 - pq, contents(sw)[3], 0);"),
+    ("guard: a denied effect is 0A000", "src/guard.cho", "    if vd[0] == 3 {\n        return \"42501\";", "    if vd[0] == 3 {\n        return \"0A000\";"),
+    ("guard: an unknown column is 0A000", "src/guard.cho", "        if c == 21 {\n            return \"42703\";", "        if c == 21 {\n            return \"0A000\";"),
+    ("guard: an unknown table is 42703", "src/guard.cho", "        if c == 20 {\n            return \"42P01\";", "        if c == 20 {\n            return \"42703\";"),
+    ("guard: a lowering refusal is lost", "src/guard.cho", "                                                                if w < 0 {\n                                                                    mark(vd, 2, 0 - w, contents(scw)[1], i);", "                                                                if false {\n                                                                    mark(vd, 2, 0 - w, contents(scw)[1], i);"),
+    ("guard: the rendering is not appended", "src/guard.cho", "                                                                        written = written + rl;", "                                                                        written = written + 0;"),
+]
+
 
 # Mutants that cannot be killed because they change nothing observable, with the reason. Empty: every mutant above
 # changes behaviour, and the ones that looked equivalent (the count guard against the bytes left) are not listed
@@ -766,7 +783,43 @@ def run_lower(cancho):
     return 1 if survivors else 0
 
 
+def run_guard(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in GUARD if not only or only in m[0]]
+    survivors = []
+    names = ("commit.cho", "token.cho", "lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho")
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "guardcheck"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/guardcheck.cho")] + [str(work / "src" / n) for n in names] + ["-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            r = subprocess.run([sys.executable, str(ROOT / "tests/guard_check.py"), str(exe)], capture_output=True, text=True)
+            if r.returncode == 0:
+                print("SURVIVED %-46s every guard case passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in r.stdout.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d case(s), e.g. %s" % (label, len(first), first[0][5:60] if first else "a crash"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
+    if kind == "guard":
+        return run_guard(cancho)
     if kind == "lower":
         return run_lower(cancho)
     if kind == "login":

@@ -61,6 +61,9 @@ quiet 2 python3 tests/lower_check.py build/lowercheck build/verify
 echo "== name resolution in the lowering against PostgreSQL (42P01, 42703, 42702)"
 quiet 2 python3 tests/lower_diff.py build/lowercheck 4000 1
 quiet 2 python3 tests/lower_diff.py build/lowercheck 4000 2
+echo "== the query guard: hand-written verdicts over tokens minted outside src/"
+"$CANCHO" build --std proxy/guardcheck.cho src/commit.cho src/token.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho -o build/guardcheck
+quiet 2 python3 tests/guard_check.py build/guardcheck
 echo "== command lines";             python3 tests/cli_test.py vectors build/verify
 echo "== attenuation property";       python3 tests/properties.py 4000 1
 echo "== fuzz (three verifiers, no crash)"; python3 tests/fuzz.py vectors build/verify 3000 1
@@ -71,4 +74,5 @@ echo "== mutants, lexer";            quiet 1 python3 tests/mutants.py lex "$CANC
 echo "== mutants, parser";          quiet 1 python3 tests/mutants.py parse "$CANCHO"
 echo "== mutants, statements";      quiet 1 python3 tests/mutants.py stmt "$CANCHO"
 echo "== mutants, lowering";        quiet 1 python3 tests/mutants.py lower "$CANCHO"
+echo "== mutants, guard";           quiet 1 python3 tests/mutants.py guard "$CANCHO"
 echo "all green"
