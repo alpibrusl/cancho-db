@@ -117,8 +117,12 @@ construct), as every refusal in this project has one.
 
 **D5. Names are resolved from an introspected schema.** An unqualified column in a join (`select total from orders join
 users ...`) cannot be attributed to a table without the schema, and `SELECT *` cannot be expanded without it. The proxy
-reads `information_schema.columns` from upstream with its own credentials at start and after each committed DDL, keeps a
-snapshot, and records the snapshot's hash as the commit's `schema`. It is read-only and the proxy's, not the client's, so
+reads the catalog from upstream with its own credentials, keeps a
+snapshot, and records the snapshot's hash as the commit's `schema`. *Corrected at P1d:* the snapshot is read **fresh for each
+query** (`pg_class`, `pg_attribute`, `pg_indexes` of the public schema, over one connection the proxy keeps), not at start and after DDL:
+there is nothing to invalidate, a DDL that bypassed the proxy is seen too, and the price is one local round trip a query
+(`m1-lowering.md` section 5.2). For a commit, `schema` is the hash of the snapshot read before the transaction's first statement
+(`m1-commit-path.md` P2-D9). It is read-only and the proxy's, not the client's, so
 it is not itself a logged commit.
 
 **D6. A transaction is one commit; an autocommit message is one commit.** From the messages and `ReadyForQuery`'s status
@@ -210,8 +214,8 @@ Each is one change with its own gate, and a gate is a test that fails when the s
 |---|---|---|
 | **P0** | listener, `SSLRequest` answered, startup parsed, token login (D1, D2), upstream relay of the login, then every message forwarded untouched with framing. **Built** (`src/login.cho`, `proxy/proxy.cho`); the gate below is `tests/proxy_e2e.py`, run against a real PostgreSQL 16 and psql 16, and what it shows and does not show is in `claims.md` C22 to C27 | psql connects with a valid token and runs `select 1` against a real PostgreSQL; a wrong token, a bad key proof and a branch outside the token are each refused at login and **no connection reaches PostgreSQL** (checked in the server's log); `cancho authority` on it; the measured password length of a token |
 | **IR v2** | `ir.md` v2: the constructs of D4, effect rules, vectors with hand-written expected sets, all three verifiers | the same gates as v1: three verifiers agree, mutants killed |
-| **P1** | lexer, parser, lowering, schema snapshot, effect check, refusals with rule tags | a corpus of statements: each lowers to IR whose id and effects equal hand-written ones; **a refused statement never appears in PostgreSQL's log** (`log_statement=all`); psql output through the proxy equals psql output direct, for every accepted statement, as a diff |
-| **P2** | transaction tracking, commit builder, three files, two-phase commit, recovery, `now()` | after a psql session, all three verifiers accept the files at L2+IR with `--expect` the last commit id; **fault injection** at each window of §6 leaves PostgreSQL's rows and the log's commits equal in number and identity |
+| **P1** | lexer, parser, lowering, schema snapshot, effect check, refusals with rule tags. **Built** in four slices (`m1-lowering.md`: P1a lexer, P1b parser and renderer, P1c lowering, P1d the guard and the proxy's query path); the claims are C33 to C61 in `claims.md` | a corpus of statements: each lowers to IR whose id and effects equal hand-written ones; **a refused statement never appears in PostgreSQL's log** (`log_statement=all`); psql output through the proxy equals psql output direct, for every accepted statement, as a diff |
+| **P2** | transaction tracking, commit builder, three files, two-phase commit, recovery, `now()`: **designed in [`m1-commit-path.md`](m1-commit-path.md)** (slices P2a to P2e, the fault-injection table, and the decisions that need the owner) | after a psql session, all three verifiers accept the files at L2+IR with `--expect` the last commit id; **fault injection** at each window of §6 leaves PostgreSQL's rows and the log's commits equal in number and identity |
 | **P3** | the psql end-to-end suite and the documentation of §5 | the suite passes unmodified `psql`; every row of §5 is a test |
 
 ## 8. Risks and open questions
