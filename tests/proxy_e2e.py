@@ -384,6 +384,18 @@ r = psql(lp, narrow, "select a from p0_e2e order by a")
 check("a Terminate from psql is forwarded and the server session ends cleanly",
       r.returncode == 0 and direct("select count(*) from pg_stat_activity where application_name = 'psql'").stdout.strip() in ("0", "1"))
 
+# the schema is read fresh for each query: what changes around the proxy is seen by the next statement, with no restart
+direct("drop table if exists p0_fresh")
+direct("create table p0_fresh(x int)")
+r = psql(lp, good, "select x from p0_fresh")
+check("a table created behind the proxy's back is visible to the next query", r.returncode == 0, r.stderr)
+direct("alter table p0_fresh add column y int")
+r = psql(lp, good, "select y from p0_fresh")
+check("... a column added behind its back too", r.returncode == 0, r.stderr)
+direct("drop table p0_fresh")
+r = psql(lp, good, "select x from p0_fresh")
+check("... and a table dropped behind its back is unknown-table (42P01), not a stale accept", "unknown-table" in r.stderr, r.stderr)
+
 check("the proxy is still alive after all of it", proxy.poll() is None)
 direct("drop table if exists p0_e2e, p0_big cascade")
 proxy.terminate()
