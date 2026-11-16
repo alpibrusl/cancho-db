@@ -422,7 +422,8 @@ PROXY = [
 
 def run_proxy(cancho):
     survivors = []
-    for label, rel, old, new in PROXY:
+    skip = int(os.environ.get("MUTANT_FROM", "0"))
+    for label, rel, old, new in PROXY[skip:]:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             for d in ("src", "proxy", "tools", "tests"):
@@ -457,7 +458,7 @@ def run_proxy(cancho):
             else:
                 failed = [l[5:].strip() for l in out.splitlines() if l.startswith("FAIL")]
                 print("killed   %-50s by: %s" % (label, (failed[0] if failed else out.strip().splitlines()[-1])[:90]))
-    print("%d mutants, %d not killed" % (len(PROXY), len(survivors)))
+    print("%d mutants, %d not killed" % (len(PROXY) - skip, len(survivors)))
     return 1 if survivors else 0
 
 
