@@ -164,13 +164,36 @@ and a commit match one for one). Then the three verifiers (cancho, Python, Go) a
 window must fail if recovery chooses the opposite action: the mutants "roll back what the log has" and "commit what it lacks" are the
 proof that it can.
 
+## 5.1 P2a as built, and what it changed in the design
+
+P2a (the proxy tracks transactions; **no log yet**) is built. The plan held; these are the differences, written where they were found.
+
+- **The proxy now opens a transaction for every autocommit statement** (`BEGIN`, the rendering, then `COMMIT`), which is what P2d
+  needs to prepare it; today the `COMMIT` is a plain one. The client sees exactly what it saw before: rows stream as they come, the
+  statement's `CommandComplete` messages are **held** and released only after the proxy's `COMMIT` succeeded, and the client's
+  `ReadyForQuery` is the proxy's own `I`. A statement that fails is rolled back, the error reaches the client, and **no
+  `CommandComplete` of an earlier statement in the same message does**.
+- **`BEGIN`, `COMMIT`, `ROLLBACK`** (and `START TRANSACTION`, `END`, `ABORT`, with `WORK` or `TRANSACTION`) are parsed as leaves with no
+  effects and answered by the proxy itself from its own record of the client's state; an option, `AND CHAIN`, `TO SAVEPOINT` or
+  `PREPARED` is `unknown-construct`. In a message with other statements they are refused (`mixed-transaction-control`).
+- **Deviations from PostgreSQL, stated**: `BEGIN` inside a transaction is an **error** here (`25001`, the transaction stays open)
+  where PostgreSQL warns; `COMMIT` or `ROLLBACK` with no transaction open are answered with the command tag and **no warning**; a
+  refused statement inside a transaction aborts it (as D6 says) and the proxy rolls the upstream back at once.
+- **The synchronous round trips are `BEGIN`, `COMMIT` and `ROLLBACK`** (bounded by `login_ms()`, as the catalog read); the
+  statement itself is not synchronous: it streams through the event loop, and a second query from the same client waits until the
+  first has finished (the proxy does not serve a client whose statement is in flight).
+- **Server messages are now framed.** `CommandComplete` and `ReadyForQuery` are collected whole (they are small), everything else is
+  relayed as it arrives, in pieces if need be, so a 7 MB result still streams (the 200,000-row test is byte for byte).
+- **Cost**: three upstream messages for every autocommit statement instead of one, and a round trip each for `BEGIN` and `COMMIT`.
+  Measured at P2e, with the rest.
+
 ## 6. Slices
 
 Each is one change with its own gate.
 
 | Slice | Delivers | Gate |
 |---|---|---|
-| **P2a** | server-to-client framing; transaction tracking; `BEGIN`/`COMMIT`/`ROLLBACK` parsed and answered by the proxy's own state; autocommit wrapped in a transaction; held `CommandComplete`/`ReadyForQuery`; **no log yet** | `psql` transactions, rollbacks, errors inside a transaction (`25P02`), statuses `I`/`T`/`E` on the wire; refused options and mixed messages; the wire tee shows the exact upstream messages; mutants |
+| **P2a** | **built**: server-to-client framing; transaction tracking; `BEGIN`/`COMMIT`/`ROLLBACK` parsed and answered by the proxy's own state; autocommit wrapped in a transaction; held `CommandComplete`/`ReadyForQuery`; **no log yet** | `psql` transactions, rollbacks, errors inside a transaction (`25P02`), statuses `I`/`T`/`E` on the wire; refused options and mixed messages; the wire tee shows the exact upstream messages; mutants |
 | **P2b** | the commit builder (`src/build.cho`, sans-io: encode, id, sign) and the store encoders | bytes equal an independent Python encoder's over hand-written commits; the verifier accepts them; mutants; **the signing is checked by the three verifiers** |
 | **P2c** | the log directory, the key, append and fsync, the lock, the startup scan, the torn-tail repair | restart reads the log back; torn tails; a second proxy refused; `cancho authority` pinned |
 | **P2d** | the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |

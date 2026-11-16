@@ -395,19 +395,29 @@ PROXY = [
     ("proxy: the token is not checked", "proxy/proxy.cho", "if rule != login.login_ok() {", "if false {"),
     ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > hello_ms()", "false"),
     ("proxy: a silent upstream is waited for a minute", "proxy/proxy.cho", "fn login_ms() -> [] int {\n    return 5000;", "fn login_ms() -> [] int {\n    return 60000;"),
-    ("proxy: forwarded bytes lose the last one", "proxy/proxy.cho", "if send(tab, core, peer, rb[0..got]) {", "if send(tab, core, peer, rb[0..got - 1]) {"),
+    ("proxy: the upstream's bytes lose the last one", "proxy/proxy.cho", "            if !send(tab, core, client, rb[pos..pos + n]) {", "            if !send(tab, core, client, rb[pos..pos + n - 1]) {"),
     ("proxy: SSLRequest is not answered N", "proxy/proxy.cho", "let no = alloc_slice[r](1, byte_of('N'));", "let no = alloc_slice[r](1, byte_of('S'));"),
     ("proxy: the client's application_name is dropped", "proxy/proxy.cho", "if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {", "if false {"),
     ("proxy: the upstream role is the client's", "proxy/proxy.cho", "\n                    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "\n                    at = put_cstr(msg, at, hb[k * hello_size() + 4 + 5..k * hello_size() + 4 + 5 + 5]);"),
     ("proxy: a refused login still opens the upstream", "proxy/proxy.cho", "refuse(tab, core, k, \"FATAL\", login.sqlstate(rule), login.rule_name(rule), \"the capability token was refused\");", "st[p] = 5;"),
     ("proxy: protocol versions are not checked", "proxy/proxy.cho", "} else if kind == login.err_version() {", "} else if false {"),
     # ---- the query path (P1d-2)
-    ("proxy: the client's own bytes are sent, not the rendering", "proxy/proxy.cho", "                    send(tw, core, st[p + 1], out[0..total]);", "                    send(tw, core, st[p + 1], mb[base..base + ln + 1]);"),
-    ("proxy: a refused query is sent upstream anyway", "proxy/proxy.cho", "            if verdict == 0 {\n                let out = contents(core.qout);", "            if true {\n                let out = contents(core.qout);"),
+    ("proxy: the rendering is not what is sent", "proxy/proxy.cho", "                    run_query(tw, core, k, vd[3]);", "                    run_query(tw, core, k, 0);"),
+    ("proxy: a refused query is sent upstream anyway", "proxy/proxy.cho", "                if verdict != 0 {\n                    refused_query(tw, core, k, vd);", "                if false {\n                    refused_query(tw, core, k, vd);"),
     ("proxy: a Parse message is a protocol violation", "proxy/proxy.cho", "} else if ty == 'P' || ty == 'B' ||", "} else if ty == 'B' ||"),
     ("proxy: messages after an extended-protocol error are answered too", "proxy/proxy.cho", "                        st[p + 15] = 1;\n                    }\n                    consume(core, k, ln + 1);", "                        st[p + 15] = 0;\n                    }\n                    consume(core, k, ln + 1);"),
     ("proxy: Sync is not answered", "proxy/proxy.cho", "                            let n = login.ready_for_query(z, 'I');\n                            send(tab, core, k, z[0..n]);", "                            let n = login.ready_for_query(z, 'I');"),
-    ("proxy: a refusal does not say ReadyForQuery", "proxy/proxy.cho", "        n = n + login.ready_for_query(buf[n..640], 'I');", "        n = n + 0;"),
+    # ---- transactions (P2a)
+    ("proxy: an autocommit statement is not wrapped in a transaction", "proxy/proxy.cho", "    if ts == 0 {\n        let r = upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[stride() * b + 21] = 1;", "    if false {\n        let r = upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[stride() * b + 21] = 1;"),
+    ("proxy: CommandComplete is not held in autocommit", "proxy/proxy.cho", "                        if ty == 'C' && st[q + 21] == 1 {", "                        if false {"),
+    ("proxy: a failed autocommit statement is committed", "proxy/proxy.cho", "    if failed {\n        r = upstream_exec(tab, core, k, \"ROLLBACK\");", "    if false {\n        r = upstream_exec(tab, core, k, \"ROLLBACK\");"),
+    ("proxy: the server's E status does not fail the client's transaction", "proxy/proxy.cho", "                                } else {\n                                    st[cp + 16] = 2;\n                                }", "                                } else {\n                                    st[cp + 16] = 1;\n                                }"),
+    ("proxy: a refused statement leaves the transaction open", "proxy/proxy.cho", "        upstream_exec(tab, core, st[p + 1], \"ROLLBACK\");\n        st[p + 16] = 2;", "        upstream_exec(tab, core, st[p + 1], \"ROLLBACK\");\n        st[p + 16] = 1;"),
+    ("proxy: COMMIT does not commit", "proxy/proxy.cho", "    if kind == 2 && ts == 1 {\n        sql = \"COMMIT\";\n    }", "    if false {\n        sql = \"COMMIT\";\n    }"),
+    ("proxy: a statement runs in a failed transaction", "proxy/proxy.cho", "    if ts == 2 {\n        answer_error(tab, core, k, 'E', \"25P02\"", "    if false {\n        answer_error(tab, core, k, 'E', \"25P02\""),
+    ("proxy: queries are served while a statement is in flight", "proxy/proxy.cho", " && st[stride() * k + 17] == 0 {", " {"),
+    ("proxy: BEGIN inside a transaction is forgiven", "proxy/proxy.cho", "        } else if ts == 1 {\n            answer_error(tab, core, k, 'T', \"25001\"", "        } else if ts == 3 {\n            answer_error(tab, core, k, 'T', \"25001\""),
+    ("proxy: a refusal does not say ReadyForQuery", "proxy/proxy.cho", "        n = n + login.ready_for_query(buf[n..640], status);", "        n = n + 0;"),
 ]
 
 def run_proxy(cancho):

@@ -108,6 +108,17 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C60 | The schema is read fresh for each query from one catalog connection the proxy keeps, so a table created, altered or dropped around the proxy is seen by the next statement. | `tests/proxy_e2e.py`: a table created, a column added and a table dropped directly on the server are each seen by the next proxied query, the last as `unknown-table` | a stale schema would resolve a name to a table that no longer is what it was |
 | C61 | **The proxy has 16 mutants, none surviving**: non-loopback clients served, the token not checked, silent peers never closed, upstream waits of a minute, forwarded bytes losing one, SSLRequest, application_name, the upstream role, a refused login opening the upstream, protocol versions, and the six of the query path (the client's bytes sent, a refused query sent, Parse as a violation, no discard after an extended error, Sync unanswered, no ReadyForQuery after a refusal). | `tests/mutants.py proxy` | each is a change the end-to-end test must notice |
 
+### Transactions, P2a ([`m1-commit-path.md`](m1-commit-path.md) section 5.1)
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C62 | **The proxy keeps the client's transaction state itself and the client sees the right one on the wire**: `T` after `BEGIN`, `E` after an error, `I` after `COMMIT` or `ROLLBACK`; a `COMMIT` of a failed transaction is a `ROLLBACK`. | `tests/proxy_e2e.py`, a raw wire client reading every message; mutants "the server's E status does not fail the client's transaction", "COMMIT does not commit", "a statement runs in a failed transaction" | the commit path of P2d is a function of this state |
+| C63 | **An autocommit statement runs inside a transaction the proxy opens and ends, and the client cannot tell**: the server is sent `BEGIN`, the rendering, `COMMIT`; a two-statement message is one transaction; a message whose second statement fails leaves nothing and **no `CommandComplete` of the first reaches the client**. | the same test, with the wire tee; mutants "an autocommit statement is not wrapped", "CommandComplete is not held", "a failed autocommit statement is committed" | P2d prepares that transaction; a statement outside one cannot be |
+| C64 | **A refused statement inside a transaction aborts it and the upstream is rolled back at once** (the server sees `ROLLBACK`, and the next statement is `25P02`, not run). | the same test; mutant "a refused statement leaves the transaction open" | locks held by an abandoned transaction would block everyone |
+| C65 | **A client that disconnects inside a transaction takes its work with it.** | the same test (a raw client begins, inserts and closes; the row is not there) | |
+| C66 | Transaction control mixed with other statements, or with an option, is refused and sends nothing upstream; two queries sent at once are answered in order. | the same test; mutant "queries are served while a statement is in flight" | the meaning of a mixed message depends on where the commit falls |
+| C67 | The deviations are stated, not hidden: `BEGIN` inside a transaction is `25001` (PostgreSQL warns), `COMMIT`/`ROLLBACK` with none open give no warning. | `docs/m1-commit-path.md` section 5.1; the test checks the first | a client relying on the warning would not get it |
+
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
 | # | Claim | Enforced by | Fails when the claim is false because |

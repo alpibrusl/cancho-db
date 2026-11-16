@@ -21,7 +21,8 @@ import cdb.token;
 // `vd` (at least 8 ints) answers: [0] the kind of verdict: 0 allowed, 1 refused by the lexer, 2 refused by the parser or lowering,
 // 3 an effect the token does not allow; [1] the code within that kind; [2] the token of the statement it stopped at, or -1; [3]
 // how many bytes of rendered text were written to `out`; [4] which statement (from 0) was refused; [5] for kind 3, the denied
-// effect's kind (0 read, 1 write, 2 ddl, 3 call, 4 nondet).
+// effect's kind (0 read, 1 write, 2 ddl, 3 call, 4 nondet); [6] 1, 2 or 3 if the message is exactly one BEGIN, COMMIT or ROLLBACK (the
+// proxy answers those itself: nothing is rendered and `out` is empty), else 0. A transaction-control statement mixed with another is refused.
 
 pub fn v_allowed() -> [] int {
     return 0;
@@ -132,6 +133,7 @@ pub fn check[&h, &k, &m, &q, &o, &r](heap: &!h Heap, tk: &k [byte], schema: &m [
     vd[3] = 0;
     vd[4] = 0;
     vd[5] = 0 - 1;
+    vd[6] = 0;
     let cap = len(sql) + 8;
     var tb = box_slice(heap, 4 * cap, 0);
     var cb = box_slice(heap, 2 * cap, 0);
@@ -170,8 +172,26 @@ pub fn check[&h, &k, &m, &q, &o, &r](heap: &!h Heap, tk: &k [byte], schema: &m [
                                                             let to = contents(cw)[2 * i + 1];
                                                             parse.reset(contents(sw));
                                                             let pq = stmt.statement(sql, toks, from, to, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(lw), contents(sw));
+                                                            var txn = 0;
+                                                            if pq >= 0 {
+                                                                let rk = contents(nw)[6 * contents(sw)[2]];
+                                                                if rk == parse.n_begin() {
+                                                                    txn = 1;
+                                                                } else if rk == parse.n_commit() {
+                                                                    txn = 2;
+                                                                } else if rk == parse.n_rollback() {
+                                                                    txn = 3;
+                                                                }
+                                                            }
                                                             if pq < 0 {
                                                                 mark(vd, 2, 0 - pq, contents(sw)[3], i);
+                                                            } else if txn > 0 {
+                                                                // transaction control has no effects and no IR; alone in its message or not at all
+                                                                if ns != 1 {
+                                                                    mark(vd, 2, parse.e_mixed_txn(), from, i);
+                                                                } else {
+                                                                    vd[6] = txn;
+                                                                }
                                                             } else {
                                                                 let root = contents(sw)[2];
                                                                 let w = lower.lower(sql, toks, contents(nw), contents(kw), root, schema, contents(rw), contents(iw), contents(scw));
@@ -196,7 +216,7 @@ pub fn check[&h, &k, &m, &q, &o, &r](heap: &!h Heap, tk: &k [byte], schema: &m [
                                                                     map.drop(heap, set);
                                                                 }
                                                             }
-                                                            if vd[0] == 0 {
+                                                            if vd[0] == 0 && txn == 0 {
                                                                 // the rendering of this statement, after a `; ` if it is not the first
                                                                 if i > 0 {
                                                                     written = append(out, written, "; ");
