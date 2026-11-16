@@ -98,6 +98,15 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C55 | **A message is allowed only if every statement in it is**, and nothing of a refused message is forwarded. | cases with the denied or unparsable statement second or third; the second statement of `select ...; insert ...` refuses both | PostgreSQL runs a message as one implicit transaction |
 | C56 | **Only the rendering is sent**: a comment, a spelling, a `;` inside a string or a trailing statement hidden in a comment never reaches PostgreSQL. | cases `select 'a;b'`, `/* ; drop table orders */`, `-- ; drop ...`, `SELECT Id FROM Orders` and their exact outputs | forwarding the client's bytes is only as safe as the guard's parser is equal to PostgreSQL's |
 
+### The proxy's query path, P1d-2 ([`m1-lowering.md`](m1-lowering.md) section 5.3)
+
+| # | Claim | Enforced by | Fails when the claim is false because |
+|---|---|---|---|
+| C57 | **What PostgreSQL is sent for an allowed query is the guard's rendering, not what the client typed.** | `tests/proxy_e2e.py`: a wire tee between the proxy and PostgreSQL records the `Query` messages; a query with comments and mixed case arrives rendered; the mutant that sends the client's bytes is killed | forwarding the client's bytes would make the guard's parse a hope |
+| C58 | **A refused message never reaches PostgreSQL**, not whole and not in part: 14 refusals, including a denied second statement and a statement hidden behind a comment, leave the tee with no `Query` and the table untouched. | the same test; the mutant that sends a refused query anyway is killed | the log would then contain what the token forbids |
+| C59 | **The extended protocol is refused cleanly**: one `0A000` error and one `ReadyForQuery` for a Parse/Bind/Execute/Sync batch, nothing sent upstream, the connection still serves simple queries; an unknown message type is `FATAL 08P01`. | the same test, with raw frames; three mutants (no discard after the error, no answer to Sync, Parse treated as unknown) killed | a driver must be told no, not left hanging |
+| C60 | The schema is read fresh for each query from one catalog connection the proxy keeps, so a table created or dropped around the proxy is seen by the next statement. If the catalog cannot be read the query is refused (`08006`). | design (section 5.2); the freshness is **not yet tested** end to end: noted here, not claimed |  |
+
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
 | # | Claim | Enforced by | Fails when the claim is false because |
@@ -170,10 +179,10 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 - **IR v2 independence:** the Go verifier was extended to v2 by the same separate agent, from the spec and the vectors only,
   and passed all 428 without a fix; I re-ran its code and its tool-call log shows no read outside its directory. Same
   caveats as before (instruction-enforced, same model family). Its six open points are written into `ir.md` section 6.
-- **The lowering is not the proxy.** The parser reads expressions, SELECT, INSERT, UPDATE, DELETE and the closed DDL, and
-  `src/lower.cho` turns them into IR; the proxy calls neither, so no query is checked against a token yet (P1d). A `SELECT`
-  with no `FROM` cannot be lowered, the schema snapshot is written by hand (nothing reads `information_schema` yet), and the
-  lowering does not type-check.
+- **The proxy checks queries, and the subset is small.** The parser reads expressions, SELECT, INSERT, UPDATE, DELETE and the closed DDL,
+  `src/lower.cho` turns them into IR and the proxy refuses what the token or the subset does not allow, but a `SELECT` with no `FROM`,
+  a sub-select, a CTE, a function as a table, `BEGIN` and every extended-protocol client are refused today: most applications cannot yet use it. The
+  lowering does not type-check, and the schema snapshot covers the `public` schema's ordinary tables only.
 - **The statement parser's differentials are as good as their generators.** The plan comparison for SELECT and DML runs over three
   small tables, and plans show joins and clauses, not every alias or name. The statement-count differential of the lexer cannot
   see a lexing error that keeps statement boundaries (for example, a doubled quote ending a string preserves quote parity); the

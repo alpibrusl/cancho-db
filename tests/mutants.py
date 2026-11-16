@@ -398,9 +398,16 @@ PROXY = [
     ("proxy: forwarded bytes lose the last one", "proxy/proxy.cho", "if send(tab, core, peer, rb[0..got]) {", "if send(tab, core, peer, rb[0..got - 1]) {"),
     ("proxy: SSLRequest is not answered N", "proxy/proxy.cho", "let no = alloc_slice[r](1, byte_of('N'));", "let no = alloc_slice[r](1, byte_of('S'));"),
     ("proxy: the client's application_name is dropped", "proxy/proxy.cho", "if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {", "if false {"),
-    ("proxy: the upstream role is the client's", "proxy/proxy.cho", "at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "at = put_cstr(msg, at, hb[k * hello_size() + 4 + 5..k * hello_size() + 4 + 5 + 5]);"),
+    ("proxy: the upstream role is the client's", "proxy/proxy.cho", "\n                    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "\n                    at = put_cstr(msg, at, hb[k * hello_size() + 4 + 5..k * hello_size() + 4 + 5 + 5]);"),
     ("proxy: a refused login still opens the upstream", "proxy/proxy.cho", "refuse(tab, core, k, \"FATAL\", login.sqlstate(rule), login.rule_name(rule), \"the capability token was refused\");", "st[p] = 5;"),
     ("proxy: protocol versions are not checked", "proxy/proxy.cho", "} else if kind == login.err_version() {", "} else if false {"),
+    # ---- the query path (P1d-2)
+    ("proxy: the client's own bytes are sent, not the rendering", "proxy/proxy.cho", "                    send(tw, core, st[p + 1], out[0..total]);", "                    send(tw, core, st[p + 1], mb[base..base + ln + 1]);"),
+    ("proxy: a refused query is sent upstream anyway", "proxy/proxy.cho", "            if verdict == 0 {\n                let out = contents(core.qout);", "            if true {\n                let out = contents(core.qout);"),
+    ("proxy: a Parse message is a protocol violation", "proxy/proxy.cho", "} else if ty == 'P' || ty == 'B' ||", "} else if ty == 'B' ||"),
+    ("proxy: messages after an extended-protocol error are answered too", "proxy/proxy.cho", "                        st[p + 15] = 1;\n                    }\n                    consume(core, k, ln + 1);", "                        st[p + 15] = 0;\n                    }\n                    consume(core, k, ln + 1);"),
+    ("proxy: Sync is not answered", "proxy/proxy.cho", "                            let n = login.ready_for_query(z, 'I');\n                            send(tab, core, k, z[0..n]);", "                            let n = login.ready_for_query(z, 'I');"),
+    ("proxy: a refusal does not say ReadyForQuery", "proxy/proxy.cho", "        n = n + login.ready_for_query(buf[n..640], 'I');", "        n = n + 0;"),
 ]
 
 def run_proxy(cancho):
@@ -419,7 +426,9 @@ def run_proxy(cancho):
             f.write_text(text.replace(old, new))
             exe = work / "proxy_mutant"
             b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
-                                str(work / "src/token.cho"), str(work / "src/login.cho"), "-o", str(exe)],
+                                str(work / "src/token.cho"), str(work / "src/login.cho")]
+                               + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho")]
+                               + ["-o", str(exe)],
                                capture_output=True, text=True)
             if b.returncode != 0:
                 print("BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]))

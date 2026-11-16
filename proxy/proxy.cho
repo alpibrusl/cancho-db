@@ -8,6 +8,7 @@ import std.bytes;
 import cdb.commit;
 import cdb.token;
 import cdb.login;
+import cdb.guard;
 
 // `proxy` -- slice P0 of the cancho-db proxy (`docs/m1-proxy.md`): the front door in front of PostgreSQL.
 //
@@ -16,7 +17,8 @@ import cdb.login;
 // A client connects, is asked for a password, and the password must be a capability token (`src/login.cho`, D1 and D2): it
 // is checked against the root key and must allow the one branch this server serves. Only then does the proxy open a
 // connection to PostgreSQL as the configured upstream role (trust login), relay the login to the client, and from there
-// forward every message untouched, in both directions. P0 understands nothing of the SQL; that is P1.
+// forward the server's messages untouched. The client's are cut into whole messages: a simple query is checked by the guard
+// (`src/guard.cho`, docs/m1-lowering.md section 5.2) and only its rendering goes on; the extended protocol is refused.
 //
 // One thread, one poller, every connection in one `std.conns` table: the structure of `cancho-pg`'s `pooler/proxy.cho`
 // (the same author and licence), with a handshake phase before a client is paired with its server connection. `cancho`'s
@@ -59,7 +61,25 @@ fn relay_max() -> [] int {
     return 16384;
 }
 
-// Per connection `k`, `state[12k..12k+12]` is:
+// The most of a client's token the proxy keeps (the token without its seed), and of one client message it will hold.
+fn token_max() -> [] int {
+    return 8192;
+}
+
+fn msg_max() -> [] int {
+    return 65536;
+}
+
+// The schema snapshot's text, and the catalog answer it is built from.
+fn snap_max() -> [] int {
+    return 65536;
+}
+
+fn snapin_max() -> [] int {
+    return 262144;
+}
+
+// Per connection `k`, `state[16k..16k+16]` is:
 //
 //     0  kind: 0 free, 1 client sending its startup, 2 client sending its password, 5 login accepted (waiting to be
 //        paired), 3 paired (forwarding)
@@ -72,8 +92,13 @@ fn relay_max() -> [] int {
 //     8  where application_name starts (-1 if absent), and 9 how long it is
 //     10 where the password message starts in the login buffer (the startup packet is before it)
 //     11 when it was accepted (monotonic ms)
+//     12 for a paired client, the length of its token (more than 0); for the upstream side of a pair, -1
+//     13 bytes of the client's messages held in its message buffer
+//     14 1 if a whole simple query is at the start of that buffer, waiting for the guard
+//     15 1 while the client's extended-protocol messages are discarded up to the next Sync
+//     (kind 6 is the proxy's own catalog connection: not watched, used one question at a time)
 fn stride() -> [] int {
-    return 12;
+    return 16;
 }
 
 res struct Core {
@@ -87,6 +112,16 @@ res struct Core {
     // NUL-ended, with where each starts in `cfgi`: [branch_at, branch_len, user_at, user_len, db_at, db_len].
     cfg: Box[[byte]],
     cfgi: Box[[int]],
+    // each client's token, `token_max()` a slot; its message buffer, `msg_max()` a slot
+    tokb: Box[[byte]],
+    mbuf: Box[[byte]],
+    // the schema snapshot, the catalog's raw answer, the guard's output and the query sent upstream
+    snap: Box[[byte]],
+    snapin: Box[[byte]],
+    rend: Box[[byte]],
+    qout: Box[[byte]],
+    // [0] the slot of the catalog connection, or -1
+    aux: Box[[int]],
 }
 
 // ------------------------------------------------------------------------------------------------ sending
@@ -142,7 +177,7 @@ fn settle[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [poll] int {
             want = 1;
         }
     } else if st[p] == 3 {
-        if st[p + 4] == 0 && st[stride() * st[p + 1] + 2] + chunk() <= queue_size() {
+        if st[p + 4] == 0 && st[stride() * st[p + 1] + 2] + chunk() <= queue_size() && st[p + 14] == 0 {
             want = 1;
         }
     }
@@ -329,7 +364,17 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Cloc
                             }
                             if rule != login.login_ok() {
                                 refuse(tab, core, k, "FATAL", login.sqlstate(rule), login.rule_name(rule), "the capability token was refused");
+                            } else if n - 32 > token_max() || n - 32 < 8 {
+                                refuse(tab, core, k, "FATAL", "28000", "login-token-size", "the capability token is too large to keep");
                             } else {
+                                // the token without the seed of its last key is what the guard checks each query against
+                                let tk = contents(core.tokb);
+                                var q = 0;
+                                while q < n - 32 {
+                                    tk[k * token_max() + q] = blob[q];
+                                    q = q + 1;
+                                }
+                                st[p + 12] = n - 32;
                                 st[p] = 5;
                                 st[p + 4] = 0;
                                 settle(tab, core, k);
@@ -396,6 +441,109 @@ fn forward[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_read, 
     return 0;
 }
 
+// ------------------------------------------------------------------------------------------------ the client's messages
+
+// Tell client `k` something went wrong with its query, and that PostgreSQL has not been asked (`ErrorResponse`, then
+// `ReadyForQuery` idle): the connection stays open.
+fn answer_error[&t, &c, &a, &b, &d](tab: &!t conns.Table, core: &!c Core, k: int, sqlstate: &a [byte], tag: &b [byte], text: &d [byte]) -> [conn_write, poll] int {
+    region r {
+        let buf = alloc_slice[r](640, byte_of(0));
+        var n = login.error_response(buf, "ERROR", sqlstate, tag, text);
+        n = n + login.ready_for_query(buf[n..640], 'I');
+        send(tab, core, k, buf[0..n]);
+    }
+    return 0;
+}
+
+// Drop the first `n` bytes of client `k`'s message buffer.
+fn consume[&c](core: &!c Core, k: int, n: int) -> [] int {
+    let st = contents(core.state);
+    let mb = contents(core.mbuf);
+    let p = stride() * k;
+    let base = k * msg_max();
+    var i = 0;
+    while i < st[p + 13] - n {
+        mb[base + i] = mb[base + n + i];
+        i = i + 1;
+    }
+    st[p + 13] = st[p + 13] - n;
+    return 0;
+}
+
+// Cut whole messages off the front of client `k`'s buffer until a simple query is there (for the guard) or no whole message
+// is. Terminate goes to PostgreSQL; the extended protocol is refused (`0A000`): the error is answered at once, the messages up
+// to the next Sync are discarded as PostgreSQL itself would, and Sync is answered `ReadyForQuery`.
+fn frame_client[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let mb = contents(core.mbuf);
+    let p = stride() * k;
+    let base = k * msg_max();
+    var going = true;
+    while going && st[p] == 3 && st[p + 14] == 0 {
+        going = false;
+        if st[p + 13] >= 5 {
+            let ty = int_of(mb[base]);
+            let ln = commit.be(mb, base + 1, 4);
+            if ln < 4 || ln + 1 > msg_max() {
+                refuse(tab, core, k, "FATAL", "08P01", "message-too-long", "a message is longer than the proxy will hold");
+            } else if st[p + 13] >= ln + 1 {
+                if ty == 'Q' {
+                    st[p + 14] = 1;
+                } else if ty == 'X' {
+                    send(tab, core, st[p + 1], mb[base..base + ln + 1]);
+                    consume(core, k, ln + 1);
+                    going = st[p] == 3;
+                } else if ty == 'P' || ty == 'B' || ty == 'E' || ty == 'D' || ty == 'C' || ty == 'S' || ty == 'H' || ty == 'F' || ty == 'd' || ty == 'c' || ty == 'f' {
+                    if ty == 'S' {
+                        region r {
+                            let z = alloc_slice[r](8, byte_of(0));
+                            let n = login.ready_for_query(z, 'I');
+                            send(tab, core, k, z[0..n]);
+                        }
+                        st[p + 15] = 0;
+                    } else if ty != 'H' && st[p + 15] == 0 {
+                        region r {
+                            let buf = alloc_slice[r](640, byte_of(0));
+                            let n = login.error_response(buf, "ERROR", "0A000", "extended-protocol", "only the simple query protocol is supported");
+                            send(tab, core, k, buf[0..n]);
+                        }
+                        st[p + 15] = 1;
+                    }
+                    consume(core, k, ln + 1);
+                    going = st[p] == 3;
+                } else {
+                    refuse(tab, core, k, "FATAL", "08P01", "protocol-violation", "unexpected frontend message");
+                }
+            }
+        }
+    }
+    settle(tab, core, k);
+    return 0;
+}
+
+// Client `k` (paired) can be read: take what it has sent into its message buffer, and act on whole messages.
+fn client_read[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let mb = contents(core.mbuf);
+    let p = stride() * k;
+    let base = k * msg_max();
+    match conns.read(tab, k, mb[base + st[p + 13]..base + msg_max()]) {
+        Received::Data(got) => {
+            st[p + 13] = st[p + 13] + got;
+            frame_client(tab, core, k);
+        }
+        Received::End => {
+            finish(tab, core, k);
+        }
+        Received::Again => {
+        }
+        Received::Failed(e) => {
+            finish(tab, core, k);
+        }
+    }
+    return 0;
+}
+
 // The poller said connection `k` is ready.
 fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int, readiness: int) -> [conn_read, conn_write, poll, clock] int {
     let st = contents(core.state);
@@ -412,7 +560,11 @@ fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int,
             }
         } else if st[p] == 3 {
             if st[p + 3] % 2 == 1 {
-                forward(tab, core, k);
+                if st[p + 12] > 0 {
+                    client_read(tab, core, k);
+                } else {
+                    forward(tab, core, k);
+                }
             } else {
                 finish(tab, core, k);
             }
@@ -464,6 +616,10 @@ fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l L
                                 st[p + 3] = 1;
                                 st[p + 4] = 0;
                                 st[p + 5] = 0;
+                                st[p + 12] = 0;
+                                st[p + 13] = 0;
+                                st[p + 14] = 0;
+                                st[p + 15] = 0;
                                 st[p + 11] = clock_ms(clk);
                                 if conns.nonblocking(ct, a) != 0 || conns.nodelay(ct, a) != 0 || conns.watch(ct, core.poller, a, a + 1, 1) != 0 {
                                     shut(ct, core, a);
@@ -650,8 +806,15 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                     st[q + 2] = 0;
                     st[q + 3] = 0;
                     st[q + 4] = 0;
+                    st[q + 12] = 0 - 1;
+                    st[q + 13] = 0;
+                    st[q + 14] = 0;
+                    st[q + 15] = 0;
                     st[p] = 3;
                     st[p + 1] = b;
+                    st[p + 13] = 0;
+                    st[p + 14] = 0;
+                    st[p + 15] = 0;
                     borrow mut table as &!ct in {
                         if conns.nonblocking(ct, b) != 0 || conns.nodelay(ct, b) != 0 || conns.watch(ct, core.poller, b, b + 1, 1) != 0 {
                             shut(ct, core, b);
@@ -711,6 +874,383 @@ fn pair_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
     return table;
 }
 
+// ------------------------------------------------------------------------------------------------ the guard
+
+// The two questions that make the schema snapshot: every ordinary table's columns in order, then every index and the table it is
+// on, in the public schema.
+fn snapshot_sql() -> [] &static [byte] {
+    return "select c.relname, a.attname from pg_class c join pg_namespace n on n.oid = c.relnamespace join pg_attribute a on a.attrelid = c.oid where n.nspname = 'public' and c.relkind in ('r', 'p') and a.attnum > 0 and not a.attisdropped order by c.relname, a.attnum; select indexname, tablename from pg_indexes where schemaname = 'public' order by indexname";
+}
+
+// A name that can be written into the snapshot's text: not empty, and none of the bytes that text uses.
+fn plain_name[&d](data: &d [byte]) -> [] bool {
+    if len(data) == 0 || len(data) > 63 {
+        return false;
+    }
+    var i = 0;
+    while i < len(data) {
+        let c = int_of(data[i]);
+        if c == ' ' || c == ':' || c == '\n' || c == '.' || c == 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn append[&o, &d](out: &!o [byte], at: int, data: &d [byte]) -> [] int {
+    if at < 0 || at + len(data) > len(out) {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < len(data) {
+        out[at + i] = data[i];
+        i = i + 1;
+    }
+    return at + len(data);
+}
+
+// Turn the catalog's answer (`raw`, `n` bytes: RowDescription, DataRow..., CommandComplete, twice, ReadyForQuery) into the
+// snapshot's text in `out` (`lower.cho`'s header). Answers its length, or -1 if the answer is not what was asked for.
+fn build_snapshot[&r, &o](raw: &r [byte], n: int, out: &!o [byte]) -> [] int {
+    var at = 0;
+    var w = 0;
+    var phase = 0;
+    var cur_at = 0 - 1;
+    var cur_len = 0;
+    var skip_table = false;
+    var pos = 0;
+    while pos + 5 <= n && w >= 0 {
+        let ty = int_of(raw[pos]);
+        let ln = commit.be(raw, pos + 1, 4);
+        if ln < 4 || pos + 1 + ln > n {
+            return 0 - 1;
+        }
+        if ty == 'D' {
+            if ln < 6 || commit.be(raw, pos + 5, 2) != 2 {
+                return 0 - 1;
+            }
+            let l1 = commit.be(raw, pos + 7, 4);
+            if l1 < 0 || pos + 11 + l1 + 4 > pos + 1 + ln {
+                return 0 - 1;
+            }
+            let a1 = pos + 11;
+            let l2 = commit.be(raw, a1 + l1, 4);
+            let a2 = a1 + l1 + 4;
+            if l2 < 0 || a2 + l2 > pos + 1 + ln {
+                return 0 - 1;
+            }
+            let first = raw[a1..a1 + l1];
+            let second = raw[a2..a2 + l2];
+            if plain_name(first) && plain_name(second) {
+                if phase == 0 {
+                    // a column of a table: a new line when the table changes
+                    var same = false;
+                    if cur_at >= 0 && cur_len == l1 {
+                        same = true;
+                        var i = 0;
+                        while i < l1 {
+                            if out[cur_at + i] != first[i] {
+                                same = false;
+                            }
+                            i = i + 1;
+                        }
+                    }
+                    if !same {
+                        if cur_at >= 0 {
+                            w = append(out, w, "\n");
+                        }
+                        cur_at = w;
+                        cur_len = l1;
+                        w = append(out, w, first);
+                        w = append(out, w, ":");
+                    }
+                    w = append(out, w, " ");
+                    w = append(out, w, second);
+                } else {
+                    w = append(out, w, "index ");
+                    w = append(out, w, first);
+                    w = append(out, w, " on ");
+                    w = append(out, w, second);
+                    w = append(out, w, "\n");
+                }
+            }
+        } else if ty == 'C' {
+            if phase == 0 {
+                if cur_at >= 0 {
+                    w = append(out, w, "\n");
+                }
+                phase = 1;
+            }
+        } else if ty == 'E' {
+            return 0 - 1;
+        }
+        pos = pos + 1 + ln;
+    }
+    if w < 0 || phase != 1 {
+        return 0 - 1;
+    }
+    return w;
+}
+
+// Put the proxy's own startup message (the configured role and database, application_name `name`) into `msg`: its length.
+fn startup_msg[&m, &c, &s](msg: &!m [byte], cfg: &c [byte], ci: &s [int], name: &static [byte]) -> [] int {
+    var at = 8;
+    at = put_cstr(msg, at, "user");
+    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);
+    at = put_cstr(msg, at, "database");
+    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
+    at = put_cstr(msg, at, "application_name");
+    at = put_cstr(msg, at, name);
+    msg[at] = byte_of(0);
+    at = at + 1;
+    msg[0] = byte_of(at / 16777216 % 256);
+    msg[1] = byte_of(at / 65536 % 256);
+    msg[2] = byte_of(at / 256 % 256);
+    msg[3] = byte_of(at % 256);
+    msg[4] = byte_of(0);
+    msg[5] = byte_of(3);
+    msg[6] = byte_of(0);
+    msg[7] = byte_of(0);
+    return at;
+}
+
+// Send all of `data` on connection `slot`, waiting if the kernel is slow: false if it fails. The catalog connection is never
+// the busy one, and its messages are small.
+fn write_all[&t, &d](tab: &!t conns.Table, slot: int, data: &d [byte]) -> [conn_write] bool {
+    var sent = 0;
+    var spins = 0;
+    while sent < len(data) {
+        match conns.write(tab, slot, data[sent..len(data)]) {
+            Sent::Wrote(x) => {
+                sent = sent + x;
+            }
+            Sent::Again => {
+                spins = spins + 1;
+                if spins > 1000000 {
+                    return false;
+                }
+            }
+            Sent::Failed(e) => {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Read from `slot` until a ReadyForQuery has come, into `into`: the bytes read, or -1 (it failed, was silent past `wait_ms`, or
+// answered with an error before the first row, or too much).
+fn read_until_ready[&t, &b](tab: &!t conns.Table, slot: int, into: &!b [byte], wait_ms: int) -> [conn_read, poll] int {
+    var fill = 0;
+    while fill < len(into) {
+        let got = login_read(tab, slot, into[fill..len(into)], wait_ms);
+        if got <= 0 {
+            return 0 - 1;
+        }
+        fill = fill + got;
+        // is there a complete ReadyForQuery as the last message?
+        var pos = 0;
+        var last = 0 - 1;
+        var whole = true;
+        while whole && pos + 5 <= fill {
+            let ln = commit.be(into, pos + 1, 4);
+            if ln < 4 {
+                return 0 - 1;
+            }
+            if pos + 1 + ln > fill {
+                whole = false;
+            } else {
+                last = int_of(into[pos]);
+                pos = pos + 1 + ln;
+            }
+        }
+        if whole && pos == fill && last == 'Z' {
+            return fill;
+        }
+    }
+    return 0 - 1;
+}
+
+// Open the proxy's own connection to PostgreSQL for catalog questions: login as the configured role, and wait for ReadyForQuery.
+// Answers its slot, or -1.
+fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
+    let cfg = contents(core.cfg);
+    let ci = contents(core.cfgi);
+    let si = contents(core.snapin);
+    var table = tab;
+    var slot = 0 - 1;
+    match tcp_connect(net, host, port) {
+        Dialed::Ok(server) => {
+            let (t1, b) = conns.put(heap, table, server);
+            table = t1;
+            if b >= 0 {
+                var good = false;
+                region r {
+                    let msg = alloc_slice[r](1024, byte_of(0));
+                    let at = startup_msg(msg, cfg, ci, "cancho-db-catalog");
+                    borrow mut table as &!tw in {
+                        if write_all(tw, b, msg[0..at]) {
+                            let got = read_until_ready(tw, b, si, login_ms());
+                            // the first message must be AuthenticationOk (R, 8, 0): a password request is not something to answer here
+                            if got >= 9 && int_of(si[0]) == 'R' && commit.be(si, 5, 4) == 0 {
+                                good = true;
+                            }
+                        }
+                    }
+                }
+                if good {
+                    slot = b;
+                    contents(core.state)[stride() * b] = 6;
+                    contents(core.state)[stride() * b + 12] = 0 - 1;
+                } else {
+                    borrow mut table as &!tw in {
+                        conns.close(tw, b);
+                    }
+                }
+            }
+        }
+        Dialed::Failed(e) => {
+        }
+    }
+    return (table, slot);
+}
+
+// The schema snapshot, fresh from the catalog, into `core.snap`: its length, or -1 if the catalog cannot be asked. The one
+// connection is kept between questions and opened again if PostgreSQL has closed it.
+fn snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
+    let aux = contents(core.aux);
+    let si = contents(core.snapin);
+    var table = tab;
+    var attempt = 0;
+    while attempt < 2 {
+        if aux[0] < 0 {
+            let (t1, slot) = catalog_open(heap, table, core, net, host, port);
+            table = t1;
+            aux[0] = slot;
+        }
+        if aux[0] >= 0 {
+            let slot = aux[0];
+            var answered = 0 - 1;
+            region r {
+                let sql = snapshot_sql();
+                let msg = alloc_slice[r](len(sql) + 8, byte_of(0));
+                msg[0] = byte_of('Q');
+                let ln = len(sql) + 5;
+                msg[1] = byte_of(ln / 16777216 % 256);
+                msg[2] = byte_of(ln / 65536 % 256);
+                msg[3] = byte_of(ln / 256 % 256);
+                msg[4] = byte_of(ln % 256);
+                var i = 0;
+                while i < len(sql) {
+                    msg[5 + i] = sql[i];
+                    i = i + 1;
+                }
+                msg[5 + len(sql)] = byte_of(0);
+                borrow mut table as &!tw in {
+                    if write_all(tw, slot, msg[0..len(sql) + 6]) {
+                        answered = read_until_ready(tw, slot, si, login_ms());
+                    }
+                }
+            }
+            if answered > 0 {
+                let w = build_snapshot(si, answered, contents(core.snap));
+                if w >= 0 {
+                    return (table, w);
+                }
+            }
+            // it failed: close it, and try once more with a fresh one
+            borrow mut table as &!tw in {
+                conns.close(tw, slot);
+            }
+            contents(core.state)[stride() * slot] = 0;
+            aux[0] = 0 - 1;
+        }
+        attempt = attempt + 1;
+    }
+    return (table, 0 - 1);
+}
+
+// Client `k` has a whole simple query waiting: ask the catalog, run the guard, and either send PostgreSQL the guard's rendering
+// or tell the client it is refused.
+fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+    let st = contents(core.state);
+    let mb = contents(core.mbuf);
+    let p = stride() * k;
+    let base = k * msg_max();
+    let ln = commit.be(mb, base + 1, 4);
+    var table = tab;
+    if int_of(mb[base + ln]) != 0 {
+        borrow mut table as &!tw in {
+            refuse(tw, core, k, "FATAL", "08P01", "protocol-violation", "a query is not terminated");
+        }
+        return table;
+    }
+    let sql = mb[base + 5..base + ln];
+    let (t1, snap_len) = snapshot(heap, table, core, net, host, port);
+    table = t1;
+    if snap_len < 0 {
+        borrow mut table as &!tw in {
+            answer_error(tw, core, k, "08006", "catalog-unavailable", "the schema could not be read, so the query was not checked");
+        }
+    } else {
+        region r {
+            let vd = alloc_slice[r](8, 0);
+            let verdict = guard.check(heap, contents(core.tokb)[k * token_max()..k * token_max() + st[p + 12]], contents(core.snap)[0..snap_len], sql, contents(core.rend), vd);
+            if verdict == 0 {
+                let out = contents(core.qout);
+                let rl = vd[3];
+                let total = rl + 6;
+                out[0] = byte_of('Q');
+                out[1] = byte_of((rl + 5) / 16777216 % 256);
+                out[2] = byte_of((rl + 5) / 65536 % 256);
+                out[3] = byte_of((rl + 5) / 256 % 256);
+                out[4] = byte_of((rl + 5) % 256);
+                var i = 0;
+                while i < rl {
+                    out[5 + i] = contents(core.rend)[i];
+                    i = i + 1;
+                }
+                out[5 + rl] = byte_of(0);
+                borrow mut table as &!tw in {
+                    send(tw, core, st[p + 1], out[0..total]);
+                }
+            } else {
+                borrow mut table as &!tw in {
+                    answer_error(tw, core, k, guard.sqlstate(vd), guard.tag(vd), "the statement was not run");
+                }
+            }
+        }
+    }
+    if st[p] == 3 {
+        consume(core, k, ln + 1);
+        st[p + 14] = 0;
+        borrow mut table as &!tw in {
+            frame_client(tw, core, k);
+        }
+    }
+    return table;
+}
+
+// Serve every client that has a whole simple query waiting, until none has.
+fn serve_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+    var table = tab;
+    var again = true;
+    while again {
+        again = false;
+        var k = 0;
+        while k < 2 * max_clients() {
+            let st = contents(core.state);
+            if st[stride() * k] == 3 && st[stride() * k + 14] == 1 {
+                table = serve_one(heap, table, core, net, host, port, k);
+                again = true;
+            }
+            k = k + 1;
+        }
+    }
+    return table;
+}
+
 // Close clients that have taken too long over their login.
 fn sweep[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock) -> [clock] int {
     let st = contents(core.state);
@@ -734,7 +1274,7 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
                 poller_add_listener(pw, listener, 0);
             }
             let slots = 2 * max_clients();
-            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi };
+            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 4, 0 - 1) };
             var tab = conns.empty(heap, 64);
             while true {
                 var ready = 0 - 1;
@@ -766,13 +1306,14 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
                 }
                 borrow mut core as &!cw in {
                     tab = pair_all(heap, tab, cw, net, host, port);
+                    tab = serve_all(heap, tab, cw, net, host, port);
                     borrow mut tab as &!tw in {
                         sweep(tw, cw, clk);
                     }
                 }
             }
             conns.drop(heap, tab);
-            let Core { poller, events, state, rbuf, pends, hbuf, cfg, cfgi } = core;
+            let Core { poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux } = core;
             poller_close(poller);
             unbox_slice(heap, events);
             unbox_slice(heap, state);
@@ -781,6 +1322,13 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
             unbox_slice(heap, hbuf);
             unbox_slice(heap, cfg);
             unbox_slice(heap, cfgi);
+            unbox_slice(heap, tokb);
+            unbox_slice(heap, mbuf);
+            unbox_slice(heap, snap);
+            unbox_slice(heap, snapin);
+            unbox_slice(heap, rend);
+            unbox_slice(heap, qout);
+            unbox_slice(heap, aux);
             return 0;
         }
         Polling::Failed(e) => {

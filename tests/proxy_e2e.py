@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""The P0 gate of docs/m1-proxy.md section 7, against a real PostgreSQL and the stock psql.
+"""The P0 and P1d gates (docs/m1-proxy.md section 7, docs/m1-lowering.md section 5.2), against a real PostgreSQL and the stock psql.
 
     PG_E2E_PORT=5532 python3 tests/proxy_e2e.py PROXY_BINARY
 
 PostgreSQL must be on 127.0.0.1:$PG_E2E_PORT with trust login for the role `postgres`. The test puts a wire tee
 (tools/pgtee.py) between the proxy and PostgreSQL, which is how it counts the connections that reach the server: a refused
-login must not be one of them. It creates and drops the table `p0_e2e`. Exit status 1 if any check fails.
+login must not be one of them, and a refused query must not be a Query the server sees. It creates and drops the tables `p0_e2e` and
+`p0_big`, directly on the server. Exit status 1 if any check fails.
 """
 import os
 import socket
@@ -45,6 +46,20 @@ def free_port():
 
 
 ROOT = mint("root")
+
+
+def client_starts(tee):
+    return [d for k, d in tee.messages if k == "Startup" and d.get("application_name") != "cancho-db-catalog"]
+
+
+def client_queries(tee):
+    """What PostgreSQL was sent by clients' connections: not the proxy's own catalog questions."""
+    return [q for q in tee.queries() if not q.startswith("select c.relname, a.attname")]
+
+
+def direct(sql):
+    return subprocess.run(["psql", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-c", sql],
+                          capture_output=True, text=True)
 
 
 def start_proxy(listen, upstream_port, branch="main"):
@@ -91,46 +106,49 @@ def raw(port, data, read=64, wait=1.0):
 tee = Tee(PG_PORT)
 lp = free_port()
 proxy = start_proxy(lp, tee.port)
-good = mint("password")
+ALLOW = "r:*,w:*,d:*,c:*,n:*"
+good = mint("password", "--effects", ALLOW)
+direct("drop table if exists p0_e2e, p0_big cascade")
+direct("create table p0_e2e(a int primary key, b text); insert into p0_e2e values (1,'x'),(2,'y'),(3,'z')")
+direct("create table p0_big as select g, md5(g::text) m from generate_series(1,200000) g")
+Q1 = "select a from p0_e2e order by a limit 1"
 
-# ---------------------------------------------------------------- a valid login, and everything forwarded untouched
-r = psql(lp, good, "select 1, current_database()")
+# ---------------------------------------------------------------- a valid login, and what the proxy lets through
+r = psql(lp, good, "select a, b from p0_e2e order by a")
 check("valid token: psql connects (default sslmode, so SSLRequest is answered N) and runs a query",
-      r.returncode == 0 and r.stdout.strip() == "1|postgres", r.stdout + r.stderr)
-check("... and the connection reached PostgreSQL once", tee.kinds().count("Startup") == 1, str(tee.kinds()))
-startup = [d for k, d in tee.messages if k == "Startup"][0]
+      r.returncode == 0 and r.stdout.strip() == "1|x\n2|y\n3|z", r.stdout + r.stderr)
+check("... and the connection reached PostgreSQL once (the proxy's own catalog connection is another)",
+      len(client_starts(tee)) == 1, str(tee.kinds()))
+startup = client_starts(tee)[0]
 check("... as the configured role and database, not the client's choice",
       startup.get("user") == "postgres" and startup.get("database") == "postgres", str(startup))
 check("... with the client's application_name passed through", startup.get("application_name") == "psql", str(startup))
 
-psql(lp, good, "drop table if exists p0_e2e; create table p0_e2e(a int primary key, b text)")
-r = psql(lp, good, "", input="insert into p0_e2e values (1,'x'),(2,'y');\nselect count(*) from p0_e2e;\n")
-check("DML round trip", r.returncode == 0 and "INSERT 0 2" in r.stdout and r.stdout.strip().endswith("2"), r.stdout + r.stderr)
-r = psql(lp, good, "select * from no_such_table")
-check("a PostgreSQL error is relayed as it is", "relation \"no_such_table\" does not exist" in r.stderr, r.stderr)
-r = psql(lp, good, "", input="begin;\ninsert into p0_e2e values (3,'z');\nrollback;\nselect count(*) from p0_e2e;\n")
-check("a transaction rolls back", r.stdout.strip().endswith("2"), r.stdout + r.stderr)
+r = psql(lp, good, "", input="insert into p0_e2e values (4,'w'),(5,'v');\nselect count(*) from p0_e2e;\n")
+check("DML round trip", r.returncode == 0 and "INSERT 0 2" in r.stdout and r.stdout.strip().endswith("5"), r.stdout + r.stderr)
+r = psql(lp, good, "insert into p0_e2e values (1, 'dup')")
+check("a PostgreSQL error the guard cannot see is relayed as it is", "duplicate key value" in r.stderr, r.stderr)
+psql(lp, good, "delete from p0_e2e where a > 3")
 
-direct = subprocess.run(["psql", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-c",
-                         "select g, md5(g::text) from generate_series(1,200000) g"], capture_output=True, text=True).stdout
-via = psql(lp, good, "select g, md5(g::text) from generate_series(1,200000) g").stdout
-check("200,000 rows come back byte for byte as direct (%d bytes)" % len(direct), direct == via and len(direct) > 5_000_000,
-      "%d vs %d bytes" % (len(direct), len(via)))
+direct_rows = direct("select g, m from p0_big").stdout
+via = psql(lp, good, "select g, m from p0_big").stdout
+check("200,000 rows come back byte for byte as direct (%d bytes)" % len(direct_rows),
+      direct_rows == via and len(direct_rows) > 7_000_000, "%d vs %d bytes" % (len(direct_rows), len(via)))
 
-procs = [subprocess.Popen(["psql", "-At", "-c", "select pg_sleep(0.2), %d" % i],
+procs = [subprocess.Popen(["psql", "-At", "-c", "select %d from p0_e2e limit 1" % i],
                           env=dict(os.environ, PGPASSWORD=good, PGHOST="127.0.0.1", PGPORT=str(lp), PGUSER="agent",
                                    PGDATABASE="main", PGSSLMODE="disable"), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           text=True) for i in range(24)]
 outs = [p.communicate(timeout=60)[0].strip() for p in procs]
-check("24 clients at once all get their own answer", sorted(outs) == sorted("|%d" % i for i in range(24)), str(outs[:3]))
+check("24 clients at once all get their own answer", sorted(outs) == sorted("%d" % i for i in range(24)), str(outs[:3]))
 
 for n in (2, 3, 5):
-    pw = mint("password", "--blocks", str(n))
-    r = psql(lp, pw, "select 1")
+    pw = mint("password", "--blocks", str(n), "--effects", ALLOW)
+    r = psql(lp, pw, Q1)
     check("a token of %d blocks (a %d-character password) works" % (n, len(pw)), r.returncode == 0 and r.stdout.strip() == "1", r.stderr)
 
 # ---------------------------------------------------------------- refused logins, and none of them reaches PostgreSQL
-before = tee.kinds().count("Startup")
+before = len(client_starts(tee))
 cases = [
     ("a key that is not the token's last", ("password", "--wrong-seed"), "main", "login-bad-proof", "28P01"),
     ("a token signed by another root", ("password", "--foreign"), "main", "login-bad-signature", "28P01"),
@@ -145,7 +163,7 @@ for name, margs, db, tag, state in cases:
 r = psql(lp, "hunter2", "select 1")
 check("refused: a password that is not a token (login-bad-token)", "login-bad-token" in r.stderr and r.returncode != 0, r.stderr)
 check("... none of those %d refusals reached PostgreSQL" % (len(cases) + 1),
-      tee.kinds().count("Startup") == before, "%d new connections" % (tee.kinds().count("Startup") - before))
+      len(client_starts(tee)) == before, "%d new connections" % (len(client_starts(tee)) - before))
 
 # SQLSTATEs, read from the wire: an ErrorResponse's C field
 def error_state(data):
@@ -178,7 +196,7 @@ for tag, margs, db, state in [("login-bad-proof", ("password", "--wrong-seed"), 
 # ---------------------------------------------------------------- the protocol before login
 got = raw(lp, startup_packet() + password_packet(""), read=400)
 check("an empty password is refused with 28P01", error_state(got[9:]) == "28P01" and b"login-bad-token" in got, str(got[:80]))
-before = tee.kinds().count("Startup")
+before = len(client_starts(tee))
 check("SSLRequest is answered N", raw(lp, struct.pack(">II", 8, 80877103), read=1) == b"N")
 check("GSSENCRequest is answered N", raw(lp, struct.pack(">II", 8, 80877104), read=1) == b"N")
 check("a startup asks for a cleartext password (R, length 8, code 3)",
@@ -196,7 +214,7 @@ check("a CancelRequest is closed without an answer (P0 does not forward cancels)
 got = raw(lp, startup_packet() + b"p" + struct.pack(">I", 70000) + b"A" * 100, read=400)
 check("a password message longer than the login buffer is refused", error_state(got[9:]) in ("08P01",), str(got[:60]))
 
-new_starts = [d for k, d in tee.messages if k == "Startup"][before:]
+new_starts = client_starts(tee)[before:]
 check("... and nothing in the protocol section reached PostgreSQL either", not new_starts,
       "%d new connections: %s" % (len(new_starts), new_starts))
 
@@ -231,7 +249,7 @@ except socket.timeout:
 dt = time.time() - t0
 check("a client that sends nothing is closed after about 10 s (%.1f s)" % dt, closed and 9 < dt < 14)
 s.close()
-check("... and the proxy still serves", psql(lp, good, "select 1").stdout.strip() == "1")
+check("... and the proxy still serves", psql(lp, good, Q1).stdout.strip() == "1")
 
 silent = socket.socket()
 silent.bind(("127.0.0.1", 0))
@@ -253,8 +271,121 @@ r = psql(int(p3), good, "select 1")
 check("an upstream that is down: refused with upstream-unavailable", "upstream-unavailable" in r.stderr, r.stderr)
 proxy3.terminate()
 
+# ---------------------------------------------------------------- P1d: what the guard does to queries, seen at the server
+narrow = mint("password", "--effects", "r:p0_e2e,r:p0_e2e.a,r:p0_e2e.b")
+a_only = mint("password", "--effects", "r:p0_e2e,r:p0_e2e.a")
+tee.clear()
+r = psql(lp, narrow, "select a /* a comment */ from P0_E2E -- and a trailing one\n order by a")
+check("an allowed query returns its rows", r.returncode == 0 and r.stdout.split() == ["1", "2", "3"], r.stdout + r.stderr)
+check("... and PostgreSQL was sent the RENDERING, not what the client typed",
+      client_queries(tee) == ['select "a" from "p0_e2e" order by "a"'], str(client_queries(tee)))
+
+tee.clear()
+refused = [
+    ("a column the token does not allow", "select a, b, a + 1 from p0_e2e where a > (b = 'x')::int", "effect-denied"),
+    ("a column read only in ORDER BY", "select a from p0_e2e order by b", "effect-denied"),
+    ("a column read only in WHERE", "select a from p0_e2e where b = 'x'", "effect-denied"),
+    ("a write the token does not allow", "delete from p0_e2e", "effect-denied"),
+    ("a table the token does not allow", "select g from p0_big", "effect-denied"),
+    ("DDL the token does not allow", "drop table p0_e2e", "effect-denied"),
+    ("a second statement that is not allowed", "select a from p0_e2e; delete from p0_e2e", "effect-denied"),
+    ("a column that does not exist", "select a from p0_e2e order by random_col", "unknown-column"),
+    ("a table that does not exist", "select x from no_such_table", "unknown-table"),
+    ("a sub-select", "select a from p0_e2e where a in (select a from p0_e2e)", "subquery"),
+    ("a statement outside the subset", "set search_path = public", "unsupported-statement"),
+    ("a transaction", "begin", "unsupported-statement"),
+    ("a nondeterministic call", "select random() from p0_e2e", "nondeterministic"),
+    ("a statement hidden after a comment", "select a from p0_e2e /* ; delete from p0_e2e */; delete from p0_e2e", "effect-denied"),
+]
+for name, sql, tag in refused:
+    r = psql(lp, a_only, sql)
+    check("refused: %s (%s)" % (name, tag), r.returncode != 0 and tag in r.stderr and r.stdout == "", r.stdout + r.stderr)
+check("... and NONE of those %d refused messages (nor any part of them) reached PostgreSQL" % len(refused),
+      client_queries(tee) == [], str(client_queries(tee)))
+check("... the table is untouched", direct("select count(*) from p0_e2e").stdout.strip() == "3")
+
+r = psql(lp, narrow, "select a from p0_e2e where b = 'it''s'")
+check("a string with a doubled quote is lowered and sent back doubled", r.returncode == 0 and client_queries(tee)[-1] == "select \"a\" from \"p0_e2e\" where (\"b\" = 'it''s')", str(client_queries(tee)))
+
+# the SQLSTATE of a refusal, from the wire
+def simple_query(port, password, sql):
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    s.sendall(startup_packet() + password_packet(password))
+    s.settimeout(5)
+    buf = b""
+    while b"Z" not in buf[-6:] or len(buf) < 20:
+        d = s.recv(65536)
+        if not d:
+            break
+        buf += d
+    body = sql.encode() + b"\0"
+    s.sendall(b"Q" + struct.pack(">I", len(body) + 4) + body)
+    out = b""
+    s.settimeout(5)
+    try:
+        while not out.endswith(b"Z\x00\x00\x00\x05I") and len(out) < 100000:
+            d = s.recv(65536)
+            if not d:
+                break
+            out += d
+    except socket.timeout:
+        pass
+    s.close()
+    return out
+
+
+out = simple_query(lp, narrow, "select b, a from p0_e2e where a = 1; select g from p0_big")
+check("a refusal is an ErrorResponse (42501 for a denied effect) then ReadyForQuery, and no row of the first statement",
+      error_state(out) == "42501" and out.endswith(b"Z\x00\x00\x00\x05I") and b"D\x00" not in out, str(out[:80]))
+out = simple_query(lp, narrow, "select zzz from p0_e2e")
+check("an unknown column is 42703, as PostgreSQL itself says it", error_state(out) == "42703", str(out[:80]))
+
+# the extended protocol and everything else a simple client never sends
+def frames(*msgs): return b"".join(t + struct.pack(">I", len(b) + 4) + b for t, b in msgs)
+
+
+s = socket.create_connection(("127.0.0.1", lp), timeout=10)
+s.sendall(startup_packet() + password_packet(narrow))
+s.settimeout(5)
+buf = b""
+while not buf.endswith(b"Z\x00\x00\x00\x05I"):
+    buf += s.recv(65536)
+tee.clear()
+s.sendall(frames((b"P", b"\0select 1\0\0\0"), (b"B", b"\0\0\0\0\0\0\0"), (b"E", b"\0\0\0\0\0"), (b"S", b"")))
+got = b""
+try:
+    while not got.endswith(b"Z\x00\x00\x00\x05I"):
+        got += s.recv(65536)
+except socket.timeout:
+    pass
+check("the extended protocol (Parse, Bind, Execute, Sync) gets ONE error, 0A000, then ReadyForQuery, as PostgreSQL's own error handling does",
+      error_state(got) == "0A000" and got.count(b"E\x00") == 1 and got.endswith(b"Z\x00\x00\x00\x05I"), str(got[:100]))
+body = b"select a from p0_e2e where a = 2\0"
+s.sendall(b"Q" + struct.pack(">I", len(body) + 4) + body)
+got = b""
+try:
+    while not got.endswith(b"Z\x00\x00\x00\x05I"):
+        got += s.recv(65536)
+except socket.timeout:
+    pass
+check("... and the same connection then serves a simple query", b"D" in got and got.endswith(b"Z\x00\x00\x00\x05I"), str(got[:100]))
+check("... and none of the extended messages reached PostgreSQL", all(not q.startswith("select 1") for q in client_queries(tee)), str(client_queries(tee)))
+s.sendall(frames((b"?", b"")))
+s.settimeout(5)
+try:
+    got = s.recv(1000)
+except socket.timeout:
+    got = b"<timeout>"
+check("a message type that is not in the protocol is a FATAL 08P01 and the connection is closed", error_state(got) == "08P01", str(got[:80]))
+s.close()
+
+before = len(client_queries(tee))
+r = psql(lp, narrow, "select a from p0_e2e order by a")
+check("a Terminate from psql is forwarded and the server session ends cleanly",
+      r.returncode == 0 and direct("select count(*) from pg_stat_activity where application_name = 'psql'").stdout.strip() in ("0", "1"))
+
 check("the proxy is still alive after all of it", proxy.poll() is None)
-psql(lp, good, "drop table if exists p0_e2e")
+direct("drop table if exists p0_e2e, p0_big cascade")
 proxy.terminate()
-print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0 checks passed")
+print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0 and P1d checks passed")
 sys.exit(1 if FAILED else 0)

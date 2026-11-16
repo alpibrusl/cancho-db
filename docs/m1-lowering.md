@@ -313,6 +313,27 @@ How the guard gets into the event loop (`proxy/proxy.cho`), written before the c
   results of allowed queries through the proxy equal the results direct, as a diff, for the accepted corpus; an extended-protocol
   client (`psycopg`'s prepared statements, `psql`'s `\bind`) gets the refusal and a working connection.
 
+### 5.3 What the end-to-end gate shows, and what it found
+
+`tests/proxy_e2e.py` puts a wire tee (`tools/pgtee.py`) between the proxy and PostgreSQL, which records every `Query` the server is sent:
+that is stronger than `log_statement=all`, because it is the bytes themselves.
+
+- **Allowed**: `select a /* a comment */ from P0_E2E -- and a trailing one\n order by a` reaches the server as
+  `select "a" from "p0_e2e" order by "a"`; a string with a doubled quote arrives doubled. 200,000 rows come back byte for byte as direct.
+- **Refused, and never sent**: 14 refusals (a column the token does not allow in the select list, in `WHERE`, in `ORDER BY`; a write; a
+  table; DDL; a denied second statement; a statement hidden after a comment; an unknown table and column; a sub-select; `SET`; `BEGIN`; `random()`):
+  the tee has **no `Query` from any of them**, and the table is untouched. `psql` shows `effect-denied: the statement was not run`, and
+  the wire carries `42501` (or `42703`, `42P01`) then `ReadyForQuery`.
+- **The extended protocol**: Parse, Bind, Execute, Sync gets one `0A000` error and one `ReadyForQuery` (the messages up to the Sync are
+  discarded, as PostgreSQL itself does after an error), nothing reaches the server, and the same connection then serves a simple query. A
+  message type that is not in the protocol is a `FATAL` `08P01` and the connection is closed.
+- **Costs and limits, stated**: every query makes one local round trip to the catalog connection (measured by the same test: not yet
+  a number: see `docs/claims.md`); the catalog connection is one for the whole proxy and a slow catalog answer stalls the loop up to
+  `login_ms()`; messages longer than 64 KiB are refused; a `SELECT` with no `FROM` (`select 1`, `select current_database()`) is refused
+  because the IR needs a table, which is what `psql`'s own startup does not use but a connection test does; transaction control is refused until P2.
+- **Found by writing it**: the P0 test's own queries (`generate_series` as a table, `pg_sleep`, `select 1`, `begin`) are outside the
+  subset and were rewritten against real tables, which is the first sign of what a client has to live with: the subset is small.
+
 ## 6. The gate, and why it can fail
 
 A corpus `tests/sql/corpus.sql` of statements, each annotated by hand with: accepted or the refusal tag, and (if accepted) the
@@ -343,7 +364,7 @@ it to PostgreSQL and counting the commands it reports), has the same number of s
 | **P1b-2c** | **the closed DDL** (`CREATE TABLE`, `DROP TABLE`, `ALTER TABLE ... ADD [COLUMN]`, `CREATE [UNIQUE] INDEX`, `DROP INDEX`) | **built**: 320 hand-written cases in all (211 refusals), 84 statement mutants killed, and `tests/ddl_diff.py`: the original and the rendering are each run in a rolled-back transaction and must leave the same catalog (section 3.4) |
 | **P1c** | **lowering** (`src/lower.cho`) to IR v2 bytes from the tree and a schema snapshot, for SELECT, INSERT, UPDATE, DELETE and the closed DDL | **built**: 73 hand-written cases (42 IR byte for byte, 42 effect sets accepted by the verifier, 31 refusals), name resolution compared with PostgreSQL's SQLSTATEs over 8,000 statements, 27 mutants killed (section 4.2); the effect check against a token is P1d |
 | **P1d-1** | **the query guard** (`src/guard.cho`), sans-io: lex, parse, lower, infer and check every statement of a `Query` message against the token, and answer the text to send instead, or a refusal | **built**: 51 hand-written verdicts over tokens minted outside `src/`, 13 mutants killed (section 5.1) |
-| **P1d-2** | the `Query` branch in the proxy: the schema snapshot read from the upstream database at login, the guard on every `Query`, the rendered text sent, refusals answered as `ErrorResponse` plus `ReadyForQuery`, the extended protocol refused | end to end with psql: differential (2) and the server log (3) |
+| **P1d-2** | **the `Query` branch in the proxy** (`proxy/proxy.cho`): the schema snapshot read fresh from the catalog for each query, the guard on every `Query`, the rendered text sent, refusals answered as `ErrorResponse` plus `ReadyForQuery`, the extended protocol refused | **built**: `tests/proxy_e2e.py` with `psql` and raw frames against a real PostgreSQL behind a wire tee: refused queries never reach the server, allowed ones arrive as the rendering, six proxy mutants (section 5.3) |
 
 ## 8. Risks
 
