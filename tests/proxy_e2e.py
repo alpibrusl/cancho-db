@@ -555,8 +555,103 @@ r = psql(lp, good, "", input="begin;\ninsert into p2a values (30, 'p');\nselect 
 check("psql runs a transaction through the proxy", r.returncode == 0 and "COMMIT" in r.stdout and r.stdout.strip().endswith("1"), r.stdout + r.stderr)
 direct("drop table if exists p2a")
 
+
+# ---- P2c: the log directory at startup (docs/m1-commit-path.md section 5.4)
+import hashlib
+import random
+import shutil
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+_rng = random.Random(5)
+_seed = bytes(_rng.randrange(256) for _ in range(32))
+_sk = Ed25519PrivateKey.from_private_bytes(_seed)
+_pk = _sk.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+
+def _log_with(n, branch=b"main"):
+    out, parent = b"CHODBLG1" + _pk, None
+    for seq in range(n):
+        l32 = lambda items: struct.pack(">I", len(items)) + b"".join(items)
+        enc = b"".join([struct.pack(">H", 1), l32([parent] if parent else []), struct.pack(">H", len(branch)) + branch, struct.pack(">Q", seq),
+                        bytes(32), l32([bytes(32)]), l32([]), bytes(32), bytes(32), l32([]), l32([]), bytes(32), bytes(32), l32([]), struct.pack(">Q", seq)])
+        cid = hashlib.sha256(b"cancho-db/commit/v1\x00" + enc).digest()
+        out += struct.pack(">I", len(enc)) + enc + _sk.sign(cid)
+        parent = cid
+    return out
+
+
+def start_logged(ldir, keyfile, branch="main", wait=True):
+    port = free_port()
+    p = subprocess.Popen([PROXY, str(port), "127.0.0.1", str(PG_PORT), branch, ROOT, "postgres", DB, str(ldir), str(keyfile)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if not wait:
+        return p, port
+    for _ in range(100):
+        if p.poll() is not None:
+            return p, port
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+            return p, port
+        except OSError:
+            time.sleep(0.05)
+    return p, port
+
+
+_work = Path(tempfile.mkdtemp())
+(_work / "key").write_bytes(_seed)
+_dir = _work / "logs"
+_dir.mkdir()
+lp1, lport1 = start_logged(_dir, _work / "key")
+check("P2c: a proxy with a fresh log directory listens", lp1.poll() is None and (_dir / "log").read_bytes() == b"CHODBLG1" + _pk)
+lp2, _ = start_logged(_dir, _work / "key")
+try:
+    err2 = lp2.communicate(timeout=10)[1]
+except subprocess.TimeoutExpired:
+    lp2.kill()
+    err2 = "timed out"
+check("P2c: a second proxy on the same directory is refused", lp2.returncode == 3 and "locked" in err2, "%s %s" % (lp2.returncode, err2))
+lp1.kill()
+lp1.wait()
+(_dir / "log").write_bytes(_log_with(3) + _log_with(4)[len(_log_with(3)):][:6])  # the first 6 bytes of a fourth record
+lp3, lport3 = start_logged(_dir, _work / "key")
+check("P2c: a restart reads the log back and cuts the torn tail", lp3.poll() is None and (_dir / "log").read_bytes() == _log_with(3))
+lp3.terminate()
+err3 = lp3.communicate(timeout=10)[1]
+check("P2c: and says so", "log has 3 commits, next seq 3, cut 6 bytes of torn tail" in err3, err3)
+bad = bytearray(_log_with(3))
+bad[60] ^= 1
+(_dir / "log").write_bytes(bytes(bad))
+lp4, lport4 = start_logged(_dir, _work / "key")
+try:
+    err4 = lp4.communicate(timeout=10)[1]
+except subprocess.TimeoutExpired:
+    lp4.kill()
+    err4 = "timed out"
+refused = False
+try:
+    socket.create_connection(("127.0.0.1", lport4), timeout=0.3).close()
+except OSError:
+    refused = True
+check("P2c: a log that does not verify is refused at startup, and the listener never opens", lp4.returncode == 3 and "log-corrupt" in err4 and refused and (_dir / "log").read_bytes() == bytes(bad), "%s %s" % (lp4.returncode, err4))
+(_dir / "log").write_bytes(b"CHODBLG1" + bytes(32) + _log_with(2)[40:])
+lp5, _ = start_logged(_dir, _work / "key")
+try:
+    err5 = lp5.communicate(timeout=10)[1]
+except subprocess.TimeoutExpired:
+    lp5.kill()
+    err5 = "timed out"
+check("P2c: a log of another key is refused", lp5.returncode == 3 and "foreign-key" in err5, err5)
+lp6, _ = start_logged(_work / "nothere", _work / "key")
+err6 = lp6.communicate(timeout=10)[1]
+check("P2c: a missing log directory is refused", lp6.returncode == 3, err6)
+lp7, _ = start_logged(_dir, _work / "nokey")
+err7 = lp7.communicate(timeout=10)[1]
+check("P2c: a missing key file is refused", lp7.returncode == 3 and "key" in err7, err7)
+shutil.rmtree(_work, ignore_errors=True)
+
 check("the proxy is still alive after all of it", proxy.poll() is None)
 direct("drop table if exists p0_e2e, p0_big cascade")
 proxy.terminate()
-print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0, P1d and P2a checks passed")
+print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0, P1d, P2a and P2c checks passed")
 sys.exit(1 if FAILED else 0)

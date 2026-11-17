@@ -391,6 +391,8 @@ LOGIN = [
 
 PROXY = [
     # ---- the event loop (proxy/proxy.cho), judged by tests/proxy_e2e.py against a real PostgreSQL
+    ("proxy: the log directory is not opened", "proxy/proxy.cho", "if logged {\n                                borrow fs as &fr in {", "if false {\n                                borrow fs as &fr in {"),
+    ("proxy: the signing key is not required", "proxy/proxy.cho", "    if !keyed {\n", "    if false {\n"),
     ("proxy: non-loopback clients are served", "proxy/proxy.cho", "if !is_loopback(ct, a) {", "if false {"),
     ("proxy: the token is not checked", "proxy/proxy.cho", "if rule != login.login_ok() {", "if false {"),
     ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > hello_ms()", "false"),
@@ -454,7 +456,7 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False

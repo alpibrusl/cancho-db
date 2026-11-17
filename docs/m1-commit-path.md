@@ -254,5 +254,6 @@ gives and syncs each. Refusals are `Opened::Failed(code)` with codes from 1000 s
 
 Two things the build changed: the tip is found by decoding each record again after the verifier has accepted them (the verifier
 does not export its tips), which is linear and was not worth a second interface; and `fsync` order is checked with `strace`, which
-CI now installs, because no program output says whether a write was made durable. **Not yet done in this slice:** the proxy does not
-open the store (the `--log-dir` and key arguments, the authority row): that is the next commit of P2c. The proxy has no commit to append until P2d.
+CI now installs, because no program output says whether a write was made durable. **The proxy opens it** (second commit of P2c): two optional arguments after the seven, `<log directory> <signing key file>` (positional, like the rest; `--log-dir` and `--key` were the design's spelling). The
+store is opened, locked and scanned *before* the listener, the summary goes to standard error, and `proxy.cho` is now edition 9 (directory
+handles). The authority pin changed on purpose (it now names `fs_read("")`, `dir_read`, `dir_write`, `file_read`, `file_write`), and the claim "never touches the filesystem" is gone from it. **`proxy.cho` is at 1,873 lines**: P2d needs the second split (the upstream I/O helpers `write_all`, `read_until_ready`, `startup_msg`) first. The proxy has no commit to append until P2d.
