@@ -57,7 +57,8 @@ class PG:
     def explain(self, stmt):
         """-> ("plan", text) or ("error", sqlstate, is_syntax). SQLSTATE 42601 also covers semantic refusals ("non-integer
         constant in ORDER BY"), so `is_syntax` says whether PostgreSQL's own parser refused the text."""
-        rows, err = self.run("explain (verbose, costs off) " + stmt)
+        # a statement with parameters has only a generic plan (PostgreSQL 16: GENERIC_PLAN accepts `$n`)
+        rows, err = self.run("explain (verbose, costs off%s) " % (", generic_plan" if "$" in stmt else "") + stmt)
         if err:
             return ("error", err[0], err[1].startswith("syntax error"))
         return ("plan", "\n".join(r[0] for r in rows))
@@ -94,10 +95,10 @@ class Gen:
         return name
 
     def num(self):
-        return self.r.choice(["0", "1", "2", "3", "7", "10", "255", "1.5", ".5", "2.", "1e2", "100000", "2147483648"])
+        return self.r.choice(["0", "1", "2", "3", "7", "10", "255", "1.5", ".5", "2.", "1e2", "100000", "2147483648", "$1", "$2", "$3"])
 
     def text_lit(self):
-        return self.r.choice(["'a'", "'ab'", "''", "'it''s'", "'%a%'", "'x_'", "'--'", "'/*'"])
+        return self.r.choice(["'a'", "'ab'", "''", "'it''s'", "'%a%'", "'x_'", "'--'", "'/*'", "$1", "$2"])
 
     def i(self, d):
         r = self.r.random()
@@ -182,14 +183,14 @@ class Gen:
 VOCAB = ["a", "b", "c", "d", "1", "2", "'x'", "null", "true", "and", "or", "not", "is", "in", "like", "between", "case", "when",
          "then", "else", "end", "cast", "as", "int", "text", "::", "(", ")", ",", "+", "-", "*", "/", "%", "||", "=", "<", ">", "<=",
          ">=", "<>", "!=", "abs", "count(*)", "t.a", "isnull", "notnull", "ilike", "not like", "not in", "not between", "not null",
-         "distinct", "from", "all", "any", "escape", "similar to", "at time zone", "collate", "^", "[", "]", ".", "1.", ".5"]
+         "distinct", "from", "all", "any", "escape", "similar to", "at time zone", "collate", "^", "[", "]", ".", "1.", ".5", "$1", "$2", "$1"]
 
 
 def fuzz(rng):
     return " ".join(rng.choice(VOCAB) for _ in range(rng.randint(1, 10)))
 
 
-OPERANDS = ["a", "b", "1", "2", "c", "d", "'x'", "null", "true", "-a", "not d", "abs(a)", "a::int", "(a)", "case when d then a end"]
+OPERANDS = ["a", "b", "1", "2", "c", "d", "'x'", "null", "true", "-a", "not d", "abs(a)", "a::int", "(a)", "case when d then a end", "$1", "$2"]
 BINOPS = ["+", "-", "*", "/", "%", "||", "=", "<>", "<", ">=", "and", "or", "like", "ilike", "not like", "between", "not between",
           "in (1, 2)", "not in (a)", "is null", "is not null", "and", "and", "or"]
 

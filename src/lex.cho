@@ -5,7 +5,7 @@ module cdb.lex;
 // It reads exactly the forms of PostgreSQL's lexer that the proxy's grammar needs, and REFUSES everything else. Refusal is the
 // default: a form this file does not name is an error, never passed through. The forms refused are the ones whose lexing
 // depends on server state or is easy to get subtly wrong (E'' and U&'' strings, $$ quoting, bit and hex strings, non-ASCII
-// identifiers, parameters), plus two PostgreSQL behaviours that would let a name be checked as one thing and run as another:
+// identifiers, `$$` quoting), plus two PostgreSQL behaviours that would let a name be checked as one thing and run as another:
 // identifiers longer than 63 bytes (PostgreSQL silently truncates them, so two different long names become one) and a number
 // followed by identifier characters (`1abc`, `1_000`, `0x1F`: accepted or refused depending on the server version).
 //
@@ -50,6 +50,11 @@ pub fn t_cast() -> [] int {
 // `;`, the statement separator
 pub fn t_semicolon() -> [] int {
     return 8;
+}
+
+// a parameter, `$` and its number: `$1` to `$65535`, no leading zero (the number is the statement's own, docs/m1-extended.md P3-D1)
+pub fn t_param() -> [] int {
+    return 9;
 }
 
 // The ways a lex is refused: `tokenize` answers `0 - code`. Each has a tag (`error_name`) for the rule-tagged refusal.
@@ -297,11 +302,24 @@ pub fn tokenize[&s, &t](sql: &s [byte], toks: &!t [int]) -> [] int {
             n = put(toks, n, t_quoted(), i + 1, j - i - 1, doubled);
             i = j + 1;
         } else if c == '$' {
-            // `$1` is a parameter, anything else is a dollar quote: neither is in the grammar
+            // `$1` is a parameter; anything else is a dollar quote, which is not in the grammar
             if i + 1 < n_in && is_digit(int_of(sql[i + 1])) {
-                return 0 - e_parameter();
+                // `$0`, a leading zero, a number over 65535 (PostgreSQL's own limit) and a number with identifier characters after it
+                // (`$1a`: PostgreSQL reads two tokens, which is not worth the doubt) are refused
+                var j = i + 1;
+                var v = 0;
+                while j < n_in && is_digit(int_of(sql[j])) && v <= 65535 {
+                    v = v * 10 + int_of(sql[j]) - '0';
+                    j = j + 1;
+                }
+                if int_of(sql[i + 1]) == '0' || v > 65535 || j < n_in && (is_digit(int_of(sql[j])) || is_ident_char(int_of(sql[j]))) {
+                    return 0 - e_parameter();
+                }
+                n = put(toks, n, t_param(), i, j - i, 0);
+                i = j;
+            } else {
+                return 0 - e_dollar_quote();
             }
-            return 0 - e_dollar_quote();
         } else if is_ident_start(c) {
             var j = i + 1;
             while j < n_in && is_ident_char(int_of(sql[j])) {

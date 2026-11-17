@@ -4,7 +4,7 @@ module cdb.lex_cases;
 // generator. Inputs and expected token renderings are hex.
 
 pub fn n_lex() -> [] int {
-    return 167;
+    return 178;
 }
 
 pub fn lex_input(i: int) -> [] &static [byte] {
@@ -396,117 +396,150 @@ pub fn lex_input(i: int) -> [] &static [byte] {
         return "73656c65637420243132";
     }
     if i == 129 {
-        return "2424782424";
+        return "243635353335";
     }
     if i == 130 {
-        return "24746167242078202474616724";
+        return "24312c2432";
     }
     if i == 131 {
-        return "24";
+        return "613d2431303b";
     }
     if i == 132 {
-        return "73656c656374202461";
+        return "28243129";
     }
     if i == 133 {
-        return "31";
+        return "2430";
     }
     if i == 134 {
-        return "312e35";
+        return "243031";
     }
     if i == 135 {
-        return "2e35";
+        return "243635353336";
     }
     if i == 136 {
-        return "312e";
+        return "243939393939393939393939393939393939393939";
     }
     if i == 137 {
-        return "316535";
+        return "243161";
     }
     if i == 138 {
-        return "31452b35";
+        return "24315f";
     }
     if i == 139 {
-        return "312e35652d33";
+        return "24313278";
     }
     if i == 140 {
-        return "303037";
+        return "2424782424";
     }
     if i == 141 {
-        return "312e322e33";
+        return "24746167242078202474616724";
     }
     if i == 142 {
-        return "312e2e32";
+        return "24";
     }
     if i == 143 {
-        return "312b32";
+        return "73656c656374202461";
     }
     if i == 144 {
-        return "312d32";
+        return "31";
     }
     if i == 145 {
-        return "742e63";
+        return "312e35";
     }
     if i == 146 {
-        return "742e2a";
+        return "2e35";
     }
     if i == 147 {
-        return "3165";
+        return "312e";
     }
     if i == 148 {
-        return "31652b";
+        return "316535";
     }
     if i == 149 {
-        return "31616263";
+        return "31452b35";
     }
     if i == 150 {
-        return "315f303030";
+        return "312e35652d33";
     }
     if i == 151 {
-        return "30783146";
+        return "303037";
     }
     if i == 152 {
-        return "312e3578";
+        return "312e322e33";
     }
     if i == 153 {
-        return "313224";
+        return "312e2e32";
     }
     if i == 154 {
-        return "28612c62295b315d";
+        return "312b32";
     }
     if i == 155 {
-        return "5c";
+        return "312d32";
     }
     if i == 156 {
-        return "73656c656374207b";
+        return "742e63";
     }
     if i == 157 {
-        return "73656c656374207d";
+        return "742e2a";
     }
     if i == 158 {
-        return "73656c656374200c31";
+        return "3165";
     }
     if i == 159 {
-        return "73656c656374200b31";
+        return "31652b";
     }
     if i == 160 {
-        return "73656c656374207f";
+        return "31616263";
     }
     if i == 161 {
-        return "73656c6563742001";
+        return "315f303030";
     }
     if i == 162 {
-        return "73656c6563742080";
+        return "30783146";
     }
     if i == 163 {
-        return "61206120612061";
+        return "312e3578";
     }
     if i == 164 {
-        return "61206120612061206120612061";
+        return "313224";
     }
     if i == 165 {
-        return "612061206120612061206120612061";
+        return "28612c62295b315d";
     }
     if i == 166 {
+        return "5c";
+    }
+    if i == 167 {
+        return "73656c656374207b";
+    }
+    if i == 168 {
+        return "73656c656374207d";
+    }
+    if i == 169 {
+        return "73656c656374200c31";
+    }
+    if i == 170 {
+        return "73656c656374200b31";
+    }
+    if i == 171 {
+        return "73656c656374207f";
+    }
+    if i == 172 {
+        return "73656c6563742001";
+    }
+    if i == 173 {
+        return "73656c6563742080";
+    }
+    if i == 174 {
+        return "61206120612061";
+    }
+    if i == 175 {
+        return "61206120612061206120612061";
+    }
+    if i == 176 {
+        return "612061206120612061206120612061";
+    }
+    if i == 177 {
         return "61206120612061206120612061206120612061";
     }
     return "";
@@ -895,55 +928,55 @@ pub fn lex_ok(i: int) -> [] int {
         return 1;
     }
     if i == 127 {
-        return 0;
+        return 1;
     }
     if i == 128 {
-        return 0;
+        return 1;
     }
     if i == 129 {
-        return 0;
+        return 1;
     }
     if i == 130 {
-        return 0;
+        return 1;
     }
     if i == 131 {
-        return 0;
+        return 1;
     }
     if i == 132 {
-        return 0;
+        return 1;
     }
     if i == 133 {
-        return 1;
+        return 0;
     }
     if i == 134 {
-        return 1;
+        return 0;
     }
     if i == 135 {
-        return 1;
+        return 0;
     }
     if i == 136 {
-        return 1;
+        return 0;
     }
     if i == 137 {
-        return 1;
+        return 0;
     }
     if i == 138 {
-        return 1;
+        return 0;
     }
     if i == 139 {
-        return 1;
+        return 0;
     }
     if i == 140 {
-        return 1;
+        return 0;
     }
     if i == 141 {
-        return 1;
+        return 0;
     }
     if i == 142 {
-        return 1;
+        return 0;
     }
     if i == 143 {
-        return 1;
+        return 0;
     }
     if i == 144 {
         return 1;
@@ -955,37 +988,37 @@ pub fn lex_ok(i: int) -> [] int {
         return 1;
     }
     if i == 147 {
-        return 0;
+        return 1;
     }
     if i == 148 {
-        return 0;
+        return 1;
     }
     if i == 149 {
-        return 0;
+        return 1;
     }
     if i == 150 {
-        return 0;
+        return 1;
     }
     if i == 151 {
-        return 0;
+        return 1;
     }
     if i == 152 {
-        return 0;
+        return 1;
     }
     if i == 153 {
-        return 0;
+        return 1;
     }
     if i == 154 {
         return 1;
     }
     if i == 155 {
-        return 0;
+        return 1;
     }
     if i == 156 {
-        return 0;
+        return 1;
     }
     if i == 157 {
-        return 0;
+        return 1;
     }
     if i == 158 {
         return 0;
@@ -1003,15 +1036,48 @@ pub fn lex_ok(i: int) -> [] int {
         return 0;
     }
     if i == 163 {
-        return 1;
-    }
-    if i == 164 {
-        return 1;
-    }
-    if i == 165 {
         return 0;
     }
+    if i == 164 {
+        return 0;
+    }
+    if i == 165 {
+        return 1;
+    }
     if i == 166 {
+        return 0;
+    }
+    if i == 167 {
+        return 0;
+    }
+    if i == 168 {
+        return 0;
+    }
+    if i == 169 {
+        return 0;
+    }
+    if i == 170 {
+        return 0;
+    }
+    if i == 171 {
+        return 0;
+    }
+    if i == 172 {
+        return 0;
+    }
+    if i == 173 {
+        return 0;
+    }
+    if i == 174 {
+        return 1;
+    }
+    if i == 175 {
+        return 1;
+    }
+    if i == 176 {
+        return 0;
+    }
+    if i == 177 {
         return 0;
     }
     return 0;
@@ -1400,97 +1466,97 @@ pub fn lex_want(i: int) -> [] &static [byte] {
         return "493a6124";
     }
     if i == 127 {
-        return "";
+        return "4d3a2431";
     }
     if i == 128 {
-        return "";
+        return "493a73656c6563740a4d3a243132";
     }
     if i == 129 {
-        return "";
+        return "4d3a243635353335";
     }
     if i == 130 {
-        return "";
+        return "4d3a24310a503a2c0a4d3a2432";
     }
     if i == 131 {
-        return "";
+        return "493a610a4f3a3d0a4d3a2431300a543a3b";
     }
     if i == 132 {
-        return "";
+        return "503a280a4d3a24310a503a29";
     }
     if i == 133 {
-        return "4e3a31";
+        return "";
     }
     if i == 134 {
-        return "4e3a312e35";
+        return "";
     }
     if i == 135 {
-        return "4e3a2e35";
+        return "";
     }
     if i == 136 {
-        return "4e3a312e";
+        return "";
     }
     if i == 137 {
-        return "4e3a316535";
+        return "";
     }
     if i == 138 {
-        return "4e3a31452b35";
+        return "";
     }
     if i == 139 {
-        return "4e3a312e35652d33";
+        return "";
     }
     if i == 140 {
-        return "4e3a303037";
+        return "";
     }
     if i == 141 {
-        return "4e3a312e320a4e3a2e33";
+        return "";
     }
     if i == 142 {
-        return "4e3a312e0a4e3a2e32";
+        return "";
     }
     if i == 143 {
-        return "4e3a310a4f3a2b0a4e3a32";
+        return "";
     }
     if i == 144 {
-        return "4e3a310a4f3a2d0a4e3a32";
+        return "4e3a31";
     }
     if i == 145 {
-        return "493a740a503a2e0a493a63";
+        return "4e3a312e35";
     }
     if i == 146 {
-        return "493a740a503a2e0a4f3a2a";
+        return "4e3a2e35";
     }
     if i == 147 {
-        return "";
+        return "4e3a312e";
     }
     if i == 148 {
-        return "";
+        return "4e3a316535";
     }
     if i == 149 {
-        return "";
+        return "4e3a31452b35";
     }
     if i == 150 {
-        return "";
+        return "4e3a312e35652d33";
     }
     if i == 151 {
-        return "";
+        return "4e3a303037";
     }
     if i == 152 {
-        return "";
+        return "4e3a312e320a4e3a2e33";
     }
     if i == 153 {
-        return "";
+        return "4e3a312e0a4e3a2e32";
     }
     if i == 154 {
-        return "503a280a493a610a503a2c0a493a620a503a290a503a5b0a4e3a310a503a5d";
+        return "4e3a310a4f3a2b0a4e3a32";
     }
     if i == 155 {
-        return "";
+        return "4e3a310a4f3a2d0a4e3a32";
     }
     if i == 156 {
-        return "";
+        return "493a740a503a2e0a493a63";
     }
     if i == 157 {
-        return "";
+        return "493a740a503a2e0a4f3a2a";
     }
     if i == 158 {
         return "";
@@ -1508,15 +1574,48 @@ pub fn lex_want(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 163 {
-        return "493a610a493a610a493a610a493a61";
-    }
-    if i == 164 {
-        return "493a610a493a610a493a610a493a610a493a610a493a610a493a61";
-    }
-    if i == 165 {
         return "";
     }
+    if i == 164 {
+        return "";
+    }
+    if i == 165 {
+        return "503a280a493a610a503a2c0a493a620a503a290a503a5b0a4e3a310a503a5d";
+    }
     if i == 166 {
+        return "";
+    }
+    if i == 167 {
+        return "";
+    }
+    if i == 168 {
+        return "";
+    }
+    if i == 169 {
+        return "";
+    }
+    if i == 170 {
+        return "";
+    }
+    if i == 171 {
+        return "";
+    }
+    if i == 172 {
+        return "";
+    }
+    if i == 173 {
+        return "";
+    }
+    if i == 174 {
+        return "493a610a493a610a493a610a493a61";
+    }
+    if i == 175 {
+        return "493a610a493a610a493a610a493a610a493a610a493a610a493a61";
+    }
+    if i == 176 {
+        return "";
+    }
+    if i == 177 {
         return "";
     }
     return "";
@@ -1905,55 +2004,55 @@ pub fn lex_stmts(i: int) -> [] int {
         return 1;
     }
     if i == 127 {
-        return 0;
+        return 1;
     }
     if i == 128 {
-        return 0;
+        return 1;
     }
     if i == 129 {
-        return 0;
+        return 1;
     }
     if i == 130 {
-        return 0;
+        return 1;
     }
     if i == 131 {
-        return 0;
+        return 1;
     }
     if i == 132 {
-        return 0;
+        return 1;
     }
     if i == 133 {
-        return 1;
+        return 0;
     }
     if i == 134 {
-        return 1;
+        return 0;
     }
     if i == 135 {
-        return 1;
+        return 0;
     }
     if i == 136 {
-        return 1;
+        return 0;
     }
     if i == 137 {
-        return 1;
+        return 0;
     }
     if i == 138 {
-        return 1;
+        return 0;
     }
     if i == 139 {
-        return 1;
+        return 0;
     }
     if i == 140 {
-        return 1;
+        return 0;
     }
     if i == 141 {
-        return 1;
+        return 0;
     }
     if i == 142 {
-        return 1;
+        return 0;
     }
     if i == 143 {
-        return 1;
+        return 0;
     }
     if i == 144 {
         return 1;
@@ -1965,37 +2064,37 @@ pub fn lex_stmts(i: int) -> [] int {
         return 1;
     }
     if i == 147 {
-        return 0;
+        return 1;
     }
     if i == 148 {
-        return 0;
+        return 1;
     }
     if i == 149 {
-        return 0;
+        return 1;
     }
     if i == 150 {
-        return 0;
+        return 1;
     }
     if i == 151 {
-        return 0;
+        return 1;
     }
     if i == 152 {
-        return 0;
+        return 1;
     }
     if i == 153 {
-        return 0;
+        return 1;
     }
     if i == 154 {
         return 1;
     }
     if i == 155 {
-        return 0;
+        return 1;
     }
     if i == 156 {
-        return 0;
+        return 1;
     }
     if i == 157 {
-        return 0;
+        return 1;
     }
     if i == 158 {
         return 0;
@@ -2013,15 +2112,48 @@ pub fn lex_stmts(i: int) -> [] int {
         return 0;
     }
     if i == 163 {
-        return 1;
-    }
-    if i == 164 {
-        return 1;
-    }
-    if i == 165 {
         return 0;
     }
+    if i == 164 {
+        return 0;
+    }
+    if i == 165 {
+        return 1;
+    }
     if i == 166 {
+        return 0;
+    }
+    if i == 167 {
+        return 0;
+    }
+    if i == 168 {
+        return 0;
+    }
+    if i == 169 {
+        return 0;
+    }
+    if i == 170 {
+        return 0;
+    }
+    if i == 171 {
+        return 0;
+    }
+    if i == 172 {
+        return 0;
+    }
+    if i == 173 {
+        return 0;
+    }
+    if i == 174 {
+        return 1;
+    }
+    if i == 175 {
+        return 1;
+    }
+    if i == 176 {
+        return 0;
+    }
+    if i == 177 {
         return 0;
     }
     return 0;
@@ -2410,55 +2542,55 @@ pub fn lex_tag(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 127 {
-        return "parameter";
+        return "";
     }
     if i == 128 {
-        return "parameter";
+        return "";
     }
     if i == 129 {
-        return "dollar-quote";
+        return "";
     }
     if i == 130 {
-        return "dollar-quote";
+        return "";
     }
     if i == 131 {
-        return "dollar-quote";
+        return "";
     }
     if i == 132 {
-        return "dollar-quote";
+        return "";
     }
     if i == 133 {
-        return "";
+        return "parameter";
     }
     if i == 134 {
-        return "";
+        return "parameter";
     }
     if i == 135 {
-        return "";
+        return "parameter";
     }
     if i == 136 {
-        return "";
+        return "parameter";
     }
     if i == 137 {
-        return "";
+        return "parameter";
     }
     if i == 138 {
-        return "";
+        return "parameter";
     }
     if i == 139 {
-        return "";
+        return "parameter";
     }
     if i == 140 {
-        return "";
+        return "dollar-quote";
     }
     if i == 141 {
-        return "";
+        return "dollar-quote";
     }
     if i == 142 {
-        return "";
+        return "dollar-quote";
     }
     if i == 143 {
-        return "";
+        return "dollar-quote";
     }
     if i == 144 {
         return "";
@@ -2470,63 +2602,96 @@ pub fn lex_tag(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 147 {
-        return "number-junk";
+        return "";
     }
     if i == 148 {
-        return "number-junk";
+        return "";
     }
     if i == 149 {
-        return "number-junk";
+        return "";
     }
     if i == 150 {
-        return "number-junk";
+        return "";
     }
     if i == 151 {
-        return "number-junk";
+        return "";
     }
     if i == 152 {
-        return "number-junk";
+        return "";
     }
     if i == 153 {
-        return "number-junk";
+        return "";
     }
     if i == 154 {
         return "";
     }
     if i == 155 {
-        return "unknown-character";
+        return "";
     }
     if i == 156 {
-        return "unknown-character";
+        return "";
     }
     if i == 157 {
-        return "unknown-character";
+        return "";
     }
     if i == 158 {
-        return "unknown-character";
+        return "number-junk";
     }
     if i == 159 {
-        return "unknown-character";
+        return "number-junk";
     }
     if i == 160 {
-        return "unknown-character";
+        return "number-junk";
     }
     if i == 161 {
-        return "unknown-character";
+        return "number-junk";
     }
     if i == 162 {
-        return "non-ascii";
+        return "number-junk";
     }
     if i == 163 {
-        return "";
+        return "number-junk";
     }
     if i == 164 {
-        return "";
+        return "number-junk";
     }
     if i == 165 {
-        return "too-long";
+        return "";
     }
     if i == 166 {
+        return "unknown-character";
+    }
+    if i == 167 {
+        return "unknown-character";
+    }
+    if i == 168 {
+        return "unknown-character";
+    }
+    if i == 169 {
+        return "unknown-character";
+    }
+    if i == 170 {
+        return "unknown-character";
+    }
+    if i == 171 {
+        return "unknown-character";
+    }
+    if i == 172 {
+        return "unknown-character";
+    }
+    if i == 173 {
+        return "non-ascii";
+    }
+    if i == 174 {
+        return "";
+    }
+    if i == 175 {
+        return "";
+    }
+    if i == 176 {
+        return "too-long";
+    }
+    if i == 177 {
         return "too-long";
     }
     return "";
@@ -3023,15 +3188,48 @@ pub fn lex_cap(i: int) -> [] int {
         return 200;
     }
     if i == 163 {
-        return 8;
+        return 200;
     }
     if i == 164 {
-        return 8;
+        return 200;
     }
     if i == 165 {
-        return 8;
+        return 200;
     }
     if i == 166 {
+        return 200;
+    }
+    if i == 167 {
+        return 200;
+    }
+    if i == 168 {
+        return 200;
+    }
+    if i == 169 {
+        return 200;
+    }
+    if i == 170 {
+        return 200;
+    }
+    if i == 171 {
+        return 200;
+    }
+    if i == 172 {
+        return 200;
+    }
+    if i == 173 {
+        return 200;
+    }
+    if i == 174 {
+        return 8;
+    }
+    if i == 175 {
+        return 8;
+    }
+    if i == 176 {
+        return 8;
+    }
+    if i == 177 {
         return 8;
     }
     return 0;

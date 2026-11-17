@@ -4,7 +4,7 @@
 Every expected answer is written by hand below, from PostgreSQL's documented lexical rules, not computed by anything in src/.
 Inputs and expected token renderings are hex in the generated file, so no byte (non-ASCII, NUL, a newline) can be mangled by
 source escaping. A token renders as `K:text`, K being I ident, Q quoted ident, S string, N number, O operator, P punctuation,
-C `::`, T `;`, joined by newlines; a refusal is its tag.
+C `::`, T `;`, M a parameter, joined by newlines; a refusal is its tag.
 
     python3 tools/gen_lex.py            # rewrites tests/lex_cases.cho
     python3 tools/gen_lex.py --check    # fails if the file on disk differs (the gate runs this)
@@ -24,7 +24,7 @@ def refuse(sql, tag, cap=200):
     CASES.append((sql if isinstance(sql, bytes) else sql.encode("latin-1"), ("refuse", tag), cap))
 
 
-I, Q, S, N, O, P, C, T = "I", "Q", "S", "N", "O", "P", "C", "T"
+I, Q, S, N, O, P, C, T, M = "I", "Q", "S", "N", "O", "P", "C", "T", "M"
 
 # ---- the plain forms
 ok("select 1", [(I, "select"), (N, "1")], 1)
@@ -151,8 +151,19 @@ refuse("\x00", "nul-byte")
 refuse("select 1 -- a\x00b", "nul-byte")
 refuse("select 1 /* a\x00b */", "nul-byte")
 ok("a$", [(I, "a$")], 1)
-refuse("$1", "parameter")
-refuse("select $12", "parameter")
+ok("$1", [(M, "$1")], 1)
+ok("select $12", [(I, "select"), (M, "$12")], 1)
+ok("$65535", [(M, "$65535")], 1)
+ok("$1,$2", [(M, "$1"), (P, ","), (M, "$2")], 1)
+ok("a=$10;", [(I, "a"), (O, "="), (M, "$10"), (T, ";")], 1)
+ok("($1)", [(P, "("), (M, "$1"), (P, ")")], 1)
+refuse("$0", "parameter")
+refuse("$01", "parameter")
+refuse("$65536", "parameter")
+refuse("$99999999999999999999", "parameter")
+refuse("$1a", "parameter")
+refuse("$1_", "parameter")
+refuse("$12x", "parameter")
 refuse("$$x$$", "dollar-quote")
 refuse("$tag$ x $tag$", "dollar-quote")
 refuse("$", "dollar-quote")

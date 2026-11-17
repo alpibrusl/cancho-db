@@ -76,6 +76,16 @@ no(READ_ORDERS, "select o.id from orders o join customers c on c.id = o.id", 3, 
 no(READ_ORDERS, "select id from customers", 3, "effect-denied", "42501")
 ok(READ_ORDERS, "select o.id from orders o where o.total > 5 order by id", 'select "o"."id" from "orders" as "o" where ("o"."total" > 5) order by "id"')
 no(NOTHING, "select id from orders", 3, "effect-denied", "42501")
+# ---- parameters (docs/m1-extended.md P3-D1): allowed where the token allows the columns, rendered with `$n`; a parameter has no effect of its own
+ok(READ_ORDERS, "select id from orders where id = $1", 'select "id" from "orders" where ("id" = $1)')
+no(READ_ORDERS, "select id from orders where customer = $1", 3, "effect-denied", "42501")
+ok(ALL, "insert into orders (id, customer, total) values ($1, $2, $3)", 'insert into "orders" ("id", "customer", "total") values ($1, $2, $3)')
+ok(ALL, "update orders set total = $2 where id = $1", 'update "orders" set "total" = $2 where ("id" = $1)')
+ok(ALL, "select id from orders where id in ($1, $2) limit $3", 'select "id" from "orders" where ("id" in ($1, $2)) limit $3')
+no(ALL, "select id from orders where id = $0", 1, "parameter", "0A000")
+no(ALL, "select id from orders where id = $65536", 1, "parameter", "0A000")
+no(ALL, "select id from orders where id = $1x", 1, "parameter", "0A000")
+no(NOTHING, "select id from orders where id = $1", 3, "effect-denied", "42501")
 # a message of more statements than a commit can name (16) is refused whole, not cut: the seventeenth is where it stops
 no(ALL, "; ".join(["select id from orders"] * 17), 2, "too-big", "0A000", 16)
 ok(ALL, "; ".join(["select id from orders"] * 16), "; ".join(['select "id" from "orders"'] * 16))

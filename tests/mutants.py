@@ -505,6 +505,10 @@ def run_proxy(cancho):
 
 
 LEX = [
+    ("lex: $0 is a parameter", "src/lex.cho", "if int_of(sql[i + 1]) == '0' || v > 65535 ||", "if v > 65535 ||"),
+    ("lex: a parameter may be over 65535", "src/lex.cho", "if int_of(sql[i + 1]) == '0' || v > 65535 ||", "if int_of(sql[i + 1]) == '0' ||"),
+    ("lex: a parameter may be followed by identifier characters", "src/lex.cho", "j < n_in && (is_digit(int_of(sql[j])) || is_ident_char(int_of(sql[j])))", "false"),
+    ("lex: a parameter's text is cut short", "src/lex.cho", "n = put(toks, n, t_param(), i, j - i, 0);", "n = put(toks, n, t_param(), i, j - i - 1, 0);"),
     # ---- the SQL lexer (src/lex.cho, tests/lex_test.cho)
     ("lex: block comments do not nest", "src/lex.cho", "                    depth = depth + 1;\n                    i = i + 2;", "                    i = i + 2;"),
     ("lex: a line comment runs past the newline", "src/lex.cho", "while i < n_in && int_of(sql[i]) != '\\n' {", "while i < n_in && int_of(sql[i]) != '\\r' {"),
@@ -515,7 +519,7 @@ LEX = [
     ("lex: non-ASCII bytes are allowed", "src/lex.cho", "        if c >= 128 {\n            return 0 - e_non_ascii();", "        if false {\n            return 0 - e_non_ascii();"),
     ("lex: a NUL byte is allowed", "src/lex.cho", "        if c == 0 {\n            return 0 - e_nul_byte();", "        if false {\n            return 0 - e_nul_byte();"),
     ("lex: dollar quoting is allowed to fall through", "src/lex.cho", "} else if c == '$' {", "} else if c == '#' {"),
-    ("lex: a parameter is a dollar quote", "src/lex.cho", "if i + 1 < n_in && is_digit(int_of(sql[i + 1])) {\n                return 0 - e_parameter();", "if false {\n                return 0 - e_parameter();"),
+    ("lex: a parameter is read as a dollar quote", "src/lex.cho", "// `$1` is a parameter; anything else is a dollar quote, which is not in the grammar\n            if i + 1 < n_in && is_digit(int_of(sql[i + 1])) {", "// `$1` is a parameter; anything else is a dollar quote, which is not in the grammar\n            if false {"),
     ("lex: lower-case e is not an escape string", "src/lex.cho", "if p == 'e' || p == 'E' {", "if p == 'E' {"),
     ("lex: n is not a prefix", "src/lex.cho", "|| p == 'n' || p == 'N' {", "{"),
     ("lex: x is not a prefix", "src/lex.cho", "|| p == 'x' || p == 'X' || p == 'n'", "|| p == 'n'"),
@@ -629,6 +633,8 @@ def run_unit(table, test_files, src_names, cancho):
 
 # ---- the SQL expression parser (src/parse.cho, tests/parse_test.cho)
 PARSE = [
+    ("parse: a parameter is not an atom", "src/parse.cho", "} else if kind == lex.t_param() {", "} else if false {"),
+    ("parse: a parameter is written back without its $", "src/parse.cho", "if kind == n_num() || kind == n_param() {\n        return put_text(out, p, sql, tstart(toks, data), tlen(toks, data), false);", "if kind == n_num() || kind == n_param() {\n        return put_text(out, p, sql, tstart(toks, data) + 1, tlen(toks, data) - 1, false);"),
     ("parse: AND binds like OR", "src/parse.cho", "if code == o_and() {\n        return 2;", "if code == o_and() {\n        return 1;"),
     ("parse: NOT binds tighter than comparison", "src/parse.cho", "if code == o_not() {\n        return 3;", "if code == o_not() {\n        return 6;"),
     ("parse: || binds like +", "src/parse.cho", "if code == o_concat() {\n        return 7;", "if code == o_concat() {\n        return 8;"),
@@ -779,6 +785,9 @@ STMT = [
 
 # ---- the lowering (src/lower.cho, tests/lower_check.py: IR bytes, effects through the verifier, refusals)
 LOWER = [
+    ("lower: a parameter's index is zero-based", "src/lower.cho", "r = wn(out, sc, idx, 4);", "r = wn(out, sc, idx - 1, 4);"),
+    ("lower: a parameter is written as a constant", "src/lower.cho", "        r = w8(out, sc, 2);\n        if r >= 0 {\n            r = wn(out, sc, idx, 4);", "        r = w8(out, sc, 1);\n        if r >= 0 {\n            r = wn(out, sc, idx, 4);"),
+    ("lower: only the last digit of a parameter counts", "src/lower.cho", "idx = idx * 10 + int_of(sql[q]) - '0';", "idx = int_of(sql[q]) - '0';"),
     ("lower: = maps to <>", "src/lower.cho", "    if code == 3 {\n        return 0;", "    if code == 3 {\n        return 1;"),
     ("lower: or maps to and", "src/lower.cho", "    if code == 1 {\n        return 7;", "    if code == 1 {\n        return 6;"),
     ("lower: NOT IN is IN", "src/lower.cho", "                    if data == 20 {\n                        neg = 1;", "                    if false {\n                        neg = 1;"),
