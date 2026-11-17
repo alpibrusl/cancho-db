@@ -9,6 +9,7 @@ login must not be one of them, and a refused query must not be a Query the serve
 `p0_big`, directly on the server. Exit status 1 if any check fails.
 """
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -55,12 +56,12 @@ def client_starts(tee):
 
 def client_queries(tee):
     """What PostgreSQL was sent by clients' connections: not the proxy's own catalog questions."""
-    return [q for q in tee.queries() if not q.startswith("select c.relname, a.attname")]
+    return [re.sub(r"'cdb:[0-9a-f]{64}'", "'cdb:ID'", q) for q in tee.queries() if not q.startswith("select c.relname, a.attname")]
 
 
 def client_statements(tee):
     """What clients' statements became upstream: client_queries without the transaction commands the proxy adds itself."""
-    return [q for q in client_queries(tee) if q not in ("BEGIN", "COMMIT", "ROLLBACK")]
+    return [q for q in client_queries(tee) if q not in ("BEGIN", "COMMIT", "ROLLBACK") and not q.startswith(("PREPARE TRANSACTION", "COMMIT PREPARED"))]
 
 
 def direct(sql):
@@ -479,7 +480,7 @@ m = w.query("commit")
 check("COMMIT: CommandComplete COMMIT, ReadyForQuery I", tags_of(m) == ["COMMIT"] and status_of(m) == "I", str(m))
 check("... and the row is there for everyone", direct("select count(*) from p2a").stdout.strip() == "1")
 check("the server was sent BEGIN, the rendering, COMMIT: exactly the proxy's own two transaction commands and the statement",
-      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (1, \'x\')', "COMMIT"], str(client_queries(tee)))
+      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (1, \'x\')', "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'"], str(client_queries(tee)))
 
 m = w.query("begin")
 w.query("insert into p2a values (2, 'y')")
@@ -528,7 +529,7 @@ m = w.query("insert into p2a values (10, 'a'); insert into p2a values (11, 'b')"
 check("an autocommit message of two statements: both CommandCompletes, then ReadyForQuery I",
       tags_of(m) == ["INSERT 0 1", "INSERT 0 1"] and status_of(m) == "I", str(m))
 check("... and the server was sent BEGIN, both statements as ONE message, COMMIT",
-      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (10, \'a\'); insert into "p2a" values (11, \'b\')', "COMMIT"],
+      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (10, \'a\'); insert into "p2a" values (11, \'b\')', "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'"],
       str(client_queries(tee)))
 tee.clear()
 m = w.query("insert into p2a values (12, 'c'); insert into p2a values (10, 'dup')")
@@ -547,7 +548,7 @@ a1 = w.read_until_ready()
 a2 = w.read_until_ready()
 check("two queries pipelined are each answered, in order", tags_of(a1) == ["SELECT 1"] and tags_of(a2) == ["SELECT 1"], str((a1, a2)))
 check("... and the second is not served while the first is in flight: the server sees one transaction after the other",
-      client_queries(tee) == ["BEGIN", 'select pg_sleep(0.3) from "p2a" limit 1', "COMMIT", "BEGIN", 'select "a" from "p2a" where ("a" = 10)', "COMMIT"],
+      client_queries(tee) == ["BEGIN", 'select pg_sleep(0.3) from "p2a" limit 1', "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'", "BEGIN", 'select "a" from "p2a" where ("a" = 10)', "COMMIT"],
       str(client_queries(tee)))
 w.close()
 
@@ -664,8 +665,80 @@ except subprocess.TimeoutExpired:
 check("P2c: a missing key file is refused, and nothing is created for it", lp7.returncode == 3 and "key file" in err7 and not (_work / "fresh" / "log").exists(), "%s %s" % (lp7.returncode, err7))
 shutil.rmtree(_work, ignore_errors=True)
 
+# ---- P2d-3: what the proxy writes in the log (docs/m1-commit-path.md section 5.6)
+import verify as pyverify
+
+VERIFIERS = os.environ.get("E2E_VERIFIERS", "").split()      # extra verifier binaries (the gate passes the cancho one and the Go one)
+
+
+def read_log(path):
+    data = Path(path).read_bytes()
+    at, out = 40, []
+    while at < len(data):
+        n = struct.unpack(">I", data[at:at + 4])[0]
+        out.append(pyverify.decode(data[at + 4:at + 4 + n]) + (data[at + 4:at + 4 + n],))
+        at += 4 + n + 64
+    return out
+
+
+direct("drop table if exists p2d; create table p2d(a int primary key, b text)")
+_d = Path(_scratch, "p2d")
+_d.mkdir()
+cp, cport = start_logged(_d, Path(_scratch, "key"))
+t_before = int(time.time() * 1000)
+cw = Wire(cport, good)
+cw.query("insert into p2d values (1, 'a')")
+cw.query("begin")
+cw.query("insert into p2d values (2, 'b')")
+cw.query("insert into p2d values (3, 'c')")
+cw.query("select a from p2d where a = 2")
+r_commit = cw.query("commit")
+cw.query("begin")
+cw.query("insert into p2d values (4, 'd')")
+cw.query("rollback")
+r_read = cw.query("select a from p2d where a = 1")
+r_dup = cw.query("insert into p2d values (1, 'dup')")
+r_now = cw.query("select now() from p2d where a = 1")
+r_post = cw.query("insert into p2d values (5, 'e')")
+check("P2d: the commits answered", tags_of(r_commit) == ["COMMIT"] and tags_of(r_read) == ["SELECT 1"] and tags_of(r_post) == ["INSERT 0 1"], str((r_commit, r_read, r_post)))
+check("P2d: a failing statement and a nondeterministic one are errors, and commit nothing",
+      any(m[0] == "E" for m in r_dup) and any(m[0] == "E" for m in r_now), str((r_dup, r_now)))
+cw.close()
+time.sleep(0.3)
+rows = direct("select string_agg(a::text, ',' order by a) from p2d").stdout.strip()
+check("P2d: PostgreSQL has exactly the rows of the commits (1, 2, 3 and 5; 4 was rolled back, the duplicate failed)", rows == "1,2,3,5", rows)
+cp.terminate()
+cp.communicate(timeout=10)
+commits = read_log(_d / "log")
+check("P2d: the log has one commit per transaction: 4 (two autocommit writes, one transaction, one read)", len(commits) == 4, len(commits))
+if len(commits) == 4:
+    check("P2d: in the order they ran, on the branch served, chained by seq", [c[1] for c in commits] == [0, 1, 2, 3] and all(c[0] == b"main" for c in commits), [(c[0], c[1]) for c in commits])
+    check("P2d: with their statements counted (1, 3, 1, 1)", [len(c[3][5]) for c in commits] == [1, 3, 1, 1], [len(c[3][5]) for c in commits])
+    check("P2d: the third is a read: its effects are reads only; the others write", all(k == 0 for k, _ in commits[2][3][3]) and all(any(k == 1 for k, _ in c[3][3]) for c in (commits[0], commits[1], commits[3])),
+          [c[3][3] for c in commits])
+    check("P2d: times are the clock's at the commit", all(t_before - 1000 <= c[3][4] <= int(time.time() * 1000) + 1000 for c in commits), [c[3][4] for c in commits])
+    # the whole directory, as an auditor would take it: L2 and IR, with every verifier there is
+    root_hex = ROOT
+    argv = ["--root", root_hex, "--tokens", str(_d / "tokens"), "--stmts", str(_d / "stmts")]
+    for name, cmd in [("python", ["python3", str(ROOT_DIR / "tools" / "verify.py")])] + [(v, [v]) for v in VERIFIERS]:
+        out = subprocess.run(cmd + [str(_d / "log")] + argv, capture_output=True, text=True).stdout.strip()
+        check("P2d: %s accepts the log, the tokens and the statements at L2 and IR" % name, out.startswith("ok commits=4 branches=1"), out)
+    # restart: the chain goes on from the tip
+    cp2, cport2 = start_logged(_d, Path(_scratch, "key"))
+    cw2 = Wire(cport2, good)
+    cw2.query("insert into p2d values (6, 'f')")
+    cw2.close()
+    time.sleep(0.3)
+    cp2.terminate()
+    err2 = cp2.communicate(timeout=10)[1]
+    commits2 = read_log(_d / "log")
+    check("P2d: a restart reads the tip back and the chain goes on (next seq 4, parent the old tip)", "next seq 4" in err2 and len(commits2) == 5 and commits2[4][1] == 4 and commits2[4][2] == [pyverify.hashlib.sha256(b"cancho-db/commit/v1\x00" + commits2[3][4]).digest()], err2)
+    out = subprocess.run(["python3", str(ROOT_DIR / "tools" / "verify.py"), str(_d / "log")] + argv, capture_output=True, text=True).stdout.strip()
+    check("P2d: and the longer log verifies", out.startswith("ok commits=5 branches=1"), out)
+direct("drop table if exists p2d")
+
 check("the proxy is still alive after all of it", proxy.poll() is None)
 direct("drop table if exists p0_e2e, p0_big cascade")
 proxy.terminate()
-print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0, P1d, P2a and P2c checks passed")
+print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0, P1d, P2a, P2c and P2d checks passed")
 sys.exit(1 if FAILED else 0)

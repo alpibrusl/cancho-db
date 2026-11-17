@@ -14,6 +14,7 @@ import cdb.build;
 import cdb.store;
 import cdb.upstream;
 import cdb.shared;
+import cdb.commitpath;
 
 // `proxy` -- slice P0 of the cancho-db proxy (`docs/m1-proxy.md`): the front door in front of PostgreSQL.
 //
@@ -518,50 +519,10 @@ fn pair_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core,
 
 // ------------------------------------------------------------------------------------------------ transactions
 
-// Run `sql` (one simple query of the proxy's own: BEGIN, COMMIT, ROLLBACK) on upstream connection `b` and wait, bounded, for its
-// ReadyForQuery. 0 if it ran, 1 if PostgreSQL answered with an error, -1 if the connection failed or was silent. Used only
-// where the upstream is idle and nothing else is owed from it.
-fn upstream_exec[&t, &c, &q](tab: &!t conns.Table, core: &!c shared.Core, b: int, sql: &q [byte]) -> [conn_read, conn_write, poll] int {
-    var sent = false;
-    region r {
-        let msg = alloc_slice[r](len(sql) + 8, byte_of(0));
-        let ln = len(sql) + 5;
-        msg[0] = byte_of('Q');
-        msg[1] = byte_of(ln / 16777216 % 256);
-        msg[2] = byte_of(ln / 65536 % 256);
-        msg[3] = byte_of(ln / 256 % 256);
-        msg[4] = byte_of(ln % 256);
-        var i = 0;
-        while i < len(sql) {
-            msg[5 + i] = sql[i];
-            i = i + 1;
-        }
-        msg[5 + len(sql)] = byte_of(0);
-        sent = upstream.write_all(tab, b, msg[0..len(sql) + 6]);
-    }
-    if !sent {
-        return 0 - 1;
-    }
-    let si = contents(core.snapin);
-    let n = upstream.read_until_ready(tab, b, si, shared.login_ms());
-    if n < 0 {
-        return 0 - 1;
-    }
-    var pos = 0;
-    var errored = 0;
-    while pos + 5 <= n {
-        if int_of(si[pos]) == 'E' {
-            errored = 1;
-        }
-        pos = pos + 1 + commit.be(si, pos + 1, 4);
-    }
-    return errored;
-}
-
 // The statement of client `client` has finished on upstream connection `k`, which the proxy had wrapped in a transaction of its
 // own (the client was in autocommit): make it permanent and tell the client, now. The held `CommandComplete` messages are
 // released only if the commit succeeded; a statement that failed is rolled back and the client has the error already.
-fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, client: int) -> [conn_read, conn_write, poll] int {
+fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, client: int) -> [conn_read, conn_write, poll, file_write] int {
     let st = contents(core.state);
     let hd = contents(core.hold);
     let q = shared.stride() * k;
@@ -572,9 +533,10 @@ fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int
     st[cp + 17] = 0;
     var r = 0;
     if failed {
-        r = upstream_exec(tab, core, k, "ROLLBACK");
+        r = commitpath.upstream_exec(tab, core, k, "ROLLBACK");
+        commitpath.reset(core, client);
     } else {
-        r = upstream_exec(tab, core, k, "COMMIT");
+        r = commitpath.conclude(tab, core, client);
     }
     if r < 0 {
         shared.finish(tab, core, k);
@@ -583,6 +545,11 @@ fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int
     if !failed && r == 1 {
         st[cp + 18] = 0;
         shared.answer_error(tab, core, client, 73, "40000", "commit-failed", "the database refused to commit the statement");
+        return 0;
+    }
+    if !failed && r == 2 {
+        st[cp + 18] = 0;
+        shared.answer_error(tab, core, client, 73, "58000", "log-unavailable", "the commit could not be written to the log, so it was rolled back");
         return 0;
     }
     if !failed && st[cp + 18] > 0 {
@@ -600,7 +567,7 @@ fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int
 // The upstream side `k` of a pair has sent `got` bytes (in `rbuf`). Messages are relayed to the client as they come, in pieces if
 // need be, except the ones the proxy acts on: `CommandComplete` (held while the statement is an autocommit one) and
 // `ReadyForQuery` (which ends it, and carries the transaction status the proxy keeps).
-fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, got: int) -> [conn_read, conn_write, poll] int {
+fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, got: int) -> [conn_read, conn_write, poll, file_write] int {
     let st = contents(core.state);
     let rb = contents(core.rbuf);
     let sb = contents(core.sbuf);
@@ -701,7 +668,7 @@ fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, got
 }
 
 // Upstream connection `k` of a pair can be read.
-fn server_read[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [conn_read, conn_write, poll] int {
+fn server_read[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [conn_read, conn_write, poll, file_write] int {
     let rb = contents(core.rbuf);
     match conns.read(tab, k, rb[0..shared.chunk()]) {
         Received::Data(got) => {
@@ -720,7 +687,7 @@ fn server_read[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [
 }
 
 // The poller said connection `k` is ready.
-fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: &k Clock, k: int, readiness: int) -> [conn_read, conn_write, poll, clock] int {
+fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: &k Clock, k: int, readiness: int) -> [conn_read, conn_write, poll, clock, file_write] int {
     let st = contents(core.state);
     let p = shared.stride() * k;
     if readiness % 4 >= 2 && st[p + 2] > 0 {
@@ -851,14 +818,14 @@ fn snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core,
 // doing what it means upstream. (A COMMIT of a failed transaction is a ROLLBACK, as in PostgreSQL.) `BEGIN` inside a transaction is
 // an error here where PostgreSQL only warns, and COMMIT or ROLLBACK with none open is answered with no warning: both stated in
 // docs/m1-commit-path.md.
-fn transaction_control[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, kind: int) -> [conn_read, conn_write, poll] int {
+fn transaction_control[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, kind: int) -> [conn_read, conn_write, poll, file_write] int {
     let st = contents(core.state);
     let p = shared.stride() * k;
     let b = st[p + 1];
     let ts = st[p + 16];
     if kind == 1 {
         if ts == 0 {
-            let r = upstream_exec(tab, core, b, "BEGIN");
+            let r = commitpath.upstream_exec(tab, core, b, "BEGIN");
             if r != 0 {
                 shared.answer_error(tab, core, k, 73, "08006", "upstream-unavailable", "the database could not begin a transaction");
                 return 0;
@@ -880,17 +847,22 @@ fn transaction_control[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: i
         }
         return 0;
     }
-    var sql = "ROLLBACK";
-    if kind == 2 && ts == 1 {
-        sql = "COMMIT";
+    let committing = kind == 2 && ts == 1;
+    var r = 0;
+    if committing {
+        r = commitpath.conclude(tab, core, k);
+    } else {
+        r = commitpath.upstream_exec(tab, core, b, "ROLLBACK");
+        commitpath.reset(core, k);
     }
-    let r = upstream_exec(tab, core, b, sql);
     st[p + 16] = 0;
     if r < 0 {
         shared.finish(tab, core, k);
     } else if r == 1 {
         shared.answer_error(tab, core, k, 73, "40000", "commit-failed", "the database refused to commit the transaction");
-    } else if kind == 2 && ts == 1 {
+    } else if r == 2 {
+        shared.answer_error(tab, core, k, 73, "58000", "log-unavailable", "the commit could not be written to the log, so it was rolled back");
+    } else if committing {
         shared.answer_tag(tab, core, k, 'I', "COMMIT");
     } else {
         shared.answer_tag(tab, core, k, 'I', "ROLLBACK");
@@ -905,7 +877,8 @@ fn refused_query[&t, &c, &v](tab: &!t conns.Table, core: &!c shared.Core, k: int
     let p = shared.stride() * k;
     let ts = st[p + 16];
     if ts == 1 {
-        upstream_exec(tab, core, st[p + 1], "ROLLBACK");
+        commitpath.upstream_exec(tab, core, st[p + 1], "ROLLBACK");
+        commitpath.reset(core, k);
         st[p + 16] = 2;
     }
     var status = 'E';
@@ -913,6 +886,29 @@ fn refused_query[&t, &c, &v](tab: &!t conns.Table, core: &!c shared.Core, k: int
         status = 'I';
     }
     shared.answer_error(tab, core, k, status, guard.sqlstate(vd), guard.tag(vd), "the statement was not run");
+    return 0;
+}
+
+// A statement the guard allowed but a commit cannot hold (`commitpath.add`'s 1 and 2): refused as a failed statement is, which aborts a
+// transaction it is in.
+fn refuse_unrecordable[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, why: int) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    let ts = st[p + 16];
+    if ts == 1 {
+        commitpath.upstream_exec(tab, core, st[p + 1], "ROLLBACK");
+        st[p + 16] = 2;
+    }
+    commitpath.reset(core, k);
+    var status = 'E';
+    if ts == 0 {
+        status = 'I';
+    }
+    if why == 1 {
+        shared.answer_error(tab, core, k, status, "54000", "transaction-too-large", "the transaction is larger than one commit can record");
+    } else {
+        shared.answer_error(tab, core, k, status, "0A000", "nondeterministic", "now() and the like are not recorded in a commit yet, so the statement was not run");
+    }
     return 0;
 }
 
@@ -928,7 +924,7 @@ fn run_query[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, rl: in
         return 0;
     }
     if ts == 0 {
-        let r = upstream_exec(tab, core, b, "BEGIN");
+        let r = commitpath.upstream_exec(tab, core, b, "BEGIN");
         if r != 0 {
             shared.answer_error(tab, core, k, 73, "08006", "upstream-unavailable", "the database could not begin a transaction");
             return 0;
@@ -957,7 +953,7 @@ fn run_query[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, rl: in
 
 // Client `k` has a whole simple query waiting: ask the catalog, run the guard, and either send PostgreSQL the guard's rendering
 // or tell the client it is refused.
-fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll, file_write] conns.Table {
     let st = contents(core.state);
     let mb = contents(core.mbuf);
     let p = shared.stride() * k;
@@ -996,9 +992,22 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core
                 if verdict != 0 {
                     refused_query(tw, core, k, vd);
                 } else if vd[6] > 0 {
+                    if vd[6] == 1 && ts == 0 {
+                        commitpath.begin(core, k, contents(core.snap)[0..snap_len]);
+                    }
                     transaction_control(tw, core, k, vd[6]);
-                } else {
+                } else if ts == 2 {
                     run_query(tw, core, k, vd[3]);
+                } else {
+                    if ts == 0 {
+                        commitpath.begin(core, k, contents(core.snap)[0..snap_len]);
+                    }
+                    let added = commitpath.add(core, k, vd[7], ids, irs[0..vd[8]], effs[0..vd[9]]);
+                    if added == 0 {
+                        run_query(tw, core, k, vd[3]);
+                    } else {
+                        refuse_unrecordable(tw, core, k, added);
+                    }
                 }
             }
         }
@@ -1014,7 +1023,7 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core
 }
 
 // Serve every client that has a whole simple query waiting, until none has.
-fn serve_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+fn serve_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll, file_write] conns.Table {
     var table = tab;
     var again = true;
     while again {
@@ -1047,7 +1056,7 @@ fn sweep[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: &k Clock)
     return 0;
 }
 
-fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), clk: &k Clock, host: &n [byte], port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, conn_accept, conn_read, conn_write, net_out(""), poll, clock] int {
+fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), clk: &k Clock, host: &n [byte], port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, conn_accept, conn_read, conn_write, net_out(""), poll, clock, file_write] int {
     match poller_new() {
         Polling::Ok(p) => {
             var poller = p;
@@ -1061,6 +1070,7 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
                 var ready = 0 - 1;
                 borrow mut core as &!cw in {
                     ready = poller_wait(cw.poller, contents(cw.events), 1000);
+                    contents(cw.aux)[1] = clock_unix_ms(clk);
                 }
                 var j = 0;
                 while j < ready {
@@ -1149,7 +1159,7 @@ fn copy_in[&d, &s](dst: &!d [byte], at: int, text: &s [byte]) -> [] int {
 }
 
 // Listen on `listen_port` and serve until the loop ends.
-fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock: &k Clock, host: &n [byte], listen_port: int, server_port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, io_write, conn_accept, conn_read, conn_write, net_out(""), net_in(""), poll, clock] int {
+fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock: &k Clock, host: &n [byte], listen_port: int, server_port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, io_write, conn_accept, conn_read, conn_write, net_out(""), net_in(""), poll, clock, file_write] int {
     var status = 3;
     match tcp_listen(net, listen_port, 1024, 0) {
         Listening::Ok(l) => {

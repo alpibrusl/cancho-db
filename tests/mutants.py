@@ -392,6 +392,15 @@ LOGIN = [
 PROXY = [
     # ---- the event loop (proxy/proxy.cho), judged by tests/proxy_e2e.py against a real PostgreSQL
     ("proxy: the signing key is not required", "proxy/proxy.cho", "    if !keyed {\n", "    if false {\n"),
+    ("proxy: a write is not prepared first", "src/commitpath.cho", "            if wrote {\n                step = upstream_exec(", "            if false {\n                step = upstream_exec("),
+    ("proxy: a read is prepared too", "src/commitpath.cho", "if kind >= 1 && kind <= 3 {", "if kind >= 0 && kind <= 3 {"),
+    ("proxy: the chain does not advance", "src/commitpath.cho", "chain[0] = chain[0] + 1;", "chain[0] = chain[0];"),
+    ("proxy: the tip is not remembered", "src/commitpath.cho", "                        tip[j] = ident[j];", "                        tip[j] = tip[j];"),
+    ("proxy: the token is never stored", "src/commitpath.cho", "            if ai[8 * k + 4] == 0 {\n                tl = build.store_record(tr, 0, tk);", "            if false {\n                tl = build.store_record(tr, 0, tk);"),
+    ("proxy: the statements are not recorded", "src/commitpath.cho", "build.put_bytes(acc[base + 2048..base + 18432], ai[8 * k + 1], irs);", "ai[8 * k + 1] = ai[8 * k + 1] + 0;"),
+    ("proxy: the effects are not recorded", "src/commitpath.cho", "build.put_bytes(acc[base + 18432..base + 22528], ai[8 * k + 2], effs);", "ai[8 * k + 2] = ai[8 * k + 2] + 0;"),
+    ("proxy: nondeterminism is committed unrecorded", "src/commitpath.cho", "        if kind == 4 {\n            return 2;", "        if kind == 4 {\n            return 0;"),
+    ("proxy: the schema is not the transaction's own", "src/commitpath.cho", "crypto.sha256(snapshot, acc[k * shared.acc_stride() + 22528..k * shared.acc_stride() + 22560]);", "crypto.sha256(\"\", acc[k * shared.acc_stride() + 22528..k * shared.acc_stride() + 22560]);"),
     ("proxy: non-loopback clients are served", "proxy/proxy.cho", "if !is_loopback(ct, a) {", "if false {"),
     ("proxy: the token is not checked", "proxy/proxy.cho", "if rule != login.login_ok() {", "if false {"),
     ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > shared.hello_ms()", "false"),
@@ -403,18 +412,18 @@ PROXY = [
     ("proxy: a refused login still opens the upstream", "proxy/proxy.cho", "refuse(tab, core, k, \"FATAL\", login.sqlstate(rule), login.rule_name(rule), \"the capability token was refused\");", "st[p] = 5;"),
     ("proxy: protocol versions are not checked", "proxy/proxy.cho", "} else if kind == login.err_version() {", "} else if false {"),
     # ---- the query path (P1d-2)
-    ("proxy: the rendering is not what is sent", "proxy/proxy.cho", "                    run_query(tw, core, k, vd[3]);", "                    run_query(tw, core, k, 0);"),
+    ("proxy: the rendering is not what is sent", "proxy/proxy.cho", "                    if added == 0 {\n                        run_query(tw, core, k, vd[3]);", "                    if added == 0 {\n                        run_query(tw, core, k, 0);"),
     ("proxy: a refused query is sent upstream anyway", "proxy/proxy.cho", "                if verdict != 0 {\n                    refused_query(tw, core, k, vd);", "                if false {\n                    refused_query(tw, core, k, vd);"),
     ("proxy: a Parse message is a protocol violation", "proxy/proxy.cho", "} else if ty == 'P' || ty == 'B' ||", "} else if ty == 'B' ||"),
     ("proxy: messages after an extended-protocol error are answered too", "proxy/proxy.cho", "                        st[p + 15] = 1;\n                    }\n                    shared.consume(core, k, ln + 1);", "                        st[p + 15] = 0;\n                    }\n                    shared.consume(core, k, ln + 1);"),
     ("proxy: Sync is not answered", "proxy/proxy.cho", "                            let n = login.ready_for_query(z, 'I');\n                            shared.send(tab, core, k, z[0..n]);", "                            let n = login.ready_for_query(z, 'I');"),
     # ---- transactions (P2a)
-    ("proxy: an autocommit statement is not wrapped in a transaction", "proxy/proxy.cho", "    if ts == 0 {\n        let r = upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            shared.answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[shared.stride() * b + 21] = 1;", "    if false {\n        let r = upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            shared.answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[shared.stride() * b + 21] = 1;"),
+    ("proxy: an autocommit statement is not wrapped in a transaction", "proxy/proxy.cho", "    if ts == 0 {\n        let r = commitpath.upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            shared.answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[shared.stride() * b + 21] = 1;", "    if false {\n        let r = commitpath.upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            shared.answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[shared.stride() * b + 21] = 1;"),
     ("proxy: CommandComplete is not held in autocommit", "proxy/proxy.cho", "                        if ty == 'C' && st[q + 21] == 1 {", "                        if false {"),
-    ("proxy: a failed autocommit statement is committed", "proxy/proxy.cho", "    if failed {\n        r = upstream_exec(tab, core, k, \"ROLLBACK\");", "    if false {\n        r = upstream_exec(tab, core, k, \"ROLLBACK\");"),
+    ("proxy: a failed autocommit statement is committed", "proxy/proxy.cho", "    if failed {\n        r = commitpath.upstream_exec(tab, core, k, \"ROLLBACK\");", "    if false {\n        r = commitpath.upstream_exec(tab, core, k, \"ROLLBACK\");"),
     ("proxy: the server's E status does not fail the client's transaction", "proxy/proxy.cho", "                                } else {\n                                    st[cp + 16] = 2;\n                                }", "                                } else {\n                                    st[cp + 16] = 1;\n                                }"),
-    ("proxy: a refused statement leaves the transaction open", "proxy/proxy.cho", "        upstream_exec(tab, core, st[p + 1], \"ROLLBACK\");\n        st[p + 16] = 2;", "        upstream_exec(tab, core, st[p + 1], \"ROLLBACK\");\n        st[p + 16] = 1;"),
-    ("proxy: COMMIT does not commit", "proxy/proxy.cho", "    if kind == 2 && ts == 1 {\n        sql = \"COMMIT\";\n    }", "    if false {\n        sql = \"COMMIT\";\n    }"),
+    ("proxy: a refused statement leaves the transaction open", "proxy/proxy.cho", "        commitpath.upstream_exec(tab, core, st[p + 1], \"ROLLBACK\");\n        commitpath.reset(core, k);\n        st[p + 16] = 2;", "        commitpath.upstream_exec(tab, core, st[p + 1], \"ROLLBACK\");\n        commitpath.reset(core, k);\n        st[p + 16] = 1;"),
+    ("proxy: COMMIT does not commit", "proxy/proxy.cho", "    let committing = kind == 2 && ts == 1;", "    let committing = false;"),
     ("proxy: a statement runs in a failed transaction", "proxy/proxy.cho", "    if ts == 2 {\n        shared.answer_error(tab, core, k, 'E', \"25P02\"", "    if false {\n        shared.answer_error(tab, core, k, 'E', \"25P02\""),
     ("proxy: queries are served while a statement is in flight", "proxy/proxy.cho", " && st[shared.stride() * k + 17] == 0 {", " {"),
     ("proxy: BEGIN inside a transaction is forgiven", "proxy/proxy.cho", "        } else if ts == 1 {\n            shared.answer_error(tab, core, k, 'T', \"25001\"", "        } else if ts == 3 {\n            shared.answer_error(tab, core, k, 'T', \"25001\""),
@@ -455,7 +464,7 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False

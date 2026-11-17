@@ -8,6 +8,7 @@ import std.addr;
 import std.bytes;
 import cdb.commit;
 import cdb.login;
+import cdb.store;
 
 // The proxy's shared state and the helpers every part of it uses (split out of `proxy.cho`, P2d-2, so the commit path can be a module
 // of its own): the limits, the layout of a connection's slot in `Core.state`, `Core` itself, sending to a connection through its
@@ -112,8 +113,30 @@ pub res struct Store {
     chain: Box[[int]],
 }
 
+// What a transaction has done so far, per client slot `k` (P2d-3): `acc` at `k * acc_stride()`: the ids of its statements (32 bytes each, at most
+// `acc_stmts()`), their IR as store records (at most `acc_irs()` bytes), their effects (at most `acc_effs()`) and the hash of the schema it began with;
+// `acci` at `8 * k`: [0] statements, [1] bytes of IR records, [2] bytes of effects, [3] 1 once any effect is a write, a ddl or a call, [4] 1 once this
+// client's token is in the token store, [5] 1 if the schema hash is set.
+pub fn acc_stmts() -> [] int {
+    return 64;
+}
+
+pub fn acc_irs() -> [] int {
+    return 16384;
+}
+
+pub fn acc_effs() -> [] int {
+    return 4096;
+}
+
+pub fn acc_stride() -> [] int {
+    return 32 * 64 + 16384 + 4096 + 32;
+}
+
 pub res struct Core {
     store: Store,
+    acc: Box[[byte]],
+    acci: Box[[int]],
     poller: Poller,
     events: Box[[int]],
     state: Box[[int]],
@@ -342,13 +365,15 @@ pub fn consume[&c](core: &!c Core, k: int, n: int) -> [] int {
 
 // A `Core` for `slots` connections, around the poller and the configuration (`cfg` and `cfgi`: see `Core`).
 pub fn new_core[&h](heap: &!h Heap, poller: Poller, cfg: Box[[byte]], cfgi: Box[[int]], kept: Store, slots: int) -> [heap] Core {
-    return Core { store: kept, poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 4, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)) };
+    return Core { store: kept, acc: box_slice(heap, slots * acc_stride() + acc_stride(), byte_of(0)), acci: box_slice(heap, 8 * slots + 8, 0), poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 4, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)) };
 }
 
 // Release everything a `Core` holds.
 pub fn drop_core[&h](heap: &!h Heap, core: Core) -> [heap] int {
-    let Core { store, poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf } = core;
+    let Core { store, acc, acci, poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf } = core;
     drop_store(heap, store);
+    unbox_slice(heap, acc);
+    unbox_slice(heap, acci);
     poller_close(poller);
     unbox_slice(heap, events);
     unbox_slice(heap, state);
@@ -404,4 +429,9 @@ pub fn drop_store[&h](heap: &!h Heap, kept: Store) -> [heap] int {
     unbox_slice(heap, tip);
     unbox_slice(heap, chain);
     return 0;
+}
+
+// Append one commit through the open files (`store.append`'s order: token, statements, then the log, each synced).
+pub fn store_append[&s, &x, &y, &z](kept: &!s Store, token_rec: &x [byte], stmt_recs: &y [byte], log_rec: &z [byte]) -> [file_write] int {
+    return store.append(kept.log, kept.tokens, kept.stmts, token_rec, stmt_recs, log_rec);
 }
