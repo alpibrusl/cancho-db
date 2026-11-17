@@ -341,6 +341,7 @@ and the three verifiers accept the files. The log that cannot be written is a fi
 ignored): the client gets `58000`, PostgreSQL holds nothing and no prepared transaction, a read is refused the same way, and the torn record the write left is
 cut at the next start.
 
-Not tested, stated: **recovery while running** (the flag the proxy sets when it loses the upstream after a log append, which makes the loop settle at its next
-turn, has code and no test); **`max_prepared_transactions = 0`** refusing to start (the throwaway server has it above 0); a torn tail **and** a prepared
+**Recovery while running** is tested too (found by CI: the mutant "a commit's id is not in the recovery table" survived, because the table is read only by a live recovery): the tee `drop`s the connection at `COMMIT PREPARED`, so the proxy loses its upstream after the log has the commit; the client's connection is closed, the running proxy settles the prepared transaction itself at its next turn by committing it (the log has it), and the next commit continues the chain.
+
+Not tested, stated: **`max_prepared_transactions = 0`** refusing to start (the throwaway server has it above 0); a torn tail **and** a prepared
 transaction together (the two repairs are tested apart); more than 64 prepared transactions in one pass (the rest wait for the next).

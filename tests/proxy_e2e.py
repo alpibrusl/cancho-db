@@ -874,6 +874,39 @@ time.sleep(0.5)
 fp3.terminate()
 err_full = fp3.communicate(timeout=10)[1]
 check("... its torn record (%d bytes past the header) is cut at the next start" % (torn - 40), (torn == 40 or "torn tail" in err_full) and Path(fdir, "log").stat().st_size == 40, err_full)
+
+# the upstream connection is lost after the log has the commit and before PostgreSQL does: the RUNNING proxy settles it, without a restart
+direct("delete from p2f")
+ldir = Path(_scratch, "w_live")
+ldir.mkdir()
+lt = Tee(PG_PORT)
+lp_, lport_ = start_logged(ldir, Path(_scratch, "key"), upstream=lt.port)
+lt.fault("COMMIT PREPARED", "drop", None)
+try:
+    lw = Wire(lport_, good)
+    lw.query("insert into p2f values (77, 'v')")
+    live_closed = False
+except (EOFError, ConnectionError, OSError):
+    live_closed = True
+settled = False
+for _ in range(60):
+    if prepared_xacts() == 0:
+        settled = True
+        break
+    time.sleep(0.25)
+check("P2d-4 live: the client's connection was closed, and the running proxy settled the prepared transaction itself by committing it (the log has it)",
+      live_closed and settled and rows_of() == "77" and commits_in(ldir) == 1 and lp_.poll() is None, "%s %s %s %s" % (live_closed, settled, rows_of(), commits_in(ldir)))
+lw2 = Wire(lport_, good)
+lw2.query("insert into p2f values (78, 'w')")
+lw2.close()
+time.sleep(0.3)
+lp_.terminate()
+lp_.communicate(timeout=10)
+check("P2d-4 live: and it goes on, the chain unbroken (two commits, the second after the first)", commits_in(ldir) == 2 and rows_of() == "77,78", "%s %s" % (commits_in(ldir), rows_of()))
+lt.stop()
+argv = ["--root", ROOT, "--tokens", str(ldir / "tokens"), "--stmts", str(ldir / "stmts")]
+out = subprocess.run(["python3", str(ROOT_DIR / "tools" / "verify.py"), str(ldir / "log")] + argv, capture_output=True, text=True).stdout.strip()
+check("P2d-4 live: and the files verify at L2 and IR", out.startswith("ok commits=2"), out)
 direct("drop table if exists p2f")
 
 check("the proxy is still alive after all of it", proxy.poll() is None)

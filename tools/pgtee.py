@@ -26,7 +26,7 @@ class Tee:
     def fault(self, prefix, when, action):
         """Run `action` (kill the proxy) once, at the first Query whose text starts with `prefix`. `when` is "before": the Query is
         dropped, never reaching the server; "reply": the Query is forwarded and the server's answer to it is dropped, never reaching
-        the proxy; "after": the Query is forwarded and `action` runs at once. Each reaches one window of docs/m1-commit-path.md section 4."""
+        the proxy; "after": the Query is forwarded and `action` runs at once; "drop": the Query is dropped and the connection (both ends) closed, `action` unused. Each reaches one window of docs/m1-commit-path.md section 4."""
         with self.lock:
             self.faults.append([prefix, when, action])
 
@@ -149,6 +149,14 @@ class Tee:
                     self._note("Query", text)
                     f = self._fault_for(text)
                     if f is not None:
+                        if f[1] == "drop":
+                            # the connection to the server is lost, the proxy is not: the Query never arrives and both ends are closed
+                            for sock in (u, c):
+                                try:
+                                    sock.shutdown(socket.SHUT_RDWR)
+                                except OSError:
+                                    pass
+                            return
                         if f[1] == "before":
                             f[2]()
                             continue
