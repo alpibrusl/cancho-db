@@ -409,7 +409,7 @@ PROXY = [
     ("proxy: SSLRequest is not answered N", "proxy/proxy.cho", "let no = alloc_slice[r](1, byte_of('N'));", "let no = alloc_slice[r](1, byte_of('S'));"),
     ("proxy: the client's application_name is dropped", "proxy/proxy.cho", "if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {", "if false {"),
     ("proxy: the upstream role is the client's", "src/upstream.cho", "\n    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "\n    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);"),
-    ("proxy: a refused login still opens the upstream", "proxy/proxy.cho", "refuse(tab, core, k, \"FATAL\", login.sqlstate(rule), login.rule_name(rule), \"the capability token was refused\");", "st[p] = 5;"),
+    ("proxy: a refused login still opens the upstream", "proxy/proxy.cho", "shared.refuse(tab, core, k, \"FATAL\", login.sqlstate(rule), login.rule_name(rule), \"the capability token was refused\");", "st[p] = 5;"),
     ("proxy: protocol versions are not checked", "proxy/proxy.cho", "} else if kind == login.err_version() {", "} else if false {"),
     # ---- the query path (P1d-2)
     ("proxy: the rendering is not what is sent", "proxy/proxy.cho", "                    if added == 0 {\n                        run_query(tw, core, k, vd[3]);", "                    if added == 0 {\n                        run_query(tw, core, k, 0);"),
