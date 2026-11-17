@@ -264,3 +264,32 @@ handles). The authority pin changed on purpose (it now names `fs_read("")`, `dir
 `startup_msg`, `write_all`, `read_until_ready`. `proxy.cho` is 1,741 lines. The end-to-end checks and the authority pin are unchanged;
 one proxy mutant's anchor moved with the code it mutates (and now swaps the role for the database name, since the hello
 buffer it used to name is not visible there).
+
+### 5.6 P2d, planned: what the commit sequence needs that does not exist yet
+
+Reading the proxy against D3 to D11 shows that P2d is five pieces, not one. Each is its own commit with its own gate, in this order.
+
+1. **The guard hands over what a commit is made of.** Today `guard.check` decides and renders, then throws away what it computed. The
+   commit needs, per statement, the **IR bytes** (the statement store holds them; their `ir.id` is what the commit names) and the
+   **inferred effects** (the commit's `effects` is their union). `guard.check` gains two output slices: the IR of each allowed statement
+   (a `u32` length, the bytes, one after another, with their ids in a third slice) and the effects, encoded as the commit encodes them,
+   repeats allowed (`build.encode` sorts and de-duplicates). Gate: `tests/guard_check.py` compares the ids and the effect set with
+   hand-written expectations, and the verifier's `ir.id` recomputes each id from the bytes handed over. Size limits are stated and refused
+   with a tag (`transaction-too-large`), not truncated.
+2. **The proxy keeps the store, and `Core` moves out of `proxy.cho`.** The three files, the branch's tip and next `seq`, and the
+   signing seed live in `Core`, which is `res` and may hold `File`s. **The log becomes mandatory:** a proxy without a log would be a
+   proxy that does not do what it is for, and keeping an unlogged mode means dummy files in `Core`. P0 to P2a tests get a temporary
+   log directory from `start_proxy`. `Core` and the per-slot state helpers (`stride()`, the slot layout, `send`, `answer_*`) move to
+   `src/core.cho` so that the commit path can be a module of its own (`src/commitpath.cho`) and `proxy.cho` stays under its ceiling.
+3. **The accumulator and the sequence.** Per client, while a transaction is open: the IR bytes and ids, the effects, whether any is a
+   write, a `ddl` or a `call`, and the hash of the schema snapshot read before the first statement. At the end of the transaction (the
+   client's `COMMIT`, or the end of an autocommit statement): build the commit; for a write `PREPARE TRANSACTION 'cdb:<id>'`; append (D10's
+   order); `COMMIT PREPARED`; advance the tip; release the held answer. A read appends first, then `COMMIT`s. Gate: after a run
+   of mixed statements the log and the stores are accepted by the cancho, Python and Go verifiers **at L2 and IR** (tokens, effects and
+   statements checked), the commits are in the order the statements were run, and PostgreSQL holds exactly the rows the commits name.
+4. **Recovery and the fault table of section 5.** Recovery needs the ids the log holds (a bounded table, 4 MiB: 131,072 commits, stated, refused
+   beyond), the catalog connection at startup, and `pg_prepared_xacts`. The `tools/pgtee.py` kills of section 5, each followed by a restart and
+   an equality check of rows and commits; the two mutants "roll back what the log has" and "commit what it lacks".
+5. **`now()`.** The `select ... extract(epoch from now())` inside the transaction before `PREPARE` (F7), the value recorded in `nondet`.
+
+Not in P2d: concurrency (D6), more than one branch, `changes`/`state`/`code`/`checks` (D9).
