@@ -620,7 +620,15 @@ fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, got
                         let whole = sb[k * shared.sbuf_max()..k * shared.sbuf_max() + ln + 1];
                         st[q + 19] = 0;
                         if ty == 'C' && st[q + 21] == 1 {
-                            // held: the client is told only when the statement is permanent
+                            // held: the client is told only when the statements are permanent. Only the NEWEST tag is held: an older one is
+                            // released now, in its place (a message of two statements with rows is `T D C T D C Z`, not `T D T D C C Z`)
+                            if st[cp + 18] > 0 {
+                                if !shared.send(tab, core, client, hd[client * shared.hold_max()..client * shared.hold_max() + st[cp + 18]]) {
+                                    shared.finish(tab, core, k);
+                                    return 0;
+                                }
+                                st[cp + 18] = 0;
+                            }
                             if st[cp + 18] + len(whole) > shared.hold_max() {
                                 shared.finish(tab, core, k);
                                 return 0;
@@ -655,6 +663,14 @@ fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, got
                 } else {
                     if ty == 'E' && st[q + 21] == 1 {
                         st[q + 22] = 1;
+                    }
+                    if st[q + 21] == 1 && st[cp + 18] > 0 {
+                        // anything that follows a held tag releases it first, so the client sees the server's order
+                        if !shared.send(tab, core, client, hd[client * shared.hold_max()..client * shared.hold_max() + st[cp + 18]]) {
+                            shared.finish(tab, core, k);
+                            return 0;
+                        }
+                        st[cp + 18] = 0;
                     }
                     if !shared.send(tab, core, client, sb[k * shared.sbuf_max()..k * shared.sbuf_max() + 5]) {
                         shared.finish(tab, core, k);
