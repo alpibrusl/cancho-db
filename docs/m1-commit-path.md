@@ -196,7 +196,7 @@ Each is one change with its own gate.
 | **P2a** | **built**: server-to-client framing; transaction tracking; `BEGIN`/`COMMIT`/`ROLLBACK` parsed and answered by the proxy's own state; autocommit wrapped in a transaction; held `CommandComplete`/`ReadyForQuery`; **no log yet** | `psql` transactions, rollbacks, errors inside a transaction (`25P02`), statuses `I`/`T`/`E` on the wire; refused options and mixed messages; the wire tee shows the exact upstream messages; mutants |
 | **P2b** | **built** (section 5.3): the commit builder (`src/build.cho`, sans-io: encode, id, sign) and the store encoders | bytes equal an independent Python encoder's over hand-written commits; the verifier accepts them; mutants; **the signing is checked by the three verifiers** |
 | **P2c** | **store built** (section 5.4): the log directory, the key, append and fsync, the lock, the startup scan, the torn-tail repair | restart reads the log back; torn tails; a second proxy refused; `cancho authority` pinned |
-| **P2d** | the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
+| **P2d** | **3 of 5 built** (section 5.8): the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
 | **P2e** | the cost, measured, and the claims | `select` and `insert` latency through the proxy vs direct on the same machine, with the fsyncs on |
 
 ## 7. Risks and what needs the owner's decision
@@ -301,3 +301,21 @@ is 1,413 lines and the commit path can be a module of its own. `Core` now holds 
 seed, the branch's tip and the next `seq` (from the scan). The log is mandatory (nine arguments after the program name); the
 P0-P2a end-to-end checks get a log directory of their own per proxy. Nothing appends yet. The proxy mutant "the log directory is not opened" went with the
 optional mode; the two P2c startup mutants that remain are "the signing key is not required" and the checks of section 5.4.
+
+### 5.8 P2d-3 as built: the sequence
+
+`src/commitpath.cho` holds it. Per client slot the proxy keeps (in `Core`, `acc` and `acci`) the ids, the IR records and the effects of the
+statements the guard has allowed in the open transaction, whether any effect is a write, a `ddl` or a `call`, and the SHA-256 of the schema snapshot
+read when the transaction began. A transaction is at most 64 statements, 16 KiB of IR and 4 KiB of effects: more is refused `54000`
+`transaction-too-large` and aborts the transaction as any refused statement does. When the transaction ends the commit is built (parents: the
+branch's tip; `seq`: the next; token: the id of the whole token; principal: the token's; time: the clock at the **start of that pass of the event loop**, not
+at the append, which is a few milliseconds earlier than the fsync; `changes`, `state` zero hashes; `code`, `nondet` and `checks` empty), signed, and
+made durable: a write is `PREPARE TRANSACTION 'cdb:<id>'`, then token, statements and commit appended and synced, then `COMMIT PREPARED`; a read is the
+appends, then `COMMIT`. The tip moves when the log has the record, whatever PostgreSQL then says. Answers: `40000` if PostgreSQL refuses the
+commit, `58000` if the log cannot be written (and PostgreSQL is rolled back), and a closed connection if the upstream is lost.
+
+What it does **not** do yet, stated so that nothing reads as more than it is: **a log failure is not yet exercised** (the fault table is P2d-4: the code
+for `ROLLBACK PREPARED` exists and has no test); **recovery on restart does not exist** (a prepared transaction left by a crash waits for P2d-4);
+**a statement that reads `now()` or any other nondeterminism is refused** (`0A000` `nondeterministic`) instead of being recorded wrongly, until P2d-5;
+`BEGIN; COMMIT` with no statement writes no commit; a token is appended once per connection (a repeat across connections is a duplicate the store
+permits). **Every `select` is a commit with its fsyncs; the latency is not measured** (P2e).
