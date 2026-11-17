@@ -1301,8 +1301,11 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: 
         }
     } else {
         region r {
-            let vd = alloc_slice[r](8, 0);
-            let verdict = guard.check(heap, contents(core.tokb)[k * token_max()..k * token_max() + st[p + 12]], contents(core.snap)[0..snap_len], sql, contents(core.rend), vd);
+            let vd = alloc_slice[r](16, 0);
+            let ids = alloc_slice[r](512, byte_of(0));
+            let irs = alloc_slice[r](16384, byte_of(0));
+            let effs = alloc_slice[r](8192, byte_of(0));
+            let verdict = guard.check(heap, contents(core.tokb)[k * token_max()..k * token_max() + st[p + 12]], contents(core.snap)[0..snap_len], sql, contents(core.rend), vd, ids, irs, effs);
             borrow mut table as &!tw in {
                 if verdict != 0 {
                     refused_query(tw, core, k, vd);

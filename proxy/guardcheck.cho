@@ -40,6 +40,31 @@ fn hexval(c: int) -> [] int {
     return 0;
 }
 
+// `data` as hex on standard error, after `label`, then a newline.
+fn err_hex[&o, &d](io: &!o Io, label: &static [byte], data: &d [byte]) -> [err_write] int {
+    region r {
+        let hex = alloc_slice[r](2 * len(data) + 1, byte_of(0));
+        var j = 0;
+        while j < len(data) {
+            let v = int_of(data[j]);
+            hex[2 * j] = byte_of(digit(v / 16));
+            hex[2 * j + 1] = byte_of(digit(v % 16));
+            j = j + 1;
+        }
+        io.error_all(io, label);
+        io.error_all(io, hex[0..2 * len(data)]);
+        io.error_all(io, "\n");
+    }
+    return 0;
+}
+
+fn digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args } = split(world);
     release(ffi);
@@ -51,6 +76,12 @@ fn main(world: World) -> [] int {
             text = read_stdin(h, i, text);
         }
         var kind = 0;
+        var parts_n = 0;
+        var parts_irs = 0;
+        var parts_effs = 0;
+        var ids = box_slice(h, 512, byte_of(0));
+        var irs = box_slice(h, 16384, byte_of(0));
+        var effs = box_slice(h, 8192, byte_of(0));
         var code = 0;
         var stmt = 0;
         var written = 0;
@@ -83,11 +114,20 @@ fn main(world: World) -> [] int {
                     sql_start = len(all);
                 }
                 let sql = all[sql_start..len(all)];
-                var vd = box_slice(h, 8, 0);
+                var vd = box_slice(h, 16, 0);
                 borrow tk as &tr in {
                     borrow mut vd as &!rw in {
                         borrow mut out as &!ow in {
-                            kind = guard.check(h, contents(tr)[0..hexlen], schema, sql, contents(ow), contents(rw));
+                            borrow mut ids as &!dw in {
+                                borrow mut irs as &!xw in {
+                                    borrow mut effs as &!fw in {
+                                        kind = guard.check(h, contents(tr)[0..hexlen], schema, sql, contents(ow), contents(rw), contents(dw), contents(xw), contents(fw));
+                                    }
+                                }
+                            }
+                            parts_n = contents(rw)[7];
+                            parts_irs = contents(rw)[8];
+                            parts_effs = contents(rw)[9];
                             code = contents(rw)[1];
                             stmt = contents(rw)[4];
                             written = contents(rw)[3];
@@ -145,7 +185,21 @@ fn main(world: World) -> [] int {
                 io.print_nat(o, stmt);
             }
             io.newline(o);
+            if kind == 0 && parts_n > 0 {
+                borrow ids as &dr in {
+                    err_hex(o, "ids ", contents(dr)[0..32 * parts_n]);
+                }
+                borrow irs as &xr in {
+                    err_hex(o, "irs ", contents(xr)[0..parts_irs]);
+                }
+                borrow effs as &fr in {
+                    err_hex(o, "effs ", contents(fr)[0..parts_effs]);
+                }
+            }
         }
+        unbox_slice(h, ids);
+        unbox_slice(h, irs);
+        unbox_slice(h, effs);
         unbox_slice(h, out);
         unbox_slice(h, tag_text);
         unbox_slice(h, state_text);

@@ -788,6 +788,11 @@ LOWER = [
 
 # ---- the query guard (src/guard.cho, tests/guard_check.py)
 GUARD = [
+    ("guard: a statement's id is not recorded", "src/guard.cho", "ir.id(contents(iw)[0..w], ids[32 * nst..32 * nst + 32]);", "nst = nst + 0;"),
+    ("guard: a statement's IR is not recorded", "src/guard.cho", "irat = build.store_record(irs, irat, contents(iw)[0..w]);", "irat = irat + 0;"),
+    ("guard: a statement's effects are not recorded", "src/guard.cho", "effat = emit_effects(sr, effs, effat);", "effat = effat + 0;"),
+    ("guard: a message of too many statements is cut", "src/guard.cho", "} else if 32 * (nst + 1) > len(ids) {", "} else if false {"),
+    ("guard: an effect's target is dropped", "src/guard.cho", "w = build.put_bytes(effs, w, key[1..len(key)]);", "w = build.put_bytes(effs, w, key[1..1]);"),
     ("guard: denied effects are not checked", "src/guard.cho", "                                                                        if dk >= 0 {", "                                                                        if false {"),
     ("guard: only the first effect is checked", "src/guard.cho", "    while e < map.entries(set) {\n        if map.is_live(set, e) {", "    while e < 1 {\n        if map.is_live(set, e) {"),
     ("guard: a denied effect is allowed to pass", "src/guard.cho", "                denied = token.effect_denied(tk, enc, 0, 1);", "                denied = false;"),
@@ -880,7 +885,7 @@ def run_guard(cancho):
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in GUARD if not only or only in m[0]]
     survivors = []
-    names = ("commit.cho", "token.cho", "lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho")
+    names = ("commit.cho", "token.cho", "lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "build.cho")
     for label, rel, old, new in table:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)

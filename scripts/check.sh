@@ -62,7 +62,7 @@ echo "== name resolution in the lowering against PostgreSQL (42P01, 42703, 42702
 quiet 2 python3 tests/lower_diff.py build/lowercheck 4000 1
 quiet 2 python3 tests/lower_diff.py build/lowercheck 4000 2
 echo "== the query guard: hand-written verdicts over tokens minted outside src/"
-"$CANCHO" build --std proxy/guardcheck.cho src/commit.cho src/token.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho -o build/guardcheck
+"$CANCHO" build --std proxy/guardcheck.cho src/commit.cho src/token.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/build.cho -o build/guardcheck
 quiet 2 python3 tests/guard_check.py build/guardcheck
 echo "== the commit builder: bytes, ids and signatures against an independent encoder; the three verifiers accept its log"
 "$CANCHO" build --std proxy/buildcheck.cho src/build.cho src/commit.cho -o build/buildcheck
