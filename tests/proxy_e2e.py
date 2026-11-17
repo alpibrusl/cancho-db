@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT_DIR / "tools"))
 from pgtee import Tee  # noqa: E402
 
 PG_PORT = int(os.environ.get("PG_E2E_PORT", "5532"))
+DB = os.environ.get("E2E_DB", "postgres")        # the database the proxy is pointed at: a mutant run gives each worker its own
 PROXY = sys.argv[1]
 MINT = [sys.executable, str(ROOT_DIR / "tools" / "mint.py")]
 FAILED = []
@@ -57,13 +58,18 @@ def client_queries(tee):
     return [q for q in tee.queries() if not q.startswith("select c.relname, a.attname")]
 
 
+def client_statements(tee):
+    """What clients' statements became upstream: client_queries without the transaction commands the proxy adds itself."""
+    return [q for q in client_queries(tee) if q not in ("BEGIN", "COMMIT", "ROLLBACK")]
+
+
 def direct(sql):
-    return subprocess.run(["psql", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-c", sql],
+    return subprocess.run(["psql", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-d", DB, "-c", sql],
                           capture_output=True, text=True)
 
 
 def start_proxy(listen, upstream_port, branch="main"):
-    p = subprocess.Popen([PROXY, str(listen), "127.0.0.1", str(upstream_port), branch, ROOT, "postgres", "postgres"],
+    p = subprocess.Popen([PROXY, str(listen), "127.0.0.1", str(upstream_port), branch, ROOT, "postgres", DB],
                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     for _ in range(100):
         try:
@@ -121,7 +127,7 @@ check("... and the connection reached PostgreSQL once (the proxy's own catalog c
       len(client_starts(tee)) == 1, str(tee.kinds()))
 startup = client_starts(tee)[0]
 check("... as the configured role and database, not the client's choice",
-      startup.get("user") == "postgres" and startup.get("database") == "postgres", str(startup))
+      startup.get("user") == "postgres" and startup.get("database") == DB, str(startup))
 check("... with the client's application_name passed through", startup.get("application_name") == "psql", str(startup))
 
 r = psql(lp, good, "", input="insert into p0_e2e values (4,'w'),(5,'v');\nselect count(*) from p0_e2e;\n")
@@ -277,8 +283,8 @@ a_only = mint("password", "--effects", "r:p0_e2e,r:p0_e2e.a")
 tee.clear()
 r = psql(lp, narrow, "select a /* a comment */ from P0_E2E -- and a trailing one\n order by a")
 check("an allowed query returns its rows", r.returncode == 0 and r.stdout.split() == ["1", "2", "3"], r.stdout + r.stderr)
-check("... and PostgreSQL was sent the RENDERING, not what the client typed",
-      client_queries(tee) == ['select "a" from "p0_e2e" order by "a"'], str(client_queries(tee)))
+check("... and PostgreSQL was sent the RENDERING, not what the client typed (inside the transaction the proxy opens)",
+      client_queries(tee) == ["BEGIN", 'select "a" from "p0_e2e" order by "a"', "COMMIT"], str(client_queries(tee)))
 
 tee.clear()
 refused = [
@@ -293,7 +299,7 @@ refused = [
     ("a table that does not exist", "select x from no_such_table", "unknown-table"),
     ("a sub-select", "select a from p0_e2e where a in (select a from p0_e2e)", "subquery"),
     ("a statement outside the subset", "set search_path = public", "unsupported-statement"),
-    ("a transaction", "begin", "unsupported-statement"),
+    ("a savepoint", "savepoint a", "unsupported-statement"),
     ("a nondeterministic call", "select random() from p0_e2e", "nondeterministic"),
     ("a statement hidden after a comment", "select a from p0_e2e /* ; delete from p0_e2e */; delete from p0_e2e", "effect-denied"),
 ]
@@ -305,7 +311,7 @@ check("... and NONE of those %d refused messages (nor any part of them) reached 
 check("... the table is untouched", direct("select count(*) from p0_e2e").stdout.strip() == "3")
 
 r = psql(lp, narrow, "select a from p0_e2e where b = 'it''s'")
-check("a string with a doubled quote is lowered and sent back doubled", r.returncode == 0 and client_queries(tee)[-1] == "select \"a\" from \"p0_e2e\" where (\"b\" = 'it''s')", str(client_queries(tee)))
+check("a string with a doubled quote is lowered and sent back doubled", r.returncode == 0 and client_statements(tee)[-1] == "select \"a\" from \"p0_e2e\" where (\"b\" = 'it''s')", str(client_queries(tee)))
 
 # the SQLSTATE of a refusal, from the wire
 def simple_query(port, password, sql):
@@ -396,8 +402,161 @@ direct("drop table p0_fresh")
 r = psql(lp, good, "select x from p0_fresh")
 check("... and a table dropped behind its back is unknown-table (42P01), not a stale accept", "unknown-table" in r.stderr, r.stderr)
 
+# ---------------------------------------------------------------- P2a: transactions, tracked by the proxy
+class Wire:
+    """A raw client of the proxy: sends simple queries and returns every message up to ReadyForQuery."""
+
+    def __init__(self, port, password):
+        self.s = socket.create_connection(("127.0.0.1", port), timeout=15)
+        self.s.sendall(startup_packet() + password_packet(password))
+        self.buf = b""
+        self.read_until_ready()
+
+    def messages(self):
+        out = []
+        while len(self.buf) >= 5:
+            ln = struct.unpack(">I", self.buf[1:5])[0]
+            if len(self.buf) < 1 + ln:
+                break
+            out.append((chr(self.buf[0]), self.buf[5:1 + ln]))
+            self.buf = self.buf[1 + ln:]
+        return out
+
+    def read_until_ready(self):
+        got = []
+        while not got or got[-1][0] != "Z":
+            got += self.messages()
+            if got and got[-1][0] == "Z":
+                break
+            d = self.s.recv(65536)
+            if not d:
+                raise EOFError("closed")
+            self.buf += d
+        return got
+
+    def send(self, sql):
+        body = sql.encode() + b"\0"
+        self.s.sendall(b"Q" + struct.pack(">I", len(body) + 4) + body)
+
+    def query(self, sql):
+        self.send(sql)
+        return self.read_until_ready()
+
+    def close(self):
+        self.s.close()
+
+
+def status_of(msgs): return msgs[-1][1].decode()
+def tags_of(msgs): return [m[1].rstrip(b"\0").decode() for m in msgs if m[0] == "C"]
+def codes_of(msgs):
+    out = []
+    for t, body in msgs:
+        if t == "E":
+            for f in body.split(b"\0"):
+                if f[:1] == b"C":
+                    out.append(f[1:].decode())
+    return out
+
+
+direct("drop table if exists p2a; create table p2a(a int primary key, b text)")
+w = Wire(lp, good)
+tee.clear()
+m = w.query("begin")
+check("BEGIN is answered by the proxy: CommandComplete BEGIN, then ReadyForQuery T", tags_of(m) == ["BEGIN"] and status_of(m) == "T", str(m))
+m = w.query("insert into p2a values (1, 'x')")
+check("a statement in the transaction: its CommandComplete comes at once, status stays T", tags_of(m) == ["INSERT 0 1"] and status_of(m) == "T", str(m))
+check("... and PostgreSQL has not got the row yet (another session sees nothing)", direct("select count(*) from p2a").stdout.strip() == "0")
+m = w.query("commit")
+check("COMMIT: CommandComplete COMMIT, ReadyForQuery I", tags_of(m) == ["COMMIT"] and status_of(m) == "I", str(m))
+check("... and the row is there for everyone", direct("select count(*) from p2a").stdout.strip() == "1")
+check("the server was sent BEGIN, the rendering, COMMIT: exactly the proxy's own two transaction commands and the statement",
+      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (1, \'x\')', "COMMIT"], str(client_queries(tee)))
+
+m = w.query("begin")
+w.query("insert into p2a values (2, 'y')")
+m = w.query("rollback")
+check("ROLLBACK: CommandComplete ROLLBACK, status I, and the row is gone", tags_of(m) == ["ROLLBACK"] and status_of(m) == "I" and
+      direct("select count(*) from p2a").stdout.strip() == "1", str(m))
+
+w.query("begin")
+m = w.query("insert into p2a values (1, 'dup')")
+check("an error from PostgreSQL inside a transaction: relayed (23505), status E", codes_of(m) == ["23505"] and status_of(m) == "E", str(m))
+m = w.query("select a from p2a")
+check("... and the next statement is refused by the proxy with 25P02 and nothing is sent upstream",
+      codes_of(m) == ["25P02"] and status_of(m) == "E" and client_queries(tee)[-1] != 'select "a" from "p2a"', str(m))
+m = w.query("commit")
+check("COMMIT of a failed transaction is a ROLLBACK, as in PostgreSQL", tags_of(m) == ["ROLLBACK"] and status_of(m) == "I", str(m))
+
+w.query("begin")
+w.query("insert into p2a values (3, 'z')")
+tee.clear()
+m = w.query("select nope from p2a")
+check("a statement the guard refuses inside a transaction: the error, status E", codes_of(m) == ["42703"] and status_of(m) == "E", str(m))
+check("... the proxy rolled the upstream transaction back at once (the server was sent ROLLBACK, and nothing else)",
+      client_queries(tee) == ["ROLLBACK"], str(client_queries(tee)))
+m = w.query("select a from p2a")
+check("... and the next statement is 25P02: the upstream transaction is gone, so running it would not be inside one",
+      codes_of(m) == ["25P02"] and status_of(m) == "E", str(m))
+m = w.query("rollback")
+check("... the client's ROLLBACK is answered, and the insert never happened", tags_of(m) == ["ROLLBACK"] and status_of(m) == "I" and
+      direct("select count(*) from p2a").stdout.strip() == "1", str(m))
+
+m = w.query("begin; select a from p2a")
+check("transaction control mixed with a statement is refused (0A000) and nothing is sent upstream",
+      codes_of(m) == ["0A000"] and status_of(m) == "I", str(m))
+m = w.query("begin isolation level serializable")
+check("an option on BEGIN is refused (0A000)", codes_of(m) == ["0A000"] and status_of(m) == "I", str(m))
+m = w.query("begin")
+m = w.query("begin")
+check("BEGIN inside a transaction is an error here (25001), the transaction stays open", codes_of(m) == ["25001"] and status_of(m) == "T", str(m))
+w.query("rollback")
+check("COMMIT and ROLLBACK with no transaction are answered, status I",
+      tags_of(w.query("commit")) == ["COMMIT"] and tags_of(w.query("rollback")) == ["ROLLBACK"])
+
+# autocommit: the proxy wraps a statement in a transaction of its own, and the client sees only what it would have seen
+tee.clear()
+m = w.query("insert into p2a values (10, 'a'); insert into p2a values (11, 'b')")
+check("an autocommit message of two statements: both CommandCompletes, then ReadyForQuery I",
+      tags_of(m) == ["INSERT 0 1", "INSERT 0 1"] and status_of(m) == "I", str(m))
+check("... and the server was sent BEGIN, both statements as ONE message, COMMIT",
+      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (10, \'a\'); insert into "p2a" values (11, \'b\')', "COMMIT"],
+      str(client_queries(tee)))
+tee.clear()
+m = w.query("insert into p2a values (12, 'c'); insert into p2a values (10, 'dup')")
+check("an autocommit message whose second statement fails: the error (23505), status I, NO CommandComplete reaches the client",
+      codes_of(m) == ["23505"] and tags_of(m) == [] and status_of(m) == "I", str(m))
+check("... the server was sent ROLLBACK, and the first statement's row is not there", client_queries(tee)[-1] == "ROLLBACK" and
+      direct("select count(*) from p2a where a = 12").stdout.strip() == "0", str(client_queries(tee)))
+m = w.query("select a from p2a order by a")
+check("a select in autocommit streams its rows: DataRow messages, SELECT n, I", [x for x in m if x[0] == "D"] and tags_of(m)[0].startswith("SELECT") and status_of(m) == "I", str(m[:3]))
+
+# two queries sent at once are answered in order, one after the other
+tee.clear()
+w.send("select pg_sleep(0.3) from p2a limit 1")
+w.send("select a from p2a where a = 10")
+a1 = w.read_until_ready()
+a2 = w.read_until_ready()
+check("two queries pipelined are each answered, in order", tags_of(a1) == ["SELECT 1"] and tags_of(a2) == ["SELECT 1"], str((a1, a2)))
+check("... and the second is not served while the first is in flight: the server sees one transaction after the other",
+      client_queries(tee) == ["BEGIN", 'select pg_sleep(0.3) from "p2a" limit 1', "COMMIT", "BEGIN", 'select "a" from "p2a" where ("a" = 10)', "COMMIT"],
+      str(client_queries(tee)))
+w.close()
+
+# a client that goes away inside a transaction takes its work with it
+w2 = Wire(lp, good)
+w2.query("begin")
+w2.query("insert into p2a values (20, 'gone')")
+w2.close()
+time.sleep(0.5)
+check("a client that disconnects inside a transaction: the transaction is rolled back", direct("select count(*) from p2a where a = 20").stdout.strip() == "0")
+
+# the same through psql: a script with a transaction, an error, and a rollback
+r = psql(lp, good, "", input="begin;\ninsert into p2a values (30, 'p');\nselect a from p2a where a = 30;\ncommit;\nselect count(*) from p2a where a = 30;\n")
+check("psql runs a transaction through the proxy", r.returncode == 0 and "COMMIT" in r.stdout and r.stdout.strip().endswith("1"), r.stdout + r.stderr)
+direct("drop table if exists p2a")
+
 check("the proxy is still alive after all of it", proxy.poll() is None)
 direct("drop table if exists p0_e2e, p0_big cascade")
 proxy.terminate()
-print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0 and P1d checks passed")
+print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0, P1d and P2a checks passed")
 sys.exit(1 if FAILED else 0)

@@ -215,6 +215,18 @@ pub fn n_drop_index() -> [] int {
     return 46;
 }
 
+pub fn n_begin() -> [] int {
+    return 47;
+}
+
+pub fn n_commit() -> [] int {
+    return 48;
+}
+
+pub fn n_rollback() -> [] int {
+    return 49;
+}
+
 // The ways a parse is refused: `expr` answers `0 - code`, and `st[3]` is the token index it stopped at.
 pub fn e_syntax() -> [] int {
     return 1;
@@ -272,6 +284,10 @@ pub fn e_on_conflict() -> [] int {
     return 14;
 }
 
+pub fn e_mixed_txn() -> [] int {
+    return 15;
+}
+
 pub fn error_name(code: int) -> [] &static [byte] {
     if code == 1 {
         return "syntax";
@@ -311,6 +327,9 @@ pub fn error_name(code: int) -> [] &static [byte] {
     }
     if code == 14 {
         return "on-conflict";
+    }
+    if code == 15 {
+        return "mixed-transaction-control";
     }
     return "subquery";
 }
@@ -1681,6 +1700,15 @@ fn emit_open[&s, &t, &n, &o](out: &!o [byte], at: int, sql: &s [byte], toks: &t 
         p = put_lit(out, p, " on ");
         p = put_name(out, p, sql, toks, nodes[6 * node + 5]);
         return put_lit(out, p, " (");
+    }
+    if kind == n_begin() {
+        return put_lit(out, p, "begin");
+    }
+    if kind == n_commit() {
+        return put_lit(out, p, "commit");
+    }
+    if kind == n_rollback() {
+        return put_lit(out, p, "rollback");
     }
     if kind == n_insert() {
         return put_lit(out, p, "insert into ");

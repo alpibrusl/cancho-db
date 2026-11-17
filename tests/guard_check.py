@@ -93,9 +93,25 @@ no(READ_ORDERS, "select id from orders; insert into orders values (1, 2, 3)", 3,
 no(READ_ORDERS, "select id from orders; select customer from orders", 3, "effect-denied", "42501", 1)
 no(READ_ORDERS, "select customer from orders; select id from orders", 3, "effect-denied", "42501", 0)
 no(ALL, "select id from orders; drop table nowhere", 2, "unknown-table", "42P01", 1)
-no(ALL, "select id from orders; begin", 2, "unsupported-statement", "0A000", 1)
+no(ALL, "select id from orders; begin", 2, "mixed-transaction-control", "0A000", 1)
 no(ALL, "select id from orders; select id from orders; select nope from orders", 2, "unknown-column", "42703", 2)
+no(ALL, "select id from orders; savepoint a", 2, "unsupported-statement", "0A000", 1)     # a parser refusal of a later statement
+no(ALL, "select id from orders; select id from orders; select id from orders where", 2, "syntax", "0A000", 2)
 ok(ALL, "select id from orders; ;; select id from orders", 'select "id" from "orders"; select "id" from "orders"')
+
+# ---- transaction control is the proxy's own to answer: nothing is rendered, and it must be alone in its message
+ok(ALL, "begin", "txn 1 ")
+ok(NOTHING, "begin", "txn 1 ")                # it has no effects, so any token may open a transaction
+ok(READ_ORDERS, "commit", "txn 2 ")
+ok(ALL, "rollback", "txn 3 ")
+ok(ALL, "  End Transaction ;", "txn 2 ")
+ok(ALL, "start transaction", "txn 1 ")
+no(ALL, "begin; select id from orders", 2, "mixed-transaction-control", "0A000", 0)
+no(ALL, "select id from orders; commit", 2, "mixed-transaction-control", "0A000", 1)
+no(ALL, "begin; commit", 2, "mixed-transaction-control", "0A000", 0)
+no(ALL, "commit prepared 'x'", 2, "unknown-construct", "0A000")
+no(ALL, "begin isolation level serializable", 2, "unknown-construct", "0A000")
+no(ALL, "savepoint a", 2, "unsupported-statement", "0A000")
 
 # ---- what the client sent is not what is sent: only the rendering goes upstream
 ok(ALL, "select 'a;b' from orders", "select 'a;b' from \"orders\"")
@@ -111,7 +127,6 @@ no(ALL, "select nope from orders", 2, "unknown-column", "42703")
 no(ALL, "select id from nowhere", 2, "unknown-table", "42P01")
 no(ALL, "select id from orders, customers", 2, "ambiguous-column", "42702")
 no(ALL, "select random() from orders", 2, "nondeterministic", "0A000")
-no(ALL, "begin", 2, "unsupported-statement", "0A000")
 no(ALL, "set search_path = x", 2, "unsupported-statement", "0A000")
 no(ALL, "copy orders from stdin", 2, "unsupported-statement", "0A000")
 no(ALL, "select id from orders union select id from customers", 2, "set-operation", "0A000")

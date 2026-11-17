@@ -948,6 +948,41 @@ fn drop_object[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int
     return end;
 }
 
+// ---- transaction control
+
+// BEGIN [WORK | TRANSACTION], START TRANSACTION, COMMIT [WORK | TRANSACTION], END [...], ROLLBACK [...], ABORT [...]: with no
+// options (no isolation level, `READ ONLY`, `AND CHAIN`, `TO SAVEPOINT`, `PREPARED`: each is refused). The tree is one leaf; the
+// proxy, not PostgreSQL, answers the client for it, so the statement has no effects and no IR.
+fn txn_control[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    var kind = parse.n_begin();
+    var pos = from + 1;
+    if parse.kw(sql, toks, from, end, "commit") || parse.kw(sql, toks, from, end, "end") {
+        kind = parse.n_commit();
+    } else if parse.kw(sql, toks, from, end, "rollback") || parse.kw(sql, toks, from, end, "abort") {
+        kind = parse.n_rollback();
+    } else if parse.kw(sql, toks, from, end, "start") {
+        // START TRANSACTION is the long spelling of BEGIN, and TRANSACTION is not optional there
+        if !parse.kw(sql, toks, pos, end, "transaction") {
+            return parse.fail(st, pos, parse.e_unsupported_statement());
+        }
+        pos = pos + 1;
+    } else if parse.kw(sql, toks, pos, end, "work") || parse.kw(sql, toks, pos, end, "transaction") {
+        pos = pos + 1;
+    }
+    if kind != parse.n_begin() && (parse.kw(sql, toks, pos, end, "work") || parse.kw(sql, toks, pos, end, "transaction")) {
+        pos = pos + 1;
+    }
+    if pos < end {
+        return parse.fail(st, pos, parse.e_unknown_construct());
+    }
+    let root = parse.mk(nodes, kids, st, kind, 0 - 1, tmp, 0, 0 - 1, 0 - 1);
+    if root < 0 {
+        return parse.fail(st, from, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
 // One statement: the first word says which. Anything else is `unsupported-statement`.
 pub fn statement[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], st: &!x [int]) -> [] int {
     if parse.kw(sql, toks, from, end, "select") {
@@ -970,6 +1005,9 @@ pub fn statement[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [i
             return create_index(sql, toks, from, end, nodes, kids, tmp, st);
         }
         return parse.fail(st, from + 1, parse.e_unsupported_statement());
+    }
+    if parse.kw(sql, toks, from, end, "begin") || parse.kw(sql, toks, from, end, "start") || parse.kw(sql, toks, from, end, "commit") || parse.kw(sql, toks, from, end, "end") || parse.kw(sql, toks, from, end, "rollback") || parse.kw(sql, toks, from, end, "abort") {
+        return txn_control(sql, toks, from, end, nodes, kids, tmp, st);
     }
     if parse.kw(sql, toks, from, end, "alter") && parse.kw(sql, toks, from + 1, end, "table") {
         return alter_table(sql, toks, from, end, nodes, kids, vs, os, tmp, st);

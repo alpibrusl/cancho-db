@@ -79,7 +79,7 @@ fn snapin_max() -> [] int {
     return 262144;
 }
 
-// Per connection `k`, `state[16k..16k+16]` is:
+// Per connection `k`, `state[24k..24k+24]` is:
 //
 //     0  kind: 0 free, 1 client sending its startup, 2 client sending its password, 5 login accepted (waiting to be
 //        paired), 3 paired (forwarding)
@@ -96,9 +96,25 @@ fn snapin_max() -> [] int {
 //     13 bytes of the client's messages held in its message buffer
 //     14 1 if a whole simple query is at the start of that buffer, waiting for the guard
 //     15 1 while the client's extended-protocol messages are discarded up to the next Sync
+//     16 a paired client's transaction state: 0 idle, 1 in a transaction, 2 in a failed one (the proxy's own record, `I` `T` `E`)
+//     17 1 while a statement of the client is in flight upstream (its ReadyForQuery has not come)
+//     18 bytes of held CommandComplete messages (kept until the statement may be said to be done)
+//     19 for the upstream side of a pair: bytes of a message being collected (a CommandComplete or a ReadyForQuery)
+//     20 for the upstream side: bytes of the message being relayed that are still to come
+//     21 for the upstream side: 1 while the statement in flight is an autocommit one the proxy wrapped in its own transaction
+//     22 for the upstream side: 1 if that statement answered with an error
 //     (kind 6 is the proxy's own catalog connection: not watched, used one question at a time)
 fn stride() -> [] int {
-    return 16;
+    return 24;
+}
+
+// The most of one statement's CommandComplete messages the proxy holds back, and of one message it collects whole.
+fn hold_max() -> [] int {
+    return 2048;
+}
+
+fn sbuf_max() -> [] int {
+    return 512;
 }
 
 res struct Core {
@@ -122,6 +138,9 @@ res struct Core {
     qout: Box[[byte]],
     // [0] the slot of the catalog connection, or -1
     aux: Box[[int]],
+    // held CommandComplete messages, `hold_max()` a slot; a message being collected, `sbuf_max()` a slot
+    hold: Box[[byte]],
+    sbuf: Box[[byte]],
 }
 
 // ------------------------------------------------------------------------------------------------ sending
@@ -415,41 +434,38 @@ fn hello_read[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k
     return 0;
 }
 
-// ------------------------------------------------------------------------------------------------ forwarding
+// ------------------------------------------------------------------------------------------------ the client's messages
 
-// Connection `k` (paired) can be read: take a chunk and pass it to the peer.
-fn forward[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_read, conn_write, poll] int {
-    let st = contents(core.state);
-    let rb = contents(core.rbuf);
-    let p = stride() * k;
-    let peer = st[p + 1];
-    match conns.read(tab, k, rb[0..chunk()]) {
-        Received::Data(got) => {
-            if send(tab, core, peer, rb[0..got]) {
-                settle(tab, core, k);
-            }
-        }
-        Received::End => {
-            finish(tab, core, k);
-        }
-        Received::Again => {
-        }
-        Received::Failed(e) => {
-            finish(tab, core, k);
-        }
+// Tell client `k` something went wrong with its query, and that PostgreSQL has not been asked (`ErrorResponse`, then
+// `ReadyForQuery` with the transaction status `status`: `I`, `T` or `E`): the connection stays open.
+fn answer_error[&t, &c, &a, &b, &d](tab: &!t conns.Table, core: &!c Core, k: int, status: int, sqlstate: &a [byte], tag: &b [byte], text: &d [byte]) -> [conn_write, poll] int {
+    region r {
+        let buf = alloc_slice[r](640, byte_of(0));
+        var n = login.error_response(buf, "ERROR", sqlstate, tag, text);
+        n = n + login.ready_for_query(buf[n..640], status);
+        send(tab, core, k, buf[0..n]);
     }
     return 0;
 }
 
-// ------------------------------------------------------------------------------------------------ the client's messages
-
-// Tell client `k` something went wrong with its query, and that PostgreSQL has not been asked (`ErrorResponse`, then
-// `ReadyForQuery` idle): the connection stays open.
-fn answer_error[&t, &c, &a, &b, &d](tab: &!t conns.Table, core: &!c Core, k: int, sqlstate: &a [byte], tag: &b [byte], text: &d [byte]) -> [conn_write, poll] int {
+// `CommandComplete` with the command tag `tag`, then `ReadyForQuery` with `status`, to client `k`: what PostgreSQL would say for
+// a `BEGIN`, `COMMIT` or `ROLLBACK` that the proxy answered itself.
+fn answer_tag[&t, &c, &a](tab: &!t conns.Table, core: &!c Core, k: int, status: int, tag: &a [byte]) -> [conn_write, poll] int {
     region r {
-        let buf = alloc_slice[r](640, byte_of(0));
-        var n = login.error_response(buf, "ERROR", sqlstate, tag, text);
-        n = n + login.ready_for_query(buf[n..640], 'I');
+        let buf = alloc_slice[r](128, byte_of(0));
+        let ln = len(tag) + 5;
+        buf[0] = byte_of('C');
+        buf[1] = byte_of(0);
+        buf[2] = byte_of(0);
+        buf[3] = byte_of(ln / 256 % 256);
+        buf[4] = byte_of(ln % 256);
+        var i = 0;
+        while i < len(tag) {
+            buf[5 + i] = tag[i];
+            i = i + 1;
+        }
+        buf[5 + len(tag)] = byte_of(0);
+        let n = 6 + len(tag) + login.ready_for_query(buf[6 + len(tag)..128], status);
         send(tab, core, k, buf[0..n]);
     }
     return 0;
@@ -544,35 +560,6 @@ fn client_read[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_re
     return 0;
 }
 
-// The poller said connection `k` is ready.
-fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int, readiness: int) -> [conn_read, conn_write, poll, clock] int {
-    let st = contents(core.state);
-    let p = stride() * k;
-    if readiness % 4 >= 2 && st[p + 2] > 0 {
-        drain(tab, core, k);
-    }
-    if st[p] != 0 && readiness % 2 == 1 {
-        if st[p] == 1 || st[p] == 2 {
-            if st[p + 4] == 0 {
-                hello_read(tab, core, clk, k);
-            } else {
-                shut(tab, core, k);
-            }
-        } else if st[p] == 3 {
-            if st[p + 3] % 2 == 1 {
-                if st[p + 12] > 0 {
-                    client_read(tab, core, k);
-                } else {
-                    forward(tab, core, k);
-                }
-            } else {
-                finish(tab, core, k);
-            }
-        }
-    }
-    return 0;
-}
-
 // ------------------------------------------------------------------------------------------------ accepting and pairing
 
 // Whether the peer of the connection in `slot` is a loopback address: 127.0.0.0/8 or ::1.
@@ -620,6 +607,13 @@ fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l L
                                 st[p + 13] = 0;
                                 st[p + 14] = 0;
                                 st[p + 15] = 0;
+                                st[p + 16] = 0;
+                                st[p + 17] = 0;
+                                st[p + 18] = 0;
+                                st[p + 19] = 0;
+                                st[p + 20] = 0;
+                                st[p + 21] = 0;
+                                st[p + 22] = 0;
                                 st[p + 11] = clock_ms(clk);
                                 if conns.nonblocking(ct, a) != 0 || conns.nodelay(ct, a) != 0 || conns.watch(ct, core.poller, a, a + 1, 1) != 0 {
                                     shut(ct, core, a);
@@ -810,11 +804,21 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                     st[q + 13] = 0;
                     st[q + 14] = 0;
                     st[q + 15] = 0;
+                    st[q + 16] = 0;
+                    st[q + 17] = 0;
+                    st[q + 18] = 0;
+                    st[q + 19] = 0;
+                    st[q + 20] = 0;
+                    st[q + 21] = 0;
+                    st[q + 22] = 0;
                     st[p] = 3;
                     st[p + 1] = b;
                     st[p + 13] = 0;
                     st[p + 14] = 0;
                     st[p + 15] = 0;
+                    st[p + 16] = 0;
+                    st[p + 17] = 0;
+                    st[p + 18] = 0;
                     borrow mut table as &!ct in {
                         if conns.nonblocking(ct, b) != 0 || conns.nodelay(ct, b) != 0 || conns.watch(ct, core.poller, b, b + 1, 1) != 0 {
                             shut(ct, core, b);
@@ -1072,6 +1076,238 @@ fn read_until_ready[&t, &b](tab: &!t conns.Table, slot: int, into: &!b [byte], w
     return 0 - 1;
 }
 
+// ------------------------------------------------------------------------------------------------ transactions
+
+// Run `sql` (one simple query of the proxy's own: BEGIN, COMMIT, ROLLBACK) on upstream connection `b` and wait, bounded, for its
+// ReadyForQuery. 0 if it ran, 1 if PostgreSQL answered with an error, -1 if the connection failed or was silent. Used only
+// where the upstream is idle and nothing else is owed from it.
+fn upstream_exec[&t, &c, &q](tab: &!t conns.Table, core: &!c Core, b: int, sql: &q [byte]) -> [conn_read, conn_write, poll] int {
+    var sent = false;
+    region r {
+        let msg = alloc_slice[r](len(sql) + 8, byte_of(0));
+        let ln = len(sql) + 5;
+        msg[0] = byte_of('Q');
+        msg[1] = byte_of(ln / 16777216 % 256);
+        msg[2] = byte_of(ln / 65536 % 256);
+        msg[3] = byte_of(ln / 256 % 256);
+        msg[4] = byte_of(ln % 256);
+        var i = 0;
+        while i < len(sql) {
+            msg[5 + i] = sql[i];
+            i = i + 1;
+        }
+        msg[5 + len(sql)] = byte_of(0);
+        sent = write_all(tab, b, msg[0..len(sql) + 6]);
+    }
+    if !sent {
+        return 0 - 1;
+    }
+    let si = contents(core.snapin);
+    let n = read_until_ready(tab, b, si, login_ms());
+    if n < 0 {
+        return 0 - 1;
+    }
+    var pos = 0;
+    var errored = 0;
+    while pos + 5 <= n {
+        if int_of(si[pos]) == 'E' {
+            errored = 1;
+        }
+        pos = pos + 1 + commit.be(si, pos + 1, 4);
+    }
+    return errored;
+}
+
+// The statement of client `client` has finished on upstream connection `k`, which the proxy had wrapped in a transaction of its
+// own (the client was in autocommit): make it permanent and tell the client, now. The held `CommandComplete` messages are
+// released only if the commit succeeded; a statement that failed is rolled back and the client has the error already.
+fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, client: int) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let hd = contents(core.hold);
+    let q = stride() * k;
+    let cp = stride() * client;
+    let failed = st[q + 22] == 1;
+    st[q + 21] = 0;
+    st[q + 22] = 0;
+    st[cp + 17] = 0;
+    var r = 0;
+    if failed {
+        r = upstream_exec(tab, core, k, "ROLLBACK");
+    } else {
+        r = upstream_exec(tab, core, k, "COMMIT");
+    }
+    if r < 0 {
+        finish(tab, core, k);
+        return 0;
+    }
+    if !failed && r == 1 {
+        st[cp + 18] = 0;
+        answer_error(tab, core, client, 73, "40000", "commit-failed", "the database refused to commit the statement");
+        return 0;
+    }
+    if !failed && st[cp + 18] > 0 {
+        send(tab, core, client, hd[client * hold_max()..client * hold_max() + st[cp + 18]]);
+    }
+    st[cp + 18] = 0;
+    region z {
+        let rq = alloc_slice[z](8, byte_of(0));
+        let n = login.ready_for_query(rq, 'I');
+        send(tab, core, client, rq[0..n]);
+    }
+    return 0;
+}
+
+// The upstream side `k` of a pair has sent `got` bytes (in `rbuf`). Messages are relayed to the client as they come, in pieces if
+// need be, except the ones the proxy acts on: `CommandComplete` (held while the statement is an autocommit one) and
+// `ReadyForQuery` (which ends it, and carries the transaction status the proxy keeps).
+fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, got: int) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let rb = contents(core.rbuf);
+    let sb = contents(core.sbuf);
+    let hd = contents(core.hold);
+    let q = stride() * k;
+    let client = st[q + 1];
+    let cp = stride() * client;
+    var pos = 0;
+    while pos < got && st[q] == 3 && st[cp] == 3 {
+        if st[q + 20] > 0 {
+            // inside a message that is relayed as it comes
+            var n = got - pos;
+            if n > st[q + 20] {
+                n = st[q + 20];
+            }
+            if !send(tab, core, client, rb[pos..pos + n]) {
+                finish(tab, core, k);
+                return 0;
+            }
+            st[q + 20] = st[q + 20] - n;
+            pos = pos + n;
+        } else {
+            // at a message boundary: collect the five bytes of its header
+            while st[q + 19] < 5 && pos < got {
+                sb[k * sbuf_max() + st[q + 19]] = rb[pos];
+                st[q + 19] = st[q + 19] + 1;
+                pos = pos + 1;
+            }
+            if st[q + 19] >= 5 {
+                let ty = int_of(sb[k * sbuf_max()]);
+                let ln = commit.be(sb, k * sbuf_max() + 1, 4);
+                if ln < 4 {
+                    finish(tab, core, k);
+                    return 0;
+                }
+                if ty == 'C' || ty == 'Z' {
+                    // small and acted on: collect it whole
+                    if ln + 1 > sbuf_max() {
+                        finish(tab, core, k);
+                        return 0;
+                    }
+                    while st[q + 19] < ln + 1 && pos < got {
+                        sb[k * sbuf_max() + st[q + 19]] = rb[pos];
+                        st[q + 19] = st[q + 19] + 1;
+                        pos = pos + 1;
+                    }
+                    if st[q + 19] >= ln + 1 {
+                        let whole = sb[k * sbuf_max()..k * sbuf_max() + ln + 1];
+                        st[q + 19] = 0;
+                        if ty == 'C' && st[q + 21] == 1 {
+                            // held: the client is told only when the statement is permanent
+                            if st[cp + 18] + len(whole) > hold_max() {
+                                finish(tab, core, k);
+                                return 0;
+                            }
+                            var i = 0;
+                            while i < len(whole) {
+                                hd[client * hold_max() + st[cp + 18] + i] = whole[i];
+                                i = i + 1;
+                            }
+                            st[cp + 18] = st[cp + 18] + len(whole);
+                        } else if ty == 'Z' && st[q + 21] == 1 {
+                            finish_autocommit(tab, core, k, client);
+                        } else {
+                            if ty == 'Z' {
+                                // the transaction state the server says it is in, which the proxy keeps
+                                let status = int_of(whole[5]);
+                                st[cp + 17] = 0;
+                                if status == 'I' {
+                                    st[cp + 16] = 0;
+                                } else if status == 'T' {
+                                    st[cp + 16] = 1;
+                                } else {
+                                    st[cp + 16] = 2;
+                                }
+                            }
+                            if !send(tab, core, client, whole) {
+                                finish(tab, core, k);
+                                return 0;
+                            }
+                        }
+                    }
+                } else {
+                    if ty == 'E' && st[q + 21] == 1 {
+                        st[q + 22] = 1;
+                    }
+                    if !send(tab, core, client, sb[k * sbuf_max()..k * sbuf_max() + 5]) {
+                        finish(tab, core, k);
+                        return 0;
+                    }
+                    st[q + 19] = 0;
+                    st[q + 20] = ln - 4;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// Upstream connection `k` of a pair can be read.
+fn server_read[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_read, conn_write, poll] int {
+    let rb = contents(core.rbuf);
+    match conns.read(tab, k, rb[0..chunk()]) {
+        Received::Data(got) => {
+            relay_server(tab, core, k, got);
+        }
+        Received::End => {
+            finish(tab, core, k);
+        }
+        Received::Again => {
+        }
+        Received::Failed(e) => {
+            finish(tab, core, k);
+        }
+    }
+    return 0;
+}
+
+// The poller said connection `k` is ready.
+fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int, readiness: int) -> [conn_read, conn_write, poll, clock] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    if readiness % 4 >= 2 && st[p + 2] > 0 {
+        drain(tab, core, k);
+    }
+    if st[p] != 0 && readiness % 2 == 1 {
+        if st[p] == 1 || st[p] == 2 {
+            if st[p + 4] == 0 {
+                hello_read(tab, core, clk, k);
+            } else {
+                shut(tab, core, k);
+            }
+        } else if st[p] == 3 {
+            if st[p + 3] % 2 == 1 {
+                if st[p + 12] > 0 {
+                    client_read(tab, core, k);
+                } else {
+                    server_read(tab, core, k);
+                }
+            } else {
+                finish(tab, core, k);
+            }
+        }
+    }
+    return 0;
+}
+
 // Open the proxy's own connection to PostgreSQL for catalog questions: login as the configured role, and wait for ReadyForQuery.
 // Answers its slot, or -1.
 fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
@@ -1171,6 +1407,114 @@ fn snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
     return (table, 0 - 1);
 }
 
+// The client's BEGIN, COMMIT or ROLLBACK, which the proxy answers itself from its own record of the client's transaction, after
+// doing what it means upstream. (A COMMIT of a failed transaction is a ROLLBACK, as in PostgreSQL.) `BEGIN` inside a transaction is
+// an error here where PostgreSQL only warns, and COMMIT or ROLLBACK with none open is answered with no warning: both stated in
+// docs/m1-commit-path.md.
+fn transaction_control[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, kind: int) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    let b = st[p + 1];
+    let ts = st[p + 16];
+    if kind == 1 {
+        if ts == 0 {
+            let r = upstream_exec(tab, core, b, "BEGIN");
+            if r != 0 {
+                answer_error(tab, core, k, 73, "08006", "upstream-unavailable", "the database could not begin a transaction");
+                return 0;
+            }
+            st[p + 16] = 1;
+            answer_tag(tab, core, k, 'T', "BEGIN");
+        } else if ts == 1 {
+            answer_error(tab, core, k, 'T', "25001", "transaction-in-progress", "there is already a transaction in progress");
+        } else {
+            answer_error(tab, core, k, 'E', "25P02", "in-failed-transaction", "current transaction is aborted, commands ignored until end of transaction block");
+        }
+        return 0;
+    }
+    if ts == 0 {
+        if kind == 2 {
+            answer_tag(tab, core, k, 'I', "COMMIT");
+        } else {
+            answer_tag(tab, core, k, 'I', "ROLLBACK");
+        }
+        return 0;
+    }
+    var sql = "ROLLBACK";
+    if kind == 2 && ts == 1 {
+        sql = "COMMIT";
+    }
+    let r = upstream_exec(tab, core, b, sql);
+    st[p + 16] = 0;
+    if r < 0 {
+        finish(tab, core, k);
+    } else if r == 1 {
+        answer_error(tab, core, k, 73, "40000", "commit-failed", "the database refused to commit the transaction");
+    } else if kind == 2 && ts == 1 {
+        answer_tag(tab, core, k, 'I', "COMMIT");
+    } else {
+        answer_tag(tab, core, k, 'I', "ROLLBACK");
+    }
+    return 0;
+}
+
+// A statement the guard refused. Inside a transaction that aborts it, as an error would in PostgreSQL: the proxy rolls the
+// upstream transaction back at once (its locks go with it) and the client is `E` until its own ROLLBACK.
+fn refused_query[&t, &c, &v](tab: &!t conns.Table, core: &!c Core, k: int, vd: &v [int]) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    let ts = st[p + 16];
+    if ts == 1 {
+        upstream_exec(tab, core, st[p + 1], "ROLLBACK");
+        st[p + 16] = 2;
+    }
+    var status = 'E';
+    if ts == 0 {
+        status = 'I';
+    }
+    answer_error(tab, core, k, status, guard.sqlstate(vd), guard.tag(vd), "the statement was not run");
+    return 0;
+}
+
+// An allowed statement, rendered into `core.rend` (`rl` bytes): sent upstream as it is inside a transaction; in autocommit the
+// proxy opens a transaction first, and `finish_autocommit` ends it when the statement has. In a failed transaction nothing is sent.
+fn run_query[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, rl: int) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let p = stride() * k;
+    let b = st[p + 1];
+    let ts = st[p + 16];
+    if ts == 2 {
+        answer_error(tab, core, k, 'E', "25P02", "in-failed-transaction", "current transaction is aborted, commands ignored until end of transaction block");
+        return 0;
+    }
+    if ts == 0 {
+        let r = upstream_exec(tab, core, b, "BEGIN");
+        if r != 0 {
+            answer_error(tab, core, k, 73, "08006", "upstream-unavailable", "the database could not begin a transaction");
+            return 0;
+        }
+        st[stride() * b + 21] = 1;
+        st[stride() * b + 22] = 0;
+        st[p + 18] = 0;
+    }
+    let out = contents(core.qout);
+    let total = rl + 6;
+    out[0] = byte_of('Q');
+    out[1] = byte_of((rl + 5) / 16777216 % 256);
+    out[2] = byte_of((rl + 5) / 65536 % 256);
+    out[3] = byte_of((rl + 5) / 256 % 256);
+    out[4] = byte_of((rl + 5) % 256);
+    var i = 0;
+    while i < rl {
+        out[5 + i] = contents(core.rend)[i];
+        i = i + 1;
+    }
+    out[5 + rl] = byte_of(0);
+    st[p + 17] = 1;
+    send(tab, core, b, out[0..total]);
+    return 0;
+}
+
 // Client `k` has a whole simple query waiting: ask the catalog, run the guard, and either send PostgreSQL the guard's rendering
 // or tell the client it is refused.
 fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
@@ -1189,35 +1533,29 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: 
     let sql = mb[base + 5..base + ln];
     let (t1, snap_len) = snapshot(heap, table, core, net, host, port);
     table = t1;
+    // the transaction state the client is in decides what is said, and what is sent
+    let ts = st[p + 16];
+    var status = 'E';
+    if ts == 0 {
+        status = 'I';
+    } else if ts == 1 {
+        status = 'T';
+    }
     if snap_len < 0 {
         borrow mut table as &!tw in {
-            answer_error(tw, core, k, "08006", "catalog-unavailable", "the schema could not be read, so the query was not checked");
+            answer_error(tw, core, k, status, "08006", "catalog-unavailable", "the schema could not be read, so the query was not checked");
         }
     } else {
         region r {
             let vd = alloc_slice[r](8, 0);
             let verdict = guard.check(heap, contents(core.tokb)[k * token_max()..k * token_max() + st[p + 12]], contents(core.snap)[0..snap_len], sql, contents(core.rend), vd);
-            if verdict == 0 {
-                let out = contents(core.qout);
-                let rl = vd[3];
-                let total = rl + 6;
-                out[0] = byte_of('Q');
-                out[1] = byte_of((rl + 5) / 16777216 % 256);
-                out[2] = byte_of((rl + 5) / 65536 % 256);
-                out[3] = byte_of((rl + 5) / 256 % 256);
-                out[4] = byte_of((rl + 5) % 256);
-                var i = 0;
-                while i < rl {
-                    out[5 + i] = contents(core.rend)[i];
-                    i = i + 1;
-                }
-                out[5 + rl] = byte_of(0);
-                borrow mut table as &!tw in {
-                    send(tw, core, st[p + 1], out[0..total]);
-                }
-            } else {
-                borrow mut table as &!tw in {
-                    answer_error(tw, core, k, guard.sqlstate(vd), guard.tag(vd), "the statement was not run");
+            borrow mut table as &!tw in {
+                if verdict != 0 {
+                    refused_query(tw, core, k, vd);
+                } else if vd[6] > 0 {
+                    transaction_control(tw, core, k, vd[6]);
+                } else {
+                    run_query(tw, core, k, vd[3]);
                 }
             }
         }
@@ -1241,7 +1579,7 @@ fn serve_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: 
         var k = 0;
         while k < 2 * max_clients() {
             let st = contents(core.state);
-            if st[stride() * k] == 3 && st[stride() * k + 14] == 1 {
+            if st[stride() * k] == 3 && st[stride() * k + 14] == 1 && st[stride() * k + 17] == 0 {
                 table = serve_one(heap, table, core, net, host, port, k);
                 again = true;
             }
@@ -1274,7 +1612,7 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
                 poller_add_listener(pw, listener, 0);
             }
             let slots = 2 * max_clients();
-            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 4, 0 - 1) };
+            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 4, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)) };
             var tab = conns.empty(heap, 64);
             while true {
                 var ready = 0 - 1;
@@ -1313,7 +1651,7 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
                 }
             }
             conns.drop(heap, tab);
-            let Core { poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux } = core;
+            let Core { poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf } = core;
             poller_close(poller);
             unbox_slice(heap, events);
             unbox_slice(heap, state);
@@ -1329,6 +1667,8 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
             unbox_slice(heap, rend);
             unbox_slice(heap, qout);
             unbox_slice(heap, aux);
+            unbox_slice(heap, hold);
+            unbox_slice(heap, sbuf);
             return 0;
         }
         Polling::Failed(e) => {

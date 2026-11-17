@@ -75,4 +75,5 @@ echo "== mutants, parser";          quiet 1 python3 tests/mutants.py parse "$CAN
 echo "== mutants, statements";      quiet 1 python3 tests/mutants.py stmt "$CANCHO"
 echo "== mutants, lowering";        quiet 1 python3 tests/mutants.py lower "$CANCHO"
 echo "== mutants, guard";           quiet 1 python3 tests/mutants.py guard "$CANCHO"
+echo "== mutants, proxy (end to end, four at once)"; quiet 1 python3 tests/mutants.py proxy "$CANCHO"
 echo "all green"

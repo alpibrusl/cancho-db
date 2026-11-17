@@ -395,59 +395,90 @@ PROXY = [
     ("proxy: the token is not checked", "proxy/proxy.cho", "if rule != login.login_ok() {", "if false {"),
     ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > hello_ms()", "false"),
     ("proxy: a silent upstream is waited for a minute", "proxy/proxy.cho", "fn login_ms() -> [] int {\n    return 5000;", "fn login_ms() -> [] int {\n    return 60000;"),
-    ("proxy: forwarded bytes lose the last one", "proxy/proxy.cho", "if send(tab, core, peer, rb[0..got]) {", "if send(tab, core, peer, rb[0..got - 1]) {"),
+    ("proxy: the upstream's bytes lose the last one", "proxy/proxy.cho", "            if !send(tab, core, client, rb[pos..pos + n]) {", "            if !send(tab, core, client, rb[pos..pos + n - 1]) {"),
     ("proxy: SSLRequest is not answered N", "proxy/proxy.cho", "let no = alloc_slice[r](1, byte_of('N'));", "let no = alloc_slice[r](1, byte_of('S'));"),
     ("proxy: the client's application_name is dropped", "proxy/proxy.cho", "if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {", "if false {"),
     ("proxy: the upstream role is the client's", "proxy/proxy.cho", "\n                    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "\n                    at = put_cstr(msg, at, hb[k * hello_size() + 4 + 5..k * hello_size() + 4 + 5 + 5]);"),
     ("proxy: a refused login still opens the upstream", "proxy/proxy.cho", "refuse(tab, core, k, \"FATAL\", login.sqlstate(rule), login.rule_name(rule), \"the capability token was refused\");", "st[p] = 5;"),
     ("proxy: protocol versions are not checked", "proxy/proxy.cho", "} else if kind == login.err_version() {", "} else if false {"),
     # ---- the query path (P1d-2)
-    ("proxy: the client's own bytes are sent, not the rendering", "proxy/proxy.cho", "                    send(tw, core, st[p + 1], out[0..total]);", "                    send(tw, core, st[p + 1], mb[base..base + ln + 1]);"),
-    ("proxy: a refused query is sent upstream anyway", "proxy/proxy.cho", "            if verdict == 0 {\n                let out = contents(core.qout);", "            if true {\n                let out = contents(core.qout);"),
+    ("proxy: the rendering is not what is sent", "proxy/proxy.cho", "                    run_query(tw, core, k, vd[3]);", "                    run_query(tw, core, k, 0);"),
+    ("proxy: a refused query is sent upstream anyway", "proxy/proxy.cho", "                if verdict != 0 {\n                    refused_query(tw, core, k, vd);", "                if false {\n                    refused_query(tw, core, k, vd);"),
     ("proxy: a Parse message is a protocol violation", "proxy/proxy.cho", "} else if ty == 'P' || ty == 'B' ||", "} else if ty == 'B' ||"),
     ("proxy: messages after an extended-protocol error are answered too", "proxy/proxy.cho", "                        st[p + 15] = 1;\n                    }\n                    consume(core, k, ln + 1);", "                        st[p + 15] = 0;\n                    }\n                    consume(core, k, ln + 1);"),
     ("proxy: Sync is not answered", "proxy/proxy.cho", "                            let n = login.ready_for_query(z, 'I');\n                            send(tab, core, k, z[0..n]);", "                            let n = login.ready_for_query(z, 'I');"),
-    ("proxy: a refusal does not say ReadyForQuery", "proxy/proxy.cho", "        n = n + login.ready_for_query(buf[n..640], 'I');", "        n = n + 0;"),
+    # ---- transactions (P2a)
+    ("proxy: an autocommit statement is not wrapped in a transaction", "proxy/proxy.cho", "    if ts == 0 {\n        let r = upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[stride() * b + 21] = 1;", "    if false {\n        let r = upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[stride() * b + 21] = 1;"),
+    ("proxy: CommandComplete is not held in autocommit", "proxy/proxy.cho", "                        if ty == 'C' && st[q + 21] == 1 {", "                        if false {"),
+    ("proxy: a failed autocommit statement is committed", "proxy/proxy.cho", "    if failed {\n        r = upstream_exec(tab, core, k, \"ROLLBACK\");", "    if false {\n        r = upstream_exec(tab, core, k, \"ROLLBACK\");"),
+    ("proxy: the server's E status does not fail the client's transaction", "proxy/proxy.cho", "                                } else {\n                                    st[cp + 16] = 2;\n                                }", "                                } else {\n                                    st[cp + 16] = 1;\n                                }"),
+    ("proxy: a refused statement leaves the transaction open", "proxy/proxy.cho", "        upstream_exec(tab, core, st[p + 1], \"ROLLBACK\");\n        st[p + 16] = 2;", "        upstream_exec(tab, core, st[p + 1], \"ROLLBACK\");\n        st[p + 16] = 1;"),
+    ("proxy: COMMIT does not commit", "proxy/proxy.cho", "    if kind == 2 && ts == 1 {\n        sql = \"COMMIT\";\n    }", "    if false {\n        sql = \"COMMIT\";\n    }"),
+    ("proxy: a statement runs in a failed transaction", "proxy/proxy.cho", "    if ts == 2 {\n        answer_error(tab, core, k, 'E', \"25P02\"", "    if false {\n        answer_error(tab, core, k, 'E', \"25P02\""),
+    ("proxy: queries are served while a statement is in flight", "proxy/proxy.cho", " && st[stride() * k + 17] == 0 {", " {"),
+    ("proxy: BEGIN inside a transaction is forgiven", "proxy/proxy.cho", "        } else if ts == 1 {\n            answer_error(tab, core, k, 'T', \"25001\"", "        } else if ts == 3 {\n            answer_error(tab, core, k, 'T', \"25001\""),
+    ("proxy: a refusal does not say ReadyForQuery", "proxy/proxy.cho", "        n = n + login.ready_for_query(buf[n..640], status);", "        n = n + 0;"),
 ]
 
 def run_proxy(cancho):
-    survivors = []
-    for label, rel, old, new in PROXY:
-        with tempfile.TemporaryDirectory() as tmp:
-            work = Path(tmp)
-            for d in ("src", "proxy", "tools", "tests"):
-                shutil.copytree(ROOT / d, work / d, ignore=shutil.ignore_patterns("__pycache__"))
-            f = work / rel
-            text = f.read_text()
-            if text.count(old) != 1:
-                print("STALE  %-52s original text occurs %d times" % (label, text.count(old)))
-                survivors.append(label)
-                continue
-            f.write_text(text.replace(old, new))
-            exe = work / "proxy_mutant"
-            b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
-                                str(work / "src/token.cho"), str(work / "src/login.cho")]
-                               + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho")]
-                               + ["-o", str(exe)],
-                               capture_output=True, text=True)
-            if b.returncode != 0:
-                print("BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]))
-                survivors.append(label)
-                continue
-            try:
-                r = subprocess.run([sys.executable, str(work / "tests/proxy_e2e.py"), str(exe)], capture_output=True,
-                                   text=True, timeout=420)
-                out = r.stdout + r.stderr
-                code = r.returncode
-            except subprocess.TimeoutExpired as e:
-                out, code = "timed out", 1
-            if code == 0:
-                print("SURVIVED %-50s every end-to-end check passes" % label)
-                survivors.append(label)
-            else:
+    """Each mutant is built and judged by the whole end-to-end test. They are slow (about three minutes each), so several run at
+    once, each in a database of its own on the same server (E2E_DB) and with its own wire tee and ports."""
+    import concurrent.futures
+    import queue
+    skip = int(os.environ.get("MUTANT_FROM", "0"))
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in PROXY[skip:] if not only or only in m[0]]
+    workers = int(os.environ.get("MUTANT_JOBS", "4"))
+    port = os.environ.get("PG_E2E_PORT", "5532")
+    dbs = queue.Queue()
+    for w in range(workers):
+        name = "mutant_db_%d" % w
+        for sql in ("drop database if exists %s" % name, "create database %s" % name):
+            subprocess.run(["psql", "-h", "127.0.0.1", "-p", port, "-U", "postgres", "-d", "postgres", "-c", sql],
+                           capture_output=True)
+        dbs.put(name)
+
+    def one(item):
+        label, rel, old, new = item
+        db = dbs.get()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                for d in ("src", "proxy", "tools", "tests"):
+                    shutil.copytree(ROOT / d, work / d, ignore=shutil.ignore_patterns("__pycache__"))
+                f = work / rel
+                text = f.read_text()
+                if text.count(old) != 1:
+                    return label, "STALE  %-52s original text occurs %d times" % (label, text.count(old)), False
+                f.write_text(text.replace(old, new))
+                exe = work / "proxy_mutant"
+                b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
+                                    str(work / "src/token.cho"), str(work / "src/login.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho")]
+                                   + ["-o", str(exe)], capture_output=True, text=True)
+                if b.returncode != 0:
+                    return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
+                try:
+                    r = subprocess.run([sys.executable, str(work / "tests/proxy_e2e.py"), str(exe)], capture_output=True,
+                                       text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
+                    out, code = r.stdout + r.stderr, r.returncode
+                except subprocess.TimeoutExpired:
+                    out, code = "timed out", 1
+                if code == 0:
+                    return label, "SURVIVED %-50s every end-to-end check passes" % label, False
                 failed = [l[5:].strip() for l in out.splitlines() if l.startswith("FAIL")]
-                print("killed   %-50s by: %s" % (label, (failed[0] if failed else out.strip().splitlines()[-1])[:90]))
-    print("%d mutants, %d not killed" % (len(PROXY), len(survivors)))
+                return label, "killed   %-50s by: %s" % (label, (failed[0] if failed else out.strip().splitlines()[-1])[:90]), True
+        finally:
+            dbs.put(db)
+
+    with concurrent.futures.ThreadPoolExecutor(workers) as ex:
+        results = list(ex.map(one, table))
+    survivors = []
+    for label, line, killed in results:
+        print(line)
+        if not killed:
+            survivors.append(label)
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
     return 1 if survivors else 0
 
 
