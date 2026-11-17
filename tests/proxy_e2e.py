@@ -531,11 +531,15 @@ m = w.query("select a from p2a order by a")
 check("a select in autocommit streams its rows: DataRow messages, SELECT n, I", [x for x in m if x[0] == "D"] and tags_of(m)[0].startswith("SELECT") and status_of(m) == "I", str(m[:3]))
 
 # two queries sent at once are answered in order, one after the other
-w.send("select 1 from p2a limit 1")
+tee.clear()
+w.send("select pg_sleep(0.3) from p2a limit 1")
 w.send("select a from p2a where a = 10")
 a1 = w.read_until_ready()
 a2 = w.read_until_ready()
 check("two queries pipelined are each answered, in order", tags_of(a1) == ["SELECT 1"] and tags_of(a2) == ["SELECT 1"], str((a1, a2)))
+check("... and the second is not served while the first is in flight: the server sees one transaction after the other",
+      client_queries(tee) == ["BEGIN", 'select pg_sleep(0.3) from "p2a" limit 1', "COMMIT", "BEGIN", 'select "a" from "p2a" where ("a" = 10)', "COMMIT"],
+      str(client_queries(tee)))
 w.close()
 
 # a client that goes away inside a transaction takes its work with it
