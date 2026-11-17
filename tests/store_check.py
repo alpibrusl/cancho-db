@@ -66,8 +66,12 @@ def log_record(c): return u32(len(c["enc"])) + c["enc"] + c["sig"]
 def store_record(b): return u32(len(b)) + b
 
 
+LAST_ERR = [""]
+
+
 def run(d, key, branch, mode, stdin="", timeout=60):
     r = subprocess.run([STORE, str(d), str(key), branch, mode], input=stdin, capture_output=True, text=True, timeout=timeout)
+    LAST_ERR[0] = r.stderr
     return r.stdout.strip(), r.returncode
 
 
@@ -132,6 +136,7 @@ check("the statement store holds the statements", (d / "stmts").read_bytes() == 
 out, rc = run(d, key, "main", "open")
 check("restart reads the log back", out == "ok commits=5 next=5 torn=0 tip=%s" % cs[-1]["id"].hex(), out)
 verify_ok(d / "log", 5)
+check("the log's commit ids are handed over, in order, whatever the branch", LAST_ERR[0].strip() == "ids " + "".join(c["id"].hex() for c in cs), LAST_ERR[0])
 out, rc = run(d, key, "other", "open")
 check("another branch has no tip", out == "ok commits=5 next=0 torn=0 tip=-", out)
 
@@ -142,9 +147,19 @@ d2 = work / "m"
 d2.mkdir()
 run(d2, key, "main", "append", feed(mixed))
 out, rc = run(d2, key, "main", "open")
+check("... and for a log of two branches, all five in log order", LAST_ERR[0].strip() == "ids " + "".join(c["id"].hex() for c in mixed), LAST_ERR[0])
 check("main's tip among two branches", out == "ok commits=5 next=2 torn=0 tip=%s" % mixed[2]["id"].hex(), out)
 out, rc = run(d2, key, "dev", "open")
 check("dev's tip among two branches", out == "ok commits=5 next=3 torn=0 tip=%s" % mixed[4]["id"].hex(), out)
+
+# a log of more commits than the table holds (64 here) is refused, not truncated
+big = Chain()
+bigcs = [big.commit() for _ in range(65)]
+d3 = work / "big"
+d3.mkdir()
+(d3 / "log").write_bytes(HEAD + b"".join(log_record(c) for c in bigcs))
+out, rc = run(d3, key, "main", "open")
+check("a log of more commits than the recovery table holds is refused", out.startswith("refused log-too-big") and rc != 0, out)
 
 # 4. a torn tail at every byte of the last record is cut, and what is left verifies
 good = (d / "log").read_bytes()
@@ -231,7 +246,7 @@ check("a lying length is refused, not waited for", out.startswith("refused recor
 t = work / "l"
 shutil.rmtree(t, ignore_errors=True)
 shutil.copytree(d, t)
-holder = subprocess.Popen([STORE, str(t), str(key), "main", "hold"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+holder = subprocess.Popen([STORE, str(t), str(key), "main", "hold"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 first = holder.stdout.readline().strip()
 check("the first process opens", first.startswith("ok commits=5"), first)
 out, rc = run(t, key, "main", "open")
@@ -240,7 +255,7 @@ holder.stdin.close()
 holder.wait(timeout=30)
 out, rc = run(t, key, "main", "open")
 check("and is not refused after", out.startswith("ok commits=5"), out)
-holder = subprocess.Popen([STORE, str(t), str(key), "main", "hold"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+holder = subprocess.Popen([STORE, str(t), str(key), "main", "hold"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 holder.stdout.readline()
 holder.kill()
 holder.wait()

@@ -401,6 +401,11 @@ PROXY = [
     ("proxy: the effects are not recorded", "src/commitpath.cho", "build.put_bytes(acc[base + 18432..base + 22528], ai[8 * k + 2], effs);", "ai[8 * k + 2] = ai[8 * k + 2] + 0;"),
     ("proxy: nondeterminism is committed unrecorded", "src/commitpath.cho", "        if kind == 4 {\n            return 2;", "        if kind == 4 {\n            return 0;"),
     ("proxy: the schema is not the transaction's own", "src/commitpath.cho", "crypto.sha256(snapshot, acc[k * shared.acc_stride() + 22528..k * shared.acc_stride() + 22560]);", "crypto.sha256(\"\", acc[k * shared.acc_stride() + 22528..k * shared.acc_stride() + 22560]);"),
+    ("proxy: recovery rolls back what the log has", "src/catalog.cho", "                    if held == 1 {\n                        at = build.put_bytes(sql, 0, \"COMMIT PREPARED '\");", "                    if held == 0 {\n                        at = build.put_bytes(sql, 0, \"COMMIT PREPARED '\");"),
+    ("proxy: recovery commits what the log lacks", "src/catalog.cho", "    if want < 0 {\n        return 0 - 1;\n    }\n    return found;", "    if want < 0 {\n        return 0 - 1;\n    }\n    return 1;"),
+    ("proxy: recovery settles nothing", "src/catalog.cho", "    if status == 0 {\n        region g {", "    if false {\n        region g {"),
+    ("proxy: a log failure leaves the transaction prepared", "src/commitpath.cho", "                        upstream_exec(tab, core, b, q[0..gid_sql(q, \"ROLLBACK PREPARED '\", ident)]);", "                        step = 0;"),
+    ("proxy: a commit's id is not in the recovery table", "src/commitpath.cho", "                    chain[2] = chain[2] + 1;", "                    chain[2] = chain[2] + 0;"),
     ("proxy: non-loopback clients are served", "proxy/proxy.cho", "if !is_loopback(ct, a) {", "if false {"),
     ("proxy: the token is not checked", "proxy/proxy.cho", "if rule != login.login_ok() {", "if false {"),
     ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > shared.hello_ms()", "false"),
@@ -464,7 +469,7 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
@@ -578,6 +583,8 @@ STORE = [
     ("store: the token store is not synced", "src/store.cho", "if !write_all(tokens, token_rec) || !synced(tokens) {", "if !write_all(tokens, token_rec) {"),
     ("store: the statement store is not synced", "src/store.cho", "if !write_all(stmts, stmt_recs) || !synced(stmts) {", "if !write_all(stmts, stmt_recs) {"),
     ("store: the log is not synced", "src/store.cho", "if !write_all(log, log_rec) || !synced(log) {", "if !write_all(log, log_rec) {"),
+    ("store: the commit ids are not handed over", "src/store.cho", "build.put_bytes(ids, 32 * index, ident);", "index = index + 0;"),
+    ("store: the id table's size is not checked", "src/store.cho", "if 32 * (index + 1) > len(ids) {", "if false {"),
     ("store: the log is written before the stores", "src/store.cho", "    if len(token_rec) > 0 {\n        if !write_all(tokens", "    if !write_all(log, log_rec) || !synced(log) {\n        return r_io();\n    }\n    if len(token_rec) > 0 {\n        if !write_all(tokens"),
 ]
 
