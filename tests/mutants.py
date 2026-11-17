@@ -421,44 +421,64 @@ PROXY = [
 ]
 
 def run_proxy(cancho):
-    survivors = []
+    """Each mutant is built and judged by the whole end-to-end test. They are slow (about three minutes each), so several run at
+    once, each in a database of its own on the same server (E2E_DB) and with its own wire tee and ports."""
+    import concurrent.futures
+    import queue
     skip = int(os.environ.get("MUTANT_FROM", "0"))
-    for label, rel, old, new in PROXY[skip:]:
-        with tempfile.TemporaryDirectory() as tmp:
-            work = Path(tmp)
-            for d in ("src", "proxy", "tools", "tests"):
-                shutil.copytree(ROOT / d, work / d, ignore=shutil.ignore_patterns("__pycache__"))
-            f = work / rel
-            text = f.read_text()
-            if text.count(old) != 1:
-                print("STALE  %-52s original text occurs %d times" % (label, text.count(old)))
-                survivors.append(label)
-                continue
-            f.write_text(text.replace(old, new))
-            exe = work / "proxy_mutant"
-            b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
-                                str(work / "src/token.cho"), str(work / "src/login.cho")]
-                               + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho")]
-                               + ["-o", str(exe)],
-                               capture_output=True, text=True)
-            if b.returncode != 0:
-                print("BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]))
-                survivors.append(label)
-                continue
-            try:
-                r = subprocess.run([sys.executable, str(work / "tests/proxy_e2e.py"), str(exe)], capture_output=True,
-                                   text=True, timeout=420)
-                out = r.stdout + r.stderr
-                code = r.returncode
-            except subprocess.TimeoutExpired as e:
-                out, code = "timed out", 1
-            if code == 0:
-                print("SURVIVED %-50s every end-to-end check passes" % label)
-                survivors.append(label)
-            else:
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in PROXY[skip:] if not only or only in m[0]]
+    workers = int(os.environ.get("MUTANT_JOBS", "4"))
+    port = os.environ.get("PG_E2E_PORT", "5532")
+    dbs = queue.Queue()
+    for w in range(workers):
+        name = "mutant_db_%d" % w
+        for sql in ("drop database if exists %s" % name, "create database %s" % name):
+            subprocess.run(["psql", "-h", "127.0.0.1", "-p", port, "-U", "postgres", "-d", "postgres", "-c", sql],
+                           capture_output=True)
+        dbs.put(name)
+
+    def one(item):
+        label, rel, old, new = item
+        db = dbs.get()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                for d in ("src", "proxy", "tools", "tests"):
+                    shutil.copytree(ROOT / d, work / d, ignore=shutil.ignore_patterns("__pycache__"))
+                f = work / rel
+                text = f.read_text()
+                if text.count(old) != 1:
+                    return label, "STALE  %-52s original text occurs %d times" % (label, text.count(old)), False
+                f.write_text(text.replace(old, new))
+                exe = work / "proxy_mutant"
+                b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
+                                    str(work / "src/token.cho"), str(work / "src/login.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho")]
+                                   + ["-o", str(exe)], capture_output=True, text=True)
+                if b.returncode != 0:
+                    return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
+                try:
+                    r = subprocess.run([sys.executable, str(work / "tests/proxy_e2e.py"), str(exe)], capture_output=True,
+                                       text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
+                    out, code = r.stdout + r.stderr, r.returncode
+                except subprocess.TimeoutExpired:
+                    out, code = "timed out", 1
+                if code == 0:
+                    return label, "SURVIVED %-50s every end-to-end check passes" % label, False
                 failed = [l[5:].strip() for l in out.splitlines() if l.startswith("FAIL")]
-                print("killed   %-50s by: %s" % (label, (failed[0] if failed else out.strip().splitlines()[-1])[:90]))
-    print("%d mutants, %d not killed" % (len(PROXY) - skip, len(survivors)))
+                return label, "killed   %-50s by: %s" % (label, (failed[0] if failed else out.strip().splitlines()[-1])[:90]), True
+        finally:
+            dbs.put(db)
+
+    with concurrent.futures.ThreadPoolExecutor(workers) as ex:
+        results = list(ex.map(one, table))
+    survivors = []
+    for label, line, killed in results:
+        print(line)
+        if not killed:
+            survivors.append(label)
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
     return 1 if survivors else 0
 
 

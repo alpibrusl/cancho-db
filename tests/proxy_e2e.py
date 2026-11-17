@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT_DIR / "tools"))
 from pgtee import Tee  # noqa: E402
 
 PG_PORT = int(os.environ.get("PG_E2E_PORT", "5532"))
+DB = os.environ.get("E2E_DB", "postgres")        # the database the proxy is pointed at: a mutant run gives each worker its own
 PROXY = sys.argv[1]
 MINT = [sys.executable, str(ROOT_DIR / "tools" / "mint.py")]
 FAILED = []
@@ -63,12 +64,12 @@ def client_statements(tee):
 
 
 def direct(sql):
-    return subprocess.run(["psql", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-c", sql],
+    return subprocess.run(["psql", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-d", DB, "-c", sql],
                           capture_output=True, text=True)
 
 
 def start_proxy(listen, upstream_port, branch="main"):
-    p = subprocess.Popen([PROXY, str(listen), "127.0.0.1", str(upstream_port), branch, ROOT, "postgres", "postgres"],
+    p = subprocess.Popen([PROXY, str(listen), "127.0.0.1", str(upstream_port), branch, ROOT, "postgres", DB],
                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     for _ in range(100):
         try:
@@ -126,7 +127,7 @@ check("... and the connection reached PostgreSQL once (the proxy's own catalog c
       len(client_starts(tee)) == 1, str(tee.kinds()))
 startup = client_starts(tee)[0]
 check("... as the configured role and database, not the client's choice",
-      startup.get("user") == "postgres" and startup.get("database") == "postgres", str(startup))
+      startup.get("user") == "postgres" and startup.get("database") == DB, str(startup))
 check("... with the client's application_name passed through", startup.get("application_name") == "psql", str(startup))
 
 r = psql(lp, good, "", input="insert into p0_e2e values (4,'w'),(5,'v');\nselect count(*) from p0_e2e;\n")

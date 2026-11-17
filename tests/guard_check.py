@@ -95,6 +95,8 @@ no(READ_ORDERS, "select customer from orders; select id from orders", 3, "effect
 no(ALL, "select id from orders; drop table nowhere", 2, "unknown-table", "42P01", 1)
 no(ALL, "select id from orders; begin", 2, "mixed-transaction-control", "0A000", 1)
 no(ALL, "select id from orders; select id from orders; select nope from orders", 2, "unknown-column", "42703", 2)
+no(ALL, "select id from orders; savepoint a", 2, "unsupported-statement", "0A000", 1)     # a parser refusal of a later statement
+no(ALL, "select id from orders; select id from orders; select id from orders where", 2, "syntax", "0A000", 2)
 ok(ALL, "select id from orders; ;; select id from orders", 'select "id" from "orders"; select "id" from "orders"')
 
 # ---- transaction control is the proxy's own to answer: nothing is rendered, and it must be alone in its message
