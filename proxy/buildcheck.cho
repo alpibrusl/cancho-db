@@ -1,0 +1,193 @@
+import std.buffer;
+import std.io;
+import cdb.build;
+
+// `buildcheck`: reads the fields of one commit, one line each in hex (an empty line is an empty field; counts are decimal), and
+// writes four lines: the commit's encoding, its id, its signature and the signer's public key, all hex, or `error`. The lines:
+// seed, parents, branch, seq, schema, statements, effects, token, principal, code, nondet count, nondet, changes, state, checks
+// count, checks, time. For tests/build_check.py, which compares it with an independent encoder.
+
+fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer) -> [heap, io_read] buffer.Buffer {
+    var out = text;
+    var c = getchar(io);
+    while c >= 0 {
+        out = buffer.push(heap, out, byte_of(c));
+        c = getchar(io);
+    }
+    return out;
+}
+
+fn hexval(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0;
+}
+
+fn digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+// Line `n` (from 0) of `all` decoded from hex into `dec` at `at`: its length in bytes, or -1 if the line is missing.
+fn field[&a, &d](all: &a [byte], n: int, dec: &!d [byte], at: int) -> [] int {
+    var p = 0;
+    var l = 0;
+    while l < n && p < len(all) {
+        if int_of(all[p]) == '\n' {
+            l = l + 1;
+        }
+        p = p + 1;
+    }
+    if l < n {
+        return 0 - 1;
+    }
+    var e = p;
+    while e < len(all) && int_of(all[e]) != '\n' {
+        e = e + 1;
+    }
+    let bytes = (e - p) / 2;
+    var j = 0;
+    while j < bytes {
+        dec[at + j] = byte_of(hexval(int_of(all[p + 2 * j])) * 16 + hexval(int_of(all[p + 2 * j + 1])));
+        j = j + 1;
+    }
+    return bytes;
+}
+
+// Line `n` as a decimal number.
+fn number[&a](all: &a [byte], n: int) -> [] int {
+    var p = 0;
+    var l = 0;
+    while l < n && p < len(all) {
+        if int_of(all[p]) == '\n' {
+            l = l + 1;
+        }
+        p = p + 1;
+    }
+    var v = 0;
+    while p < len(all) && int_of(all[p]) >= '0' && int_of(all[p]) <= '9' {
+        v = v * 10 + int_of(all[p]) - '0';
+        p = p + 1;
+    }
+    return v;
+}
+
+fn put_hex[&i, &d](io: &!i Io, data: &d [byte]) -> [io_write] int {
+    var j = 0;
+    while j < len(data) {
+        putchar(io, digit(int_of(data[j]) / 16));
+        putchar(io, digit(int_of(data[j]) % 16));
+        j = j + 1;
+    }
+    putchar(io, '\n');
+    return 0;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(ffi);
+    release(fs);
+    release(args);
+    borrow mut heap as &!h in {
+        var text = buffer.empty(h, 4096);
+        borrow mut io as &!i in {
+            text = read_stdin(h, i, text);
+        }
+        var dec = box_slice(h, 300000, byte_of(0));
+        var out = box_slice(h, 600000, byte_of(0));
+        var lens = box_slice(h, 32, 0);
+        var offs = box_slice(h, 32, 0);
+        var n = 0;
+        var ok = true;
+        borrow text as &t in {
+            let all = buffer.bytes(t);
+            borrow mut dec as &!dw in {
+                borrow mut lens as &!lw in {
+                    borrow mut offs as &!ow in {
+                        var at = 0;
+                        var f = 0;
+                        while f < 17 {
+                            if f == 3 || f == 10 || f == 14 {
+                                contents(ow)[f] = at;
+                                contents(lw)[f] = 0;
+                            } else {
+                                contents(ow)[f] = at;
+                                let got = field(all, f, contents(dw), at);
+                                if got < 0 {
+                                    ok = false;
+                                    contents(lw)[f] = 0;
+                                } else {
+                                    contents(lw)[f] = got;
+                                    at = at + got;
+                                }
+                            }
+                            f = f + 1;
+                        }
+                        let seq = number(all, 3);
+                        let nn = number(all, 10);
+                        let cn = number(all, 14);
+                        let time = number(all, 16);
+                        let d = contents(dw);
+                        let o = contents(ow);
+                        let l = contents(lw);
+                        if ok {
+                            borrow mut out as &!uw in {
+                                let w = contents(uw);
+                                let enc_len = build.encode(w, d[o[1]..o[1] + l[1]], d[o[2]..o[2] + l[2]], seq, d[o[4]..o[4] + l[4]], d[o[5]..o[5] + l[5]], d[o[6]..o[6] + l[6]], d[o[7]..o[7] + l[7]], d[o[8]..o[8] + l[8]], d[o[9]..o[9] + l[9]], nn, d[o[11]..o[11] + l[11]], d[o[12]..o[12] + l[12]], d[o[13]..o[13] + l[13]], cn, d[o[15]..o[15] + l[15]], time);
+                                if enc_len < 0 || l[0] != 32 {
+                                    ok = false;
+                                } else {
+                                    borrow mut io as &!i in {
+                                        put_hex(i, w[0..enc_len]);
+                                        let ident = w[enc_len..enc_len + 32];
+                                        build.id(w[0..enc_len], w[enc_len..enc_len + 32]);
+                                        put_hex(i, w[enc_len..enc_len + 32]);
+                                        build.sign(d[o[0]..o[0] + 32], w[enc_len..enc_len + 32], w[enc_len + 32..enc_len + 96]);
+                                        put_hex(i, w[enc_len + 32..enc_len + 96]);
+                                        build.public_key(d[o[0]..o[0] + 32], w[enc_len + 96..enc_len + 128]);
+                                        put_hex(i, w[enc_len + 96..enc_len + 128]);
+                                        // the three files a commit goes to: the log's first record, a token store, a statement store
+                                        let base = enc_len + 128;
+                                        var e1 = build.log_header(w, base, w[enc_len + 96..enc_len + 128]);
+                                        e1 = build.log_record(w, e1, w[0..enc_len], w[enc_len + 32..enc_len + 96]);
+                                        put_hex(i, w[base..e1]);
+                                        var e2 = build.tokens_header(w, e1);
+                                        e2 = build.store_record(w, e2, d[o[7]..o[7] + l[7]]);
+                                        put_hex(i, w[e1..e2]);
+                                        var e3 = build.stmts_header(w, e2);
+                                        e3 = build.store_record(w, e3, d[o[5]..o[5] + l[5]]);
+                                        put_hex(i, w[e2..e3]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !ok {
+            borrow mut io as &!i in {
+                putchar(i, 'e');
+                putchar(i, 'r');
+                putchar(i, 'r');
+                putchar(i, 'o');
+                putchar(i, 'r');
+                putchar(i, '\n');
+            }
+        }
+        unbox_slice(h, dec);
+        unbox_slice(h, out);
+        unbox_slice(h, lens);
+        unbox_slice(h, offs);
+        buffer.drop(h, text);
+    }
+    release(io);
+    release(heap);
+    return 0;
+}

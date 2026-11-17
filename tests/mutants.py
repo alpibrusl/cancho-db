@@ -454,7 +454,7 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
@@ -520,6 +520,33 @@ LEX = [
     ("lex: the token cap is off by one", "src/lex.cho", "if n >= cap - 1 {", "if n >= cap {"),
     ("lex: a string with a prefix letter after a digit", "src/lex.cho", "fn is_ident_start(c: int) -> [] bool {\n    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_';", "fn is_ident_start(c: int) -> [] bool {\n    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z';"),
 ]
+
+# ---- the commit builder (src/build.cho, tests/build_check.py against an independent encoder and the verifiers)
+BUILD = [
+    ("build: bytes are written mod 255", "src/build.cho", "out[at + i] = byte_of(rest % 256);", "out[at + i] = byte_of(rest % 255);"),
+    ("build: effect kinds up to 5", "src/build.cho", "int_of(effs[p]) > 4", "int_of(effs[p]) > 5"),
+    ("build: effects are ordered by target only", "src/build.cho", "    if ka != kb {\n        return ka - kb;", "    if false {\n        return ka - kb;"),
+    ("build: repeated effects are written twice", "src/build.cho", "effect_cmp(effs, q, last) > 0", "effect_cmp(effs, q, last) >= 0"),
+    ("build: effects come out largest first", "src/build.cho", "effect_cmp(effs, q, best) < 0", "effect_cmp(effs, q, best) > 0"),
+    ("build: the effect count is the input's", "src/build.cho", "put_be(out, at, written, 4);", "put_be(out, at, n, 4);"),
+    ("build: the effects ignore an earlier failure", "src/build.cho", "    if at < 0 {\n        return 0 - 1;\n    }\n    // first pass", "    if false {\n        return 0 - 1;\n    }\n    // first pass"),
+    ("build: a hash list may be ragged", "src/build.cho", "if len(hashes) % 32 != 0 {", "if false {"),
+    ("build: the sequence's low half is mod 2^32 - 1", "src/build.cho", "at = put_be(out, at, seq % 4294967296, 4);", "at = put_be(out, at, seq % 4294967295, 4);"),
+    ("build: the time's high half is lost", "src/build.cho", "at = put_be(out, at, time / 4294967296, 4);", "at = put_be(out, at, 0, 4);"),
+    ("build: an empty branch is allowed", "src/build.cho", "len(branch) == 0 ||", "false ||"),
+    ("build: a branch of 256 bytes is allowed", "src/build.cho", "len(branch) > 255", "len(branch) > 256"),
+    ("build: a short schema hash is allowed", "src/build.cho", "len(schema) != 32 ||", "false ||"),
+    ("build: the version is 2", "src/build.cho", "var at = put_be(out, 0, 1, 2);", "var at = put_be(out, 0, 2, 2);"),
+    ("build: the id's domain is v2", "src/build.cho", "\"cancho-db/commit/v1\"", "\"cancho-db/commit/v2\""),
+    ("build: the id leaves out the separator", "src/build.cho", "crypto.sha256_update(sha, nul);", "crypto.sha256_update(sha, enc[0..0]);"),
+    ("build: the log's magic is wrong", "src/build.cho", "\"CHODBLG1\"", "\"CHODBLG2\""),
+    ("build: the token store's magic is wrong", "src/build.cho", "\"CHODBTK1\"", "\"CHODBTK2\""),
+    ("build: the statement store is v1", "src/build.cho", "\"CHODBST2\"", "\"CHODBST1\""),
+    ("build: a log record's length is one over", "src/build.cho", "put_be(out, at, len(enc), 4)", "put_be(out, at, len(enc) + 1, 4)"),
+    ("build: a store entry's length is one over", "src/build.cho", "put_be(out, at, len(body), 4)", "put_be(out, at, len(body) + 1, 4)"),
+]
+
+
 
 def run_unit(table, test_files, src_names, cancho):
     only = os.environ.get("MUTANT_ONLY")
@@ -857,9 +884,44 @@ def run_guard(cancho):
     return 1 if survivors else 0
 
 
+def run_build(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in BUILD if not only or only in m[0]]
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "buildcheck"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/buildcheck.cho"), str(work / "src/build.cho"), str(work / "src/commit.cho"), "-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            r = subprocess.run([sys.executable, str(ROOT / "tests/build_check.py"), str(exe)], capture_output=True, text=True, timeout=600)
+            if r.returncode == 0:
+                print("SURVIVED %-46s every build check passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in r.stdout.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d check(s), e.g. %s" % (label, len(first), first[0][5:60] if first else "a crash"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
     if kind == "guard":
         return run_guard(cancho)
+    if kind == "build":
+        return run_build(cancho)
     if kind == "lower":
         return run_lower(cancho)
     if kind == "login":
