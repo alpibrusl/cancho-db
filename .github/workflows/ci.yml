@@ -42,6 +42,9 @@ jobs:
       - name: The second verifier's one dependency (Ed25519)
         run: pip install cryptography
 
+      - name: strace (the log directory's tests read the order of fsyncs from the kernel's side)
+        run: command -v strace || (sudo apt-get update -qq && sudo apt-get install -y -qq strace)
+
       # Formatting, reproducible vectors, build, authority, both verifiers on every vector, the command lines,
       # differential fuzzing, and the mutants of both verifiers (each must make a vector fail).
       - name: Check

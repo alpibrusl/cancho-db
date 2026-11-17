@@ -1,0 +1,484 @@
+edition 9;
+module cdb.store;
+
+import std.buffer;
+import cdb.commit;
+import cdb.build;
+import cdb.l1;
+
+// The log directory (docs/m1-commit-path.md P2-D10 and P2-D11, slice P2c): three files, `log`, `tokens` and `stmts`, exactly
+// the inputs `verify` takes. This module opens them, repairs what a crash can leave, and appends a commit. It does no
+// networking and knows nothing of PostgreSQL.
+//
+// `open_log` takes the lock on the log (`flock`, released when the process ends however it ends), reads it whole, cuts a torn
+// tail off (the one repair the proxy makes on its own log, because no client was acknowledged for a record that is not whole), runs
+// the verifier's own `l1.verify` on what is left, and finds the tip of the one branch the proxy serves. A log that does not verify
+// is not repaired: it is refused, and the refusal names the verifier's rule and record.
+//
+// The refusals are `Opened::Failed(code)` with codes of ours from 1000 up, so none can be taken for an errno.
+
+pub fn r_locked() -> [] int {
+    return 1001;
+}
+
+pub fn r_bad_magic() -> [] int {
+    return 1002;
+}
+
+pub fn r_foreign_key() -> [] int {
+    return 1003;
+}
+
+pub fn r_record_too_large() -> [] int {
+    return 1004;
+}
+
+pub fn r_corrupt() -> [] int {
+    return 1005;
+}
+
+pub fn r_too_big() -> [] int {
+    return 1006;
+}
+
+pub fn r_io() -> [] int {
+    return 1007;
+}
+
+// What a refusal is called, for the message on standard error.
+pub fn refusal_name(code: int) -> [] &static [byte] {
+    if code == 1001 {
+        return "locked";
+    }
+    if code == 1002 {
+        return "bad-magic";
+    }
+    if code == 1003 {
+        return "foreign-key";
+    }
+    if code == 1004 {
+        return "record-too-large";
+    }
+    if code == 1005 {
+        return "log-corrupt";
+    }
+    if code == 1006 {
+        return "log-too-big";
+    }
+    if code == 1007 {
+        return "io-error";
+    }
+    return "cannot-open";
+}
+
+// The largest log read whole at startup: M1's stated limit (the scan holds the file in memory).
+pub fn max_log() -> [] int {
+    return 268435456;
+}
+
+// All of `data` to `file`, one `write(2)` at a time.
+pub fn write_all[&f, &d](file: &!f File, data: &d [byte]) -> [file_write] bool {
+    var sent = 0;
+    while sent < len(data) {
+        match file_write(file, data[sent..len(data)]) {
+            Done::Ok(n) => {
+                if n <= 0 {
+                    return false;
+                }
+                sent = sent + n;
+            }
+            Done::Failed(e) => {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn synced[&f](file: &!f File) -> [file_write] bool {
+    match file_sync(file) {
+        Done::Ok(n) => {
+            return true;
+        }
+        Done::Failed(e) => {
+            return false;
+        }
+    }
+}
+
+// The whole of `file` appended to `text`: the buffer, and -1 if the read failed.
+fn read_whole[&h, &f](heap: &!h Heap, file: &!f File, text: buffer.Buffer) -> [heap, file_read] (buffer.Buffer, int) {
+    var out = text;
+    var total = 0;
+    var bad = false;
+    var chunk = buffer.empty(heap, 65536);
+    var going = true;
+    while going {
+        var got = 0;
+        borrow mut chunk as &!c in {
+            match file_read(file, buffer.room(c)) {
+                Read::Got(n) => {
+                    got = n;
+                    buffer.filled(c, n);
+                }
+                Read::End => {
+                    going = false;
+                }
+                Read::Failed(e) => {
+                    going = false;
+                    bad = true;
+                }
+            }
+        }
+        if got > 0 {
+            borrow chunk as &c in {
+                out = buffer.append(heap, out, buffer.bytes(c));
+            }
+            total = total + got;
+            borrow mut chunk as &!c in {
+                buffer.clear(c);
+            }
+            if total > max_log() {
+                going = false;
+                bad = true;
+            }
+        }
+    }
+    buffer.drop(heap, chunk);
+    if bad {
+        return (out, 0 - 1);
+    }
+    return (out, total);
+}
+
+// Make `name` exist with `head` in it, made durable (the file, then the directory entry). 0 if it exists already or was made,
+// otherwise an errno or 1007.
+fn create_with[&d, &p, &q](dir: &d Dir, name: &p [byte], head: &q [byte]) -> [dir_write, file_write] int {
+    match dir_open_new(dir, name) {
+        Opened::Failed(e) => {
+            if e == 17 {
+                return 0;
+            }
+            return e;
+        }
+        Opened::Ok(made) => {
+            var f = made;
+            var ok = false;
+            borrow mut f as &!w in {
+                ok = write_all(w, head) && synced(w);
+            }
+            file_close(f);
+            if !ok {
+                return r_io();
+            }
+            match dir_sync(dir) {
+                Done::Ok(n) => {
+                    return 0;
+                }
+                Done::Failed(e) => {
+                    return r_io();
+                }
+            }
+        }
+    }
+}
+
+// Where the whole records of `data` end, framed as the log is (a `u32` length, then that many bytes, then `tail` more) from `from`:
+// the position, or -1 if a length is over the limit. What is left after it is a torn record.
+fn whole_end[&d](data: &d [byte], from: int, tail: int, limit: int) -> [] int {
+    var at = from;
+    var going = true;
+    while going && at < len(data) {
+        if len(data) - at < 4 {
+            going = false;
+        } else {
+            let length = commit.be(data, at, 4);
+            if length > limit {
+                return 0 - 1;
+            }
+            if len(data) - at - 4 < length + tail {
+                going = false;
+            } else {
+                at = at + 4 + length + tail;
+            }
+        }
+    }
+    return at;
+}
+
+fn is_prefix[&a, &b](part: &a [byte], whole: &b [byte]) -> [] bool {
+    if len(part) > len(whole) {
+        return false;
+    }
+    var i = 0;
+    while i < len(part) {
+        if part[i] != whole[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Open one of the two stores (`tokens`, `stmts`) for appending: create it with its `magic` if it is missing, cut a torn tail (a
+// record a crash left half written) and answer the handle. Refused as `r_bad_magic()` if it starts with something else.
+pub fn open_store[&h, &d, &n, &m](heap: &!h Heap, dir: &d Dir, name: &n [byte], magic: &m [byte]) -> [heap, dir_read, dir_write, file_read, file_write] Opened {
+    let made = create_with(dir, name, magic);
+    if made != 0 {
+        return Opened::Failed(made);
+    }
+    var data = buffer.empty(heap, 4096);
+    var got = 0 - 1;
+    match dir_open_read(dir, name) {
+        Opened::Failed(e) => {
+            buffer.drop(heap, data);
+            return Opened::Failed(e);
+        }
+        Opened::Ok(rf) => {
+            var r = rf;
+            borrow mut r as &!w in {
+                let (grown, n2) = read_whole(heap, w, data);
+                data = grown;
+                got = n2;
+            }
+            file_close(r);
+        }
+    }
+    var code = 0;
+    var keep = 0;
+    var ptruncate = false;
+    borrow data as &t in {
+        let all = buffer.bytes(t);
+        if got < 0 {
+            code = r_io();
+        } else if len(all) < 8 {
+            if is_prefix(all, magic) {
+                keep = 0;
+                ptruncate = true;
+            } else {
+                code = r_bad_magic();
+            }
+        } else if !is_prefix(magic, all) {
+            code = r_bad_magic();
+        } else {
+            let end = whole_end(all, 8, 0, 16777216);
+            if end < 0 {
+                code = r_record_too_large();
+            } else {
+                keep = end;
+                ptruncate = end < len(all);
+            }
+        }
+    }
+    buffer.drop(heap, data);
+    if code != 0 {
+        return Opened::Failed(code);
+    }
+    match dir_open_append(dir, name) {
+        Opened::Failed(e) => {
+            return Opened::Failed(e);
+        }
+        Opened::Ok(af) => {
+            var a = af;
+            var ok = true;
+            borrow mut a as &!w in {
+                if ptruncate {
+                    match file_truncate(w, keep) {
+                        Done::Ok(n) => {
+                        }
+                        Done::Failed(e) => {
+                            ok = false;
+                        }
+                    }
+                    if ok && keep == 0 {
+                        ok = write_all(w, magic);
+                    }
+                    ok = ok && synced(w);
+                }
+            }
+            if !ok {
+                file_close(a);
+                return Opened::Failed(r_io());
+            }
+            return Opened::Ok(a);
+        }
+    }
+}
+
+// Open the log, locked, repaired and checked. `pk` is the server's public key (32 bytes), `branch` the branch served. On success
+// `info` says: [0] commits in the log, [1] and [2] unused (0), [3] the next `seq` on the branch, [4] the bytes of torn tail cut, [5]
+// 1 if there is a tip, and `tip` (32 bytes) is the id of the branch's last commit. On refusal `info[1]` is the verifier's rule and
+// `info[2]` the record, for `r_corrupt()`.
+pub fn open_log[&h, &d, &p, &b, &o, &t](heap: &!h Heap, dir: &d Dir, pk: &p [byte], branch: &b [byte], info: &!o [int], tip: &!t [byte]) -> [heap, dir_read, dir_write, file_read, file_write] Opened {
+    var i = 0;
+    while i < 8 {
+        info[i] = 0;
+        i = i + 1;
+    }
+    region hr {
+        let head = alloc_slice[hr](40, byte_of(0));
+        build.log_header(head, 0, pk);
+        let made = create_with(dir, "log", head);
+        if made != 0 {
+            return Opened::Failed(made);
+        }
+    }
+    match dir_open_append(dir, "log") {
+        Opened::Failed(e) => {
+            return Opened::Failed(e);
+        }
+        Opened::Ok(af) => {
+            var a = af;
+            var locked = false;
+            borrow mut a as &!w in {
+                match file_lock(w) {
+                    Done::Ok(n) => {
+                        locked = true;
+                    }
+                    Done::Failed(e) => {
+                        locked = false;
+                    }
+                }
+            }
+            if !locked {
+                file_close(a);
+                return Opened::Failed(r_locked());
+            }
+            var data = buffer.empty(heap, 65536);
+            var got = 0 - 1;
+            match dir_open_read(dir, "log") {
+                Opened::Failed(e) => {
+                    file_close(a);
+                    buffer.drop(heap, data);
+                    return Opened::Failed(e);
+                }
+                Opened::Ok(rf) => {
+                    var r = rf;
+                    borrow mut r as &!w in {
+                        let (grown, n2) = read_whole(heap, w, data);
+                        data = grown;
+                        got = n2;
+                    }
+                    file_close(r);
+                }
+            }
+            var code = 0;
+            var good = 0;
+            var rewrite = false;
+            region hr {
+                let head = alloc_slice[hr](40, byte_of(0));
+                build.log_header(head, 0, pk);
+                borrow data as &t2 in {
+                    let all = buffer.bytes(t2);
+                    if got < 0 {
+                        code = r_io();
+                        if got < 0 && len(all) > max_log() {
+                            code = r_too_big();
+                        }
+                    } else if len(all) < 40 {
+                        if is_prefix(all, head) {
+                            rewrite = true;
+                        } else if len(all) >= 8 && !is_prefix(all[0..8], "CHODBLG1") {
+                            code = r_bad_magic();
+                        } else {
+                            code = r_bad_magic();
+                        }
+                    } else if !is_prefix(all[0..8], "CHODBLG1") {
+                        code = r_bad_magic();
+                    } else if !is_prefix(head, all) {
+                        code = r_foreign_key();
+                    } else {
+                        let end = whole_end(all, 40, 64, 16777216);
+                        if end < 0 {
+                            code = r_record_too_large();
+                        } else {
+                            good = end;
+                            info[4] = len(all) - end;
+                        }
+                    }
+                    if code == 0 && !rewrite {
+                        // the verifier's own check on every whole record
+                        let verdict = alloc_slice[hr](4, 0);
+                        l1.verify(heap, all[0..good], all[0..0], verdict);
+                        if verdict[0] != 0 {
+                            code = r_corrupt();
+                            info[1] = verdict[0];
+                            info[2] = verdict[1];
+                        } else {
+                            info[0] = verdict[2];
+                            // the tip of the branch served: the last whole record on it
+                            let out = alloc_slice[hr](commit.out_len(), 0);
+                            let ident = alloc_slice[hr](32, byte_of(0));
+                            var at = 40;
+                            while at < good {
+                                let length = commit.be(all, at, 4);
+                                let enc = all[at + 4..at + 4 + length];
+                                commit.decode(enc, out);
+                                let bat = out[commit.f_branch_at()];
+                                if l1.same(enc[bat..bat + out[commit.f_branch_len()]], branch) {
+                                    build.id(enc, ident);
+                                    var j = 0;
+                                    while j < 32 {
+                                        tip[j] = ident[j];
+                                        j = j + 1;
+                                    }
+                                    info[3] = out[commit.f_seq_lo()] + 1;
+                                    info[5] = 1;
+                                }
+                                at = at + 4 + length + 64;
+                            }
+                        }
+                    }
+                    if code == 0 && (rewrite || good < len(all)) {
+                        // repair: nothing past the last whole record was acknowledged to a client
+                        var ok = true;
+                        borrow mut a as &!w in {
+                            match file_truncate(w, good) {
+                                Done::Ok(n) => {
+                                }
+                                Done::Failed(e) => {
+                                    ok = false;
+                                }
+                            }
+                            if ok && rewrite {
+                                info[4] = len(all);
+                                ok = write_all(w, head);
+                            }
+                            ok = ok && synced(w);
+                        }
+                        if !ok {
+                            code = r_io();
+                        }
+                    }
+                }
+            }
+            buffer.drop(heap, data);
+            if code != 0 {
+                file_close(a);
+                return Opened::Failed(code);
+            }
+            return Opened::Ok(a);
+        }
+    }
+}
+
+// Append one commit's records and make them durable, in the order P2-D10 gives: the token and the statements to their stores, both
+// synced, then the commit to the log, synced. `token_rec` and `stmt_recs` are store records (`build.store_record`: a `u32` length and
+// the body, one after another); `log_rec` is `build.log_record`'s. 0 if the commit is in the log, otherwise `r_io()`: the log is then
+// not trusted to have it (a torn record is cut on the next start).
+pub fn append[&a, &b, &c, &x, &y, &z](log: &!a File, tokens: &!b File, stmts: &!c File, token_rec: &x [byte], stmt_recs: &y [byte], log_rec: &z [byte]) -> [file_write] int {
+    if len(token_rec) > 0 {
+        if !write_all(tokens, token_rec) || !synced(tokens) {
+            return r_io();
+        }
+    }
+    if len(stmt_recs) > 0 {
+        if !write_all(stmts, stmt_recs) || !synced(stmts) {
+            return r_io();
+        }
+    }
+    if !write_all(log, log_rec) || !synced(log) {
+        return r_io();
+    }
+    return 0;
+}

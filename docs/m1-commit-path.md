@@ -195,7 +195,7 @@ Each is one change with its own gate.
 |---|---|---|
 | **P2a** | **built**: server-to-client framing; transaction tracking; `BEGIN`/`COMMIT`/`ROLLBACK` parsed and answered by the proxy's own state; autocommit wrapped in a transaction; held `CommandComplete`/`ReadyForQuery`; **no log yet** | `psql` transactions, rollbacks, errors inside a transaction (`25P02`), statuses `I`/`T`/`E` on the wire; refused options and mixed messages; the wire tee shows the exact upstream messages; mutants |
 | **P2b** | **built** (section 5.3): the commit builder (`src/build.cho`, sans-io: encode, id, sign) and the store encoders | bytes equal an independent Python encoder's over hand-written commits; the verifier accepts them; mutants; **the signing is checked by the three verifiers** |
-| **P2c** | the log directory, the key, append and fsync, the lock, the startup scan, the torn-tail repair | restart reads the log back; torn tails; a second proxy refused; `cancho authority` pinned |
+| **P2c** | **store built** (section 5.4): the log directory, the key, append and fsync, the lock, the startup scan, the torn-tail repair | restart reads the log back; torn tails; a second proxy refused; `cancho authority` pinned |
 | **P2d** | the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
 | **P2e** | the cost, measured, and the claims | `select` and `insert` latency through the proxy vs direct on the same machine, with the fsyncs on |
 
@@ -242,3 +242,17 @@ in already encoded with their counts; P2d encodes `now()` as the one int value D
 alone, with `hashlib` for the id and `cryptography` for the signature; then writes a 120-commit chain as a log that the three
 verifiers accept, and a copy with one flipped byte that each rejects. 21 mutants, all killed. It found one real bug in the first
 run: the effects writer did not stop when an earlier field had already failed, so a ragged parent list still produced bytes.
+
+### 5.4 P2c, the store as built
+
+`src/store.cho` (edition 9: directory handles) opens the log directory through a `Dir`, so no path is resolved twice and no link is
+followed. `open_log` makes the files if they are missing (`dir_open_new`, write, `fsync`, then `dir_sync`), opens the log for
+appending, takes the `flock`, reads the file whole, cuts a torn tail, runs the verifier's own check and finds the tip. The verifier's
+check was moved out of `verify.cho` into `src/l1.cho` for this (428 vectors and 139 verifier mutants still agree), so the proxy does not carry a second copy.
+`open_store` does the same for `tokens` and `stmts` (their entries are `u32 length, body`). `append` writes the three files in the order D10
+gives and syncs each. Refusals are `Opened::Failed(code)` with codes from 1000 so none can be taken for an errno.
+
+Two things the build changed: the tip is found by decoding each record again after the verifier has accepted them (the verifier
+does not export its tips), which is linear and was not worth a second interface; and `fsync` order is checked with `strace`, which
+CI now installs, because no program output says whether a write was made durable. **Not yet done in this slice:** the proxy does not
+open the store (the `--log-dir` and key arguments, the authority row): that is the next commit of P2c. The proxy has no commit to append until P2d.

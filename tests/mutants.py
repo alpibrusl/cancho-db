@@ -548,6 +548,30 @@ BUILD = [
 
 
 
+# ---- the log directory (src/store.cho, tests/store_check.py: the scan, the repair, the lock and the order of durable writes)
+STORE = [
+    ("store: the log's lock is not taken", "src/store.cho", "if !locked {", "if false {"),
+    ("store: a torn tail is not cut", "src/store.cho", "if code == 0 && (rewrite || good < len(all)) {", "if code == 0 && rewrite {"),
+    ("store: the log is not verified", "src/store.cho", "if code == 0 && !rewrite {", "if false {"),
+    ("store: another key's log is accepted", "src/store.cho", "} else if !is_prefix(head, all) {", "} else if false {"),
+    ("store: the log's magic is not checked", "src/store.cho", "} else if !is_prefix(all[0..8], \"CHODBLG1\") {", "} else if false {"),
+    ("store: a record's length is not limited", "src/store.cho", "whole_end(all, 40, 64, 16777216)", "whole_end(all, 40, 64, 4294967296)"),
+    ("store: a record's signature is not counted in its frame", "src/store.cho", "whole_end(all, 40, 64, 16777216)", "whole_end(all, 40, 63, 16777216)"),
+    ("store: the next seq is the tip's own", "src/store.cho", "info[3] = out[commit.f_seq_lo()] + 1;", "info[3] = out[commit.f_seq_lo()];"),
+    ("store: every branch's commit is the tip", "src/store.cho", "if l1.same(enc[bat..bat + out[commit.f_branch_len()]], branch) {", "if true {"),
+    ("store: a torn header is cut and not rewritten", "src/store.cho", "ok = write_all(w, head);", "ok = true;"),
+    ("store: a torn store tail is not cut", "src/store.cho", "ptruncate = end < len(all);", "ptruncate = false;"),
+    ("store: a store's magic is not checked", "src/store.cho", "} else if !is_prefix(magic, all) {", "} else if false {"),
+    ("store: the new file is not synced", "src/store.cho", "ok = write_all(w, head) && synced(w);", "ok = write_all(w, head);"),
+    ("store: the log's repair is not synced", "src/store.cho", "ok = ok && synced(w);\n                        }\n                        if !ok {\n                            code = r_io();", "ok = ok;\n                        }\n                        if !ok {\n                            code = r_io();"),
+    ("store: a store's repair is not synced", "src/store.cho", "ok = ok && synced(w);\n                }\n            }\n            if !ok {\n                file_close(a);", "ok = ok;\n                }\n            }\n            if !ok {\n                file_close(a);"),
+    ("store: the token store is not synced", "src/store.cho", "if !write_all(tokens, token_rec) || !synced(tokens) {", "if !write_all(tokens, token_rec) {"),
+    ("store: the statement store is not synced", "src/store.cho", "if !write_all(stmts, stmt_recs) || !synced(stmts) {", "if !write_all(stmts, stmt_recs) {"),
+    ("store: the log is not synced", "src/store.cho", "if !write_all(log, log_rec) || !synced(log) {", "if !write_all(log, log_rec) {"),
+    ("store: the log is written before the stores", "src/store.cho", "    if len(token_rec) > 0 {\n        if !write_all(tokens", "    if !write_all(log, log_rec) || !synced(log) {\n        return r_io();\n    }\n    if len(token_rec) > 0 {\n        if !write_all(tokens"),
+]
+
+
 def run_unit(table, test_files, src_names, cancho):
     only = os.environ.get("MUTANT_ONLY")
     if only:
@@ -917,11 +941,50 @@ def run_build(cancho):
     return 1 if survivors else 0
 
 
+def run_store(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in STORE if not only or only in m[0]]
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "storecheck"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/storecheck.cho")] + [str(work / "src" / n) for n in ("store.cho", "build.cho", "commit.cho", "l1.cho")] + ["-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            try:
+                r = subprocess.run([sys.executable, str(ROOT / "tests/store_check.py"), str(exe)], capture_output=True, text=True, timeout=300)
+                rc, out = r.returncode, r.stdout
+            except subprocess.TimeoutExpired:
+                rc, out = 1, "FAIL timed out"
+            if rc == 0:
+                print("SURVIVED %-46s every store check passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in out.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d check(s), e.g. %s" % (label, len(first), first[0][5:60] if first else "a crash"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
     if kind == "guard":
         return run_guard(cancho)
     if kind == "build":
         return run_build(cancho)
+    if kind == "store":
+        return run_store(cancho)
     if kind == "lower":
         return run_lower(cancho)
     if kind == "login":
