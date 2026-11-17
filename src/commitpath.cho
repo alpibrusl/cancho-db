@@ -152,6 +152,12 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
         return r;
     }
     let wrote = ai[8 * k + 3] == 1;
+    if contents(core.store.chain)[2] >= shared.ids_max() {
+        // the recovery table is full: no further commit can be made safely (a restart refuses this log too)
+        upstream_exec(tab, core, b, "ROLLBACK");
+        reset(core, k);
+        return 2;
+    }
     var result = 0;
     region z {
         let enc = alloc_slice[z](8192, byte_of(0));
@@ -212,6 +218,8 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
                         tip[j] = ident[j];
                         j = j + 1;
                     }
+                    build.put_bytes(contents(core.store.ids), 32 * chain[2], ident);
+                    chain[2] = chain[2] + 1;
                     chain[0] = chain[0] + 1;
                     chain[1] = 1;
                     ai[8 * k + 4] = 1;

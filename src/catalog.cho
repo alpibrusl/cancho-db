@@ -1,0 +1,307 @@
+edition 9;
+module cdb.catalog;
+
+import std.conns;
+import cdb.commit;
+import cdb.shared;
+import cdb.upstream;
+import cdb.snapshot;
+import cdb.commitpath;
+import cdb.build;
+
+// The proxy's own connection to PostgreSQL (slot kind 6, one question at a time): the schema snapshot, read fresh for every query, and
+// recovery (docs/m1-commit-path.md P2-D11), which settles the prepared transactions a crash left.
+
+// Open the proxy's own connection to PostgreSQL for catalog questions: login as the configured role, and wait for ReadyForQuery.
+// Answers its slot, or -1.
+pub fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
+    let cfg = contents(core.cfg);
+    let ci = contents(core.cfgi);
+    let si = contents(core.snapin);
+    var table = tab;
+    var slot = 0 - 1;
+    match tcp_connect(net, host, port) {
+        Dialed::Ok(server) => {
+            let (t1, b) = conns.put(heap, table, server);
+            table = t1;
+            if b >= 0 {
+                var good = false;
+                region r {
+                    let msg = alloc_slice[r](1024, byte_of(0));
+                    let at = upstream.startup_msg(msg, cfg, ci, "cancho-db-catalog");
+                    borrow mut table as &!tw in {
+                        if upstream.write_all(tw, b, msg[0..at]) {
+                            let got = upstream.read_until_ready(tw, b, si, shared.login_ms());
+                            // the first message must be AuthenticationOk (R, 8, 0): a password request is not something to answer here
+                            if got >= 9 && int_of(si[0]) == 'R' && commit.be(si, 5, 4) == 0 {
+                                good = true;
+                            }
+                        }
+                    }
+                }
+                if good {
+                    slot = b;
+                    contents(core.state)[shared.stride() * b] = 6;
+                    contents(core.state)[shared.stride() * b + 12] = 0 - 1;
+                } else {
+                    borrow mut table as &!tw in {
+                        conns.close(tw, b);
+                    }
+                }
+            }
+        }
+        Dialed::Failed(e) => {
+        }
+    }
+    return (table, slot);
+}
+
+// The schema snapshot, fresh from the catalog, into `core.snap`: its length, or -1 if the catalog cannot be asked. The one
+// connection is kept between questions and opened again if PostgreSQL has closed it.
+pub fn read_snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
+    let aux = contents(core.aux);
+    let si = contents(core.snapin);
+    var table = tab;
+    var attempt = 0;
+    while attempt < 2 {
+        if aux[0] < 0 {
+            let (t1, slot) = catalog_open(heap, table, core, net, host, port);
+            table = t1;
+            aux[0] = slot;
+        }
+        if aux[0] >= 0 {
+            let slot = aux[0];
+            var answered = 0 - 1;
+            region r {
+                let sql = snapshot.sql();
+                let msg = alloc_slice[r](len(sql) + 8, byte_of(0));
+                msg[0] = byte_of('Q');
+                let ln = len(sql) + 5;
+                msg[1] = byte_of(ln / 16777216 % 256);
+                msg[2] = byte_of(ln / 65536 % 256);
+                msg[3] = byte_of(ln / 256 % 256);
+                msg[4] = byte_of(ln % 256);
+                var i = 0;
+                while i < len(sql) {
+                    msg[5 + i] = sql[i];
+                    i = i + 1;
+                }
+                msg[5 + len(sql)] = byte_of(0);
+                borrow mut table as &!tw in {
+                    if upstream.write_all(tw, slot, msg[0..len(sql) + 6]) {
+                        answered = upstream.read_until_ready(tw, slot, si, shared.login_ms());
+                    }
+                }
+            }
+            if answered > 0 {
+                let w = snapshot.build(si, answered, contents(core.snap));
+                if w >= 0 {
+                    return (table, w);
+                }
+            }
+            // it failed: close it, and try once more with a fresh one
+            borrow mut table as &!tw in {
+                conns.close(tw, slot);
+            }
+            contents(core.state)[shared.stride() * slot] = 0;
+            aux[0] = 0 - 1;
+        }
+        attempt = attempt + 1;
+    }
+    return (table, 0 - 1);
+}
+
+// The first column of the first row of the last answer in `si`, read as a decimal number: -1 if there is none or it is not one.
+fn first_number[&s](si: &s [byte]) -> [] int {
+    var pos = 0;
+    while pos + 5 <= len(si) {
+        let ln = commit.be(si, pos + 1, 4);
+        if ln < 4 {
+            return 0 - 1;
+        }
+        if int_of(si[pos]) == 'D' && pos + 11 <= len(si) {
+            let cl = commit.be(si, pos + 7, 4);
+            var v = 0;
+            var i = 0;
+            while i < cl && pos + 11 + i < len(si) {
+                let c = int_of(si[pos + 11 + i]);
+                if c < '0' || c > '9' {
+                    return 0 - 1;
+                }
+                v = v * 10 + c - '0';
+                i = i + 1;
+            }
+            return v;
+        }
+        if int_of(si[pos]) == 'Z' {
+            return 0 - 1;
+        }
+        pos = pos + 1 + ln;
+    }
+    return 0 - 1;
+}
+
+fn hex_value(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0 - 1;
+}
+
+// `gid` is `cdb:` and 64 lowercase hex digits and the commit it names is in `ids` (`count` ids of 32 bytes): 1; 0 if it is the right shape and
+// not there; -1 if it is not the right shape (not ours to settle).
+fn gid_state[&g, &i](gid: &g [byte], ids: &i [byte], count: int) -> [] int {
+    if len(gid) != 68 || int_of(gid[0]) != 'c' || int_of(gid[1]) != 'd' || int_of(gid[2]) != 'b' || int_of(gid[3]) != ':' {
+        return 0 - 1;
+    }
+    var want = 0;
+    var found = 0;
+    region r {
+        let id = alloc_slice[r](32, byte_of(0));
+        var j = 0;
+        while j < 32 {
+            let hi = hex_value(int_of(gid[4 + 2 * j]));
+            let lo = hex_value(int_of(gid[5 + 2 * j]));
+            if hi < 0 || lo < 0 {
+                want = 0 - 1;
+                j = 32;
+            } else {
+                id[j] = byte_of(hi * 16 + lo);
+                j = j + 1;
+            }
+        }
+        if want == 0 {
+            var e = 0;
+            while e < count && found == 0 {
+                var same = true;
+                var b = 0;
+                while b < 32 && same {
+                    if ids[32 * e + b] != id[b] {
+                        same = false;
+                    }
+                    b = b + 1;
+                }
+                if same {
+                    found = 1;
+                }
+                e = e + 1;
+            }
+        }
+    }
+    if want < 0 {
+        return 0 - 1;
+    }
+    return found;
+}
+
+// Settle the prepared transactions this proxy may have left (P2-D11): for every `cdb:` gid in `pg_prepared_xacts` **of the database it serves** (the view is
+// cluster-wide, and another database's prepared transaction cannot be settled from this connection: PostgreSQL refuses), `COMMIT PREPARED` if the
+// log holds the commit it names, `ROLLBACK PREPARED` if not; a gid that is not `cdb:` and 64 hex digits is left alone. Done on the catalog
+// connection. The status: 0, 1 if PostgreSQL cannot prepare transactions at all (`max_prepared_transactions` is 0), -1 if it could not be
+// asked. The counts of what was done are in `core.aux[3..6]` (committed, rolled back, left alone); `core.aux[2]` is cleared when it is done.
+pub fn recover[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
+    var table = tab;
+    let aux = contents(core.aux);
+    aux[3] = 0;
+    aux[4] = 0;
+    aux[5] = 0;
+    if aux[0] < 0 {
+        let (t1, slot) = catalog_open(heap, table, core, net, host, port);
+        table = t1;
+        aux[0] = slot;
+    }
+    if aux[0] < 0 {
+        return (table, 0 - 1);
+    }
+    let slot = aux[0];
+    var status = 0;
+    var r = 0;
+    borrow mut table as &!tw in {
+        r = commitpath.upstream_exec(tw, core, slot, "show max_prepared_transactions");
+    }
+    if r != 0 {
+        status = 0 - 1;
+    } else if first_number(contents(core.snapin)) <= 0 {
+        status = 1;
+    }
+    if status == 0 {
+        region g {
+            let gids = alloc_slice[g](64 * 68, byte_of(0));
+            var n = 0;
+            borrow mut table as &!tw in {
+                r = commitpath.upstream_exec(tw, core, slot, "select gid from pg_prepared_xacts where gid like 'cdb:%' and database = current_database() order by prepared");
+            }
+            if r != 0 {
+                status = 0 - 1;
+            } else {
+                let si = contents(core.snapin);
+                var pos = 0;
+                var going = true;
+                while going && pos + 5 <= len(si) && n < 64 {
+                    let ln = commit.be(si, pos + 1, 4);
+                    if ln < 4 || int_of(si[pos]) == 'Z' {
+                        going = false;
+                    } else {
+                        if int_of(si[pos]) == 'D' && pos + 11 <= len(si) {
+                            let cl = commit.be(si, pos + 7, 4);
+                            if cl == 68 && pos + 11 + cl <= len(si) {
+                                var i = 0;
+                                while i < 68 {
+                                    gids[68 * n + i] = si[pos + 11 + i];
+                                    i = i + 1;
+                                }
+                                n = n + 1;
+                            } else {
+                                aux[5] = aux[5] + 1;
+                            }
+                        }
+                        pos = pos + 1 + ln;
+                    }
+                }
+            }
+            var gi = 0;
+            while status == 0 && gi < n {
+                let gid = gids[68 * gi..68 * gi + 68];
+                let held = gid_state(gid, contents(core.store.ids), contents(core.store.chain)[2]);
+                if held < 0 {
+                    aux[5] = aux[5] + 1;
+                } else {
+                    let sql = alloc_slice[g](96, byte_of(0));
+                    var at = 0;
+                    if held == 1 {
+                        at = build.put_bytes(sql, 0, "COMMIT PREPARED '");
+                    } else {
+                        at = build.put_bytes(sql, 0, "ROLLBACK PREPARED '");
+                    }
+                    at = build.put_bytes(sql, at, gid);
+                    at = build.put_bytes(sql, at, "'");
+                    borrow mut table as &!tw in {
+                        r = commitpath.upstream_exec(tw, core, slot, sql[0..at]);
+                    }
+                    if r != 0 {
+                        status = 0 - 1;
+                    } else if held == 1 {
+                        aux[3] = aux[3] + 1;
+                    } else {
+                        aux[4] = aux[4] + 1;
+                    }
+                }
+                gi = gi + 1;
+            }
+        }
+    }
+    if status < 0 {
+        // the catalog connection is not to be trusted: close it, so the next attempt opens a fresh one
+        borrow mut table as &!tw in {
+            conns.close(tw, slot);
+        }
+        contents(core.state)[shared.stride() * slot] = 0;
+        aux[0] = 0 - 1;
+    } else {
+        aux[2] = 0;
+    }
+    return (table, status);
+}

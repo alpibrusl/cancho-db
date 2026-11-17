@@ -196,7 +196,7 @@ Each is one change with its own gate.
 | **P2a** | **built**: server-to-client framing; transaction tracking; `BEGIN`/`COMMIT`/`ROLLBACK` parsed and answered by the proxy's own state; autocommit wrapped in a transaction; held `CommandComplete`/`ReadyForQuery`; **no log yet** | `psql` transactions, rollbacks, errors inside a transaction (`25P02`), statuses `I`/`T`/`E` on the wire; refused options and mixed messages; the wire tee shows the exact upstream messages; mutants |
 | **P2b** | **built** (section 5.3): the commit builder (`src/build.cho`, sans-io: encode, id, sign) and the store encoders | bytes equal an independent Python encoder's over hand-written commits; the verifier accepts them; mutants; **the signing is checked by the three verifiers** |
 | **P2c** | **store built** (section 5.4): the log directory, the key, append and fsync, the lock, the startup scan, the torn-tail repair | restart reads the log back; torn tails; a second proxy refused; `cancho authority` pinned |
-| **P2d** | **3 of 5 built** (section 5.8): the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
+| **P2d** | **4 of 5 built** (sections 5.8 and 5.9): the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
 | **P2e** | the cost, measured, and the claims | `select` and `insert` latency through the proxy vs direct on the same machine, with the fsyncs on |
 
 ## 7. Risks and what needs the owner's decision
@@ -319,3 +319,29 @@ for `ROLLBACK PREPARED` exists and has no test); **recovery on restart does not 
 **a statement that reads `now()` or any other nondeterminism is refused** (`0A000` `nondeterministic`) instead of being recorded wrongly, until P2d-5;
 `BEGIN; COMMIT` with no statement writes no commit; a token is appended once per connection (a repeat across connections is a duplicate the store
 permits). **Every `select` is a commit with its fsyncs; the latency is not measured** (P2e).
+
+### 5.9 P2d-4 as built: recovery and the failure windows
+
+`src/catalog.cho` now holds the proxy's own connection to PostgreSQL (moved out of `proxy.cho`: the schema snapshot, and `recover`). **Recovery**
+runs at the start of `run`, before anything is accepted: it asks `show max_prepared_transactions` (0 refuses to start: a write could not be two-phase),
+lists `pg_prepared_xacts` whose gid starts `cdb:` **and which belong to the database served** (the view is cluster-wide; found when a mutant run left prepared transactions in other databases and the proxy refused to start, because PostgreSQL will not settle another database's prepared transaction from this connection), and for each of 64 per pass issues `COMMIT PREPARED` if the log holds the commit its gid names and
+`ROLLBACK PREPARED` if not; a `cdb:` gid that is not 64 lowercase hex digits is left alone and counted. The ids the log holds are a table of 1,048,576
+commits (32 MiB; `store.open_log` fills it, `conclude` extends it): a log with more is refused at startup, and a proxy whose table fills refuses further
+commits. A summary goes to standard error when anything was done. **The listener is bound before recovery, so the port is open and connections
+wait in the kernel's backlog; none is accepted until recovery is done** (the design said "the listener opens only then": this is the difference).
+**A proxy needs a reachable PostgreSQL to start**: if it cannot be asked, the proxy exits (code 6); four end-to-end tests that had pointed the proxy at a dead or silent
+upstream now start it against a tee that goes bad afterwards.
+
+The failure windows of section 4 are reached by `tools/pgtee.py`, which can now `fault(prefix, when, action)`: drop a `Query` before it reaches the server
+(`before`), forward it and drop the server's answer (`reply`), or forward it and act (`after`); the action kills the proxy. Four windows, each followed by
+a look at PostgreSQL's prepared transactions and rows and the log, a restart, and the same look: before `PREPARE` (nothing anywhere, nothing to settle); after
+`PREPARE` with the answer dropped (prepared, not logged: **rolled back** on restart); at `COMMIT PREPARED` before it is sent (logged, prepared: **committed**
+on restart); after `COMMIT PREPARED` with the answer dropped (committed, logged: nothing to do). In each the rows left are the commits in the log, one for one,
+and the three verifiers accept the files. The log that cannot be written is a file-size limit just under one commit's log (`RLIMIT_FSIZE`, `SIGXFSZ`
+ignored): the client gets `58000`, PostgreSQL holds nothing and no prepared transaction, a read is refused the same way, and the torn record the write left is
+cut at the next start.
+
+**Recovery while running** is tested too (found by CI: the mutant "a commit's id is not in the recovery table" survived, because the table is read only by a live recovery): the tee `drop`s the connection at `COMMIT PREPARED`, so the proxy loses its upstream after the log has the commit; the client's connection is closed, the running proxy settles the prepared transaction itself at its next turn by committing it (the log has it), and the next commit continues the chain.
+
+Not tested, stated: **`max_prepared_transactions = 0`** refusing to start (the throwaway server has it above 0); a torn tail **and** a prepared
+transaction together (the two repairs are tested apart); more than 64 prepared transactions in one pass (the rest wait for the next).

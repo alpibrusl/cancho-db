@@ -17,8 +17,42 @@ class Tee:
         self.sock.listen(8)
         self.port = self.sock.getsockname()[1]
         self.messages = []          # (kind, detail) of every client message, in order, all connections
+        self.faults = []            # [prefix, when, action] one-shot rules, see fault()
+        self.blackhole = False      # when set, a new connection is accepted and then ignored: a server that never answers
+        self.socks = []             # every socket opened, so that stop() can close them
         self.lock = threading.Lock()
         threading.Thread(target=self._accept, daemon=True).start()
+
+    def fault(self, prefix, when, action):
+        """Run `action` (kill the proxy) once, at the first Query whose text starts with `prefix`. `when` is "before": the Query is
+        dropped, never reaching the server; "reply": the Query is forwarded and the server's answer to it is dropped, never reaching
+        the proxy; "after": the Query is forwarded and `action` runs at once; "drop": the Query is dropped and the connection (both ends) closed, `action` unused. Each reaches one window of docs/m1-commit-path.md section 4."""
+        with self.lock:
+            self.faults.append([prefix, when, action])
+
+    def _fault_for(self, query):
+        with self.lock:
+            for f in self.faults:
+                if query.startswith(f[0]):
+                    self.faults.remove(f)
+                    return f
+        return None
+
+    def stop(self):
+        """Close the listening socket and every connection: the server is gone."""
+        for how in (lambda x: x.shutdown(socket.SHUT_RDWR), lambda x: x.close()):
+            try:
+                how(self.sock)
+            except OSError:
+                pass
+        with self.lock:
+            socks, self.socks = self.socks, []
+        for s in socks:
+            for how in (lambda x: x.shutdown(socket.SHUT_RDWR), lambda x: x.close()):
+                try:
+                    how(s)
+                except OSError:
+                    pass
 
     def clear(self):
         with self.lock:
@@ -38,16 +72,22 @@ class Tee:
 
     def _accept(self):
         while True:
-            c, _ = self.sock.accept()
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                return
             threading.Thread(target=self._serve, args=(c,), daemon=True).start()
 
     @staticmethod
-    def _pump(a, b):
+    def _pump(a, b, held=None):
         try:
             while True:
                 d = a.recv(65536)
                 if not d:
                     break
+                if held is not None and held:
+                    held.pop()()          # the answer the proxy was to get is dropped, and the proxy is killed instead
+                    continue
                 b.sendall(d)
         except OSError:
             pass
@@ -58,8 +98,15 @@ class Tee:
                 pass
 
     def _serve(self, c):
+        with self.lock:
+            self.socks.append(c)
+        if self.blackhole:
+            return
         u = socket.create_connection((self.host, self.upstream))
-        threading.Thread(target=self._pump, args=(u, c), daemon=True).start()
+        with self.lock:
+            self.socks.append(u)
+        held = []
+        threading.Thread(target=self._pump, args=(u, c, held), daemon=True).start()
         buf, started = b"", False
 
         def need(n):
@@ -98,7 +145,27 @@ class Tee:
                 msg, buf = buf[:1 + ln], buf[1 + ln:]
                 body = msg[5:]
                 if t == b"Q":
-                    self._note("Query", body[:-1].decode(errors="replace"))
+                    text = body[:-1].decode(errors="replace")
+                    self._note("Query", text)
+                    f = self._fault_for(text)
+                    if f is not None:
+                        if f[1] == "drop":
+                            # the connection to the server is lost, the proxy is not: the Query never arrives and both ends are closed
+                            for sock in (u, c):
+                                try:
+                                    sock.shutdown(socket.SHUT_RDWR)
+                                except OSError:
+                                    pass
+                            return
+                        if f[1] == "before":
+                            f[2]()
+                            continue
+                        if f[1] == "reply":
+                            held.append(f[2])
+                        elif f[1] == "after":
+                            u.sendall(msg)
+                            f[2]()
+                            continue
                 elif t == b"P":
                     self._note("Parse", body.split(b"\0")[1].decode(errors="replace"))
                 elif t == b"p":

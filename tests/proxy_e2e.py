@@ -267,21 +267,21 @@ check("a client that sends nothing is closed after about 10 s (%.1f s)" % dt, cl
 s.close()
 check("... and the proxy still serves", psql(lp, good, Q1).stdout.strip() == "1")
 
-silent = socket.socket()
-silent.bind(("127.0.0.1", 0))
-silent.listen(4)
-sp = silent.getsockname()[1]
+# (the proxy settles prepared transactions before it listens, so it needs a live server to start: these upstreams are tees that go bad after that)
+silent_tee = Tee(PG_PORT)
 p2 = free_port()
-proxy2 = start_proxy(p2, sp)
+proxy2 = start_proxy(p2, silent_tee.port)
+silent_tee.blackhole = True
 t0 = time.time()
 r = psql(p2, good, "select 1", timeout=40)
 dt = time.time() - t0
 check("an upstream that never answers: refused with upstream-timeout after about 5 s (%.1f s)" % dt,
       "upstream-timeout" in r.stderr and 4 < dt < 12, r.stderr)
 proxy2.terminate()
-silent.close()
-dead = free_port()
-proxy3 = start_proxy(free_port(), dead)
+silent_tee.stop()
+dead_tee = Tee(PG_PORT)
+proxy3 = start_proxy(free_port(), dead_tee.port)
+dead_tee.stop()
 p3 = proxy3.args[1]
 r = psql(int(p3), good, "select 1")
 check("an upstream that is down: refused with upstream-unavailable", "upstream-unavailable" in r.stderr, r.stderr)
@@ -591,10 +591,10 @@ def _log_with(n, branch=b"main"):
     return out
 
 
-def start_logged(ldir, keyfile, branch="main", wait=True):
+def start_logged(ldir, keyfile, branch="main", wait=True, upstream=None, preexec=None):
     port = free_port()
-    p = subprocess.Popen([PROXY, str(port), "127.0.0.1", str(PG_PORT), branch, ROOT, "postgres", DB, str(ldir), str(keyfile)],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    p = subprocess.Popen([PROXY, str(port), "127.0.0.1", str(upstream or PG_PORT), branch, ROOT, "postgres", DB, str(ldir), str(keyfile)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, preexec_fn=preexec)
     if not wait:
         return p, port
     for _ in range(100):
@@ -758,8 +758,159 @@ if len(commits) == 4:
     check("P2d: and the longer log verifies", out.startswith("ok commits=5 branches=1"), out)
 direct("drop table if exists p2d")
 
+# ---- P2d-4: the failure windows of docs/m1-commit-path.md section 4, reached from outside (a tee kills the proxy at a chosen message)
+import resource
+import signal
+
+direct("drop table if exists p2f; create table p2f(a int primary key, b text)")
+
+
+def prepared_xacts():
+    return int(direct("select count(*) from pg_prepared_xacts where gid like 'cdb:%' and database = current_database()").stdout.strip() or -1)
+
+
+def rows_of():
+    return direct("select coalesce(string_agg(a::text, ',' order by a), '') from p2f").stdout.strip()
+
+
+def commits_in(ldir):
+    return len(read_log(Path(ldir, "log")))
+
+
+def run_window(name, prefix, when, key, expect):
+    """Kill the proxy at one window, look at what PostgreSQL and the log hold, restart it (which recovers) and look again. `expect` is
+    (prepared before, rows before, commits before, summary on restart, rows after, commits after)."""
+    direct("delete from p2f")
+    ldir = Path(_scratch, "w_" + name)
+    ldir.mkdir()
+    ft = Tee(PG_PORT)
+    fp, fport = start_logged(ldir, Path(_scratch, "key"), upstream=ft.port)
+    ft.fault(prefix, when, fp.kill)
+    died = None
+    try:
+        fw = Wire(fport, good)
+        died = fw.query("insert into p2f values (%d, 'v')" % key)
+    except (EOFError, ConnectionError, OSError):
+        died = "closed"
+    fp.wait(timeout=10)
+    ft.stop()
+    before = (prepared_xacts(), rows_of(), commits_in(ldir))
+    rp, rport = start_logged(ldir, Path(_scratch, "key"))
+    time.sleep(0.5)
+    ok_started = rp.poll() is None
+    rp.terminate()
+    err = rp.communicate(timeout=10)[1]
+    after = (prepared_xacts(), rows_of(), commits_in(ldir))
+    want_before, want_after, summary = expect
+    check("P2d-4 %s: the proxy was killed, and PostgreSQL, the log hold what the window says (prepared, rows, commits) %s" % (name, want_before),
+          fp.returncode is not None and before == want_before, "%s %s" % (before, died))
+    check("P2d-4 %s: the restart settles it: %s" % (name, want_after), ok_started and after == want_after and summary in err, "%s %s" % (after, err))
+    # equality: the rows PostgreSQL holds are the rows the commits in the log name, one for one
+    check("P2d-4 %s: and the rows are exactly the commits (count and identity)" % name,
+          len([r for r in after[1].split(",") if r]) == after[2] and (after[2] == 0 or after[1] == str(key)), after)
+    if after[2]:
+        argv = ["--root", ROOT, "--tokens", str(ldir / "tokens"), "--stmts", str(ldir / "stmts")]
+        for vname, cmd in [("python", ["python3", str(ROOT_DIR / "tools" / "verify.py")])] + [(v, [v]) for v in VERIFIERS]:
+            out = subprocess.run(cmd + [str(ldir / "log")] + argv, capture_output=True, text=True).stdout.strip()
+            check("P2d-4 %s: %s accepts the files after recovery" % (name, vname), out.startswith("ok commits=%d" % after[2]), out)
+
+
+# a prepared transaction of another database (the view is cluster-wide) is not this proxy's to settle and must not stop it starting
+direct("drop database if exists p2d_other")
+direct("create database p2d_other")
+subprocess.run(["psql", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-d", "p2d_other", "-c", "begin; create table t(a int); prepare transaction 'cdb:%s'" % ("0" * 64)], capture_output=True, text=True)
+sd = Path(_scratch, "w_other")
+sd.mkdir()
+so, _ = start_logged(sd, Path(_scratch, "key"))
+time.sleep(0.5)
+check("P2d-4: a prepared transaction of another database does not stop the proxy from starting", so.poll() is None)
+so.terminate()
+so.communicate(timeout=10)
+subprocess.run(["psql", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-d", "p2d_other", "-c", "rollback prepared 'cdb:%s'" % ("0" * 64)], capture_output=True, text=True)
+direct("drop database if exists p2d_other")
+
+run_window("before_prepare", "PREPARE TRANSACTION", "before", 1, ((0, "", 0), (0, "", 0), "log has 0 commits"))
+run_window("prepared_no_log", "PREPARE TRANSACTION", "reply", 2, ((1, "", 0), (0, "", 0), "recovery: committed 0, rolled back 1"))
+run_window("logged_not_committed", "COMMIT PREPARED", "before", 3, ((1, "", 1), (0, "3", 1), "recovery: committed 1, rolled back 0"))
+run_window("committed_not_acked", "COMMIT PREPARED", "reply", 4, ((0, "4", 1), (0, "4", 1), "log has 1 commits"))
+
+# the log cannot be written: the file-size limit is set just under the size of one commit's log, so the append fails part-way (a torn record)
+direct("delete from p2f")
+size_dir = Path(_scratch, "w_size")
+size_dir.mkdir()
+sp_, sport = start_logged(size_dir, Path(_scratch, "key"))
+sw = Wire(sport, good)
+sw.query("insert into p2f values (91, 'v')")
+sw.close()
+time.sleep(0.3)
+sp_.terminate()
+sp_.communicate(timeout=10)
+log_size, tok_size, stmt_size = (Path(size_dir, n).stat().st_size for n in ("log", "tokens", "stmts"))
+limit = log_size - 1
+direct("delete from p2f")
+fdir = Path(_scratch, "w_full")
+fdir.mkdir()
+
+
+def limited():
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+
+
+fp2, fport2 = start_logged(fdir, Path(_scratch, "key"), preexec=limited)
+fw2 = Wire(fport2, good)
+r_full = fw2.query("insert into p2f values (92, 'v')")
+check("P2d-4: when the log cannot be written the client gets 58000 and PostgreSQL has nothing (limit %d, one commit needs %d, tokens %d, stmts %d)" % (limit, log_size, tok_size, stmt_size),
+      tok_size < log_size and stmt_size < log_size and any(m[0] == "E" and b"58000" in m[1] for m in r_full) and rows_of() == "" and prepared_xacts() == 0, str(r_full))
+r_next = fw2.query("select a from p2f where a = 92")
+check("... and the proxy goes on answering (a read is a commit too, so it is refused the same way while the log cannot be written)",
+      fp2.poll() is None and any(m[0] == "E" and b"58000" in m[1] for m in r_next) and r_next[-1][0] == "Z", str(r_next))
+fw2.close()
+fp2.terminate()
+fp2.communicate(timeout=10)
+torn = Path(fdir, "log").stat().st_size
+fp3, _ = start_logged(fdir, Path(_scratch, "key"))
+time.sleep(0.5)
+fp3.terminate()
+err_full = fp3.communicate(timeout=10)[1]
+check("... its torn record (%d bytes past the header) is cut at the next start" % (torn - 40), (torn == 40 or "torn tail" in err_full) and Path(fdir, "log").stat().st_size == 40, err_full)
+
+# the upstream connection is lost after the log has the commit and before PostgreSQL does: the RUNNING proxy settles it, without a restart
+direct("delete from p2f")
+ldir = Path(_scratch, "w_live")
+ldir.mkdir()
+lt = Tee(PG_PORT)
+lp_, lport_ = start_logged(ldir, Path(_scratch, "key"), upstream=lt.port)
+lt.fault("COMMIT PREPARED", "drop", None)
+try:
+    lw = Wire(lport_, good)
+    lw.query("insert into p2f values (77, 'v')")
+    live_closed = False
+except (EOFError, ConnectionError, OSError):
+    live_closed = True
+settled = False
+for _ in range(60):
+    if prepared_xacts() == 0:
+        settled = True
+        break
+    time.sleep(0.25)
+check("P2d-4 live: the client's connection was closed, and the running proxy settled the prepared transaction itself by committing it (the log has it)",
+      live_closed and settled and rows_of() == "77" and commits_in(ldir) == 1 and lp_.poll() is None, "%s %s %s %s" % (live_closed, settled, rows_of(), commits_in(ldir)))
+lw2 = Wire(lport_, good)
+lw2.query("insert into p2f values (78, 'w')")
+lw2.close()
+time.sleep(0.3)
+lp_.terminate()
+lp_.communicate(timeout=10)
+check("P2d-4 live: and it goes on, the chain unbroken (two commits, the second after the first)", commits_in(ldir) == 2 and rows_of() == "77,78", "%s %s" % (commits_in(ldir), rows_of()))
+lt.stop()
+argv = ["--root", ROOT, "--tokens", str(ldir / "tokens"), "--stmts", str(ldir / "stmts")]
+out = subprocess.run(["python3", str(ROOT_DIR / "tools" / "verify.py"), str(ldir / "log")] + argv, capture_output=True, text=True).stdout.strip()
+check("P2d-4 live: and the files verify at L2 and IR", out.startswith("ok commits=2"), out)
+direct("drop table if exists p2f")
+
 check("the proxy is still alive after all of it", proxy.poll() is None)
 direct("drop table if exists p0_e2e, p0_big cascade")
 proxy.terminate()
-print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0, P1d, P2a, P2c and P2d checks passed")
+print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0, P1d, P2a, P2c, P2d and P2d-4 checks passed")
 sys.exit(1 if FAILED else 0)
