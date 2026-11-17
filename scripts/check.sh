@@ -36,7 +36,7 @@ echo "== authority";                 sh tests/authority.sh
 echo "== vectors, python verifier";  python3 tests/run_vectors.py vectors -- python3 tools/verify.py
 echo "== vectors, cancho verifier";  python3 tests/run_vectors.py vectors -- build/verify
 echo "== vectors, go verifier";      python3 tests/run_vectors.py vectors -- build/verify-go
-echo "== the proxy builds";          "$CANCHO" build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho -o build/proxy
+echo "== the proxy builds";          "$CANCHO" build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho -o build/proxy
 echo "== the proxy end to end (psql, a real PostgreSQL)"
 sh scripts/pg_throwaway.sh start 5593
 trap 'sh scripts/pg_throwaway.sh stop 5593' EXIT

@@ -222,3 +222,10 @@ Each is one change with its own gate.
 - **A restart after the proxy is killed in the third window** means a client saw no acknowledgement of a commit that is in the log and
   in PostgreSQL. It will retry. That is the usual unknown-outcome problem of any database; nothing here dedupes retries (an
   idempotency key would be a client contract, M2).
+
+### 5.2 Housekeeping before P2b: the proxy is split
+
+`proxy/proxy.cho` had reached 1,811 lines against the 2,000 ceiling, with P2b-P2d still to come. The schema-snapshot builder
+(`snapshot_sql`, `plain_name`, `append`, `build_snapshot`: pure functions on bytes, no I/O) moved to `src/snapshot.cho`, so
+`proxy.cho` is 1,695 lines. Nothing else changed: the end-to-end checks pass on the split build, `tests/authority.sh` shows the same
+authority, and the proxy mutants build with the new file. P2c/P2d will need a second split (the upstream I/O helpers) before they land.
