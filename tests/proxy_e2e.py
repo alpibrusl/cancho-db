@@ -531,10 +531,19 @@ check("an autocommit message of two statements: both CommandCompletes, then Read
 check("... and the server was sent BEGIN, both statements as ONE message, COMMIT",
       client_queries(tee) == ["BEGIN", 'insert into "p2a" values (10, \'a\'); insert into "p2a" values (11, \'b\')', "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'"],
       str(client_queries(tee)))
+
+# the order of a message of several statements: every statement's messages in the server's order, the last tag held for the commit (found in P3: the
+# proxy held ALL the tags and streamed the rows after them, so `T D C T D C Z` reached the client as `T D T D C C Z`)
+m = w.query("select a from p2a where a = 10; select b from p2a where a = 11")
+check("a message of two selects: T D C T D C Z, in the server's order", "".join(k for k, _ in m) == "TDCTDCZ", "".join(k for k, _ in m))
+m = w.query("insert into p2a values (40, 'k'); select a from p2a where a = 40; select b from p2a where a = 40")
+check("an insert and two selects: C T D C T D C Z", "".join(k for k, _ in m) == "CTDCTDCZ", "".join(k for k, _ in m))
+m = w.query("select a from p2a where a = 40")
+check("one statement is as before: T D C Z", "".join(k for k, _ in m) == "TDCZ", "".join(k for k, _ in m))
 tee.clear()
 m = w.query("insert into p2a values (12, 'c'); insert into p2a values (10, 'dup')")
-check("an autocommit message whose second statement fails: the error (23505), status I, NO CommandComplete reaches the client",
-      codes_of(m) == ["23505"] and tags_of(m) == [] and status_of(m) == "I", str(m))
+check("an autocommit message whose second statement fails: the first statement's tag, then the error (23505), status I: the stream PostgreSQL sends",
+      codes_of(m) == ["23505"] and tags_of(m) == ["INSERT 0 1"] and [k for k, _ in m] == ["C", "E", "Z"] and status_of(m) == "I", str(m))
 check("... the server was sent ROLLBACK, and the first statement's row is not there", client_queries(tee)[-1] == "ROLLBACK" and
       direct("select count(*) from p2a where a = 12").stdout.strip() == "0", str(client_queries(tee)))
 m = w.query("select a from p2a order by a")
@@ -860,6 +869,9 @@ fw2 = Wire(fport2, good)
 r_full = fw2.query("insert into p2f values (92, 'v')")
 check("P2d-4: when the log cannot be written the client gets 58000 and PostgreSQL has nothing (limit %d, one commit needs %d, tokens %d, stmts %d)" % (limit, log_size, tok_size, stmt_size),
       tok_size < log_size and stmt_size < log_size and any(m[0] == "E" and b"58000" in m[1] for m in r_full) and rows_of() == "" and prepared_xacts() == 0, str(r_full))
+r_two = fw2.query("insert into p2f values (93, 'a'); insert into p2f values (94, 'b')")
+check("... in a message of two statements the first statement's tag is released in its place and only the last is held, so a failed commit gives C then E (as PostgreSQL's own stream would)",
+      [k for k, _ in r_two] == ["C", "E", "Z"] and b"58000" in r_two[1][1] and tags_of(r_two) == ["INSERT 0 1"], str(r_two))
 r_next = fw2.query("select a from p2f where a = 92")
 check("... and the proxy goes on answering (a read is a commit too, so it is refused the same way while the log cannot be written)",
       fp2.poll() is None and any(m[0] == "E" and b"58000" in m[1] for m in r_next) and r_next[-1][0] == "Z", str(r_next))

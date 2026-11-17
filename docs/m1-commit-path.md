@@ -170,9 +170,13 @@ P2a (the proxy tracks transactions; **no log yet**) is built. The plan held; the
 
 - **The proxy now opens a transaction for every autocommit statement** (`BEGIN`, the rendering, then `COMMIT`), which is what P2d
   needs to prepare it; today the `COMMIT` is a plain one. The client sees exactly what it saw before: rows stream as they come, the
-  statement's `CommandComplete` messages are **held** and released only after the proxy's `COMMIT` succeeded, and the client's
-  `ReadyForQuery` is the proxy's own `I`. A statement that fails is rolled back, the error reaches the client, and **no
-  `CommandComplete` of an earlier statement in the same message does**.
+  statement's `CommandComplete` is **held** and released only after the proxy's `COMMIT` succeeded, and the client's
+  `ReadyForQuery` is the proxy's own `I`. A statement that fails is rolled back and the error reaches the client.
+  **Corrected (found in P3 by a message of two selects): P2a held *every* tag of a message and streamed the rows after them, so `T D C T D C Z`
+  reached the client as `T D T D C C Z` and psql lost the first statement's tag, and it said that no tag of an earlier statement reaches the client
+  when a later one fails. Only the newest tag is held now; an older one is released in its place as soon as anything follows it. The client sees
+  the stream PostgreSQL sends, including `C` then `E` when a later statement fails (the implicit transaction is rolled back, as in PostgreSQL);
+  what is held until the commit is durable is the last tag and `ReadyForQuery`.**
 - **`BEGIN`, `COMMIT`, `ROLLBACK`** (and `START TRANSACTION`, `END`, `ABORT`, with `WORK` or `TRANSACTION`) are parsed as leaves with no
   effects and answered by the proxy itself from its own record of the client's state; an option, `AND CHAIN`, `TO SAVEPOINT` or
   `PREPARED` is `unknown-construct`. In a message with other statements they are refused (`mixed-transaction-control`).

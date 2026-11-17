@@ -411,6 +411,8 @@ PROXY = [
     ("proxy: a transaction without now() records one", "src/commitpath.cho", "    if ai[8 * k + 6] == 1 {\n        let nr", "    if true {\n        let nr"),
     ("proxy: now() is not noted when added", "src/commitpath.cho", "        ai[8 * k + 6] = 1;\n    }\n    return 0;", "        ai[8 * k + 6] = 0;\n    }\n    return 0;"),
     ("proxy: the statements of a transaction are not limited", "src/commitpath.cho", "    if ai[8 * k] + n > shared.acc_stmts() ||", "    if false ||"),
+    ("proxy: rows stream past a held tag", "proxy/proxy.cho", "                    if st[q + 21] == 1 && st[cp + 18] > 0 {\n                        // anything that follows", "                    if false {\n                        // anything that follows"),
+    ("proxy: an older held tag is kept, not released", "proxy/proxy.cho", "                            if st[cp + 18] > 0 {\n                                if !shared.send(", "                            if false {\n                                if !shared.send("),
     ("proxy: non-loopback clients are served", "proxy/proxy.cho", "if !is_loopback(ct, a) {", "if false {"),
     ("proxy: the token is not checked", "proxy/proxy.cho", "if rule != login.login_ok() {", "if false {"),
     ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > shared.hello_ms()", "false"),
