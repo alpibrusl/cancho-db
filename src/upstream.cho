@@ -1,0 +1,141 @@
+edition 9;
+module cdb.upstream;
+
+import std.conns;
+import cdb.commit;
+
+// The proxy's own side of the upstream connection (split out of `proxy.cho` for the file ceiling, before P2d): the startup message
+// it sends PostgreSQL, bounded reads and complete writes on one connection of the table. No policy lives here.
+
+// Put `b` after `x` into `out` as a NUL-ended string at `at`; answers where it ends.
+pub fn put_cstr[&o, &s](out: &!o [byte], at: int, text: &s [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        out[at + i] = text[i];
+        i = i + 1;
+    }
+    out[at + len(text)] = byte_of(0);
+    return at + len(text) + 1;
+}
+
+// Read what the connection in `slot` has to say within `wait_ms`, into `into`: the number of bytes (more than 0), 0 if
+// nothing came in time, -1 if the connection ended or failed. A private poller bounds the wait, so a silent upstream
+// costs one client a refusal and not the loop its attention.
+pub fn login_read[&t, &b](tab: &!t conns.Table, slot: int, into: &!b [byte], wait_ms: int) -> [conn_read, poll] int {
+    match poller_new() {
+        Polling::Ok(p) => {
+            var poller = p;
+            var answer = 0 - 1;
+            region r {
+                let ev = alloc_slice[r](8, 0);
+                borrow mut poller as &!pw in {
+                    if conns.watch(tab, pw, slot, 1, 1) == 0 {
+                        let n = poller_wait(pw, ev, wait_ms);
+                        if n > 0 {
+                            match conns.read(tab, slot, into) {
+                                Received::Data(g) => {
+                                    answer = g;
+                                }
+                                Received::End => {
+                                    answer = 0 - 1;
+                                }
+                                Received::Again => {
+                                    answer = 0;
+                                }
+                                Received::Failed(e) => {
+                                    answer = 0 - 1;
+                                }
+                            }
+                        } else if n == 0 {
+                            answer = 0;
+                        }
+                    }
+                }
+            }
+            poller_close(poller);
+            return answer;
+        }
+        Polling::Failed(e) => {
+            return 0 - 1;
+        }
+    }
+}
+
+// Put the proxy's own startup message (the configured role and database, application_name `name`) into `msg`: its length.
+pub fn startup_msg[&m, &c, &s](msg: &!m [byte], cfg: &c [byte], ci: &s [int], name: &static [byte]) -> [] int {
+    var at = 8;
+    at = put_cstr(msg, at, "user");
+    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);
+    at = put_cstr(msg, at, "database");
+    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
+    at = put_cstr(msg, at, "application_name");
+    at = put_cstr(msg, at, name);
+    msg[at] = byte_of(0);
+    at = at + 1;
+    msg[0] = byte_of(at / 16777216 % 256);
+    msg[1] = byte_of(at / 65536 % 256);
+    msg[2] = byte_of(at / 256 % 256);
+    msg[3] = byte_of(at % 256);
+    msg[4] = byte_of(0);
+    msg[5] = byte_of(3);
+    msg[6] = byte_of(0);
+    msg[7] = byte_of(0);
+    return at;
+}
+
+// Send all of `data` on connection `slot`, waiting if the kernel is slow: false if it fails. The catalog connection is never
+// the busy one, and its messages are small.
+pub fn write_all[&t, &d](tab: &!t conns.Table, slot: int, data: &d [byte]) -> [conn_write] bool {
+    var sent = 0;
+    var spins = 0;
+    while sent < len(data) {
+        match conns.write(tab, slot, data[sent..len(data)]) {
+            Sent::Wrote(x) => {
+                sent = sent + x;
+            }
+            Sent::Again => {
+                spins = spins + 1;
+                if spins > 1000000 {
+                    return false;
+                }
+            }
+            Sent::Failed(e) => {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Read from `slot` until a ReadyForQuery has come, into `into`: the bytes read, or -1 (it failed, was silent past `wait_ms`, or
+// answered with an error before the first row, or too much).
+pub fn read_until_ready[&t, &b](tab: &!t conns.Table, slot: int, into: &!b [byte], wait_ms: int) -> [conn_read, poll] int {
+    var fill = 0;
+    while fill < len(into) {
+        let got = login_read(tab, slot, into[fill..len(into)], wait_ms);
+        if got <= 0 {
+            return 0 - 1;
+        }
+        fill = fill + got;
+        // is there a complete ReadyForQuery as the last message?
+        var pos = 0;
+        var last = 0 - 1;
+        var whole = true;
+        while whole && pos + 5 <= fill {
+            let ln = commit.be(into, pos + 1, 4);
+            if ln < 4 {
+                return 0 - 1;
+            }
+            if pos + 1 + ln > fill {
+                whole = false;
+            } else {
+                last = int_of(into[pos]);
+                pos = pos + 1 + ln;
+            }
+        }
+        if whole && pos == fill && last == 'Z' {
+            return fill;
+        }
+    }
+    return 0 - 1;
+}

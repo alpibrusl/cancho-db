@@ -12,6 +12,7 @@ import cdb.guard;
 import cdb.snapshot;
 import cdb.build;
 import cdb.store;
+import cdb.upstream;
 
 // `proxy` -- slice P0 of the cancho-db proxy (`docs/m1-proxy.md`): the front door in front of PostgreSQL.
 //
@@ -637,60 +638,6 @@ fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l L
     return table;
 }
 
-// Put `b` after `x` into `out` as a NUL-ended string at `at`; answers where it ends.
-fn put_cstr[&o, &s](out: &!o [byte], at: int, text: &s [byte]) -> [] int {
-    var i = 0;
-    while i < len(text) {
-        out[at + i] = text[i];
-        i = i + 1;
-    }
-    out[at + len(text)] = byte_of(0);
-    return at + len(text) + 1;
-}
-
-// Read what the connection in `slot` has to say within `wait_ms`, into `into`: the number of bytes (more than 0), 0 if
-// nothing came in time, -1 if the connection ended or failed. A private poller bounds the wait, so a silent upstream
-// costs one client a refusal and not the loop its attention.
-fn login_read[&t, &b](tab: &!t conns.Table, slot: int, into: &!b [byte], wait_ms: int) -> [conn_read, poll] int {
-    match poller_new() {
-        Polling::Ok(p) => {
-            var poller = p;
-            var answer = 0 - 1;
-            region r {
-                let ev = alloc_slice[r](8, 0);
-                borrow mut poller as &!pw in {
-                    if conns.watch(tab, pw, slot, 1, 1) == 0 {
-                        let n = poller_wait(pw, ev, wait_ms);
-                        if n > 0 {
-                            match conns.read(tab, slot, into) {
-                                Received::Data(g) => {
-                                    answer = g;
-                                }
-                                Received::End => {
-                                    answer = 0 - 1;
-                                }
-                                Received::Again => {
-                                    answer = 0;
-                                }
-                                Received::Failed(e) => {
-                                    answer = 0 - 1;
-                                }
-                            }
-                        } else if n == 0 {
-                            answer = 0;
-                        }
-                    }
-                }
-            }
-            poller_close(poller);
-            return answer;
-        }
-        Polling::Failed(e) => {
-            return 0 - 1;
-        }
-    }
-}
-
 // Open the connection to PostgreSQL for client `k` (kind 5), log in to it (trust), and pair them. Blocking, and the one
 // place that is: PostgreSQL is local and trusted (docs/m1-proxy.md section 3, P0's limit). The server's login answer is
 // relayed to the client as it is.
@@ -715,15 +662,15 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                 region r {
                     let msg = alloc_slice[r](1024, byte_of(0));
                     var at = 8;
-                    at = put_cstr(msg, at, "user");
-                    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);
-                    at = put_cstr(msg, at, "database");
-                    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
-                    at = put_cstr(msg, at, "application_name");
+                    at = upstream.put_cstr(msg, at, "user");
+                    at = upstream.put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);
+                    at = upstream.put_cstr(msg, at, "database");
+                    at = upstream.put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
+                    at = upstream.put_cstr(msg, at, "application_name");
                     if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {
-                        at = put_cstr(msg, at, hb[k * hello_size() + st[p + 8]..k * hello_size() + st[p + 8] + st[p + 9]]);
+                        at = upstream.put_cstr(msg, at, hb[k * hello_size() + st[p + 8]..k * hello_size() + st[p + 8] + st[p + 9]]);
                     } else {
-                        at = put_cstr(msg, at, "cancho-db");
+                        at = upstream.put_cstr(msg, at, "cancho-db");
                     }
                     msg[at] = byte_of(0);
                     at = at + 1;
@@ -757,7 +704,7 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                 while failed == 0 && !done {
                     var got = 0 - 1;
                     borrow mut table as &!tw in {
-                        got = login_read(tw, b, rb[fill..relay_max()], login_ms());
+                        got = upstream.login_read(tw, b, rb[fill..relay_max()], login_ms());
                     }
                     if got < 0 {
                         failed = 1;
@@ -883,85 +830,6 @@ fn pair_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
 
 // ------------------------------------------------------------------------------------------------ the guard
 
-// Put the proxy's own startup message (the configured role and database, application_name `name`) into `msg`: its length.
-fn startup_msg[&m, &c, &s](msg: &!m [byte], cfg: &c [byte], ci: &s [int], name: &static [byte]) -> [] int {
-    var at = 8;
-    at = put_cstr(msg, at, "user");
-    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);
-    at = put_cstr(msg, at, "database");
-    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
-    at = put_cstr(msg, at, "application_name");
-    at = put_cstr(msg, at, name);
-    msg[at] = byte_of(0);
-    at = at + 1;
-    msg[0] = byte_of(at / 16777216 % 256);
-    msg[1] = byte_of(at / 65536 % 256);
-    msg[2] = byte_of(at / 256 % 256);
-    msg[3] = byte_of(at % 256);
-    msg[4] = byte_of(0);
-    msg[5] = byte_of(3);
-    msg[6] = byte_of(0);
-    msg[7] = byte_of(0);
-    return at;
-}
-
-// Send all of `data` on connection `slot`, waiting if the kernel is slow: false if it fails. The catalog connection is never
-// the busy one, and its messages are small.
-fn write_all[&t, &d](tab: &!t conns.Table, slot: int, data: &d [byte]) -> [conn_write] bool {
-    var sent = 0;
-    var spins = 0;
-    while sent < len(data) {
-        match conns.write(tab, slot, data[sent..len(data)]) {
-            Sent::Wrote(x) => {
-                sent = sent + x;
-            }
-            Sent::Again => {
-                spins = spins + 1;
-                if spins > 1000000 {
-                    return false;
-                }
-            }
-            Sent::Failed(e) => {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-// Read from `slot` until a ReadyForQuery has come, into `into`: the bytes read, or -1 (it failed, was silent past `wait_ms`, or
-// answered with an error before the first row, or too much).
-fn read_until_ready[&t, &b](tab: &!t conns.Table, slot: int, into: &!b [byte], wait_ms: int) -> [conn_read, poll] int {
-    var fill = 0;
-    while fill < len(into) {
-        let got = login_read(tab, slot, into[fill..len(into)], wait_ms);
-        if got <= 0 {
-            return 0 - 1;
-        }
-        fill = fill + got;
-        // is there a complete ReadyForQuery as the last message?
-        var pos = 0;
-        var last = 0 - 1;
-        var whole = true;
-        while whole && pos + 5 <= fill {
-            let ln = commit.be(into, pos + 1, 4);
-            if ln < 4 {
-                return 0 - 1;
-            }
-            if pos + 1 + ln > fill {
-                whole = false;
-            } else {
-                last = int_of(into[pos]);
-                pos = pos + 1 + ln;
-            }
-        }
-        if whole && pos == fill && last == 'Z' {
-            return fill;
-        }
-    }
-    return 0 - 1;
-}
-
 // ------------------------------------------------------------------------------------------------ transactions
 
 // Run `sql` (one simple query of the proxy's own: BEGIN, COMMIT, ROLLBACK) on upstream connection `b` and wait, bounded, for its
@@ -983,13 +851,13 @@ fn upstream_exec[&t, &c, &q](tab: &!t conns.Table, core: &!c Core, b: int, sql: 
             i = i + 1;
         }
         msg[5 + len(sql)] = byte_of(0);
-        sent = write_all(tab, b, msg[0..len(sql) + 6]);
+        sent = upstream.write_all(tab, b, msg[0..len(sql) + 6]);
     }
     if !sent {
         return 0 - 1;
     }
     let si = contents(core.snapin);
-    let n = read_until_ready(tab, b, si, login_ms());
+    let n = upstream.read_until_ready(tab, b, si, login_ms());
     if n < 0 {
         return 0 - 1;
     }
@@ -1210,10 +1078,10 @@ fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, ne
                 var good = false;
                 region r {
                     let msg = alloc_slice[r](1024, byte_of(0));
-                    let at = startup_msg(msg, cfg, ci, "cancho-db-catalog");
+                    let at = upstream.startup_msg(msg, cfg, ci, "cancho-db-catalog");
                     borrow mut table as &!tw in {
-                        if write_all(tw, b, msg[0..at]) {
-                            let got = read_until_ready(tw, b, si, login_ms());
+                        if upstream.write_all(tw, b, msg[0..at]) {
+                            let got = upstream.read_until_ready(tw, b, si, login_ms());
                             // the first message must be AuthenticationOk (R, 8, 0): a password request is not something to answer here
                             if got >= 9 && int_of(si[0]) == 'R' && commit.be(si, 5, 4) == 0 {
                                 good = true;
@@ -1270,8 +1138,8 @@ fn snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                 }
                 msg[5 + len(sql)] = byte_of(0);
                 borrow mut table as &!tw in {
-                    if write_all(tw, slot, msg[0..len(sql) + 6]) {
-                        answered = read_until_ready(tw, slot, si, login_ms());
+                    if upstream.write_all(tw, slot, msg[0..len(sql) + 6]) {
+                        answered = upstream.read_until_ready(tw, slot, si, login_ms());
                     }
                 }
             }

@@ -257,3 +257,10 @@ does not export its tips), which is linear and was not worth a second interface;
 CI now installs, because no program output says whether a write was made durable. **The proxy opens it** (second commit of P2c): two optional arguments after the seven, `<log directory> <signing key file>` (positional, like the rest; `--log-dir` and `--key` were the design's spelling). The
 store is opened, locked and scanned *before* the listener, the summary goes to standard error, and `proxy.cho` is now edition 9 (directory
 handles). The authority pin changed on purpose (it now names `fs_read("")`, `dir_read`, `dir_write`, `file_read`, `file_write`), and the claim "never touches the filesystem" is gone from it. **`proxy.cho` is at 1,873 lines**: P2d needs the second split (the upstream I/O helpers `write_all`, `read_until_ready`, `startup_msg`) first. The proxy has no commit to append until P2d.
+
+### 5.5 The second split (before P2d)
+
+`proxy.cho` was 1,873 lines. `src/upstream.cho` (141 lines) now holds the proxy's side of the upstream connection: `put_cstr`, `login_read`,
+`startup_msg`, `write_all`, `read_until_ready`. `proxy.cho` is 1,741 lines. The end-to-end checks and the authority pin are unchanged;
+one proxy mutant's anchor moved with the code it mutates (and now swaps the role for the database name, since the hello
+buffer it used to name is not visible there).
