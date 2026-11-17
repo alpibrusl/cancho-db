@@ -54,7 +54,7 @@ Accepted, to the extent IR v2 can say it:
 Refused, **before anything reaches PostgreSQL**, with `0A000` and a rule tag in the message, one tag per class so a log or a
 test can count them: `unsupported-sql: subquery`, `cte`, `set-operation`, `window`, `returning`, `on-conflict`,
 `insert-select`, `copy`, `temp-table`, `listen`, `set`, `catalog` (a reference to `pg_catalog` or `information_schema`),
-`dollar-quote`, `escape-string`, `unicode-escape`, `nested-too-deep`, `nondeterministic` (`random()`, `clock_timestamp()`,
+`dollar-quote`, `parameter` (only `$0`, `$1x`, a leading zero or a number over 65535: **since P3a `$n` itself is a parameter, `Param n`, not a refusal**, docs/m1-extended.md), `escape-string`, `unicode-escape`, `nested-too-deep`, `nondeterministic` (`random()`, `clock_timestamp()`,
 `nextval`, `gen_random_uuid()`), `unknown-construct`. And `42703` `unknown-column` / `42702` `ambiguous-column` /
 `42P01` `unknown-table` where the schema snapshot shows PostgreSQL would refuse too; refusing here is the same answer sooner.
 

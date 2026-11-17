@@ -40,6 +40,7 @@ def Int(v): return b"\x01\x01" + __import__("struct").pack(">q", v)
 def Txt(v): return b"\x01\x02" + u32(len(v)) + v
 NULLC = b"\x01\x00"
 def Nondet(s): return b"\x03" + b16(s)
+def Param(n): return b"\x02" + u32(n)
 def Call(f, *a): return b"\x04" + b16(f) + u32(len(a)) + b"".join(a)
 def Op(op, a, b): return b"\x05" + bytes([op]) + a + b
 STAR = b"\x06"
@@ -71,6 +72,19 @@ def no(sql, tag): CASES.append((sql, tag))
 
 
 # ---- SELECT: columns, aliases, stars
+# ---- parameters (docs/m1-extended.md P3-D1): `Param n`, the number as written; no effect of their own
+ok("select id from orders where id = $1", Select2([Col("orders", "id")], [From("orders")], where=Op(EQ, Col("orders", "id"), Param(1))),
+   [rd("orders"), rd("orders", "id")])
+ok("select id from orders where total > $2 and customer = $1",
+   Select2([Col("orders", "id")], [From("orders")], where=Op(AND, Op(GT, Col("orders", "total"), Param(2)), Op(EQ, Col("orders", "customer"), Param(1)))),
+   [rd("orders"), rd("orders", "id"), rd("orders", "total"), rd("orders", "customer")])
+ok("select id from orders where id in ($3, $1) limit $2",
+   Select2([Col("orders", "id")], [From("orders")], where=In(0, Col("orders", "id"), Param(3), Param(1)), limit=Param(2)),
+   [rd("orders"), rd("orders", "id")])
+ok("insert into orders (id, customer, total) values ($1, $2, $3)", Insert("orders", ["id", "customer", "total"], [[Param(1), Param(2), Param(3)]]), [(W, "orders")])
+ok("update orders set total = $1 where id = $2", Update("orders", [("total", Param(1))], Op(EQ, Col("orders", "id"), Param(2))),
+   [(W, "orders"), rd("orders", "id")])
+ok("delete from orders where id = $65535", Delete("orders", Op(EQ, Col("orders", "id"), Param(65535))), [(W, "orders"), rd("orders", "id")])
 ok("select id from orders", Select2([Col("orders", "id")], [From("orders")]), [rd("orders"), rd("orders", "id")])
 ok("SELECT ID FROM Orders", Select2([Col("orders", "id")], [From("orders")]), [rd("orders"), rd("orders", "id")])
 ok("select o.total from orders o", Select2([Col("orders", "total")], [From("orders")]), [rd("orders"), rd("orders", "total")])

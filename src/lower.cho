@@ -625,6 +625,21 @@ fn visit[&s, &t, &n, &k, &m, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [
     if kind == parse.n_str() {
         return emit_bytes_const(sql, toks, data, true, out, sc);
     }
+    if kind == parse.n_param() {
+        // `Param index:u32`, the number as written (ir.md section 2)
+        var idx = 0;
+        var q = parse.tstart(toks, data) + 1;
+        let stop = parse.tstart(toks, data) + parse.tlen(toks, data);
+        while q < stop {
+            idx = idx * 10 + int_of(sql[q]) - '0';
+            q = q + 1;
+        }
+        r = w8(out, sc, 2);
+        if r >= 0 {
+            r = wn(out, sc, idx, 4);
+        }
+        return r;
+    }
     if kind == parse.n_null() {
         r = w8(out, sc, 1);
         if r >= 0 {

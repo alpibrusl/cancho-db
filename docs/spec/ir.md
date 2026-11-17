@@ -34,7 +34,7 @@ Name      = bytes16                                        // length at least 1
 Expr      = tag body, in PREFIX order (the operator first, then its operands):
   0 Col      table:Name  column:Name
   1 Const    Value                                         // commit.md §2
-  2 Param    index:u32
+  2 Param    index:u32                                     // the number as written in the statement: `$1` is 1 (P3, m1-extended.md)
   3 Nondet   source:Name                                   // now, random, a sequence: a value the server chose
   4 Call     fn:Name  argc:u32   then argc Exprs
   5 Op       op:u8 (0 to 11)     then 2 Exprs              // eq ne lt le gt ge and or add sub mul div

@@ -55,6 +55,9 @@ fn letter(kind: int) -> [] int {
     if kind == lex.t_cast() {
         return 'C';
     }
+    if kind == lex.t_param() {
+        return 'M';
+    }
     return 'T';
 }
 

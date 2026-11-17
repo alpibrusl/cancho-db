@@ -227,6 +227,11 @@ pub fn n_rollback() -> [] int {
     return 49;
 }
 
+// A parameter, `$n` (docs/m1-extended.md P3-D1): a leaf, data = its token.
+pub fn n_param() -> [] int {
+    return 50;
+}
+
 // The ways a parse is refused: `expr` answers `0 - code`, and `st[3]` is the token index it stopped at.
 pub fn e_syntax() -> [] int {
     return 1;
@@ -1118,6 +1123,10 @@ pub fn expr[&s, &t, &n, &k, &v, &o, &x](sql: &s [byte], toks: &t [int], from: in
                 r = leaf(nodes, kids, vs, st, n_num(), pos, 0 - 1);
                 pos = pos + 1;
                 want = false;
+            } else if kind == lex.t_param() {
+                r = leaf(nodes, kids, vs, st, n_param(), pos, 0 - 1);
+                pos = pos + 1;
+                want = false;
             } else if kind == lex.t_string() {
                 r = leaf(nodes, kids, vs, st, n_str(), pos, 0 - 1);
                 pos = pos + 1;
@@ -1577,7 +1586,7 @@ fn emit_open[&s, &t, &n, &o](out: &!o [byte], at: int, sql: &s [byte], toks: &t 
     let kind = nodes[6 * node];
     let data = nodes[6 * node + 1];
     var p = at;
-    if kind == n_num() {
+    if kind == n_num() || kind == n_param() {
         return put_text(out, p, sql, tstart(toks, data), tlen(toks, data), false);
     }
     if kind == n_str() {
@@ -1793,7 +1802,7 @@ fn emit_close[&s, &t, &o, &n](out: &!o [byte], at: int, sql: &s [byte], toks: &t
     let kind = nodes[6 * node];
     let data = nodes[6 * node + 1];
     var p = at;
-    if kind >= n_num() && kind <= n_col() {
+    if kind >= n_num() && kind <= n_col() || kind == n_param() {
         return p;
     }
     if kind == n_item() {

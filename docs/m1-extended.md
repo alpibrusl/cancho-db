@@ -1,6 +1,6 @@
 # M1, slice P3: the extended protocol
 
-Status: **designed, nothing built.** Written against measurements (section 2, `scripts/measure_p3.py`) and against the proxy as it is after P2.
+Status: **designed; P3a built (section 7); P3b to P3d not.** Written against measurements (section 2, `scripts/measure_p3.py`) and against the proxy as it is after P2.
 The decisions (section 3) are recommendations; the slices (section 5) start when they are accepted.
 
 ## 1. What this adds, and why it is the last open M1 criterion
@@ -103,3 +103,20 @@ commit sequence.
 2. **D10: the client list for M1** is `psql` and the six drivers; the catalog-reading tools (SQLAlchemy, Prisma, Metabase, JDBC) are a later, separate piece of work.
 3. **D2: SQL-level `PREPARE`, `EXECUTE`, `DEALLOCATE`, `SET`, `SHOW` stay refused.**
 4. The order: P3a to P3d as above.
+
+## 7. P3a as built: `$n` through the SQL pipeline
+
+`$n` lexes as a parameter token (`t_param`, 9; `$1` to `$65535`; `$0`, a leading zero, a number over 65535 and a number followed by identifier characters or digits are refused `parameter`),
+parses as a leaf (`n_param`, 50), is written back as written, and lowers to `Param n` (tag 2 and a `u32`, the number as written). It has no effect. `ir.md` says the index is the
+number as written (one sentence; no verifier or vector changed). Where the grammar takes an expression a parameter may stand: `where a = $1`, `values ($1, $2)`, `set b = $1`,
+`in ($1, $2)`, `limit $1`, `case`, casts, calls. PostgreSQL's own rules about types stay PostgreSQL's: `select $1 from t` is allowed through (PostgreSQL will refuse it at `Parse` with
+"could not determine data type of parameter $1", which is the proxy's answer too, because the error comes from the server).
+
+Gates, all passing: the lexer cases (`$1`, `$12`, `$65535`, `$1,$2` and the refusals) and `lex_diff` (4000 strings); the parser cases (nine parameter shapes) and `parse_diff` with parameters in
+the generators (4000 cases, two seeds): **the plan of the original and of the rendering are compared with `EXPLAIN (GENERIC_PLAN)` for any statement with a `$`**; `stmt_diff` and `ddl_diff`
+(8000 and 3000 cases); `lower_check`, whose six new cases give the IR bytes byte for byte as hand-written and effect sets the real verifier accepts (each refused with one fewer and one more);
+the guard (nine cases, including a token narrowed to `orders.id` allowing `where id = $1` and refusing `where customer = $1`, and the ids and effects of the IR handed over checked by the
+Python verifier's own inference). 8 mutants (lexer 4, parser 2, lowering 3 and one old lexer mutant moved to the new code); one more that the tests could not see turned out to be equivalent
+(`emit_close` of a leaf falls through to the same result) and was dropped.
+
+Not yet: nothing in the proxy reads `$n` from a client (P3b); a `Parse` still reaches the proxy's refusal of the extended protocol.
