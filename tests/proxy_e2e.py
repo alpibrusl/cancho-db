@@ -716,6 +716,27 @@ if len(commits) == 4:
     check("P2d: with their statements counted (1, 3, 1, 1)", [len(c[3][5]) for c in commits] == [1, 3, 1, 1], [len(c[3][5]) for c in commits])
     check("P2d: the third is a read: its effects are reads only; the others write", all(k == 0 for k, _ in commits[2][3][3]) and all(any(k == 1 for k, _ in c[3][3]) for c in (commits[0], commits[1], commits[3])),
           [c[3][3] for c in commits])
+    # the schema the transaction began with: SHA-256 of the snapshot text, rebuilt here from the catalog by queries of this file's own
+    def schema_of(enc):
+        at = 2
+        at += 4 + 32 * struct.unpack(">I", enc[at:at + 4])[0]
+        at += 2 + struct.unpack(">H", enc[at:at + 2])[0] + 8
+        return enc[at:at + 32]
+
+    cols = direct("select c.relname || ' ' || a.attname from pg_class c join pg_namespace n on n.oid = c.relnamespace join pg_attribute a on a.attrelid = c.oid "
+                  "where n.nspname = 'public' and c.relkind in ('r', 'p') and a.attnum > 0 and not a.attisdropped order by c.relname, a.attnum").stdout.split("\n")
+    idxs = direct("select indexname || ' ' || tablename from pg_indexes where schemaname = 'public' order by indexname").stdout.split("\n")
+    text, last = "", None
+    for line in [l for l in cols if l]:
+        table, col = line.split(" ")
+        if table != last:
+            text += ("\n" if last is not None else "") + table + ":"
+            last = table
+        text += " " + col
+    text += "\n" if last is not None else ""
+    text += "".join("index %s on %s\n" % tuple(l.split(" ")) for l in idxs if l)
+    check("P2d: every commit records the SHA-256 of the schema snapshot the transaction began with", all(schema_of(c[4]) == hashlib.sha256(text.encode()).digest() for c in commits),
+          str((text[:80], [schema_of(c[4]).hex()[:8] for c in commits], hashlib.sha256(text.encode()).hexdigest()[:8])))
     check("P2d: times are the clock's at the commit", all(t_before - 1000 <= c[3][4] <= int(time.time() * 1000) + 1000 for c in commits), [c[3][4] for c in commits])
     # the whole directory, as an auditor would take it: L2 and IR, with every verifier there is
     root_hex = ROOT
