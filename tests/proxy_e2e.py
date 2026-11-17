@@ -869,6 +869,9 @@ fw2 = Wire(fport2, good)
 r_full = fw2.query("insert into p2f values (92, 'v')")
 check("P2d-4: when the log cannot be written the client gets 58000 and PostgreSQL has nothing (limit %d, one commit needs %d, tokens %d, stmts %d)" % (limit, log_size, tok_size, stmt_size),
       tok_size < log_size and stmt_size < log_size and any(m[0] == "E" and b"58000" in m[1] for m in r_full) and rows_of() == "" and prepared_xacts() == 0, str(r_full))
+r_two = fw2.query("insert into p2f values (93, 'a'); insert into p2f values (94, 'b')")
+check("... in a message of two statements the first statement's tag is released in its place and only the last is held, so a failed commit gives C then E (as PostgreSQL's own stream would)",
+      [k for k, _ in r_two] == ["C", "E", "Z"] and b"58000" in r_two[1][1] and tags_of(r_two) == ["INSERT 0 1"], str(r_two))
 r_next = fw2.query("select a from p2f where a = 92")
 check("... and the proxy goes on answering (a read is a commit too, so it is refused the same way while the log cannot be written)",
       fp2.poll() is None and any(m[0] == "E" and b"58000" in m[1] for m in r_next) and r_next[-1][0] == "Z", str(r_next))

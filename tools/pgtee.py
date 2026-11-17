@@ -167,7 +167,35 @@ class Tee:
                             f[2]()
                             continue
                 elif t == b"P":
-                    self._note("Parse", body.split(b"\0")[1].decode(errors="replace"))
+                    name, sql, rest = body.split(b"\0", 2)
+                    self._note("Parse", sql.decode(errors="replace"))
+                    self._note("Parse.detail", "name=%r params=%d" % (name.decode(errors="replace"), struct.unpack(">H", rest[:2])[0]))
+                elif t == b"B":
+                    portal, rest = body.split(b"\0", 1)
+                    stmt, rest = rest.split(b"\0", 1)
+                    nf = struct.unpack(">H", rest[:2])[0]
+                    fmts = struct.unpack(">%dH" % nf, rest[2:2 + 2 * nf])
+                    rest = rest[2 + 2 * nf:]
+                    npar = struct.unpack(">H", rest[:2])[0]
+                    rest = rest[2:]
+                    vals = []
+                    for _ in range(npar):
+                        ln = struct.unpack(">i", rest[:4])[0]
+                        rest = rest[4:]
+                        if ln < 0:
+                            vals.append(None)
+                        else:
+                            vals.append(rest[:ln].decode(errors="replace") if True else None)
+                            rest = rest[ln:]
+                    nr = struct.unpack(">H", rest[:2])[0]
+                    rf = struct.unpack(">%dH" % nr, rest[2:2 + 2 * nr])
+                    self._note("Bind", "stmt=%r portal=%r paramformats=%s params=%s resultformats=%s" % (stmt.decode(errors="replace"), portal.decode(errors="replace"), list(fmts), vals, list(rf)))
+                elif t == b"D":
+                    self._note("Describe", "%s %r" % (chr(body[0]), body[1:-1].decode(errors="replace")))
+                elif t == b"E":
+                    self._note("Execute", "portal=%r max=%d" % (body[:-5].decode(errors="replace"), struct.unpack(">I", body[-4:])[0]))
+                elif t == b"C":
+                    self._note("Close", "%s %r" % (chr(body[0]), body[1:-1].decode(errors="replace")))
                 elif t == b"p":
                     self._note("Password", len(body))
                 else:
