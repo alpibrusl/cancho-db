@@ -440,6 +440,11 @@ PROXY = [
     ("proxy: queries are served while a statement is in flight", "proxy/proxy.cho", " && st[shared.stride() * k + 17] == 0 {", " {"),
     ("proxy: BEGIN inside a transaction is forgiven", "proxy/proxy.cho", "        } else if ts == 1 {\n            shared.answer_error(tab, core, k, 'T', \"25001\"", "        } else if ts == 3 {\n            shared.answer_error(tab, core, k, 'T', \"25001\""),
     ("proxy: a refusal does not say ReadyForQuery", "src/shared.cho", "        n = n + login.ready_for_query(buf[n..640], status);", "        n = n + 0;"),
+    # ---- the extended protocol (P3b/P3c), judged by tests/ext_e2e.py
+    ("ext: names starting cdb are not reserved", "src/extended.cho", "int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'b';", "int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'z';"),
+    ("ext: a statement is not counted at Execute", "src/extended.cho", "            if added != 0 {\n                fail(tw, core, k, \"54000\"", "            if added != 0 || true {\n                fail(tw, core, k, \"54000\""),
+    ("ext: a refusal does not roll back the implicit transaction", "src/extended.cho", "    if st[q + 21] == 1 {\n        commitpath.upstream_exec(tab, core, up, \"ROLLBACK\");\n        st[q + 21] = 0;", "    if st[q + 21] == 9 {\n        commitpath.upstream_exec(tab, core, up, \"ROLLBACK\");\n        st[q + 21] = 0;"),
+    ("ext: messages after an error are not discarded", "src/extended.cho", "    if contents(core.state)[shared.stride() * k + 15] != 0 && ty != 'S' {", "    if false && ty != 'S' {"),
 ]
 
 def run_proxy(cancho):
@@ -476,12 +481,13 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
                 try:
-                    r = subprocess.run([sys.executable, str(work / "tests/proxy_e2e.py"), str(exe)], capture_output=True,
+                    judge = "ext_e2e.py" if label.startswith("ext:") else "proxy_e2e.py"
+                    r = subprocess.run([sys.executable, str(work / "tests" / judge), str(exe)], capture_output=True,
                                        text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
                     out, code = r.stdout + r.stderr, r.returncode
                 except subprocess.TimeoutExpired:

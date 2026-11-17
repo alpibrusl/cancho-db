@@ -16,26 +16,62 @@ import cdb.login;
 // signed, and made durable in the order of P2-D4: for a write `PREPARE TRANSACTION`, the three files, `COMMIT PREPARED`; for a read the
 // files, then `COMMIT`. The whole sequence runs inside the event loop with bounded waits (P2-D6).
 
-// Run `sql` (one simple query of the proxy's own: BEGIN, COMMIT, ROLLBACK) on upstream connection `b` and wait, bounded, for its
-// ReadyForQuery. 0 if it ran, 1 if PostgreSQL answered with an error, -1 if the connection failed or was silent. Used only
-// where the upstream is idle and nothing else is owed from it.
+// The proxy's own commands (BEGIN, COMMIT, PREPARE TRANSACTION and the rest) go to the server through the EXTENDED protocol, with names of their own
+// (`cdb_x`, `cdb_p`), never the simple one: PostgreSQL's simple `Query` destroys the client's unnamed prepared statement and portal, and a client
+// that parsed one in an earlier group (pg8000 does) would lose it to the proxy's `BEGIN` or `COMMIT`. The names are reserved (a client's statement
+// or portal may not start with `cdb`: src/extended.cho).
+fn put_header[&m](m: &!m [byte], at: int, ty: int, body: int) -> [] int {
+    m[at] = byte_of(ty);
+    m[at + 1] = byte_of((body + 4) / 16777216 % 256);
+    m[at + 2] = byte_of((body + 4) / 65536 % 256);
+    m[at + 3] = byte_of((body + 4) / 256 % 256);
+    m[at + 4] = byte_of((body + 4) % 256);
+    return at + 5;
+}
+
+fn put_name[&m, &s](m: &!m [byte], at: int, text: &s [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        m[at + i] = byte_of(int_of(text[i]));
+        i = i + 1;
+    }
+    m[at + len(text)] = byte_of(0);
+    return at + len(text) + 1;
+}
+
+// Run `sql` on upstream connection `b` and wait, bounded, for its `ReadyForQuery`. 0 if it ran, 1 if PostgreSQL answered with an error, -1 if the
+// connection failed or was silent. The server must be quiet (nothing owed from it): lockstep (src/extended.cho) and the simple path both see to that.
 pub fn upstream_exec[&t, &c, &q](tab: &!t conns.Table, core: &!c shared.Core, b: int, sql: &q [byte]) -> [conn_read, conn_write, poll] int {
     var sent = false;
     region r {
-        let msg = alloc_slice[r](len(sql) + 8, byte_of(0));
-        let ln = len(sql) + 5;
-        msg[0] = byte_of('Q');
-        msg[1] = byte_of(ln / 16777216 % 256);
-        msg[2] = byte_of(ln / 65536 % 256);
-        msg[3] = byte_of(ln / 256 % 256);
-        msg[4] = byte_of(ln % 256);
-        var i = 0;
-        while i < len(sql) {
-            msg[5 + i] = sql[i];
-            i = i + 1;
-        }
-        msg[5 + len(sql)] = byte_of(0);
-        sent = upstream.write_all(tab, b, msg[0..len(sql) + 6]);
+        let m = alloc_slice[r](len(sql) + 160, byte_of(0));
+        var at = 0;
+        // Close of a leftover statement and portal (no error if there are none), Parse, Bind, Execute, Close, Close, Sync
+        at = put_header(m, at, 'C', 7);
+        m[at] = byte_of('S');
+        at = put_name(m, at + 1, "cdb_x");
+        at = put_header(m, at, 'C', 7);
+        m[at] = byte_of('P');
+        at = put_name(m, at + 1, "cdb_p");
+        at = put_header(m, at, 'P', 6 + len(sql) + 1 + 2);
+        at = put_name(m, at, "cdb_x");
+        at = put_name(m, at, sql);
+        at = at + 2;
+        at = put_header(m, at, 'B', 6 + 6 + 6);
+        at = put_name(m, at, "cdb_p");
+        at = put_name(m, at, "cdb_x");
+        at = at + 6;
+        at = put_header(m, at, 'E', 6 + 4);
+        at = put_name(m, at, "cdb_p");
+        at = at + 4;
+        at = put_header(m, at, 'C', 7);
+        m[at] = byte_of('S');
+        at = put_name(m, at + 1, "cdb_x");
+        at = put_header(m, at, 'C', 7);
+        m[at] = byte_of('P');
+        at = put_name(m, at + 1, "cdb_p");
+        at = put_header(m, at, 'S', 0);
+        sent = upstream.write_all(tab, b, m[0..at]);
     }
     if !sent {
         return 0 - 1;
