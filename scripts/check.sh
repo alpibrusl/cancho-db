@@ -64,6 +64,9 @@ quiet 2 python3 tests/lower_diff.py build/lowercheck 4000 2
 echo "== the query guard: hand-written verdicts over tokens minted outside src/"
 "$CANCHO" build --std proxy/guardcheck.cho src/commit.cho src/token.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho -o build/guardcheck
 quiet 2 python3 tests/guard_check.py build/guardcheck
+echo "== the commit builder: bytes, ids and signatures against an independent encoder; the three verifiers accept its log"
+"$CANCHO" build --std proxy/buildcheck.cho src/build.cho src/commit.cho -o build/buildcheck
+quiet 2 python3 tests/build_check.py build/buildcheck build/verify build/verify-go
 echo "== command lines";             python3 tests/cli_test.py vectors build/verify
 echo "== attenuation property";       python3 tests/properties.py 4000 1
 echo "== fuzz (three verifiers, no crash)"; python3 tests/fuzz.py vectors build/verify 3000 1
@@ -75,5 +78,6 @@ echo "== mutants, parser";          quiet 1 python3 tests/mutants.py parse "$CAN
 echo "== mutants, statements";      quiet 1 python3 tests/mutants.py stmt "$CANCHO"
 echo "== mutants, lowering";        quiet 1 python3 tests/mutants.py lower "$CANCHO"
 echo "== mutants, guard";           quiet 1 python3 tests/mutants.py guard "$CANCHO"
+echo "== mutants, commit builder"; quiet 1 python3 tests/mutants.py build "$CANCHO"
 echo "== mutants, proxy (end to end, four at once)"; quiet 1 python3 tests/mutants.py proxy "$CANCHO"
 echo "all green"

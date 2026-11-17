@@ -194,7 +194,7 @@ Each is one change with its own gate.
 | Slice | Delivers | Gate |
 |---|---|---|
 | **P2a** | **built**: server-to-client framing; transaction tracking; `BEGIN`/`COMMIT`/`ROLLBACK` parsed and answered by the proxy's own state; autocommit wrapped in a transaction; held `CommandComplete`/`ReadyForQuery`; **no log yet** | `psql` transactions, rollbacks, errors inside a transaction (`25P02`), statuses `I`/`T`/`E` on the wire; refused options and mixed messages; the wire tee shows the exact upstream messages; mutants |
-| **P2b** | the commit builder (`src/build.cho`, sans-io: encode, id, sign) and the store encoders | bytes equal an independent Python encoder's over hand-written commits; the verifier accepts them; mutants; **the signing is checked by the three verifiers** |
+| **P2b** | **built** (section 5.3): the commit builder (`src/build.cho`, sans-io: encode, id, sign) and the store encoders | bytes equal an independent Python encoder's over hand-written commits; the verifier accepts them; mutants; **the signing is checked by the three verifiers** |
 | **P2c** | the log directory, the key, append and fsync, the lock, the startup scan, the torn-tail repair | restart reads the log back; torn tails; a second proxy refused; `cancho authority` pinned |
 | **P2d** | the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
 | **P2e** | the cost, measured, and the claims | `select` and `insert` latency through the proxy vs direct on the same machine, with the fsyncs on |
@@ -229,3 +229,16 @@ Each is one change with its own gate.
 (`snapshot_sql`, `plain_name`, `append`, `build_snapshot`: pure functions on bytes, no I/O) moved to `src/snapshot.cho`, so
 `proxy.cho` is 1,695 lines. Nothing else changed: the end-to-end checks pass on the split build, `tests/authority.sh` shows the same
 authority, and the proxy mutants build with the new file. P2c/P2d will need a second split (the upstream I/O helpers) before they land.
+
+### 5.3 P2b as built
+
+`src/build.cho` is sans-io and heap-free: `encode` (a commit's bytes; the effects arrive in any order with repeats and leave
+sorted and distinct, so the encoder owns the ordering rule the verifiers enforce), `id`, `sign`, `public_key`, and the record
+writers for the three files (`log_header`, `log_record`, `tokens_header`, `stmts_header`, `store_record`). Every writer takes the
+position and returns the new one, or -1, which sticks, so a caller chains them and tests the end once. `nondet` and `checks` come
+in already encoded with their counts; P2d encodes `now()` as the one int value D9 says.
+
+`tests/build_check.py` drives `proxy/buildcheck.cho` with random commits and compares with an encoder written from `commit.md`
+alone, with `hashlib` for the id and `cryptography` for the signature; then writes a 120-commit chain as a log that the three
+verifiers accept, and a copy with one flipped byte that each rejects. 21 mutants, all killed. It found one real bug in the first
+run: the effects writer did not stop when an earlier field had already failed, so a ragged parent list still produced bytes.

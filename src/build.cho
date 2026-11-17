@@ -1,0 +1,213 @@
+module cdb.build;
+
+import std.crypto;
+import std.ed25519;
+import cdb.commit;
+
+// The commit builder (docs/m1-commit-path.md, slice P2b), sans-io: the bytes of a commit (docs/spec/commit.md section 2), its
+// id and signature (section 3), and the records the three files are made of (the log, section 4; the token store,
+// token.md section 3; the statement store, ir.md section 4). Nothing here reads a clock, a file or the network: a caller
+// hands over every field, and what comes out is bytes. The proxy's `build` step calls this and the verifier checks it.
+//
+// Every writer takes the output slice and the position to write at, and answers the new position, or -1 if the bytes do
+// not fit (and once it is -1 it stays -1), so a caller can chain them and test the end once.
+
+pub fn max_effects() -> [] int {
+    return 4096;
+}
+
+// `n` bytes of `v`, big-endian (`n` up to 8, `v` not negative).
+pub fn put_be[&o](out: &!o [byte], at: int, v: int, n: int) -> [] int {
+    if at < 0 || n < 0 || at + n > len(out) {
+        return 0 - 1;
+    }
+    var i = n;
+    var rest = v;
+    while i > 0 {
+        i = i - 1;
+        out[at + i] = byte_of(rest % 256);
+        rest = rest / 256;
+    }
+    return at + n;
+}
+
+// All of `data`.
+pub fn put_bytes[&o, &d](out: &!o [byte], at: int, data: &d [byte]) -> [] int {
+    if at < 0 || at + len(data) > len(out) {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < len(data) {
+        out[at + i] = data[i];
+        i = i + 1;
+    }
+    return at + len(data);
+}
+
+// `bytes16`: a `u16` length, then the bytes.
+fn put_b16[&o, &d](out: &!o [byte], at: int, data: &d [byte]) -> [] int {
+    if len(data) > 65535 {
+        return 0 - 1;
+    }
+    return put_bytes(out, put_be(out, at, len(data), 2), data);
+}
+
+// The end of the effect that starts at `at` in `effs` (kind, a `u16` length, the target), or -1 if it does not fit.
+fn effect_end[&e](effs: &e [byte], at: int) -> [] int {
+    if at + 3 > len(effs) {
+        return 0 - 1;
+    }
+    let end = at + 3 + commit.be(effs, at + 1, 2);
+    if end > len(effs) {
+        return 0 - 1;
+    }
+    return end;
+}
+
+// Order of two effects of `effs` by (kind, target): negative, zero or positive.
+fn effect_cmp[&e](effs: &e [byte], a: int, b: int) -> [] int {
+    let ka = int_of(effs[a]);
+    let kb = int_of(effs[b]);
+    if ka != kb {
+        return ka - kb;
+    }
+    return commit.compare_at(effs, a + 3, commit.be(effs, a + 1, 2), b + 3, commit.be(effs, b + 1, 2));
+}
+
+// The effects of `effs` (any order, repeats allowed) as the commit encodes them: a `u32` count, then strictly ascending by
+// (kind, target), each once. -1 if `effs` is not a run of whole effects, a kind is over 4, or more than `max_effects()`.
+fn put_effects[&o, &e](out: &!o [byte], at: int, effs: &e [byte]) -> [] int {
+    if at < 0 {
+        return 0 - 1;
+    }
+    // first pass: that it is whole, and how many are distinct
+    var p = 0;
+    var n = 0;
+    while p < len(effs) {
+        let end = effect_end(effs, p);
+        if end < 0 || int_of(effs[p]) > 4 {
+            return 0 - 1;
+        }
+        n = n + 1;
+        if n > max_effects() {
+            return 0 - 1;
+        }
+        p = end;
+    }
+    // second pass: repeatedly the smallest effect larger than the last one written
+    var w = at + 4;
+    var written = 0;
+    var last = 0 - 1;
+    var more = true;
+    while more && w >= 0 {
+        var best = 0 - 1;
+        var q = 0;
+        while q < len(effs) {
+            let end = effect_end(effs, q);
+            if (last < 0 || effect_cmp(effs, q, last) > 0) && (best < 0 || effect_cmp(effs, q, best) < 0) {
+                best = q;
+            }
+            q = end;
+        }
+        if best < 0 {
+            more = false;
+        } else {
+            w = put_bytes(out, w, effs[best..effect_end(effs, best)]);
+            written = written + 1;
+            last = best;
+        }
+    }
+    if w < 0 {
+        return 0 - 1;
+    }
+    put_be(out, at, written, 4);
+    return w;
+}
+
+// A list of `n` elements the caller has already encoded (`blob`): the count, then the bytes.
+fn put_list[&o, &d](out: &!o [byte], at: int, n: int, blob: &d [byte]) -> [] int {
+    return put_bytes(out, put_be(out, at, n, 4), blob);
+}
+
+// A list of hashes: `hashes` is 32 bytes each, back to back.
+fn put_hashes[&o, &d](out: &!o [byte], at: int, hashes: &d [byte]) -> [] int {
+    if len(hashes) % 32 != 0 {
+        return 0 - 1;
+    }
+    return put_list(out, at, len(hashes) / 32, hashes);
+}
+
+// The encoding of a commit (commit.md section 2) into `out`: its length, or -1 (a field of the wrong size, an effect list that
+// is not whole, too long a branch, or `out` too small). `effs` is the effects, whole and in any order; `nondet` and `checks`
+// are `nondet_n` and `checks_n` elements already encoded. `seq` and `time` are not negative.
+pub fn encode[&o, &p, &b, &h, &s, &e, &t, &c, &n, &k](out: &!o [byte], parents: &p [byte], branch: &b [byte], seq: int, schema: &h [byte], stmts: &s [byte], effs: &e [byte], token: &t [byte], principal: &t [byte], code: &c [byte], nondet_n: int, nondet: &n [byte], changes: &h [byte], state: &h [byte], checks_n: int, checks: &k [byte], time: int) -> [] int {
+    if len(parents) > 64 || len(branch) == 0 || len(branch) > 255 || len(schema) != 32 || len(token) != 32 || len(principal) != 32 || len(changes) != 32 || len(state) != 32 || seq < 0 || time < 0 {
+        return 0 - 1;
+    }
+    var at = put_be(out, 0, 1, 2);
+    at = put_hashes(out, at, parents);
+    at = put_b16(out, at, branch);
+    at = put_be(out, at, seq / 4294967296, 4);
+    at = put_be(out, at, seq % 4294967296, 4);
+    at = put_bytes(out, at, schema);
+    at = put_hashes(out, at, stmts);
+    at = put_effects(out, at, effs);
+    at = put_bytes(out, at, token);
+    at = put_bytes(out, at, principal);
+    at = put_hashes(out, at, code);
+    at = put_list(out, at, nondet_n, nondet);
+    at = put_bytes(out, at, changes);
+    at = put_bytes(out, at, state);
+    at = put_list(out, at, checks_n, checks);
+    at = put_be(out, at, time / 4294967296, 4);
+    at = put_be(out, at, time % 4294967296, 4);
+    return at;
+}
+
+// The commit's id (commit.md section 3) into the 32 bytes of `out`.
+pub fn id[&d, &o](enc: &d [byte], out: &!o [byte]) -> [] int {
+    region r {
+        let sha = alloc_slice[r](crypto.sha256_state_len(), 0);
+        let nul = alloc_slice[r](1, byte_of(0));
+        crypto.sha256_init(sha);
+        crypto.sha256_update(sha, "cancho-db/commit/v1");
+        crypto.sha256_update(sha, nul);
+        crypto.sha256_update(sha, enc);
+        crypto.sha256_final(sha, out);
+    }
+    return 0;
+}
+
+// The signature over an id by the key with this 32-byte `seed`, into the 64 bytes of `out`.
+pub fn sign[&s, &d, &o](seed: &s [byte], ident: &d [byte], out: &!o [byte]) -> [] int {
+    return ed25519.sign(seed, ident, out);
+}
+
+// The public key of a seed, into the 32 bytes of `out`.
+pub fn public_key[&s, &o](seed: &s [byte], out: &!o [byte]) -> [] int {
+    return ed25519.public_key_from_seed(seed, out);
+}
+
+// The log's first 40 bytes (commit.md section 4): the magic and the server's public key.
+pub fn log_header[&o, &k](out: &!o [byte], at: int, pk: &k [byte]) -> [] int {
+    return put_bytes(out, put_bytes(out, at, "CHODBLG1"), pk);
+}
+
+// One log record: the length of `enc`, `enc`, and the 64-byte signature.
+pub fn log_record[&o, &d, &g](out: &!o [byte], at: int, enc: &d [byte], sig: &g [byte]) -> [] int {
+    return put_bytes(out, put_bytes(out, put_be(out, at, len(enc), 4), enc), sig);
+}
+
+// The token store's first 8 bytes (token.md section 3), and the statement store's.
+pub fn tokens_header[&o](out: &!o [byte], at: int) -> [] int {
+    return put_bytes(out, at, "CHODBTK1");
+}
+
+pub fn stmts_header[&o](out: &!o [byte], at: int) -> [] int {
+    return put_bytes(out, at, "CHODBST2");
+}
+
+// One store entry: a `u32` length and the token's, or the statement's, bytes.
+pub fn store_record[&o, &d](out: &!o [byte], at: int, body: &d [byte]) -> [] int {
+    return put_bytes(out, put_be(out, at, len(body), 4), body);
+}
