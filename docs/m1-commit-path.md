@@ -196,7 +196,7 @@ Each is one change with its own gate.
 | **P2a** | **built**: server-to-client framing; transaction tracking; `BEGIN`/`COMMIT`/`ROLLBACK` parsed and answered by the proxy's own state; autocommit wrapped in a transaction; held `CommandComplete`/`ReadyForQuery`; **no log yet** | `psql` transactions, rollbacks, errors inside a transaction (`25P02`), statuses `I`/`T`/`E` on the wire; refused options and mixed messages; the wire tee shows the exact upstream messages; mutants |
 | **P2b** | **built** (section 5.3): the commit builder (`src/build.cho`, sans-io: encode, id, sign) and the store encoders | bytes equal an independent Python encoder's over hand-written commits; the verifier accepts them; mutants; **the signing is checked by the three verifiers** |
 | **P2c** | **store built** (section 5.4): the log directory, the key, append and fsync, the lock, the startup scan, the torn-tail repair | restart reads the log back; torn tails; a second proxy refused; `cancho authority` pinned |
-| **P2d** | **4 of 5 built** (sections 5.8 and 5.9): the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
+| **P2d** | **built** (sections 5.8 to 5.10): the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
 | **P2e** | the cost, measured, and the claims | `select` and `insert` latency through the proxy vs direct on the same machine, with the fsyncs on |
 
 ## 7. Risks and what needs the owner's decision
@@ -316,8 +316,7 @@ commit, `58000` if the log cannot be written (and PostgreSQL is rolled back), an
 
 What it does **not** do yet, stated so that nothing reads as more than it is: **a log failure is not yet exercised** (the fault table is P2d-4: the code
 for `ROLLBACK PREPARED` exists and has no test); **recovery on restart does not exist** (a prepared transaction left by a crash waits for P2d-4);
-**a statement that reads `now()` or any other nondeterminism is refused** (`0A000` `nondeterministic`) instead of being recorded wrongly, until P2d-5;
-`BEGIN; COMMIT` with no statement writes no commit; a token is appended once per connection (a repeat across connections is a duplicate the store
+**a statement that reads `now()` is recorded since P2d-5** (section 5.10; it was refused with `0A000` before, and this paragraph said so: corrected here); `BEGIN; COMMIT` with no statement writes no commit; a token is appended once per connection (a repeat across connections is a duplicate the store
 permits). **Every `select` is a commit with its fsyncs; the latency is not measured** (P2e).
 
 ### 5.9 P2d-4 as built: recovery and the failure windows
@@ -345,3 +344,18 @@ cut at the next start.
 
 Not tested, stated: **`max_prepared_transactions = 0`** refusing to start (the throwaway server has it above 0); a torn tail **and** a prepared
 transaction together (the two repairs are tested apart); more than 64 prepared transactions in one pass (the rest wait for the next).
+
+### 5.10 P2d-5 as built: `now()`
+
+A statement the lowering turns into `Nondet now` (`select now() from t`: `now()` needs a table, ir.md section 6) has the effect `nondet now`, and the
+guard lets it through if the token allows `n`. The transaction notes it. When the transaction ends, **before** anything is made durable, the proxy runs
+`select (extract(epoch from now()) * 1000000)::bigint` inside the same transaction (PostgreSQL's `now()` is the transaction's start, the same for every
+statement in it: F7) and records the answer as one `int` in the commit's `nondet`, in microseconds, as D9 says. A transaction that read no clock records an
+empty `nondet`; one that read it twice records one value, because there is one. If the read fails the transaction is rolled back and nothing is logged.
+
+The test compares the recorded value with **what the client was shown** by its own `select now()`, to the microsecond, in an explicit transaction (two selects, one
+value) and in an autocommit statement (its own value); the three verifiers accept the log, whose `Value` encoding they check. `random()`, `clock_timestamp()` and
+the other sources stay refused by the lowering (`nondeterministic`, `0A000`): only `now()` is recorded.
+
+What this does not give: **replay** (L3) is not specified, so nothing yet *uses* the recorded value; it says what a replay would have to substitute. The value is
+read by a second statement, so a transaction with `now()` costs one more upstream round trip (measured with the rest at P2e).
