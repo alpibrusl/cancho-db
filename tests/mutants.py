@@ -395,9 +395,9 @@ PROXY = [
     ("proxy: the signing key is not required", "proxy/proxy.cho", "    if !keyed {\n", "    if false {\n"),
     ("proxy: non-loopback clients are served", "proxy/proxy.cho", "if !is_loopback(ct, a) {", "if false {"),
     ("proxy: the token is not checked", "proxy/proxy.cho", "if rule != login.login_ok() {", "if false {"),
-    ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > hello_ms()", "false"),
-    ("proxy: a silent upstream is waited for a minute", "proxy/proxy.cho", "fn login_ms() -> [] int {\n    return 5000;", "fn login_ms() -> [] int {\n    return 60000;"),
-    ("proxy: the upstream's bytes lose the last one", "proxy/proxy.cho", "            if !send(tab, core, client, rb[pos..pos + n]) {", "            if !send(tab, core, client, rb[pos..pos + n - 1]) {"),
+    ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > shared.hello_ms()", "false"),
+    ("proxy: a silent upstream is waited for a minute", "src/shared.cho", "fn login_ms() -> [] int {\n    return 5000;", "fn login_ms() -> [] int {\n    return 60000;"),
+    ("proxy: the upstream's bytes lose the last one", "proxy/proxy.cho", "            if !shared.send(tab, core, client, rb[pos..pos + n]) {", "            if !shared.send(tab, core, client, rb[pos..pos + n - 1]) {"),
     ("proxy: SSLRequest is not answered N", "proxy/proxy.cho", "let no = alloc_slice[r](1, byte_of('N'));", "let no = alloc_slice[r](1, byte_of('S'));"),
     ("proxy: the client's application_name is dropped", "proxy/proxy.cho", "if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {", "if false {"),
     ("proxy: the upstream role is the client's", "src/upstream.cho", "\n    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "\n    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);"),
@@ -407,19 +407,19 @@ PROXY = [
     ("proxy: the rendering is not what is sent", "proxy/proxy.cho", "                    run_query(tw, core, k, vd[3]);", "                    run_query(tw, core, k, 0);"),
     ("proxy: a refused query is sent upstream anyway", "proxy/proxy.cho", "                if verdict != 0 {\n                    refused_query(tw, core, k, vd);", "                if false {\n                    refused_query(tw, core, k, vd);"),
     ("proxy: a Parse message is a protocol violation", "proxy/proxy.cho", "} else if ty == 'P' || ty == 'B' ||", "} else if ty == 'B' ||"),
-    ("proxy: messages after an extended-protocol error are answered too", "proxy/proxy.cho", "                        st[p + 15] = 1;\n                    }\n                    consume(core, k, ln + 1);", "                        st[p + 15] = 0;\n                    }\n                    consume(core, k, ln + 1);"),
-    ("proxy: Sync is not answered", "proxy/proxy.cho", "                            let n = login.ready_for_query(z, 'I');\n                            send(tab, core, k, z[0..n]);", "                            let n = login.ready_for_query(z, 'I');"),
+    ("proxy: messages after an extended-protocol error are answered too", "proxy/proxy.cho", "                        st[p + 15] = 1;\n                    }\n                    shared.consume(core, k, ln + 1);", "                        st[p + 15] = 0;\n                    }\n                    shared.consume(core, k, ln + 1);"),
+    ("proxy: Sync is not answered", "proxy/proxy.cho", "                            let n = login.ready_for_query(z, 'I');\n                            shared.send(tab, core, k, z[0..n]);", "                            let n = login.ready_for_query(z, 'I');"),
     # ---- transactions (P2a)
-    ("proxy: an autocommit statement is not wrapped in a transaction", "proxy/proxy.cho", "    if ts == 0 {\n        let r = upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[stride() * b + 21] = 1;", "    if false {\n        let r = upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[stride() * b + 21] = 1;"),
+    ("proxy: an autocommit statement is not wrapped in a transaction", "proxy/proxy.cho", "    if ts == 0 {\n        let r = upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            shared.answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[shared.stride() * b + 21] = 1;", "    if false {\n        let r = upstream_exec(tab, core, b, \"BEGIN\");\n        if r != 0 {\n            shared.answer_error(tab, core, k, 73, \"08006\", \"upstream-unavailable\", \"the database could not begin a transaction\");\n            return 0;\n        }\n        st[shared.stride() * b + 21] = 1;"),
     ("proxy: CommandComplete is not held in autocommit", "proxy/proxy.cho", "                        if ty == 'C' && st[q + 21] == 1 {", "                        if false {"),
     ("proxy: a failed autocommit statement is committed", "proxy/proxy.cho", "    if failed {\n        r = upstream_exec(tab, core, k, \"ROLLBACK\");", "    if false {\n        r = upstream_exec(tab, core, k, \"ROLLBACK\");"),
     ("proxy: the server's E status does not fail the client's transaction", "proxy/proxy.cho", "                                } else {\n                                    st[cp + 16] = 2;\n                                }", "                                } else {\n                                    st[cp + 16] = 1;\n                                }"),
     ("proxy: a refused statement leaves the transaction open", "proxy/proxy.cho", "        upstream_exec(tab, core, st[p + 1], \"ROLLBACK\");\n        st[p + 16] = 2;", "        upstream_exec(tab, core, st[p + 1], \"ROLLBACK\");\n        st[p + 16] = 1;"),
     ("proxy: COMMIT does not commit", "proxy/proxy.cho", "    if kind == 2 && ts == 1 {\n        sql = \"COMMIT\";\n    }", "    if false {\n        sql = \"COMMIT\";\n    }"),
-    ("proxy: a statement runs in a failed transaction", "proxy/proxy.cho", "    if ts == 2 {\n        answer_error(tab, core, k, 'E', \"25P02\"", "    if false {\n        answer_error(tab, core, k, 'E', \"25P02\""),
-    ("proxy: queries are served while a statement is in flight", "proxy/proxy.cho", " && st[stride() * k + 17] == 0 {", " {"),
-    ("proxy: BEGIN inside a transaction is forgiven", "proxy/proxy.cho", "        } else if ts == 1 {\n            answer_error(tab, core, k, 'T', \"25001\"", "        } else if ts == 3 {\n            answer_error(tab, core, k, 'T', \"25001\""),
-    ("proxy: a refusal does not say ReadyForQuery", "proxy/proxy.cho", "        n = n + login.ready_for_query(buf[n..640], status);", "        n = n + 0;"),
+    ("proxy: a statement runs in a failed transaction", "proxy/proxy.cho", "    if ts == 2 {\n        shared.answer_error(tab, core, k, 'E', \"25P02\"", "    if false {\n        shared.answer_error(tab, core, k, 'E', \"25P02\""),
+    ("proxy: queries are served while a statement is in flight", "proxy/proxy.cho", " && st[shared.stride() * k + 17] == 0 {", " {"),
+    ("proxy: BEGIN inside a transaction is forgiven", "proxy/proxy.cho", "        } else if ts == 1 {\n            shared.answer_error(tab, core, k, 'T', \"25001\"", "        } else if ts == 3 {\n            shared.answer_error(tab, core, k, 'T', \"25001\""),
+    ("proxy: a refusal does not say ReadyForQuery", "src/shared.cho", "        n = n + login.ready_for_query(buf[n..640], status);", "        n = n + 0;"),
 ]
 
 def run_proxy(cancho):
@@ -456,7 +456,7 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
