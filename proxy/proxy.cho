@@ -13,6 +13,8 @@ import cdb.snapshot;
 import cdb.build;
 import cdb.store;
 import cdb.upstream;
+import cdb.shared;
+import cdb.commitpath;
 
 // `proxy` -- slice P0 of the cancho-db proxy (`docs/m1-proxy.md`): the front door in front of PostgreSQL.
 //
@@ -33,271 +35,6 @@ import cdb.upstream;
 // local upstream and would stall the loop for a black-holed one. Its login answer is waited for at most `login_ms()`, and a
 // client that does not finish its own login in `hello_ms()` is closed.
 
-fn max_clients() -> [] int {
-    return 64;
-}
-
-fn chunk() -> [] int {
-    return 32768;
-}
-
-fn queue_size() -> [] int {
-    return 65536;
-}
-
-// The most a client may send before it is paired: its startup packet and its password message together.
-fn hello_size() -> [] int {
-    return 16384;
-}
-
-// How long a client may take over its login.
-fn hello_ms() -> [] int {
-    return 10000;
-}
-
-// How long the proxy waits for PostgreSQL's login answer before it gives up on it.
-fn login_ms() -> [] int {
-    return 5000;
-}
-
-// The most of PostgreSQL's login answer (parameter statuses, key data, ready) the proxy will hold to relay.
-fn relay_max() -> [] int {
-    return 16384;
-}
-
-// The most of a client's token the proxy keeps (the token without its seed), and of one client message it will hold.
-fn token_max() -> [] int {
-    return 8192;
-}
-
-fn msg_max() -> [] int {
-    return 65536;
-}
-
-// The schema snapshot's text, and the catalog answer it is built from.
-fn snap_max() -> [] int {
-    return 65536;
-}
-
-fn snapin_max() -> [] int {
-    return 262144;
-}
-
-// Per connection `k`, `state[24k..24k+24]` is:
-//
-//     0  kind: 0 free, 1 client sending its startup, 2 client sending its password, 5 login accepted (waiting to be
-//        paired), 3 paired (forwarding)
-//     1  its peer's slot (paired), or -1
-//     2  bytes waiting to be sent to it
-//     3  what it is watched for (1 to read, 2 to write, 3 both, 0 neither)
-//     4  1 if it closes once its queue has gone
-//     5  bytes held in its login buffer
-//     6  where the database name starts in the login buffer (kinds 2 and 5), and 7 how long it is
-//     8  where application_name starts (-1 if absent), and 9 how long it is
-//     10 where the password message starts in the login buffer (the startup packet is before it)
-//     11 when it was accepted (monotonic ms)
-//     12 for a paired client, the length of its token (more than 0); for the upstream side of a pair, -1
-//     13 bytes of the client's messages held in its message buffer
-//     14 1 if a whole simple query is at the start of that buffer, waiting for the guard
-//     15 1 while the client's extended-protocol messages are discarded up to the next Sync
-//     16 a paired client's transaction state: 0 idle, 1 in a transaction, 2 in a failed one (the proxy's own record, `I` `T` `E`)
-//     17 1 while a statement of the client is in flight upstream (its ReadyForQuery has not come)
-//     18 bytes of held CommandComplete messages (kept until the statement may be said to be done)
-//     19 for the upstream side of a pair: bytes of a message being collected (a CommandComplete or a ReadyForQuery)
-//     20 for the upstream side: bytes of the message being relayed that are still to come
-//     21 for the upstream side: 1 while the statement in flight is an autocommit one the proxy wrapped in its own transaction
-//     22 for the upstream side: 1 if that statement answered with an error
-//     (kind 6 is the proxy's own catalog connection: not watched, used one question at a time)
-fn stride() -> [] int {
-    return 24;
-}
-
-// The most of one statement's CommandComplete messages the proxy holds back, and of one message it collects whole.
-fn hold_max() -> [] int {
-    return 2048;
-}
-
-fn sbuf_max() -> [] int {
-    return 512;
-}
-
-res struct Core {
-    poller: Poller,
-    events: Box[[int]],
-    state: Box[[int]],
-    rbuf: Box[[byte]],
-    pends: Box[[byte]],
-    hbuf: Box[[byte]],
-    // The configuration: the root key (32 bytes), then the branch, the upstream user and the upstream database, each
-    // NUL-ended, with where each starts in `cfgi`: [branch_at, branch_len, user_at, user_len, db_at, db_len].
-    cfg: Box[[byte]],
-    cfgi: Box[[int]],
-    // each client's token, `token_max()` a slot; its message buffer, `msg_max()` a slot
-    tokb: Box[[byte]],
-    mbuf: Box[[byte]],
-    // the schema snapshot, the catalog's raw answer, the guard's output and the query sent upstream
-    snap: Box[[byte]],
-    snapin: Box[[byte]],
-    rend: Box[[byte]],
-    qout: Box[[byte]],
-    // [0] the slot of the catalog connection, or -1
-    aux: Box[[int]],
-    // held CommandComplete messages, `hold_max()` a slot; a message being collected, `sbuf_max()` a slot
-    hold: Box[[byte]],
-    sbuf: Box[[byte]],
-}
-
-// ------------------------------------------------------------------------------------------------ sending
-
-// Hand `data` to the kernel without waiting for room, and keep what it did not take. Answers the new number of bytes
-// queued, or -1 if the queue cannot hold the rest or the connection has failed (`cancho-pg`'s `emit`).
-fn emit[&c, &d, &e](table: &!c conns.Table, slot: int, data: &d [byte], pend: &!e [byte], pending: int) -> [conn_write] int {
-    var at = 0;
-    if pending == 0 {
-        match conns.write(table, slot, data) {
-            Sent::Wrote(n) => {
-                at = n;
-            }
-            Sent::Again => {
-            }
-            Sent::Failed(e) => {
-                return 0 - 1;
-            }
-        }
-    }
-    if at >= len(data) {
-        return pending;
-    }
-    if pending + len(data) - at > len(pend) {
-        return 0 - 1;
-    }
-    var i = at;
-    while i < len(data) {
-        pend[pending + i - at] = data[i];
-        i = i + 1;
-    }
-    return pending + len(data) - at;
-}
-
-fn shut[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [] int {
-    let st = contents(core.state);
-    conns.close(tab, k);
-    st[stride() * k] = 0;
-    return 0;
-}
-
-// Watch `k` for what it now waits on.
-fn settle[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [poll] int {
-    let st = contents(core.state);
-    let p = stride() * k;
-    if st[p] == 0 {
-        return 0;
-    }
-    var want = 0;
-    if st[p] == 1 || st[p] == 2 {
-        // still logging in: read while it is not closing
-        if st[p + 4] == 0 {
-            want = 1;
-        }
-    } else if st[p] == 3 {
-        if st[p + 4] == 0 && st[stride() * st[p + 1] + 2] + chunk() <= queue_size() && st[p + 14] == 0 {
-            want = 1;
-        }
-    }
-    if st[p + 2] > 0 {
-        want = want + 2;
-    }
-    if want != st[p + 3] {
-        conns.rewatch(tab, core.poller, k, k + 1, want);
-        st[p + 3] = want;
-    }
-    return 0;
-}
-
-// `k` closes once what is queued for it has been sent.
-fn close_after[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [poll] int {
-    let st = contents(core.state);
-    if st[stride() * k + 2] == 0 {
-        shut(tab, core, k);
-    } else {
-        st[stride() * k + 4] = 1;
-        settle(tab, core, k);
-    }
-    return 0;
-}
-
-// `k` is finished (the peer closed, or it failed). Close it; a paired peer goes once what is queued for it has been sent.
-fn finish[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [poll] int {
-    let st = contents(core.state);
-    let peer = st[stride() * k + 1];
-    let paired = st[stride() * k] == 3;
-    shut(tab, core, k);
-    if paired && peer >= 0 && st[stride() * peer] == 3 {
-        close_after(tab, core, peer);
-    }
-    return 0;
-}
-
-// Connection `k` can be written to: send what is queued for it.
-fn drain[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_write, poll] int {
-    let st = contents(core.state);
-    let pd = contents(core.pends);
-    let p = stride() * k;
-    let obase = k * queue_size();
-    match conns.write(tab, k, pd[obase..obase + st[p + 2]]) {
-        Sent::Wrote(sent) => {
-            var at = 0;
-            while at < st[p + 2] - sent {
-                pd[obase + at] = pd[obase + sent + at];
-                at = at + 1;
-            }
-            st[p + 2] = st[p + 2] - sent;
-            if st[p + 2] == 0 && st[p + 4] == 1 {
-                shut(tab, core, k);
-            } else {
-                settle(tab, core, k);
-                if st[p] == 3 {
-                    settle(tab, core, st[p + 1]);
-                }
-            }
-        }
-        Sent::Again => {
-        }
-        Sent::Failed(e) => {
-            finish(tab, core, k);
-        }
-    }
-    return 0;
-}
-
-// Queue `data` for `k`; false if it cannot be (the connection is then closed).
-fn send[&t, &c, &d](tab: &!t conns.Table, core: &!c Core, k: int, data: &d [byte]) -> [conn_write, poll] bool {
-    let st = contents(core.state);
-    let pd = contents(core.pends);
-    let q = stride() * k;
-    let pending = emit(tab, k, data, pd[k * queue_size()..k * queue_size() + queue_size()], st[q + 2]);
-    if pending < 0 {
-        shut(tab, core, k);
-        return false;
-    }
-    st[q + 2] = pending;
-    settle(tab, core, k);
-    return true;
-}
-
-// Tell client `k` it is refused (`ErrorResponse`, severity and SQLSTATE and the tag `login.cho` or this file gives) and
-// close it once that has been sent. Nothing has reached PostgreSQL.
-fn refuse[&t, &c, &a, &b, &d, &e](tab: &!t conns.Table, core: &!c Core, k: int, severity: &a [byte], sqlstate: &b [byte], tag: &d [byte], text: &e [byte]) -> [conn_write, poll] int {
-    region r {
-        let buf = alloc_slice[r](512, byte_of(0));
-        let n = login.error_response(buf, severity, sqlstate, tag, text);
-        if send(tab, core, k, buf[0..n]) {
-            close_after(tab, core, k);
-        }
-    }
-    return 0;
-}
-
 // ------------------------------------------------------------------------------------------------ the login
 
 fn put_first(c: int) -> [] int {
@@ -306,13 +43,13 @@ fn put_first(c: int) -> [] int {
 
 // Everything in client `k`'s login buffer that can be decided is decided: the startup packet (answering `SSLRequest` and
 // `GSSENCRequest` with `N`), then the password. A refusal is sent and `k` closed; a good password makes it kind 5.
-fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int) -> [conn_write, poll, clock] int {
+fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: &k Clock, k: int) -> [conn_write, poll, clock] int {
     let st = contents(core.state);
     let hb = contents(core.hbuf);
     let cfg = contents(core.cfg);
     let ci = contents(core.cfgi);
-    let p = stride() * k;
-    let base = k * hello_size();
+    let p = shared.stride() * k;
+    let base = k * shared.hello_size();
     var going = true;
     while going && st[p] != 0 && st[p + 4] == 0 {
         going = false;
@@ -321,7 +58,7 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Cloc
             if st[p + 5] >= 4 {
                 let bl = login.startup_body_len(hb[base..base + 4]);
                 if bl < 0 {
-                    refuse(tab, core, k, "FATAL", "08P01", "startup-length", "invalid length of startup packet");
+                    shared.refuse(tab, core, k, "FATAL", "08P01", "startup-length", "invalid length of startup packet");
                 } else if st[p + 5] >= 4 + bl {
                     region r {
                         let out = alloc_slice[r](6, 0);
@@ -329,7 +66,7 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Cloc
                         if kind == login.kind_ssl() || kind == login.kind_gss() {
                             // plain only: answer N and take the next packet from where this one ended
                             let no = alloc_slice[r](1, byte_of('N'));
-                            if send(tab, core, k, no) {
+                            if shared.send(tab, core, k, no) {
                                 var i = 0;
                                 while i < st[p + 5] - 4 - bl {
                                     hb[base + i] = hb[base + 4 + bl + i];
@@ -339,7 +76,7 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Cloc
                                 going = true;
                             }
                         } else if kind == login.kind_cancel() {
-                            shut(tab, core, k);
+                            shared.shut(tab, core, k);
                         } else if kind == login.kind_startup() {
                             st[p + 6] = 4 + out[2];
                             st[p + 7] = out[3];
@@ -352,14 +89,14 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Cloc
                             st[p + 10] = 4 + bl;
                             let ask = alloc_slice[r](9, byte_of(0));
                             let n = login.auth_cleartext(ask);
-                            if send(tab, core, k, ask[0..n]) {
+                            if shared.send(tab, core, k, ask[0..n]) {
                                 st[p] = 2;
                                 going = true;
                             }
                         } else if kind == login.err_version() {
-                            refuse(tab, core, k, "FATAL", "0A000", "unsupported-protocol", "only protocol 3.0 is supported");
+                            shared.refuse(tab, core, k, "FATAL", "0A000", "unsupported-protocol", "only protocol 3.0 is supported");
                         } else {
-                            refuse(tab, core, k, "FATAL", "08P01", "startup-malformed", "invalid startup packet");
+                            shared.refuse(tab, core, k, "FATAL", "08P01", "startup-malformed", "invalid startup packet");
                         }
                     }
                 }
@@ -368,12 +105,12 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Cloc
             let h0 = st[p + 10];
             if st[p + 5] >= h0 + 5 {
                 let ln = commit.be(hb, base + h0 + 1, 4);
-                if int_of(hb[base + h0]) != 'p' || ln < 5 || h0 + 1 + ln > hello_size() {
-                    refuse(tab, core, k, "FATAL", "08P01", "password-malformed", "expected a password message");
+                if int_of(hb[base + h0]) != 'p' || ln < 5 || h0 + 1 + ln > shared.hello_size() {
+                    shared.refuse(tab, core, k, "FATAL", "08P01", "password-malformed", "expected a password message");
                 } else if st[p + 5] >= h0 + 1 + ln {
                     let text = hb[base + h0 + 5..base + h0 + 1 + ln - 1];
                     if int_of(hb[base + h0 + ln]) != 0 {
-                        refuse(tab, core, k, "FATAL", "08P01", "password-malformed", "password is not terminated");
+                        shared.refuse(tab, core, k, "FATAL", "08P01", "password-malformed", "password is not terminated");
                     } else {
                         region r {
                             let blob = alloc_slice[r](len(text) + 4, byte_of(0));
@@ -386,21 +123,21 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Cloc
                                 rule = login.check(blob[0..n], database, cfg[32 + ci[0]..32 + ci[0] + ci[1]], cfg[0..32], now / 4294967296, now % 4294967296);
                             }
                             if rule != login.login_ok() {
-                                refuse(tab, core, k, "FATAL", login.sqlstate(rule), login.rule_name(rule), "the capability token was refused");
-                            } else if n - 32 > token_max() || n - 32 < 8 {
-                                refuse(tab, core, k, "FATAL", "28000", "login-token-size", "the capability token is too large to keep");
+                                shared.refuse(tab, core, k, "FATAL", login.sqlstate(rule), login.rule_name(rule), "the capability token was refused");
+                            } else if n - 32 > shared.token_max() || n - 32 < 8 {
+                                shared.refuse(tab, core, k, "FATAL", "28000", "login-token-size", "the capability token is too large to keep");
                             } else {
                                 // the token without the seed of its last key is what the guard checks each query against
                                 let tk = contents(core.tokb);
                                 var q = 0;
                                 while q < n - 32 {
-                                    tk[k * token_max() + q] = blob[q];
+                                    tk[k * shared.token_max() + q] = blob[q];
                                     q = q + 1;
                                 }
                                 st[p + 12] = n - 32;
                                 st[p] = 5;
                                 st[p + 4] = 0;
-                                settle(tab, core, k);
+                                shared.settle(tab, core, k);
                             }
                         }
                     }
@@ -412,27 +149,27 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Cloc
 }
 
 // Client `k` (kind 1 or 2) has something to read.
-fn hello_read[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int) -> [conn_read, conn_write, poll, clock] int {
+fn hello_read[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: &k Clock, k: int) -> [conn_read, conn_write, poll, clock] int {
     let st = contents(core.state);
     let hb = contents(core.hbuf);
-    let p = stride() * k;
-    let base = k * hello_size();
-    if st[p + 5] >= hello_size() {
-        refuse(tab, core, k, "FATAL", "08P01", "login-too-long", "login message too long");
+    let p = shared.stride() * k;
+    let base = k * shared.hello_size();
+    if st[p + 5] >= shared.hello_size() {
+        shared.refuse(tab, core, k, "FATAL", "08P01", "login-too-long", "login message too long");
         return 0;
     }
-    match conns.read(tab, k, hb[base + st[p + 5]..base + hello_size()]) {
+    match conns.read(tab, k, hb[base + st[p + 5]..base + shared.hello_size()]) {
         Received::Data(got) => {
             st[p + 5] = st[p + 5] + got;
             hello_progress(tab, core, clk, k);
         }
         Received::End => {
-            shut(tab, core, k);
+            shared.shut(tab, core, k);
         }
         Received::Again => {
         }
         Received::Failed(e) => {
-            shut(tab, core, k);
+            shared.shut(tab, core, k);
         }
     }
     return 0;
@@ -440,125 +177,75 @@ fn hello_read[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k
 
 // ------------------------------------------------------------------------------------------------ the client's messages
 
-// Tell client `k` something went wrong with its query, and that PostgreSQL has not been asked (`ErrorResponse`, then
-// `ReadyForQuery` with the transaction status `status`: `I`, `T` or `E`): the connection stays open.
-fn answer_error[&t, &c, &a, &b, &d](tab: &!t conns.Table, core: &!c Core, k: int, status: int, sqlstate: &a [byte], tag: &b [byte], text: &d [byte]) -> [conn_write, poll] int {
-    region r {
-        let buf = alloc_slice[r](640, byte_of(0));
-        var n = login.error_response(buf, "ERROR", sqlstate, tag, text);
-        n = n + login.ready_for_query(buf[n..640], status);
-        send(tab, core, k, buf[0..n]);
-    }
-    return 0;
-}
-
-// `CommandComplete` with the command tag `tag`, then `ReadyForQuery` with `status`, to client `k`: what PostgreSQL would say for
-// a `BEGIN`, `COMMIT` or `ROLLBACK` that the proxy answered itself.
-fn answer_tag[&t, &c, &a](tab: &!t conns.Table, core: &!c Core, k: int, status: int, tag: &a [byte]) -> [conn_write, poll] int {
-    region r {
-        let buf = alloc_slice[r](128, byte_of(0));
-        let ln = len(tag) + 5;
-        buf[0] = byte_of('C');
-        buf[1] = byte_of(0);
-        buf[2] = byte_of(0);
-        buf[3] = byte_of(ln / 256 % 256);
-        buf[4] = byte_of(ln % 256);
-        var i = 0;
-        while i < len(tag) {
-            buf[5 + i] = tag[i];
-            i = i + 1;
-        }
-        buf[5 + len(tag)] = byte_of(0);
-        let n = 6 + len(tag) + login.ready_for_query(buf[6 + len(tag)..128], status);
-        send(tab, core, k, buf[0..n]);
-    }
-    return 0;
-}
-
-// Drop the first `n` bytes of client `k`'s message buffer.
-fn consume[&c](core: &!c Core, k: int, n: int) -> [] int {
-    let st = contents(core.state);
-    let mb = contents(core.mbuf);
-    let p = stride() * k;
-    let base = k * msg_max();
-    var i = 0;
-    while i < st[p + 13] - n {
-        mb[base + i] = mb[base + n + i];
-        i = i + 1;
-    }
-    st[p + 13] = st[p + 13] - n;
-    return 0;
-}
-
 // Cut whole messages off the front of client `k`'s buffer until a simple query is there (for the guard) or no whole message
 // is. Terminate goes to PostgreSQL; the extended protocol is refused (`0A000`): the error is answered at once, the messages up
 // to the next Sync are discarded as PostgreSQL itself would, and Sync is answered `ReadyForQuery`.
-fn frame_client[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_write, poll] int {
+fn frame_client[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [conn_write, poll] int {
     let st = contents(core.state);
     let mb = contents(core.mbuf);
-    let p = stride() * k;
-    let base = k * msg_max();
+    let p = shared.stride() * k;
+    let base = k * shared.msg_max();
     var going = true;
     while going && st[p] == 3 && st[p + 14] == 0 {
         going = false;
         if st[p + 13] >= 5 {
             let ty = int_of(mb[base]);
             let ln = commit.be(mb, base + 1, 4);
-            if ln < 4 || ln + 1 > msg_max() {
-                refuse(tab, core, k, "FATAL", "08P01", "message-too-long", "a message is longer than the proxy will hold");
+            if ln < 4 || ln + 1 > shared.msg_max() {
+                shared.refuse(tab, core, k, "FATAL", "08P01", "message-too-long", "a message is longer than the proxy will hold");
             } else if st[p + 13] >= ln + 1 {
                 if ty == 'Q' {
                     st[p + 14] = 1;
                 } else if ty == 'X' {
-                    send(tab, core, st[p + 1], mb[base..base + ln + 1]);
-                    consume(core, k, ln + 1);
+                    shared.send(tab, core, st[p + 1], mb[base..base + ln + 1]);
+                    shared.consume(core, k, ln + 1);
                     going = st[p] == 3;
                 } else if ty == 'P' || ty == 'B' || ty == 'E' || ty == 'D' || ty == 'C' || ty == 'S' || ty == 'H' || ty == 'F' || ty == 'd' || ty == 'c' || ty == 'f' {
                     if ty == 'S' {
                         region r {
                             let z = alloc_slice[r](8, byte_of(0));
                             let n = login.ready_for_query(z, 'I');
-                            send(tab, core, k, z[0..n]);
+                            shared.send(tab, core, k, z[0..n]);
                         }
                         st[p + 15] = 0;
                     } else if ty != 'H' && st[p + 15] == 0 {
                         region r {
                             let buf = alloc_slice[r](640, byte_of(0));
                             let n = login.error_response(buf, "ERROR", "0A000", "extended-protocol", "only the simple query protocol is supported");
-                            send(tab, core, k, buf[0..n]);
+                            shared.send(tab, core, k, buf[0..n]);
                         }
                         st[p + 15] = 1;
                     }
-                    consume(core, k, ln + 1);
+                    shared.consume(core, k, ln + 1);
                     going = st[p] == 3;
                 } else {
-                    refuse(tab, core, k, "FATAL", "08P01", "protocol-violation", "unexpected frontend message");
+                    shared.refuse(tab, core, k, "FATAL", "08P01", "protocol-violation", "unexpected frontend message");
                 }
             }
         }
     }
-    settle(tab, core, k);
+    shared.settle(tab, core, k);
     return 0;
 }
 
 // Client `k` (paired) can be read: take what it has sent into its message buffer, and act on whole messages.
-fn client_read[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_read, conn_write, poll] int {
+fn client_read[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [conn_read, conn_write, poll] int {
     let st = contents(core.state);
     let mb = contents(core.mbuf);
-    let p = stride() * k;
-    let base = k * msg_max();
-    match conns.read(tab, k, mb[base + st[p + 13]..base + msg_max()]) {
+    let p = shared.stride() * k;
+    let base = k * shared.msg_max();
+    match conns.read(tab, k, mb[base + st[p + 13]..base + shared.msg_max()]) {
         Received::Data(got) => {
             st[p + 13] = st[p + 13] + got;
             frame_client(tab, core, k);
         }
         Received::End => {
-            finish(tab, core, k);
+            shared.finish(tab, core, k);
         }
         Received::Again => {
         }
         Received::Failed(e) => {
-            finish(tab, core, k);
+            shared.finish(tab, core, k);
         }
     }
     return 0;
@@ -579,7 +266,7 @@ fn is_loopback[&t](tab: &!t conns.Table, slot: int) -> [] bool {
 }
 
 // Take every client waiting on the listener: loopback ones start their login, others are closed unread.
-fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l Listener, core: &!c Core, clk: &k Clock) -> [heap, conn_accept, poll, clock] conns.Table {
+fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l Listener, core: &!c shared.Core, clk: &k Clock) -> [heap, conn_accept, poll, clock] conns.Table {
     let st = contents(core.state);
     var table = conn;
     var more = true;
@@ -590,7 +277,7 @@ fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l L
                 borrow table as &tt in {
                     held = conns.live(tt);
                 }
-                if held + 2 > 2 * max_clients() {
+                if held + 2 > 2 * shared.max_clients() {
                     conn_close(client);
                 } else {
                     let (t1, a) = conns.put(heap, table, client);
@@ -600,7 +287,7 @@ fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l L
                             if !is_loopback(ct, a) {
                                 conns.close(ct, a);
                             } else {
-                                let p = stride() * a;
+                                let p = shared.stride() * a;
                                 st[p] = 1;
                                 st[p + 1] = 0 - 1;
                                 st[p + 2] = 0;
@@ -620,7 +307,7 @@ fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l L
                                 st[p + 22] = 0;
                                 st[p + 11] = clock_ms(clk);
                                 if conns.nonblocking(ct, a) != 0 || conns.nodelay(ct, a) != 0 || conns.watch(ct, core.poller, a, a + 1, 1) != 0 {
-                                    shut(ct, core, a);
+                                    shared.shut(ct, core, a);
                                 }
                             }
                         }
@@ -641,13 +328,13 @@ fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l L
 // Open the connection to PostgreSQL for client `k` (kind 5), log in to it (trust), and pair them. Blocking, and the one
 // place that is: PostgreSQL is local and trusted (docs/m1-proxy.md section 3, P0's limit). The server's login answer is
 // relayed to the client as it is.
-fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
     let st = contents(core.state);
     let cfg = contents(core.cfg);
     let ci = contents(core.cfgi);
     let hb = contents(core.hbuf);
     let rb = contents(core.rbuf);
-    let p = stride() * k;
+    let p = shared.stride() * k;
     var table = tab;
     var failed = 0;
     var detail = 0;
@@ -668,7 +355,7 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                     at = upstream.put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
                     at = upstream.put_cstr(msg, at, "application_name");
                     if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {
-                        at = upstream.put_cstr(msg, at, hb[k * hello_size() + st[p + 8]..k * hello_size() + st[p + 8] + st[p + 9]]);
+                        at = upstream.put_cstr(msg, at, hb[k * shared.hello_size() + st[p + 8]..k * shared.hello_size() + st[p + 8] + st[p + 9]]);
                     } else {
                         at = upstream.put_cstr(msg, at, "cancho-db");
                     }
@@ -704,7 +391,7 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                 while failed == 0 && !done {
                     var got = 0 - 1;
                     borrow mut table as &!tw in {
-                        got = upstream.login_read(tw, b, rb[fill..relay_max()], login_ms());
+                        got = upstream.login_read(tw, b, rb[fill..shared.relay_max()], shared.login_ms());
                     }
                     if got < 0 {
                         failed = 1;
@@ -721,7 +408,7 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                             more = false;
                         } else {
                             let ln = commit.be(rb, pos + 1, 4);
-                            if ln < 4 || ln > relay_max() {
+                            if ln < 4 || ln > shared.relay_max() {
                                 failed = 1;
                             } else if pos + 1 + ln > fill {
                                 more = false;
@@ -738,13 +425,13 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                             }
                         }
                     }
-                    if fill >= relay_max() && !done {
+                    if fill >= shared.relay_max() && !done {
                         failed = 1;
                     }
                 }
                 if failed == 0 {
                     // pair: the relay goes to the client, and from here both are forwarded
-                    let q = stride() * b;
+                    let q = shared.stride() * b;
                     st[q] = 3;
                     st[q + 1] = k;
                     st[q + 2] = 0;
@@ -771,12 +458,12 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                     st[p + 18] = 0;
                     borrow mut table as &!ct in {
                         if conns.nonblocking(ct, b) != 0 || conns.nodelay(ct, b) != 0 || conns.watch(ct, core.poller, b, b + 1, 1) != 0 {
-                            shut(ct, core, b);
-                            shut(ct, core, k);
+                            shared.shut(ct, core, b);
+                            shared.shut(ct, core, k);
                         } else {
                             st[q + 3] = 1;
-                            send(ct, core, k, rb[0..fill]);
-                            settle(ct, core, k);
+                            shared.send(ct, core, k, rb[0..fill]);
+                            shared.settle(ct, core, k);
                         }
                     }
                 } else {
@@ -786,15 +473,15 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                     borrow mut table as &!ct in {
                         conns.close(ct, b);
                         if failed == 3 {
-                            if send(ct, core, k, rb[0..fill]) {
-                                close_after(ct, core, k);
+                            if shared.send(ct, core, k, rb[0..fill]) {
+                                shared.close_after(ct, core, k);
                             }
                         } else if failed == 2 {
-                            refuse(ct, core, k, "FATAL", "28000", "upstream-auth-unsupported", "the database requires a password the proxy does not have");
+                            shared.refuse(ct, core, k, "FATAL", "28000", "upstream-auth-unsupported", "the database requires a password the proxy does not have");
                         } else if failed == 4 {
-                            refuse(ct, core, k, "FATAL", "08006", "upstream-timeout", "the database did not answer in time");
+                            shared.refuse(ct, core, k, "FATAL", "08006", "upstream-timeout", "the database did not answer in time");
                         } else {
-                            refuse(ct, core, k, "FATAL", "08006", "upstream-unavailable", "the database closed the connection during login");
+                            shared.refuse(ct, core, k, "FATAL", "08006", "upstream-unavailable", "the database closed the connection during login");
                         }
                     }
                 }
@@ -802,24 +489,24 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
         }
         Dialed::Failed(e) => {
             borrow mut table as &!ct in {
-                refuse(ct, core, k, "FATAL", "08006", "upstream-unavailable", "cannot reach the database");
+                shared.refuse(ct, core, k, "FATAL", "08006", "upstream-unavailable", "cannot reach the database");
             }
         }
     }
     if failed == 1 && st[p] == 5 {
         borrow mut table as &!ct in {
-            refuse(ct, core, k, "FATAL", "08006", "upstream-unavailable", "cannot reach the database");
+            shared.refuse(ct, core, k, "FATAL", "08006", "upstream-unavailable", "cannot reach the database");
         }
     }
     return table;
 }
 
 // Pair every client whose login has been accepted.
-fn pair_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+fn pair_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
     var table = tab;
     var k = 0;
-    while k < 2 * max_clients() {
-        let kind = contents(core.state)[stride() * k];
+    while k < 2 * shared.max_clients() {
+        let kind = contents(core.state)[shared.stride() * k];
         if kind == 5 {
             table = pair_one(heap, table, core, net, host, port, k);
         }
@@ -832,81 +519,47 @@ fn pair_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
 
 // ------------------------------------------------------------------------------------------------ transactions
 
-// Run `sql` (one simple query of the proxy's own: BEGIN, COMMIT, ROLLBACK) on upstream connection `b` and wait, bounded, for its
-// ReadyForQuery. 0 if it ran, 1 if PostgreSQL answered with an error, -1 if the connection failed or was silent. Used only
-// where the upstream is idle and nothing else is owed from it.
-fn upstream_exec[&t, &c, &q](tab: &!t conns.Table, core: &!c Core, b: int, sql: &q [byte]) -> [conn_read, conn_write, poll] int {
-    var sent = false;
-    region r {
-        let msg = alloc_slice[r](len(sql) + 8, byte_of(0));
-        let ln = len(sql) + 5;
-        msg[0] = byte_of('Q');
-        msg[1] = byte_of(ln / 16777216 % 256);
-        msg[2] = byte_of(ln / 65536 % 256);
-        msg[3] = byte_of(ln / 256 % 256);
-        msg[4] = byte_of(ln % 256);
-        var i = 0;
-        while i < len(sql) {
-            msg[5 + i] = sql[i];
-            i = i + 1;
-        }
-        msg[5 + len(sql)] = byte_of(0);
-        sent = upstream.write_all(tab, b, msg[0..len(sql) + 6]);
-    }
-    if !sent {
-        return 0 - 1;
-    }
-    let si = contents(core.snapin);
-    let n = upstream.read_until_ready(tab, b, si, login_ms());
-    if n < 0 {
-        return 0 - 1;
-    }
-    var pos = 0;
-    var errored = 0;
-    while pos + 5 <= n {
-        if int_of(si[pos]) == 'E' {
-            errored = 1;
-        }
-        pos = pos + 1 + commit.be(si, pos + 1, 4);
-    }
-    return errored;
-}
-
 // The statement of client `client` has finished on upstream connection `k`, which the proxy had wrapped in a transaction of its
 // own (the client was in autocommit): make it permanent and tell the client, now. The held `CommandComplete` messages are
 // released only if the commit succeeded; a statement that failed is rolled back and the client has the error already.
-fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, client: int) -> [conn_read, conn_write, poll] int {
+fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, client: int) -> [conn_read, conn_write, poll, file_write] int {
     let st = contents(core.state);
     let hd = contents(core.hold);
-    let q = stride() * k;
-    let cp = stride() * client;
+    let q = shared.stride() * k;
+    let cp = shared.stride() * client;
     let failed = st[q + 22] == 1;
     st[q + 21] = 0;
     st[q + 22] = 0;
     st[cp + 17] = 0;
     var r = 0;
     if failed {
-        r = upstream_exec(tab, core, k, "ROLLBACK");
+        r = commitpath.upstream_exec(tab, core, k, "ROLLBACK");
+        commitpath.reset(core, client);
     } else {
-        r = upstream_exec(tab, core, k, "COMMIT");
+        r = commitpath.conclude(tab, core, client);
     }
     if r < 0 {
-        finish(tab, core, k);
+        shared.finish(tab, core, k);
         return 0;
     }
     if !failed && r == 1 {
         st[cp + 18] = 0;
-        answer_error(tab, core, client, 73, "40000", "commit-failed", "the database refused to commit the statement");
+        shared.answer_error(tab, core, client, 73, "40000", "commit-failed", "the database refused to commit the statement");
+        return 0;
+    }
+    if !failed && r == 2 {
+        st[cp + 18] = 0;
+        shared.answer_error(tab, core, client, 73, "58000", "log-unavailable", "the commit could not be written to the log, so it was rolled back");
         return 0;
     }
     if !failed && st[cp + 18] > 0 {
-        send(tab, core, client, hd[client * hold_max()..client * hold_max() + st[cp + 18]]);
+        shared.send(tab, core, client, hd[client * shared.hold_max()..client * shared.hold_max() + st[cp + 18]]);
     }
     st[cp + 18] = 0;
     region z {
         let rq = alloc_slice[z](8, byte_of(0));
         let n = login.ready_for_query(rq, 'I');
-        send(tab, core, client, rq[0..n]);
+        shared.send(tab, core, client, rq[0..n]);
     }
     return 0;
 }
@@ -914,14 +567,14 @@ fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, clien
 // The upstream side `k` of a pair has sent `got` bytes (in `rbuf`). Messages are relayed to the client as they come, in pieces if
 // need be, except the ones the proxy acts on: `CommandComplete` (held while the statement is an autocommit one) and
 // `ReadyForQuery` (which ends it, and carries the transaction status the proxy keeps).
-fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, got: int) -> [conn_read, conn_write, poll] int {
+fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, got: int) -> [conn_read, conn_write, poll, file_write] int {
     let st = contents(core.state);
     let rb = contents(core.rbuf);
     let sb = contents(core.sbuf);
     let hd = contents(core.hold);
-    let q = stride() * k;
+    let q = shared.stride() * k;
     let client = st[q + 1];
-    let cp = stride() * client;
+    let cp = shared.stride() * client;
     var pos = 0;
     while pos < got && st[q] == 3 && st[cp] == 3 {
         if st[q + 20] > 0 {
@@ -930,8 +583,8 @@ fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, got: int) 
             if n > st[q + 20] {
                 n = st[q + 20];
             }
-            if !send(tab, core, client, rb[pos..pos + n]) {
-                finish(tab, core, k);
+            if !shared.send(tab, core, client, rb[pos..pos + n]) {
+                shared.finish(tab, core, k);
                 return 0;
             }
             st[q + 20] = st[q + 20] - n;
@@ -939,40 +592,40 @@ fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, got: int) 
         } else {
             // at a message boundary: collect the five bytes of its header
             while st[q + 19] < 5 && pos < got {
-                sb[k * sbuf_max() + st[q + 19]] = rb[pos];
+                sb[k * shared.sbuf_max() + st[q + 19]] = rb[pos];
                 st[q + 19] = st[q + 19] + 1;
                 pos = pos + 1;
             }
             if st[q + 19] >= 5 {
-                let ty = int_of(sb[k * sbuf_max()]);
-                let ln = commit.be(sb, k * sbuf_max() + 1, 4);
+                let ty = int_of(sb[k * shared.sbuf_max()]);
+                let ln = commit.be(sb, k * shared.sbuf_max() + 1, 4);
                 if ln < 4 {
-                    finish(tab, core, k);
+                    shared.finish(tab, core, k);
                     return 0;
                 }
                 if ty == 'C' || ty == 'Z' {
                     // small and acted on: collect it whole
-                    if ln + 1 > sbuf_max() {
-                        finish(tab, core, k);
+                    if ln + 1 > shared.sbuf_max() {
+                        shared.finish(tab, core, k);
                         return 0;
                     }
                     while st[q + 19] < ln + 1 && pos < got {
-                        sb[k * sbuf_max() + st[q + 19]] = rb[pos];
+                        sb[k * shared.sbuf_max() + st[q + 19]] = rb[pos];
                         st[q + 19] = st[q + 19] + 1;
                         pos = pos + 1;
                     }
                     if st[q + 19] >= ln + 1 {
-                        let whole = sb[k * sbuf_max()..k * sbuf_max() + ln + 1];
+                        let whole = sb[k * shared.sbuf_max()..k * shared.sbuf_max() + ln + 1];
                         st[q + 19] = 0;
                         if ty == 'C' && st[q + 21] == 1 {
                             // held: the client is told only when the statement is permanent
-                            if st[cp + 18] + len(whole) > hold_max() {
-                                finish(tab, core, k);
+                            if st[cp + 18] + len(whole) > shared.hold_max() {
+                                shared.finish(tab, core, k);
                                 return 0;
                             }
                             var i = 0;
                             while i < len(whole) {
-                                hd[client * hold_max() + st[cp + 18] + i] = whole[i];
+                                hd[client * shared.hold_max() + st[cp + 18] + i] = whole[i];
                                 i = i + 1;
                             }
                             st[cp + 18] = st[cp + 18] + len(whole);
@@ -991,8 +644,8 @@ fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, got: int) 
                                     st[cp + 16] = 2;
                                 }
                             }
-                            if !send(tab, core, client, whole) {
-                                finish(tab, core, k);
+                            if !shared.send(tab, core, client, whole) {
+                                shared.finish(tab, core, k);
                                 return 0;
                             }
                         }
@@ -1001,8 +654,8 @@ fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, got: int) 
                     if ty == 'E' && st[q + 21] == 1 {
                         st[q + 22] = 1;
                     }
-                    if !send(tab, core, client, sb[k * sbuf_max()..k * sbuf_max() + 5]) {
-                        finish(tab, core, k);
+                    if !shared.send(tab, core, client, sb[k * shared.sbuf_max()..k * shared.sbuf_max() + 5]) {
+                        shared.finish(tab, core, k);
                         return 0;
                     }
                     st[q + 19] = 0;
@@ -1015,37 +668,37 @@ fn relay_server[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, got: int) 
 }
 
 // Upstream connection `k` of a pair can be read.
-fn server_read[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int) -> [conn_read, conn_write, poll] int {
+fn server_read[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [conn_read, conn_write, poll, file_write] int {
     let rb = contents(core.rbuf);
-    match conns.read(tab, k, rb[0..chunk()]) {
+    match conns.read(tab, k, rb[0..shared.chunk()]) {
         Received::Data(got) => {
             relay_server(tab, core, k, got);
         }
         Received::End => {
-            finish(tab, core, k);
+            shared.finish(tab, core, k);
         }
         Received::Again => {
         }
         Received::Failed(e) => {
-            finish(tab, core, k);
+            shared.finish(tab, core, k);
         }
     }
     return 0;
 }
 
 // The poller said connection `k` is ready.
-fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int, readiness: int) -> [conn_read, conn_write, poll, clock] int {
+fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: &k Clock, k: int, readiness: int) -> [conn_read, conn_write, poll, clock, file_write] int {
     let st = contents(core.state);
-    let p = stride() * k;
+    let p = shared.stride() * k;
     if readiness % 4 >= 2 && st[p + 2] > 0 {
-        drain(tab, core, k);
+        shared.drain(tab, core, k);
     }
     if st[p] != 0 && readiness % 2 == 1 {
         if st[p] == 1 || st[p] == 2 {
             if st[p + 4] == 0 {
                 hello_read(tab, core, clk, k);
             } else {
-                shut(tab, core, k);
+                shared.shut(tab, core, k);
             }
         } else if st[p] == 3 {
             if st[p + 3] % 2 == 1 {
@@ -1055,7 +708,7 @@ fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int,
                     server_read(tab, core, k);
                 }
             } else {
-                finish(tab, core, k);
+                shared.finish(tab, core, k);
             }
         }
     }
@@ -1064,7 +717,7 @@ fn step[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock, k: int,
 
 // Open the proxy's own connection to PostgreSQL for catalog questions: login as the configured role, and wait for ReadyForQuery.
 // Answers its slot, or -1.
-fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
+fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
     let cfg = contents(core.cfg);
     let ci = contents(core.cfgi);
     let si = contents(core.snapin);
@@ -1081,7 +734,7 @@ fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, ne
                     let at = upstream.startup_msg(msg, cfg, ci, "cancho-db-catalog");
                     borrow mut table as &!tw in {
                         if upstream.write_all(tw, b, msg[0..at]) {
-                            let got = upstream.read_until_ready(tw, b, si, login_ms());
+                            let got = upstream.read_until_ready(tw, b, si, shared.login_ms());
                             // the first message must be AuthenticationOk (R, 8, 0): a password request is not something to answer here
                             if got >= 9 && int_of(si[0]) == 'R' && commit.be(si, 5, 4) == 0 {
                                 good = true;
@@ -1091,8 +744,8 @@ fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, ne
                 }
                 if good {
                     slot = b;
-                    contents(core.state)[stride() * b] = 6;
-                    contents(core.state)[stride() * b + 12] = 0 - 1;
+                    contents(core.state)[shared.stride() * b] = 6;
+                    contents(core.state)[shared.stride() * b + 12] = 0 - 1;
                 } else {
                     borrow mut table as &!tw in {
                         conns.close(tw, b);
@@ -1108,7 +761,7 @@ fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, ne
 
 // The schema snapshot, fresh from the catalog, into `core.snap`: its length, or -1 if the catalog cannot be asked. The one
 // connection is kept between questions and opened again if PostgreSQL has closed it.
-fn snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
+fn snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
     let aux = contents(core.aux);
     let si = contents(core.snapin);
     var table = tab;
@@ -1139,7 +792,7 @@ fn snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                 msg[5 + len(sql)] = byte_of(0);
                 borrow mut table as &!tw in {
                     if upstream.write_all(tw, slot, msg[0..len(sql) + 6]) {
-                        answered = upstream.read_until_ready(tw, slot, si, login_ms());
+                        answered = upstream.read_until_ready(tw, slot, si, shared.login_ms());
                     }
                 }
             }
@@ -1153,7 +806,7 @@ fn snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
             borrow mut table as &!tw in {
                 conns.close(tw, slot);
             }
-            contents(core.state)[stride() * slot] = 0;
+            contents(core.state)[shared.stride() * slot] = 0;
             aux[0] = 0 - 1;
         }
         attempt = attempt + 1;
@@ -1165,90 +818,119 @@ fn snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
 // doing what it means upstream. (A COMMIT of a failed transaction is a ROLLBACK, as in PostgreSQL.) `BEGIN` inside a transaction is
 // an error here where PostgreSQL only warns, and COMMIT or ROLLBACK with none open is answered with no warning: both stated in
 // docs/m1-commit-path.md.
-fn transaction_control[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, kind: int) -> [conn_read, conn_write, poll] int {
+fn transaction_control[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, kind: int) -> [conn_read, conn_write, poll, file_write] int {
     let st = contents(core.state);
-    let p = stride() * k;
+    let p = shared.stride() * k;
     let b = st[p + 1];
     let ts = st[p + 16];
     if kind == 1 {
         if ts == 0 {
-            let r = upstream_exec(tab, core, b, "BEGIN");
+            let r = commitpath.upstream_exec(tab, core, b, "BEGIN");
             if r != 0 {
-                answer_error(tab, core, k, 73, "08006", "upstream-unavailable", "the database could not begin a transaction");
+                shared.answer_error(tab, core, k, 73, "08006", "upstream-unavailable", "the database could not begin a transaction");
                 return 0;
             }
             st[p + 16] = 1;
-            answer_tag(tab, core, k, 'T', "BEGIN");
+            shared.answer_tag(tab, core, k, 'T', "BEGIN");
         } else if ts == 1 {
-            answer_error(tab, core, k, 'T', "25001", "transaction-in-progress", "there is already a transaction in progress");
+            shared.answer_error(tab, core, k, 'T', "25001", "transaction-in-progress", "there is already a transaction in progress");
         } else {
-            answer_error(tab, core, k, 'E', "25P02", "in-failed-transaction", "current transaction is aborted, commands ignored until end of transaction block");
+            shared.answer_error(tab, core, k, 'E', "25P02", "in-failed-transaction", "current transaction is aborted, commands ignored until end of transaction block");
         }
         return 0;
     }
     if ts == 0 {
         if kind == 2 {
-            answer_tag(tab, core, k, 'I', "COMMIT");
+            shared.answer_tag(tab, core, k, 'I', "COMMIT");
         } else {
-            answer_tag(tab, core, k, 'I', "ROLLBACK");
+            shared.answer_tag(tab, core, k, 'I', "ROLLBACK");
         }
         return 0;
     }
-    var sql = "ROLLBACK";
-    if kind == 2 && ts == 1 {
-        sql = "COMMIT";
+    let committing = kind == 2 && ts == 1;
+    var r = 0;
+    if committing {
+        r = commitpath.conclude(tab, core, k);
+    } else {
+        r = commitpath.upstream_exec(tab, core, b, "ROLLBACK");
+        commitpath.reset(core, k);
     }
-    let r = upstream_exec(tab, core, b, sql);
     st[p + 16] = 0;
     if r < 0 {
-        finish(tab, core, k);
+        shared.finish(tab, core, k);
     } else if r == 1 {
-        answer_error(tab, core, k, 73, "40000", "commit-failed", "the database refused to commit the transaction");
-    } else if kind == 2 && ts == 1 {
-        answer_tag(tab, core, k, 'I', "COMMIT");
+        shared.answer_error(tab, core, k, 73, "40000", "commit-failed", "the database refused to commit the transaction");
+    } else if r == 2 {
+        shared.answer_error(tab, core, k, 73, "58000", "log-unavailable", "the commit could not be written to the log, so it was rolled back");
+    } else if committing {
+        shared.answer_tag(tab, core, k, 'I', "COMMIT");
     } else {
-        answer_tag(tab, core, k, 'I', "ROLLBACK");
+        shared.answer_tag(tab, core, k, 'I', "ROLLBACK");
     }
     return 0;
 }
 
 // A statement the guard refused. Inside a transaction that aborts it, as an error would in PostgreSQL: the proxy rolls the
 // upstream transaction back at once (its locks go with it) and the client is `E` until its own ROLLBACK.
-fn refused_query[&t, &c, &v](tab: &!t conns.Table, core: &!c Core, k: int, vd: &v [int]) -> [conn_read, conn_write, poll] int {
+fn refused_query[&t, &c, &v](tab: &!t conns.Table, core: &!c shared.Core, k: int, vd: &v [int]) -> [conn_read, conn_write, poll] int {
     let st = contents(core.state);
-    let p = stride() * k;
+    let p = shared.stride() * k;
     let ts = st[p + 16];
     if ts == 1 {
-        upstream_exec(tab, core, st[p + 1], "ROLLBACK");
+        commitpath.upstream_exec(tab, core, st[p + 1], "ROLLBACK");
+        commitpath.reset(core, k);
         st[p + 16] = 2;
     }
     var status = 'E';
     if ts == 0 {
         status = 'I';
     }
-    answer_error(tab, core, k, status, guard.sqlstate(vd), guard.tag(vd), "the statement was not run");
+    shared.answer_error(tab, core, k, status, guard.sqlstate(vd), guard.tag(vd), "the statement was not run");
+    return 0;
+}
+
+// A statement the guard allowed but a commit cannot hold (`commitpath.add`'s 1 and 2): refused as a failed statement is, which aborts a
+// transaction it is in.
+fn refuse_unrecordable[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, why: int) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    let ts = st[p + 16];
+    if ts == 1 {
+        commitpath.upstream_exec(tab, core, st[p + 1], "ROLLBACK");
+        st[p + 16] = 2;
+    }
+    commitpath.reset(core, k);
+    var status = 'E';
+    if ts == 0 {
+        status = 'I';
+    }
+    if why == 1 {
+        shared.answer_error(tab, core, k, status, "54000", "transaction-too-large", "the transaction is larger than one commit can record");
+    } else {
+        shared.answer_error(tab, core, k, status, "0A000", "nondeterministic", "now() and the like are not recorded in a commit yet, so the statement was not run");
+    }
     return 0;
 }
 
 // An allowed statement, rendered into `core.rend` (`rl` bytes): sent upstream as it is inside a transaction; in autocommit the
 // proxy opens a transaction first, and `finish_autocommit` ends it when the statement has. In a failed transaction nothing is sent.
-fn run_query[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, rl: int) -> [conn_read, conn_write, poll] int {
+fn run_query[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, rl: int) -> [conn_read, conn_write, poll] int {
     let st = contents(core.state);
-    let p = stride() * k;
+    let p = shared.stride() * k;
     let b = st[p + 1];
     let ts = st[p + 16];
     if ts == 2 {
-        answer_error(tab, core, k, 'E', "25P02", "in-failed-transaction", "current transaction is aborted, commands ignored until end of transaction block");
+        shared.answer_error(tab, core, k, 'E', "25P02", "in-failed-transaction", "current transaction is aborted, commands ignored until end of transaction block");
         return 0;
     }
     if ts == 0 {
-        let r = upstream_exec(tab, core, b, "BEGIN");
+        let r = commitpath.upstream_exec(tab, core, b, "BEGIN");
         if r != 0 {
-            answer_error(tab, core, k, 73, "08006", "upstream-unavailable", "the database could not begin a transaction");
+            shared.answer_error(tab, core, k, 73, "08006", "upstream-unavailable", "the database could not begin a transaction");
             return 0;
         }
-        st[stride() * b + 21] = 1;
-        st[stride() * b + 22] = 0;
+        st[shared.stride() * b + 21] = 1;
+        st[shared.stride() * b + 22] = 0;
         st[p + 18] = 0;
     }
     let out = contents(core.qout);
@@ -1265,22 +947,22 @@ fn run_query[&t, &c](tab: &!t conns.Table, core: &!c Core, k: int, rl: int) -> [
     }
     out[5 + rl] = byte_of(0);
     st[p + 17] = 1;
-    send(tab, core, b, out[0..total]);
+    shared.send(tab, core, b, out[0..total]);
     return 0;
 }
 
 // Client `k` has a whole simple query waiting: ask the catalog, run the guard, and either send PostgreSQL the guard's rendering
 // or tell the client it is refused.
-fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll, file_write] conns.Table {
     let st = contents(core.state);
     let mb = contents(core.mbuf);
-    let p = stride() * k;
-    let base = k * msg_max();
+    let p = shared.stride() * k;
+    let base = k * shared.msg_max();
     let ln = commit.be(mb, base + 1, 4);
     var table = tab;
     if int_of(mb[base + ln]) != 0 {
         borrow mut table as &!tw in {
-            refuse(tw, core, k, "FATAL", "08P01", "protocol-violation", "a query is not terminated");
+            shared.refuse(tw, core, k, "FATAL", "08P01", "protocol-violation", "a query is not terminated");
         }
         return table;
     }
@@ -1297,7 +979,7 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: 
     }
     if snap_len < 0 {
         borrow mut table as &!tw in {
-            answer_error(tw, core, k, status, "08006", "catalog-unavailable", "the schema could not be read, so the query was not checked");
+            shared.answer_error(tw, core, k, status, "08006", "catalog-unavailable", "the schema could not be read, so the query was not checked");
         }
     } else {
         region r {
@@ -1305,20 +987,33 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: 
             let ids = alloc_slice[r](512, byte_of(0));
             let irs = alloc_slice[r](16384, byte_of(0));
             let effs = alloc_slice[r](8192, byte_of(0));
-            let verdict = guard.check(heap, contents(core.tokb)[k * token_max()..k * token_max() + st[p + 12]], contents(core.snap)[0..snap_len], sql, contents(core.rend), vd, ids, irs, effs);
+            let verdict = guard.check(heap, contents(core.tokb)[k * shared.token_max()..k * shared.token_max() + st[p + 12]], contents(core.snap)[0..snap_len], sql, contents(core.rend), vd, ids, irs, effs);
             borrow mut table as &!tw in {
                 if verdict != 0 {
                     refused_query(tw, core, k, vd);
                 } else if vd[6] > 0 {
+                    if vd[6] == 1 && ts == 0 {
+                        commitpath.begin(core, k, contents(core.snap)[0..snap_len]);
+                    }
                     transaction_control(tw, core, k, vd[6]);
-                } else {
+                } else if ts == 2 {
                     run_query(tw, core, k, vd[3]);
+                } else {
+                    if ts == 0 {
+                        commitpath.begin(core, k, contents(core.snap)[0..snap_len]);
+                    }
+                    let added = commitpath.add(core, k, vd[7], ids, irs[0..vd[8]], effs[0..vd[9]]);
+                    if added == 0 {
+                        run_query(tw, core, k, vd[3]);
+                    } else {
+                        refuse_unrecordable(tw, core, k, added);
+                    }
                 }
             }
         }
     }
     if st[p] == 3 {
-        consume(core, k, ln + 1);
+        shared.consume(core, k, ln + 1);
         st[p + 14] = 0;
         borrow mut table as &!tw in {
             frame_client(tw, core, k);
@@ -1328,15 +1023,15 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: 
 }
 
 // Serve every client that has a whole simple query waiting, until none has.
-fn serve_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+fn serve_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll, file_write] conns.Table {
     var table = tab;
     var again = true;
     while again {
         again = false;
         var k = 0;
-        while k < 2 * max_clients() {
+        while k < 2 * shared.max_clients() {
             let st = contents(core.state);
-            if st[stride() * k] == 3 && st[stride() * k + 14] == 1 && st[stride() * k + 17] == 0 {
+            if st[shared.stride() * k] == 3 && st[shared.stride() * k + 14] == 1 && st[shared.stride() * k + 17] == 0 {
                 table = serve_one(heap, table, core, net, host, port, k);
                 again = true;
             }
@@ -1347,34 +1042,35 @@ fn serve_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: 
 }
 
 // Close clients that have taken too long over their login.
-fn sweep[&t, &c, &k](tab: &!t conns.Table, core: &!c Core, clk: &k Clock) -> [clock] int {
+fn sweep[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: &k Clock) -> [clock] int {
     let st = contents(core.state);
     let now = clock_ms(clk);
     var k = 0;
-    while k < 2 * max_clients() {
-        let p = stride() * k;
-        if (st[p] == 1 || st[p] == 2) && now - st[p + 11] > hello_ms() {
-            shut(tab, core, k);
+    while k < 2 * shared.max_clients() {
+        let p = shared.stride() * k;
+        if (st[p] == 1 || st[p] == 2) && now - st[p + 11] > shared.hello_ms() {
+            shared.shut(tab, core, k);
         }
         k = k + 1;
     }
     return 0;
 }
 
-fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), clk: &k Clock, host: &n [byte], port: int, cfg: Box[[byte]], cfgi: Box[[int]]) -> [heap, conn_accept, conn_read, conn_write, net_out(""), poll, clock] int {
+fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), clk: &k Clock, host: &n [byte], port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, conn_accept, conn_read, conn_write, net_out(""), poll, clock, file_write] int {
     match poller_new() {
         Polling::Ok(p) => {
             var poller = p;
             borrow mut poller as &!pw in {
                 poller_add_listener(pw, listener, 0);
             }
-            let slots = 2 * max_clients();
-            var core = Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 4, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)) };
+            let slots = 2 * shared.max_clients();
+            var core = shared.new_core(heap, poller, cfg, cfgi, kept, slots);
             var tab = conns.empty(heap, 64);
             while true {
                 var ready = 0 - 1;
                 borrow mut core as &!cw in {
                     ready = poller_wait(cw.poller, contents(cw.events), 1000);
+                    contents(cw.aux)[1] = clock_unix_ms(clk);
                 }
                 var j = 0;
                 while j < ready {
@@ -1391,7 +1087,7 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
                     } else {
                         borrow mut tab as &!tw in {
                             borrow mut core as &!cw in {
-                                if contents(cw.state)[stride() * (token - 1)] != 0 {
+                                if contents(cw.state)[shared.stride() * (token - 1)] != 0 {
                                     step(tw, cw, clk, token - 1, readiness);
                                 }
                             }
@@ -1408,29 +1104,13 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
                 }
             }
             conns.drop(heap, tab);
-            let Core { poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf } = core;
-            poller_close(poller);
-            unbox_slice(heap, events);
-            unbox_slice(heap, state);
-            unbox_slice(heap, rbuf);
-            unbox_slice(heap, pends);
-            unbox_slice(heap, hbuf);
-            unbox_slice(heap, cfg);
-            unbox_slice(heap, cfgi);
-            unbox_slice(heap, tokb);
-            unbox_slice(heap, mbuf);
-            unbox_slice(heap, snap);
-            unbox_slice(heap, snapin);
-            unbox_slice(heap, rend);
-            unbox_slice(heap, qout);
-            unbox_slice(heap, aux);
-            unbox_slice(heap, hold);
-            unbox_slice(heap, sbuf);
+            shared.drop_core(heap, core);
             return 0;
         }
         Polling::Failed(e) => {
             unbox_slice(heap, cfg);
             unbox_slice(heap, cfgi);
+            shared.drop_store(heap, kept);
             return 4;
         }
     }
@@ -1479,7 +1159,7 @@ fn copy_in[&d, &s](dst: &!d [byte], at: int, text: &s [byte]) -> [] int {
 }
 
 // Listen on `listen_port` and serve until the loop ends.
-fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock: &k Clock, host: &n [byte], listen_port: int, server_port: int, cfg: Box[[byte]], cfgi: Box[[int]]) -> [heap, io_write, conn_accept, conn_read, conn_write, net_out(""), net_in(""), poll, clock] int {
+fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock: &k Clock, host: &n [byte], listen_port: int, server_port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, io_write, conn_accept, conn_read, conn_write, net_out(""), net_in(""), poll, clock, file_write] int {
     var status = 3;
     match tcp_listen(net, listen_port, 1024, 0) {
         Listening::Ok(l) => {
@@ -1487,13 +1167,14 @@ fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock
             borrow mut listener as &!lh in {
                 listener_nonblocking(lh);
                 io.write_all(io, "listening\n");
-                status = run(heap, lh, net, clock, host, server_port, cfg, cfgi);
+                status = run(heap, lh, net, clock, host, server_port, cfg, cfgi, kept);
             }
             listener_close(listener);
         }
         Listening::Failed(e) => {
             unbox_slice(heap, cfg);
             unbox_slice(heap, cfgi);
+            shared.drop_store(heap, kept);
             status = 3;
         }
     }
@@ -1608,6 +1289,7 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                                 refuse_start(io, "token store", code);
                                                 unbox_slice(heap, cfg);
                                                 unbox_slice(heap, cfgi);
+                                                file_close(logfile);
                                             }
                                             Opened::Ok(tf) => {
                                                 var tokens = tf;
@@ -1616,6 +1298,8 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                                         refuse_start(io, "statement store", code);
                                                         unbox_slice(heap, cfg);
                                                         unbox_slice(heap, cfgi);
+                                                        file_close(tokens);
+                                                        file_close(logfile);
                                                     }
                                                     Opened::Ok(sf) => {
                                                         var stmts = sf;
@@ -1629,14 +1313,14 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                                             io.error_all(io, " bytes of torn tail");
                                                         }
                                                         io.newline(io);
-                                                        status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi);
-                                                        file_close(stmts);
+                                                        borrow seed as &sd2 in {
+                                                            let kept = shared.new_store(heap, logfile, tokens, stmts, contents(sd2), contents(tw), contents(iw)[3], contents(iw)[5]);
+                                                            status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi, kept);
+                                                        }
                                                     }
                                                 }
-                                                file_close(tokens);
                                             }
                                         }
-                                        file_close(logfile);
                                     }
                                 }
                             }
@@ -1664,17 +1348,13 @@ fn main(world: World) -> [] int {
     var listen_port = 0 - 1;
     var server_port = 0 - 1;
     var good = false;
-    var logged = false;
     borrow args as &g in {
         let n = arg_count(g);
-        if n == 8 || n == 10 {
-            logged = n == 10;
+        if n == 10 {
             listen_port = number_of(arg(g, 1));
             server_port = number_of(arg(g, 3));
             good = listen_port > 0 && listen_port < 65536 && server_port > 0 && server_port < 65536 && len(arg(g, 4)) > 0 && len(arg(g, 5)) == 64 && len(arg(g, 6)) > 0 && len(arg(g, 7)) > 0;
-            if logged {
-                good = good && len(arg(g, 8)) > 0 && len(arg(g, 9)) > 0;
-            }
+            good = good && len(arg(g, 8)) > 0 && len(arg(g, 9)) > 0;
             var i = 0;
             while good && i < 64 {
                 if hexval(int_of(arg(g, 5)[i])) < 0 {
@@ -1686,7 +1366,7 @@ fn main(world: World) -> [] int {
     }
     if !good {
         borrow mut io as &!e in {
-            io.error_all(e, "usage: proxy <listen port> <upstream host> <upstream port> <branch> <root key, 64 hex digits> <upstream user> <upstream database> [<log directory> <signing key file, 32 bytes>]\n");
+            io.error_all(e, "usage: proxy <listen port> <upstream host> <upstream port> <branch> <root key, 64 hex digits> <upstream user> <upstream database> <log directory> <signing key file, 32 bytes>\n");
         }
     } else {
         status = 3;
@@ -1721,12 +1401,8 @@ fn main(world: World) -> [] int {
                 borrow net as &nn in {
                     borrow clock as &ck in {
                         borrow mut io as &!o in {
-                            if logged {
-                                borrow fs as &fr in {
-                                    status = with_log(h, o, fr, nn, ck, arg(g, 2), listen_port, server_port, cfg, cfgi, arg(g, 8), arg(g, 9), branch);
-                                }
-                            } else {
-                                status = serve_port(h, o, nn, ck, arg(g, 2), listen_port, server_port, cfg, cfgi);
+                            borrow fs as &fr in {
+                                status = with_log(h, o, fr, nn, ck, arg(g, 2), listen_port, server_port, cfg, cfgi, arg(g, 8), arg(g, 9), branch);
                             }
                         }
                     }
