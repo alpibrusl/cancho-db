@@ -1,0 +1,292 @@
+edition 9;
+
+import std.buffer;
+import std.io;
+import cdb.commit;
+import cdb.build;
+import cdb.store;
+
+// `storecheck DIR KEYFILE BRANCH MODE`: opens the log directory as the proxy will (P2c) and says what it found, for
+// tests/store_check.py.
+//
+//     MODE open    open, print one line, close
+//     MODE hold    open, print one line, then wait until standard input closes (so a second process can try the lock)
+//     MODE append  open, print one line, then read commits from standard input and append each; print `appended N`
+//
+// The line: `ok commits=C next=S torn=T tip=<64 hex digits or ->`, or `refused <name> rule=R record=I`. For `append` a commit is
+// four lines of hex: the encoding, the signature, the token's bytes and the statement's bytes (either may be empty).
+
+fn hexval(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0;
+}
+
+fn digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+// Read one line of standard input into `buf`, decoded from hex: its length in bytes, or -1 at the end of input.
+fn read_hex_line[&i, &b](io: &!i Io, buf: &!b [byte]) -> [io_read] int {
+    var c = getchar(io);
+    if c < 0 {
+        return 0 - 1;
+    }
+    var n = 0;
+    var half = 0 - 1;
+    while c >= 0 && c != '\n' {
+        if half < 0 {
+            half = hexval(c);
+        } else {
+            buf[n] = byte_of(half * 16 + hexval(c));
+            n = n + 1;
+            half = 0 - 1;
+        }
+        c = getchar(io);
+    }
+    return n;
+}
+
+fn print_line[&o, &i, &t](io: &!o Io, info: &i [int], tip: &t [byte]) -> [io_write] int {
+    io.write_all(io, "ok commits=");
+    io.print_nat(io, info[0]);
+    io.write_all(io, " next=");
+    io.print_nat(io, info[3]);
+    io.write_all(io, " torn=");
+    io.print_nat(io, info[4]);
+    io.write_all(io, " tip=");
+    if info[5] == 0 {
+        io.write_all(io, "-");
+    } else {
+        var j = 0;
+        while j < 32 {
+            putchar(io, digit(int_of(tip[j]) / 16));
+            putchar(io, digit(int_of(tip[j]) % 16));
+            j = j + 1;
+        }
+    }
+    io.newline(io);
+    return 0;
+}
+
+// The append mode: commits from standard input, four hex lines each, until it ends. How many were appended, or -1.
+fn append_all[&h, &o, &d, &l](heap: &!h Heap, io: &!o Io, dir: &d Dir, log: &!l File) -> [heap, io_read, io_write, dir_read, dir_write, file_read, file_write] int {
+    var done = 0;
+    match store.open_store(heap, dir, "tokens", "CHODBTK1") {
+        Opened::Failed(e) => {
+            io.write_all(io, "refused ");
+            io.write_all(io, store.refusal_name(e));
+            io.newline(io);
+            return 0 - 1;
+        }
+        Opened::Ok(tf) => {
+            var tokens = tf;
+            match store.open_store(heap, dir, "stmts", "CHODBST2") {
+                Opened::Failed(e) => {
+                    io.write_all(io, "refused ");
+                    io.write_all(io, store.refusal_name(e));
+                    io.newline(io);
+                    file_close(tokens);
+                    return 0 - 1;
+                }
+                Opened::Ok(sf) => {
+                    var stmts = sf;
+                    var enc = box_slice(heap, 70000, byte_of(0));
+                    var sig = box_slice(heap, 64, byte_of(0));
+                    var tb = box_slice(heap, 70000, byte_of(0));
+                    var sb = box_slice(heap, 70000, byte_of(0));
+                    var tr = box_slice(heap, 70010, byte_of(0));
+                    var sr = box_slice(heap, 70010, byte_of(0));
+                    var lr = box_slice(heap, 70200, byte_of(0));
+                    var going = true;
+                    borrow mut tokens as &!tw1 in {
+                        borrow mut stmts as &!sw1 in {
+                            borrow mut enc as &!ew in {
+                                borrow mut sig as &!gw in {
+                                    borrow mut tb as &!bw in {
+                                        borrow mut sb as &!xw in {
+                                            borrow mut tr as &!trw in {
+                                                borrow mut sr as &!srw in {
+                                                    borrow mut lr as &!lw in {
+                                                        while going {
+                                                            let en = read_hex_line(io, contents(ew));
+                                                            if en < 0 {
+                                                                going = false;
+                                                            } else {
+                                                                read_hex_line(io, contents(gw));
+                                                                let tn = read_hex_line(io, contents(bw));
+                                                                let sn = read_hex_line(io, contents(xw));
+                                                                var tl = 0;
+                                                                var sl = 0;
+                                                                if tn > 0 {
+                                                                    tl = build.store_record(contents(trw), 0, contents(bw)[0..tn]);
+                                                                }
+                                                                if sn > 0 {
+                                                                    sl = build.store_record(contents(srw), 0, contents(xw)[0..sn]);
+                                                                }
+                                                                let ll = build.log_record(contents(lw), 0, contents(ew)[0..en], contents(gw));
+                                                                let r = store.append(log, tw1, sw1, contents(trw)[0..tl], contents(srw)[0..sl], contents(lw)[0..ll]);
+                                                                if r == 0 {
+                                                                    done = done + 1;
+                                                                } else {
+                                                                    done = 0 - 1;
+                                                                    going = false;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    unbox_slice(heap, enc);
+                    unbox_slice(heap, sig);
+                    unbox_slice(heap, tb);
+                    unbox_slice(heap, sb);
+                    unbox_slice(heap, tr);
+                    unbox_slice(heap, sr);
+                    unbox_slice(heap, lr);
+                    file_close(stmts);
+                    file_close(tokens);
+                }
+            }
+        }
+    }
+    return done;
+}
+
+fn serve[&h, &o, &d, &p, &b, &m](heap: &!h Heap, io: &!o Io, dir: &d Dir, pk: &p [byte], branch: &b [byte], mode: &m [byte]) -> [heap, io_read, io_write, dir_read, dir_write, file_read, file_write] int {
+    var info = box_slice(heap, 8, 0);
+    var tip = box_slice(heap, 32, byte_of(0));
+    var st = 1;
+    borrow mut info as &!iw in {
+        borrow mut tip as &!tw in {
+            match store.open_log(heap, dir, pk, branch, contents(iw), contents(tw)) {
+                Opened::Failed(code) => {
+                    io.write_all(io, "refused ");
+                    if code >= 1000 {
+                        io.write_all(io, store.refusal_name(code));
+                    } else {
+                        io.write_all(io, "errno-");
+                        io.print_nat(io, code);
+                    }
+                    io.write_all(io, " rule=");
+                    io.print_nat(io, contents(iw)[1]);
+                    io.write_all(io, " record=");
+                    io.print_nat(io, contents(iw)[2]);
+                    io.newline(io);
+                }
+                Opened::Ok(lf) => {
+                    var log = lf;
+                    print_line(io, contents(iw), contents(tw));
+                    st = 0;
+                    if int_of(mode[0]) == 'h' {
+                        // hold: wait for standard input to close
+                        flush_out(io);
+                        while getchar(io) >= 0 {
+                        }
+                    } else if int_of(mode[0]) == 'a' {
+                        borrow mut log as &!lw in {
+                            let n = append_all(heap, io, dir, lw);
+                            io.write_all(io, "appended ");
+                            if n >= 0 {
+                                io.print_nat(io, n);
+                            } else {
+                                io.write_all(io, "failed");
+                                st = 1;
+                            }
+                            io.newline(io);
+                        }
+                    }
+                    file_close(log);
+                }
+            }
+        }
+    }
+    unbox_slice(heap, info);
+    unbox_slice(heap, tip);
+    return st;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(tty);
+    release(ffi);
+    release(net);
+    release(clock);
+    release(signals);
+    release(exec);
+    var status = 2;
+    var good = false;
+    region rr {
+        borrow fs as &fsr in {
+            let seed = alloc_slice[rr](32, byte_of(0));
+            let pk = alloc_slice[rr](32, byte_of(0));
+            borrow args as &g in {
+                if arg_count(g) == 5 {
+                    good = true;
+                    match open_read(fsr, arg(g, 2)) {
+                        Opened::Ok(kf) => {
+                            var key = kf;
+                            borrow mut key as &!w in {
+                                match file_read(w, seed) {
+                                    Read::Got(n) => {
+                                        good = n == 32;
+                                    }
+                                    Read::End => {
+                                        good = false;
+                                    }
+                                    Read::Failed(e) => {
+                                        good = false;
+                                    }
+                                }
+                            }
+                            file_close(key);
+                        }
+                        Opened::Failed(e) => {
+                            good = false;
+                        }
+                    }
+                }
+            }
+            if good {
+                build.public_key(seed, pk);
+                status = 3;
+                borrow args as &g in {
+                    match open_dir(fsr, arg(g, 1)) {
+                        DirOpened::Failed(e) => {
+                            status = 4;
+                        }
+                        DirOpened::Ok(dh) => {
+                            var dir = dh;
+                            borrow dir as &dr in {
+                                borrow mut heap as &!h in {
+                                    borrow mut io as &!o in {
+                                        status = serve(h, o, dr, pk, arg(g, 3), arg(g, 4));
+                                    }
+                                }
+                            }
+                            dir_close(dir);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    release(fs);
+    release(args);
+    release(io);
+    release(heap);
+    return status;
+}

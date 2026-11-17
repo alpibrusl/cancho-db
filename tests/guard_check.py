@@ -13,9 +13,13 @@ import hashlib
 import struct
 import subprocess
 import sys
+from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+import verify as pyverify  # noqa: E402  (the second verifier: its IR reader and effect inference are the independent check)
 
 GUARD = sys.argv[1]
 NONE = 2**64 - 1
@@ -72,6 +76,9 @@ no(READ_ORDERS, "select o.id from orders o join customers c on c.id = o.id", 3, 
 no(READ_ORDERS, "select id from customers", 3, "effect-denied", "42501")
 ok(READ_ORDERS, "select o.id from orders o where o.total > 5 order by id", 'select "o"."id" from "orders" as "o" where ("o"."total" > 5) order by "id"')
 no(NOTHING, "select id from orders", 3, "effect-denied", "42501")
+# a message of more statements than a commit can name (16) is refused whole, not cut: the seventeenth is where it stops
+no(ALL, "; ".join(["select id from orders"] * 17), 2, "too-big", "0A000", 16)
+ok(ALL, "; ".join(["select id from orders"] * 16), "; ".join(['select "id" from "orders"'] * 16))
 
 # ---- writes, DDL and calls
 no(READ_ORDERS, "insert into orders values (1, 2, 3)", 3, "effect-denied", "42501")
@@ -142,12 +149,65 @@ def run(tok, sql):
     return out if r.returncode == 0 and out else "crash: " + r.stderr.decode()[:200]
 
 
+def parts(tok, sql):
+    """What the guard hands over for a commit: the statements' ids, their IR as store records, and the effects they infer (stderr)."""
+    r = subprocess.run([GUARD], input=(tok + "\n" + SCHEMA + "---\n" + sql).encode(), capture_output=True, timeout=30)
+    got = {}
+    for line in r.stderr.decode().splitlines():
+        label, _, hexed = line.partition(" ")
+        got[label] = bytes.fromhex(hexed)
+    return got
+
+
+def check_parts(tok, sql):
+    """The ids are recomputed from the IR bytes, and the effects from the IR by the Python verifier's own inference; none of it is read
+    back from the guard's own words."""
+    got = parts(tok, sql)
+    if set(got) != {"ids", "irs", "effs"}:
+        return "no parts: %s" % sorted(got)
+    irs, at, stmts = got["irs"], 0, []
+    while at < len(irs):
+        n = struct.unpack(">I", irs[at:at + 4])[0]
+        stmts.append(irs[at + 4:at + 4 + n])
+        at += 4 + n
+    if at != len(irs):
+        return "ragged irs"
+    if len(got["ids"]) != 32 * len(stmts):
+        return "%d ids for %d statements" % (len(got["ids"]) // 32, len(stmts))
+    want_effs = set()
+    for i, ir in enumerate(stmts):
+        if hashlib.sha256(b"cancho-db/stmt/v1\x00" + ir).digest() != got["ids"][32 * i:32 * i + 32]:
+            return "statement %d: the id is not the hash of its bytes" % i
+        want_effs |= {(k, t) for k, t in pyverify.infer_effects(ir, v2=True)}
+    effs, at, have = got["effs"], 0, []
+    while at < len(effs):
+        n = struct.unpack(">H", effs[at + 1:at + 3])[0]
+        have.append((effs[at], effs[at + 3:at + 3 + n]))
+        at += 3 + n
+    if at != len(effs):
+        return "ragged effects"
+    if set(have) != want_effs:
+        return "effects %s, the Python verifier infers %s" % (sorted(have), sorted(want_effs))
+    return None
+
+
 def main():
     bad = []
     for tok, sql, want in CASES:
         got = run(tok, sql)
         if got != want:
             bad.append((sql, "want " + want, "got " + got))
+    # every allowed message, and a few made to have several statements: what a commit would be made of is right
+    allowed = [sql for tok, sql, want in CASES if want.startswith("ok") and tok == ALL and not want.startswith("ok txn") and want.strip() != "ok"]
+    extra = ["select id from orders; select name from customers", "insert into orders (id, customer, total) values (1, 2, 3); select id from orders",
+             "update orders set total = 1 where id = 2; delete from orders where id = 9; select id from orders"]
+    n_parts = 0
+    for sql in allowed + extra:
+        why = check_parts(ALL, sql)
+        n_parts += 1
+        if why:
+            bad.append((sql, "parts", why))
+    print("guard parts: %d messages" % n_parts)
     print("guard: %d cases, %d refusals, %d allowed" % (len(CASES), sum(1 for c in CASES if c[2].startswith("refused")),
                                                           sum(1 for c in CASES if c[2].startswith("ok"))))
     for b in bad[:15]:

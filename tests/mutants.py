@@ -199,27 +199,27 @@ CHO = [
     ("check ok up to 2", "src/commit.cho", "if int_of(data[cur[0]]) > 1 {", "if int_of(data[cur[0]]) > 2 {"),
     ("nondet tag 3 allowed", "src/commit.cho", "} else if tag != 0 {", "} else if tag > 3 {"),
     ("trailing bytes allowed", "src/commit.cho", "|| cur[0] != len(data) {", "|| false {"),
-    ("record limit off by one", "src/verify.cho", "if length > 16777216 {", "if length >= 16777216 {"),
-    ("signature length off", "src/verify.cho", "< length + 64 {", "< length + 63 {"),
-    ("duplicates allowed", "src/verify.cho", "if is_dup {", "if false {"),
-    ("signature unchecked", "src/verify.cho", "} else if crypto_ok(data[8..40], ident, sig) == 0 {", "} else if false {"),
-    ("sig over wrong domain", "src/verify.cho", "crypto.sha256_update(sha, nul);\n", ""),
-    ("seq may skip ahead", "src/verify.cho", "out[commit.f_seq_lo()] != count_here {", "out[commit.f_seq_lo()] < count_here {"),
-    ("seq may repeat", "src/verify.cho", "out[commit.f_seq_lo()] != count_here {", "out[commit.f_seq_lo()] > count_here {"),
-    ("seq high half ignored", "src/verify.cho", "if out[commit.f_seq_hi()] != 0 ||", "if false ||"),
-    ("root may have 2 parents", "src/verify.cho", "if np == 2 {\n                                rule = commit.parent_count();\n                            } else if np == 1 {", "if np == 1 {"),
-    ("fork parent unchecked", "src/verify.cho", "if !known {\n                                    rule = commit.parent_unknown();\n                                }\n                            }\n                        } else if np == 0 {", "if false {\n                                    rule = commit.parent_unknown();\n                                }\n                            }\n                        } else if np == 0 {"),
-    ("seq>0 needs no parent", "src/verify.cho", "} else if np == 0 {\n                            rule = commit.parent_count();\n                        } else {", "} else if np == 0 {\n                            rule = 0;\n                        } else {"),
-    ("first parent unchecked", "src/verify.cho", "rule = commit.parent_mismatch();", "rule = 0;"),
-    ("merge parents may be equal", "src/verify.cho", "if same(enc[pat..pat + 32], enc[pat + 32..pat + 64]) {", "if false {"),
-    ("merge parent may be unknown", "src/verify.cho", "                                    if !known {\n                                        rule = commit.parent_unknown();\n                                    }\n                                }\n                            }\n                        }\n\n",
+    ("record limit off by one", "src/l1.cho", "if length > 16777216 {", "if length >= 16777216 {"),
+    ("signature length off", "src/l1.cho", "< length + 64 {", "< length + 63 {"),
+    ("duplicates allowed", "src/l1.cho", "if is_dup {", "if false {"),
+    ("signature unchecked", "src/l1.cho", "} else if crypto_ok(data[8..40], ident, sig) == 0 {", "} else if false {"),
+    ("sig over wrong domain", "src/l1.cho", "crypto.sha256_update(sha, nul);\n", ""),
+    ("seq may skip ahead", "src/l1.cho", "out[commit.f_seq_lo()] != count_here {", "out[commit.f_seq_lo()] < count_here {"),
+    ("seq may repeat", "src/l1.cho", "out[commit.f_seq_lo()] != count_here {", "out[commit.f_seq_lo()] > count_here {"),
+    ("seq high half ignored", "src/l1.cho", "if out[commit.f_seq_hi()] != 0 ||", "if false ||"),
+    ("root may have 2 parents", "src/l1.cho", "if np == 2 {\n                                rule = commit.parent_count();\n                            } else if np == 1 {", "if np == 1 {"),
+    ("fork parent unchecked", "src/l1.cho", "if !known {\n                                    rule = commit.parent_unknown();\n                                }\n                            }\n                        } else if np == 0 {", "if false {\n                                    rule = commit.parent_unknown();\n                                }\n                            }\n                        } else if np == 0 {"),
+    ("seq>0 needs no parent", "src/l1.cho", "} else if np == 0 {\n                            rule = commit.parent_count();\n                        } else {", "} else if np == 0 {\n                            rule = 0;\n                        } else {"),
+    ("first parent unchecked", "src/l1.cho", "rule = commit.parent_mismatch();", "rule = 0;"),
+    ("merge parents may be equal", "src/l1.cho", "if same(enc[pat..pat + 32], enc[pat + 32..pat + 64]) {", "if false {"),
+    ("merge parent may be unknown", "src/l1.cho", "                                    if !known {\n                                        rule = commit.parent_unknown();\n                                    }\n                                }\n                            }\n                        }\n\n",
      "                                }\n                            }\n                        }\n\n"),
-    ("expected id unchecked", "src/verify.cho", "if rule == 0 && len(expect) == 32 {", "if false {"),
-    ("magic unchecked", "src/verify.cho", "} else if !same(data[0..8], \"CHODBLG1\") {", "} else if false {"),
-    ("short header accepted", "src/verify.cho", "} else if len(data) < 40 {", "} else if len(data) < 8 {"),
-    ("record index off by one", "src/verify.cho", "bad_at = index;", "bad_at = index + 1;"),
-    ("commit not counted per branch", "src/verify.cho", "counts = map.put(heap, counts, branch, count_here + 1);", "counts = map.put(heap, counts, branch, commits + 1);"),
-    ("tip not updated", "src/verify.cho", "tips = map.put(heap, tips, branch, commits);", "tips = tips;"),
+    ("expected id unchecked", "src/l1.cho", "if rule == 0 && len(expect) == 32 {", "if false {"),
+    ("magic unchecked", "src/l1.cho", "} else if !same(data[0..8], \"CHODBLG1\") {", "} else if false {"),
+    ("short header accepted", "src/l1.cho", "} else if len(data) < 40 {", "} else if len(data) < 8 {"),
+    ("record index off by one", "src/l1.cho", "bad_at = index;", "bad_at = index + 1;"),
+    ("commit not counted per branch", "src/l1.cho", "counts = map.put(heap, counts, branch, count_here + 1);", "counts = map.put(heap, counts, branch, commits + 1);"),
+    ("tip not updated", "src/l1.cho", "tips = map.put(heap, tips, branch, commits);", "tips = tips;"),
 ]
 
 CHO += [
@@ -391,6 +391,8 @@ LOGIN = [
 
 PROXY = [
     # ---- the event loop (proxy/proxy.cho), judged by tests/proxy_e2e.py against a real PostgreSQL
+    ("proxy: the log directory is not opened", "proxy/proxy.cho", "if logged {\n                                borrow fs as &fr in {", "if false {\n                                borrow fs as &fr in {"),
+    ("proxy: the signing key is not required", "proxy/proxy.cho", "    if !keyed {\n", "    if false {\n"),
     ("proxy: non-loopback clients are served", "proxy/proxy.cho", "if !is_loopback(ct, a) {", "if false {"),
     ("proxy: the token is not checked", "proxy/proxy.cho", "if rule != login.login_ok() {", "if false {"),
     ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > hello_ms()", "false"),
@@ -398,7 +400,7 @@ PROXY = [
     ("proxy: the upstream's bytes lose the last one", "proxy/proxy.cho", "            if !send(tab, core, client, rb[pos..pos + n]) {", "            if !send(tab, core, client, rb[pos..pos + n - 1]) {"),
     ("proxy: SSLRequest is not answered N", "proxy/proxy.cho", "let no = alloc_slice[r](1, byte_of('N'));", "let no = alloc_slice[r](1, byte_of('S'));"),
     ("proxy: the client's application_name is dropped", "proxy/proxy.cho", "if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {", "if false {"),
-    ("proxy: the upstream role is the client's", "proxy/proxy.cho", "\n                    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "\n                    at = put_cstr(msg, at, hb[k * hello_size() + 4 + 5..k * hello_size() + 4 + 5 + 5]);"),
+    ("proxy: the upstream role is the client's", "src/upstream.cho", "\n    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "\n    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);"),
     ("proxy: a refused login still opens the upstream", "proxy/proxy.cho", "refuse(tab, core, k, \"FATAL\", login.sqlstate(rule), login.rule_name(rule), \"the capability token was refused\");", "st[p] = 5;"),
     ("proxy: protocol versions are not checked", "proxy/proxy.cho", "} else if kind == login.err_version() {", "} else if false {"),
     # ---- the query path (P1d-2)
@@ -454,7 +456,7 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
@@ -546,6 +548,30 @@ BUILD = [
     ("build: a store entry's length is one over", "src/build.cho", "put_be(out, at, len(body), 4)", "put_be(out, at, len(body) + 1, 4)"),
 ]
 
+
+
+# ---- the log directory (src/store.cho, tests/store_check.py: the scan, the repair, the lock and the order of durable writes)
+STORE = [
+    ("store: the log's lock is not taken", "src/store.cho", "if !locked {", "if false {"),
+    ("store: a torn tail is not cut", "src/store.cho", "if code == 0 && (rewrite || good < len(all)) {", "if code == 0 && rewrite {"),
+    ("store: the log is not verified", "src/store.cho", "if code == 0 && !rewrite {", "if false {"),
+    ("store: another key's log is accepted", "src/store.cho", "} else if !is_prefix(head, all) {", "} else if false {"),
+    ("store: the log's magic is not checked", "src/store.cho", "} else if !is_prefix(all[0..8], \"CHODBLG1\") {", "} else if false {"),
+    ("store: a record's length is not limited", "src/store.cho", "whole_end(all, 40, 64, 16777216)", "whole_end(all, 40, 64, 4294967296)"),
+    ("store: a record's signature is not counted in its frame", "src/store.cho", "whole_end(all, 40, 64, 16777216)", "whole_end(all, 40, 63, 16777216)"),
+    ("store: the next seq is the tip's own", "src/store.cho", "info[3] = out[commit.f_seq_lo()] + 1;", "info[3] = out[commit.f_seq_lo()];"),
+    ("store: every branch's commit is the tip", "src/store.cho", "if l1.same(enc[bat..bat + out[commit.f_branch_len()]], branch) {", "if true {"),
+    ("store: a torn header is cut and not rewritten", "src/store.cho", "ok = write_all(w, head);", "ok = true;"),
+    ("store: a torn store tail is not cut", "src/store.cho", "ptruncate = end < len(all);", "ptruncate = false;"),
+    ("store: a store's magic is not checked", "src/store.cho", "} else if !is_prefix(magic, all) {", "} else if false {"),
+    ("store: the new file is not synced", "src/store.cho", "ok = write_all(w, head) && synced(w);", "ok = write_all(w, head);"),
+    ("store: the log's repair is not synced", "src/store.cho", "ok = ok && synced(w);\n                        }\n                        if !ok {\n                            code = r_io();", "ok = ok;\n                        }\n                        if !ok {\n                            code = r_io();"),
+    ("store: a store's repair is not synced", "src/store.cho", "ok = ok && synced(w);\n                }\n            }\n            if !ok {\n                file_close(a);", "ok = ok;\n                }\n            }\n            if !ok {\n                file_close(a);"),
+    ("store: the token store is not synced", "src/store.cho", "if !write_all(tokens, token_rec) || !synced(tokens) {", "if !write_all(tokens, token_rec) {"),
+    ("store: the statement store is not synced", "src/store.cho", "if !write_all(stmts, stmt_recs) || !synced(stmts) {", "if !write_all(stmts, stmt_recs) {"),
+    ("store: the log is not synced", "src/store.cho", "if !write_all(log, log_rec) || !synced(log) {", "if !write_all(log, log_rec) {"),
+    ("store: the log is written before the stores", "src/store.cho", "    if len(token_rec) > 0 {\n        if !write_all(tokens", "    if !write_all(log, log_rec) || !synced(log) {\n        return r_io();\n    }\n    if len(token_rec) > 0 {\n        if !write_all(tokens"),
+]
 
 
 def run_unit(table, test_files, src_names, cancho):
@@ -762,6 +788,11 @@ LOWER = [
 
 # ---- the query guard (src/guard.cho, tests/guard_check.py)
 GUARD = [
+    ("guard: a statement's id is not recorded", "src/guard.cho", "ir.id(contents(iw)[0..w], ids[32 * nst..32 * nst + 32]);", "nst = nst + 0;"),
+    ("guard: a statement's IR is not recorded", "src/guard.cho", "irat = build.store_record(irs, irat, contents(iw)[0..w]);", "irat = irat + 0;"),
+    ("guard: a statement's effects are not recorded", "src/guard.cho", "effat = emit_effects(sr, effs, effat);", "effat = effat + 0;"),
+    ("guard: a message of too many statements is cut", "src/guard.cho", "} else if 32 * (nst + 1) > len(ids) {", "} else if false {"),
+    ("guard: an effect's target is dropped", "src/guard.cho", "w = build.put_bytes(effs, w, key[1..len(key)]);", "w = build.put_bytes(effs, w, key[1..1]);"),
     ("guard: denied effects are not checked", "src/guard.cho", "                                                                        if dk >= 0 {", "                                                                        if false {"),
     ("guard: only the first effect is checked", "src/guard.cho", "    while e < map.entries(set) {\n        if map.is_live(set, e) {", "    while e < 1 {\n        if map.is_live(set, e) {"),
     ("guard: a denied effect is allowed to pass", "src/guard.cho", "                denied = token.effect_denied(tk, enc, 0, 1);", "                denied = false;"),
@@ -854,7 +885,7 @@ def run_guard(cancho):
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in GUARD if not only or only in m[0]]
     survivors = []
-    names = ("commit.cho", "token.cho", "lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho")
+    names = ("commit.cho", "token.cho", "lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "build.cho")
     for label, rel, old, new in table:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
@@ -917,11 +948,50 @@ def run_build(cancho):
     return 1 if survivors else 0
 
 
+def run_store(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in STORE if not only or only in m[0]]
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "storecheck"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/storecheck.cho")] + [str(work / "src" / n) for n in ("store.cho", "build.cho", "commit.cho", "l1.cho")] + ["-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            try:
+                r = subprocess.run([sys.executable, str(ROOT / "tests/store_check.py"), str(exe)], capture_output=True, text=True, timeout=300)
+                rc, out = r.returncode, r.stdout
+            except subprocess.TimeoutExpired:
+                rc, out = 1, "FAIL timed out"
+            if rc == 0:
+                print("SURVIVED %-46s every store check passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in out.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d check(s), e.g. %s" % (label, len(first), first[0][5:60] if first else "a crash"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
     if kind == "guard":
         return run_guard(cancho)
     if kind == "build":
         return run_build(cancho)
+    if kind == "store":
+        return run_store(cancho)
     if kind == "lower":
         return run_lower(cancho)
     if kind == "login":

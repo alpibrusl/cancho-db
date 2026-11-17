@@ -1,4 +1,4 @@
-edition 5;
+edition 9;
 
 import std.buffer;
 import std.conns;
@@ -10,6 +10,9 @@ import cdb.token;
 import cdb.login;
 import cdb.guard;
 import cdb.snapshot;
+import cdb.build;
+import cdb.store;
+import cdb.upstream;
 
 // `proxy` -- slice P0 of the cancho-db proxy (`docs/m1-proxy.md`): the front door in front of PostgreSQL.
 //
@@ -635,60 +638,6 @@ fn accept_all[&h, &l, &c, &k](heap: &!h Heap, conn: conns.Table, listener: &!l L
     return table;
 }
 
-// Put `b` after `x` into `out` as a NUL-ended string at `at`; answers where it ends.
-fn put_cstr[&o, &s](out: &!o [byte], at: int, text: &s [byte]) -> [] int {
-    var i = 0;
-    while i < len(text) {
-        out[at + i] = text[i];
-        i = i + 1;
-    }
-    out[at + len(text)] = byte_of(0);
-    return at + len(text) + 1;
-}
-
-// Read what the connection in `slot` has to say within `wait_ms`, into `into`: the number of bytes (more than 0), 0 if
-// nothing came in time, -1 if the connection ended or failed. A private poller bounds the wait, so a silent upstream
-// costs one client a refusal and not the loop its attention.
-fn login_read[&t, &b](tab: &!t conns.Table, slot: int, into: &!b [byte], wait_ms: int) -> [conn_read, poll] int {
-    match poller_new() {
-        Polling::Ok(p) => {
-            var poller = p;
-            var answer = 0 - 1;
-            region r {
-                let ev = alloc_slice[r](8, 0);
-                borrow mut poller as &!pw in {
-                    if conns.watch(tab, pw, slot, 1, 1) == 0 {
-                        let n = poller_wait(pw, ev, wait_ms);
-                        if n > 0 {
-                            match conns.read(tab, slot, into) {
-                                Received::Data(g) => {
-                                    answer = g;
-                                }
-                                Received::End => {
-                                    answer = 0 - 1;
-                                }
-                                Received::Again => {
-                                    answer = 0;
-                                }
-                                Received::Failed(e) => {
-                                    answer = 0 - 1;
-                                }
-                            }
-                        } else if n == 0 {
-                            answer = 0;
-                        }
-                    }
-                }
-            }
-            poller_close(poller);
-            return answer;
-        }
-        Polling::Failed(e) => {
-            return 0 - 1;
-        }
-    }
-}
-
 // Open the connection to PostgreSQL for client `k` (kind 5), log in to it (trust), and pair them. Blocking, and the one
 // place that is: PostgreSQL is local and trusted (docs/m1-proxy.md section 3, P0's limit). The server's login answer is
 // relayed to the client as it is.
@@ -713,15 +662,15 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                 region r {
                     let msg = alloc_slice[r](1024, byte_of(0));
                     var at = 8;
-                    at = put_cstr(msg, at, "user");
-                    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);
-                    at = put_cstr(msg, at, "database");
-                    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
-                    at = put_cstr(msg, at, "application_name");
+                    at = upstream.put_cstr(msg, at, "user");
+                    at = upstream.put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);
+                    at = upstream.put_cstr(msg, at, "database");
+                    at = upstream.put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
+                    at = upstream.put_cstr(msg, at, "application_name");
                     if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {
-                        at = put_cstr(msg, at, hb[k * hello_size() + st[p + 8]..k * hello_size() + st[p + 8] + st[p + 9]]);
+                        at = upstream.put_cstr(msg, at, hb[k * hello_size() + st[p + 8]..k * hello_size() + st[p + 8] + st[p + 9]]);
                     } else {
-                        at = put_cstr(msg, at, "cancho-db");
+                        at = upstream.put_cstr(msg, at, "cancho-db");
                     }
                     msg[at] = byte_of(0);
                     at = at + 1;
@@ -755,7 +704,7 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                 while failed == 0 && !done {
                     var got = 0 - 1;
                     borrow mut table as &!tw in {
-                        got = login_read(tw, b, rb[fill..relay_max()], login_ms());
+                        got = upstream.login_read(tw, b, rb[fill..relay_max()], login_ms());
                     }
                     if got < 0 {
                         failed = 1;
@@ -881,85 +830,6 @@ fn pair_all[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
 
 // ------------------------------------------------------------------------------------------------ the guard
 
-// Put the proxy's own startup message (the configured role and database, application_name `name`) into `msg`: its length.
-fn startup_msg[&m, &c, &s](msg: &!m [byte], cfg: &c [byte], ci: &s [int], name: &static [byte]) -> [] int {
-    var at = 8;
-    at = put_cstr(msg, at, "user");
-    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);
-    at = put_cstr(msg, at, "database");
-    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
-    at = put_cstr(msg, at, "application_name");
-    at = put_cstr(msg, at, name);
-    msg[at] = byte_of(0);
-    at = at + 1;
-    msg[0] = byte_of(at / 16777216 % 256);
-    msg[1] = byte_of(at / 65536 % 256);
-    msg[2] = byte_of(at / 256 % 256);
-    msg[3] = byte_of(at % 256);
-    msg[4] = byte_of(0);
-    msg[5] = byte_of(3);
-    msg[6] = byte_of(0);
-    msg[7] = byte_of(0);
-    return at;
-}
-
-// Send all of `data` on connection `slot`, waiting if the kernel is slow: false if it fails. The catalog connection is never
-// the busy one, and its messages are small.
-fn write_all[&t, &d](tab: &!t conns.Table, slot: int, data: &d [byte]) -> [conn_write] bool {
-    var sent = 0;
-    var spins = 0;
-    while sent < len(data) {
-        match conns.write(tab, slot, data[sent..len(data)]) {
-            Sent::Wrote(x) => {
-                sent = sent + x;
-            }
-            Sent::Again => {
-                spins = spins + 1;
-                if spins > 1000000 {
-                    return false;
-                }
-            }
-            Sent::Failed(e) => {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-// Read from `slot` until a ReadyForQuery has come, into `into`: the bytes read, or -1 (it failed, was silent past `wait_ms`, or
-// answered with an error before the first row, or too much).
-fn read_until_ready[&t, &b](tab: &!t conns.Table, slot: int, into: &!b [byte], wait_ms: int) -> [conn_read, poll] int {
-    var fill = 0;
-    while fill < len(into) {
-        let got = login_read(tab, slot, into[fill..len(into)], wait_ms);
-        if got <= 0 {
-            return 0 - 1;
-        }
-        fill = fill + got;
-        // is there a complete ReadyForQuery as the last message?
-        var pos = 0;
-        var last = 0 - 1;
-        var whole = true;
-        while whole && pos + 5 <= fill {
-            let ln = commit.be(into, pos + 1, 4);
-            if ln < 4 {
-                return 0 - 1;
-            }
-            if pos + 1 + ln > fill {
-                whole = false;
-            } else {
-                last = int_of(into[pos]);
-                pos = pos + 1 + ln;
-            }
-        }
-        if whole && pos == fill && last == 'Z' {
-            return fill;
-        }
-    }
-    return 0 - 1;
-}
-
 // ------------------------------------------------------------------------------------------------ transactions
 
 // Run `sql` (one simple query of the proxy's own: BEGIN, COMMIT, ROLLBACK) on upstream connection `b` and wait, bounded, for its
@@ -981,13 +851,13 @@ fn upstream_exec[&t, &c, &q](tab: &!t conns.Table, core: &!c Core, b: int, sql: 
             i = i + 1;
         }
         msg[5 + len(sql)] = byte_of(0);
-        sent = write_all(tab, b, msg[0..len(sql) + 6]);
+        sent = upstream.write_all(tab, b, msg[0..len(sql) + 6]);
     }
     if !sent {
         return 0 - 1;
     }
     let si = contents(core.snapin);
-    let n = read_until_ready(tab, b, si, login_ms());
+    let n = upstream.read_until_ready(tab, b, si, login_ms());
     if n < 0 {
         return 0 - 1;
     }
@@ -1208,10 +1078,10 @@ fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, ne
                 var good = false;
                 region r {
                     let msg = alloc_slice[r](1024, byte_of(0));
-                    let at = startup_msg(msg, cfg, ci, "cancho-db-catalog");
+                    let at = upstream.startup_msg(msg, cfg, ci, "cancho-db-catalog");
                     borrow mut table as &!tw in {
-                        if write_all(tw, b, msg[0..at]) {
-                            let got = read_until_ready(tw, b, si, login_ms());
+                        if upstream.write_all(tw, b, msg[0..at]) {
+                            let got = upstream.read_until_ready(tw, b, si, login_ms());
                             // the first message must be AuthenticationOk (R, 8, 0): a password request is not something to answer here
                             if got >= 9 && int_of(si[0]) == 'R' && commit.be(si, 5, 4) == 0 {
                                 good = true;
@@ -1268,8 +1138,8 @@ fn snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: &
                 }
                 msg[5 + len(sql)] = byte_of(0);
                 borrow mut table as &!tw in {
-                    if write_all(tw, slot, msg[0..len(sql) + 6]) {
-                        answered = read_until_ready(tw, slot, si, login_ms());
+                    if upstream.write_all(tw, slot, msg[0..len(sql) + 6]) {
+                        answered = upstream.read_until_ready(tw, slot, si, login_ms());
                     }
                 }
             }
@@ -1431,8 +1301,11 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c Core, net: 
         }
     } else {
         region r {
-            let vd = alloc_slice[r](8, 0);
-            let verdict = guard.check(heap, contents(core.tokb)[k * token_max()..k * token_max() + st[p + 12]], contents(core.snap)[0..snap_len], sql, contents(core.rend), vd);
+            let vd = alloc_slice[r](16, 0);
+            let ids = alloc_slice[r](512, byte_of(0));
+            let irs = alloc_slice[r](16384, byte_of(0));
+            let effs = alloc_slice[r](8192, byte_of(0));
+            let verdict = guard.check(heap, contents(core.tokb)[k * token_max()..k * token_max() + st[p + 12]], contents(core.snap)[0..snap_len], sql, contents(core.rend), vd, ids, irs, effs);
             borrow mut table as &!tw in {
                 if verdict != 0 {
                     refused_query(tw, core, k, vd);
@@ -1605,19 +1478,203 @@ fn copy_in[&d, &s](dst: &!d [byte], at: int, text: &s [byte]) -> [] int {
     return at + len(text);
 }
 
+// Listen on `listen_port` and serve until the loop ends.
+fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock: &k Clock, host: &n [byte], listen_port: int, server_port: int, cfg: Box[[byte]], cfgi: Box[[int]]) -> [heap, io_write, conn_accept, conn_read, conn_write, net_out(""), net_in(""), poll, clock] int {
+    var status = 3;
+    match tcp_listen(net, listen_port, 1024, 0) {
+        Listening::Ok(l) => {
+            var listener = l;
+            borrow mut listener as &!lh in {
+                listener_nonblocking(lh);
+                io.write_all(io, "listening\n");
+                status = run(heap, lh, net, clock, host, server_port, cfg, cfgi);
+            }
+            listener_close(listener);
+        }
+        Listening::Failed(e) => {
+            unbox_slice(heap, cfg);
+            unbox_slice(heap, cfgi);
+            status = 3;
+        }
+    }
+    return status;
+}
+
+// A natural number on standard error (`io.print_nat` writes to standard output).
+fn err_nat[&o](io: &!o Io, n: int) -> [err_write] int {
+    region r {
+        let digits = alloc_slice[r](24, byte_of(0));
+        var at = 24;
+        var v = n;
+        if v == 0 {
+            at = at - 1;
+            digits[at] = byte_of('0');
+        }
+        while v > 0 {
+            at = at - 1;
+            digits[at] = byte_of('0' + v % 10);
+            v = v / 10;
+        }
+        io.error_all(io, digits[at..24]);
+    }
+    return 0;
+}
+
+fn refuse_start[&o, &a](io: &!o Io, what: &a [byte], code: int) -> [err_write] int {
+    io.error_all(io, "proxy: ");
+    io.error_all(io, what);
+    io.error_all(io, ": ");
+    if code >= 1000 {
+        io.error_all(io, store.refusal_name(code));
+    } else {
+        io.error_all(io, "cannot open");
+    }
+    io.error_all(io, "\n");
+    return 3;
+}
+
+// Open the log directory (P2c): the key, the three files, the lock, the scan; say what was found; serve; close. The listener is
+// opened only after all of that (docs/m1-commit-path.md P2-D11). Nothing appends to the log until P2d.
+fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""), net: &n Net(""), clock: &k Clock, host: &n [byte], listen_port: int, server_port: int, cfg: Box[[byte]], cfgi: Box[[int]], logdir: &d [byte], keyfile: &b [byte], branch: &b [byte]) -> [heap, io_write, err_write, fs_read(""), dir_read, dir_write, file_read, file_write, conn_accept, conn_read, conn_write, net_out(""), net_in(""), poll, clock] int {
+    var status = 3;
+    var seed = box_slice(heap, 32, byte_of(0));
+    var pk = box_slice(heap, 32, byte_of(0));
+    var tip = box_slice(heap, 32, byte_of(0));
+    var info = box_slice(heap, 8, 0);
+    var keyed = false;
+    borrow mut seed as &!sw in {
+        match open_read(fs, keyfile) {
+            Opened::Ok(kf) => {
+                var key = kf;
+                borrow mut key as &!w in {
+                    match file_read(w, contents(sw)) {
+                        Read::Got(n2) => {
+                            keyed = n2 == 32;
+                        }
+                        Read::End => {
+                            keyed = false;
+                        }
+                        Read::Failed(e) => {
+                            keyed = false;
+                        }
+                    }
+                }
+                file_close(key);
+            }
+            Opened::Failed(e) => {
+                keyed = false;
+            }
+        }
+    }
+    if !keyed {
+        refuse_start(io, "key file (32 bytes expected)", 0);
+        unbox_slice(heap, cfg);
+        unbox_slice(heap, cfgi);
+    } else {
+        borrow seed as &sr in {
+            borrow mut pk as &!pw in {
+                build.public_key(contents(sr), contents(pw));
+            }
+        }
+        match open_dir(fs, logdir) {
+            DirOpened::Failed(e) => {
+                refuse_start(io, "log directory", e);
+                unbox_slice(heap, cfg);
+                unbox_slice(heap, cfgi);
+            }
+            DirOpened::Ok(dh) => {
+                var dir = dh;
+                borrow dir as &dr in {
+                    borrow pk as &pr in {
+                        borrow mut info as &!iw in {
+                            borrow mut tip as &!tw in {
+                                match store.open_log(heap, dr, contents(pr), branch, contents(iw), contents(tw)) {
+                                    Opened::Failed(code) => {
+                                        refuse_start(io, "log", code);
+                                        if code == store.r_corrupt() {
+                                            io.error_all(io, "proxy: the verifier's verdict: rule ");
+                                            io.error_all(io, commit.rule_name(contents(iw)[1]));
+                                            io.error_all(io, ", record ");
+                                            err_nat(io, contents(iw)[2]);
+                                            io.newline(io);
+                                        }
+                                        unbox_slice(heap, cfg);
+                                        unbox_slice(heap, cfgi);
+                                    }
+                                    Opened::Ok(lf) => {
+                                        var logfile = lf;
+                                        match store.open_store(heap, dr, "tokens", "CHODBTK1") {
+                                            Opened::Failed(code) => {
+                                                refuse_start(io, "token store", code);
+                                                unbox_slice(heap, cfg);
+                                                unbox_slice(heap, cfgi);
+                                            }
+                                            Opened::Ok(tf) => {
+                                                var tokens = tf;
+                                                match store.open_store(heap, dr, "stmts", "CHODBST2") {
+                                                    Opened::Failed(code) => {
+                                                        refuse_start(io, "statement store", code);
+                                                        unbox_slice(heap, cfg);
+                                                        unbox_slice(heap, cfgi);
+                                                    }
+                                                    Opened::Ok(sf) => {
+                                                        var stmts = sf;
+                                                        io.error_all(io, "proxy: log has ");
+                                                        err_nat(io, contents(iw)[0]);
+                                                        io.error_all(io, " commits, next seq ");
+                                                        err_nat(io, contents(iw)[3]);
+                                                        if contents(iw)[4] > 0 {
+                                                            io.error_all(io, ", cut ");
+                                                            err_nat(io, contents(iw)[4]);
+                                                            io.error_all(io, " bytes of torn tail");
+                                                        }
+                                                        io.newline(io);
+                                                        status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi);
+                                                        file_close(stmts);
+                                                    }
+                                                }
+                                                file_close(tokens);
+                                            }
+                                        }
+                                        file_close(logfile);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                dir_close(dir);
+            }
+        }
+    }
+    unbox_slice(heap, seed);
+    unbox_slice(heap, pk);
+    unbox_slice(heap, tip);
+    unbox_slice(heap, info);
+    return status;
+}
+
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
-    release(fs);
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
     release(ffi);
+    release(signals);
+    release(exec);
+    release(tty);
     var status = 2;
     var listen_port = 0 - 1;
     var server_port = 0 - 1;
     var good = false;
+    var logged = false;
     borrow args as &g in {
-        if arg_count(g) == 8 {
+        let n = arg_count(g);
+        if n == 8 || n == 10 {
+            logged = n == 10;
             listen_port = number_of(arg(g, 1));
             server_port = number_of(arg(g, 3));
             good = listen_port > 0 && listen_port < 65536 && server_port > 0 && server_port < 65536 && len(arg(g, 4)) > 0 && len(arg(g, 5)) == 64 && len(arg(g, 6)) > 0 && len(arg(g, 7)) > 0;
+            if logged {
+                good = good && len(arg(g, 8)) > 0 && len(arg(g, 9)) > 0;
+            }
             var i = 0;
             while good && i < 64 {
                 if hexval(int_of(arg(g, 5)[i])) < 0 {
@@ -1629,7 +1686,7 @@ fn main(world: World) -> [] int {
     }
     if !good {
         borrow mut io as &!e in {
-            io.error_all(e, "usage: proxy <listen port> <upstream host> <upstream port> <branch> <root key, 64 hex digits> <upstream user> <upstream database>\n");
+            io.error_all(e, "usage: proxy <listen port> <upstream host> <upstream port> <branch> <root key, 64 hex digits> <upstream user> <upstream database> [<log directory> <signing key file, 32 bytes>]\n");
         }
     } else {
         status = 3;
@@ -1662,30 +1719,22 @@ fn main(world: World) -> [] int {
                     }
                 }
                 borrow net as &nn in {
-                    match tcp_listen(nn, listen_port, 1024, 0) {
-                        Listening::Ok(l) => {
-                            var listener = l;
-                            borrow mut listener as &!lh in {
-                                listener_nonblocking(lh);
-                                borrow mut io as &!o in {
-                                    io.write_all(o, "listening\n");
+                    borrow clock as &ck in {
+                        borrow mut io as &!o in {
+                            if logged {
+                                borrow fs as &fr in {
+                                    status = with_log(h, o, fr, nn, ck, arg(g, 2), listen_port, server_port, cfg, cfgi, arg(g, 8), arg(g, 9), branch);
                                 }
-                                borrow clock as &ck in {
-                                    status = run(h, lh, nn, ck, arg(g, 2), server_port, cfg, cfgi);
-                                }
+                            } else {
+                                status = serve_port(h, o, nn, ck, arg(g, 2), listen_port, server_port, cfg, cfgi);
                             }
-                            listener_close(listener);
-                        }
-                        Listening::Failed(e) => {
-                            unbox_slice(h, cfg);
-                            unbox_slice(h, cfgi);
-                            status = 3;
                         }
                     }
                 }
             }
         }
     }
+    release(fs);
     release(net);
     release(clock);
     release(args);

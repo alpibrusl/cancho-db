@@ -1,0 +1,169 @@
+module cdb.l1;
+
+import std.buffer;
+import std.bytes;
+import std.map;
+import std.crypto;
+import std.ed25519;
+import cdb.commit;
+
+// The L1 check of docs/spec/commit.md section 5 on the bytes of a log, split out of `verify.cho` so that the proxy's startup
+// scan runs the verifier's own code (docs/m1-commit-path.md P2-D11) and not a second copy of it.
+
+pub fn same[&a, &b](x: &a [byte], y: &b [byte]) -> [] bool {
+    return bytes.equal(x, y);
+}
+
+// The verdict for the bytes of a log (spec §4, §5). `verdict[0]` is a rule code (`commit.ok()` when it verifies),
+// `verdict[1]` the record it names (-1 for none), `verdict[2]` the commits seen and `verdict[3]` the branches.
+// `expect` is empty, or the 32 bytes of an id that must occur in the log.
+//
+// No early `return` in the loop: the maps are owned and are dropped once, at the end, on every path.
+pub fn verify[&h, &d, &e, &o](heap: &!h Heap, data: &d [byte], expect: &e [byte], verdict: &!o [int]) -> [heap] int {
+    var rule = 0;
+    var bad_at = 0 - 1;
+    var commits = 0;
+    var seen = map.empty(heap, 64, 0, 7);
+    var counts = map.empty(heap, 16, 0, 11);
+    var tips = map.empty(heap, 16, 0, 13);
+    // every id, in log order, 32 bytes each: a branch's tip is an index into this
+    var ids = buffer.empty(heap, 4096);
+
+    if len(data) < 8 {
+        rule = commit.truncated();
+    } else if !same(data[0..8], "CHODBLG1") {
+        rule = commit.bad_magic();
+    } else if len(data) < 40 {
+        rule = commit.truncated();
+    }
+
+    region r {
+        let out = alloc_slice[r](commit.out_len(), 0);
+        let ident = alloc_slice[r](32, byte_of(0));
+        let sha = alloc_slice[r](crypto.sha256_state_len(), 0);
+        let nul = alloc_slice[r](1, byte_of(0));
+        var at = 40;
+
+        while rule == 0 && at < len(data) {
+            let index = commits;
+            if len(data) - at < 4 {
+                rule = commit.truncated();
+            } else {
+                let length = commit.be(data, at, 4);
+                if length > 16777216 {
+                    rule = commit.record_too_large();
+                } else if len(data) - at - 4 < length + 64 {
+                    rule = commit.truncated();
+                } else {
+                    let enc = data[at + 4..at + 4 + length];
+                    let sig = data[at + 4 + length..at + 4 + length + 64];
+                    at = at + 4 + length + 64;
+
+                    rule = commit.decode(enc, out);
+                    if rule == 0 {
+                        crypto.sha256_init(sha);
+                        crypto.sha256_update(sha, "cancho-db/commit/v1");
+                        crypto.sha256_update(sha, nul);
+                        crypto.sha256_update(sha, enc);
+                        crypto.sha256_final(sha, ident);
+
+                        let branch = enc[out[commit.f_branch_at()]..out[commit.f_branch_at()] + out[commit.f_branch_len()]];
+                        let np = out[commit.f_parents()];
+                        let pat = out[commit.f_parents_at()];
+                        var count_here = 0;
+                        var tip_index = 0 - 1;
+                        borrow counts as &m in {
+                            count_here = map.get(m, branch, 0);
+                        }
+                        borrow tips as &m in {
+                            tip_index = map.get(m, branch, 0 - 1);
+                        }
+
+                        var is_dup = false;
+                        borrow seen as &m in {
+                            is_dup = map.has(m, ident);
+                        }
+                        if is_dup {
+                            rule = commit.duplicate_commit();
+                        } else if crypto_ok(data[8..40], ident, sig) == 0 {
+                            rule = commit.bad_signature();
+                        } else if out[commit.f_seq_hi()] != 0 || out[commit.f_seq_lo()] != count_here {
+                            rule = commit.seq_gap();
+                        } else if count_here == 0 {
+                            if np == 2 {
+                                rule = commit.parent_count();
+                            } else if np == 1 {
+                                var known = false;
+                                borrow seen as &m in {
+                                    known = map.has(m, enc[pat..pat + 32]);
+                                }
+                                if !known {
+                                    rule = commit.parent_unknown();
+                                }
+                            }
+                        } else if np == 0 {
+                            rule = commit.parent_count();
+                        } else {
+                            borrow ids as &b in {
+                                if !same(enc[pat..pat + 32], buffer.bytes(b)[tip_index * 32..tip_index * 32 + 32]) {
+                                    rule = commit.parent_mismatch();
+                                }
+                            }
+                            if rule == 0 && np == 2 {
+                                if same(enc[pat..pat + 32], enc[pat + 32..pat + 64]) {
+                                    rule = commit.parent_count();
+                                } else {
+                                    var known = false;
+                                    borrow seen as &m in {
+                                        known = map.has(m, enc[pat + 32..pat + 64]);
+                                    }
+                                    if !known {
+                                        rule = commit.parent_unknown();
+                                    }
+                                }
+                            }
+                        }
+
+                        if rule == 0 {
+                            seen = map.put(heap, seen, ident, commits);
+                            counts = map.put(heap, counts, branch, count_here + 1);
+                            tips = map.put(heap, tips, branch, commits);
+                            ids = buffer.append(heap, ids, ident);
+                            commits = commits + 1;
+                        }
+                    }
+                }
+            }
+            if rule != 0 {
+                bad_at = index;
+            }
+        }
+
+        if rule == 0 && len(expect) == 32 {
+            var found = false;
+            borrow seen as &m in {
+                found = map.has(m, expect);
+            }
+            if !found {
+                rule = commit.expected_missing();
+            }
+        }
+    }
+
+    verdict[0] = rule;
+    verdict[1] = bad_at;
+    verdict[2] = commits;
+    borrow counts as &m in {
+        verdict[3] = map.size(m);
+    }
+    map.drop(heap, seen);
+    map.drop(heap, counts);
+    map.drop(heap, tips);
+    buffer.drop(heap, ids);
+    return 0;
+}
+
+// `1` if `sig` is a valid Ed25519 signature by `pk` over the 32 id bytes.
+fn crypto_ok[&k, &m, &s](pk: &k [byte], id: &m [byte], sig: &s [byte]) -> [] int {
+    return ed25519.verify(pk, id, sig);
+}

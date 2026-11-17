@@ -195,7 +195,7 @@ Each is one change with its own gate.
 |---|---|---|
 | **P2a** | **built**: server-to-client framing; transaction tracking; `BEGIN`/`COMMIT`/`ROLLBACK` parsed and answered by the proxy's own state; autocommit wrapped in a transaction; held `CommandComplete`/`ReadyForQuery`; **no log yet** | `psql` transactions, rollbacks, errors inside a transaction (`25P02`), statuses `I`/`T`/`E` on the wire; refused options and mixed messages; the wire tee shows the exact upstream messages; mutants |
 | **P2b** | **built** (section 5.3): the commit builder (`src/build.cho`, sans-io: encode, id, sign) and the store encoders | bytes equal an independent Python encoder's over hand-written commits; the verifier accepts them; mutants; **the signing is checked by the three verifiers** |
-| **P2c** | the log directory, the key, append and fsync, the lock, the startup scan, the torn-tail repair | restart reads the log back; torn tails; a second proxy refused; `cancho authority` pinned |
+| **P2c** | **store built** (section 5.4): the log directory, the key, append and fsync, the lock, the startup scan, the torn-tail repair | restart reads the log back; torn tails; a second proxy refused; `cancho authority` pinned |
 | **P2d** | the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
 | **P2e** | the cost, measured, and the claims | `select` and `insert` latency through the proxy vs direct on the same machine, with the fsyncs on |
 
@@ -242,3 +242,54 @@ in already encoded with their counts; P2d encodes `now()` as the one int value D
 alone, with `hashlib` for the id and `cryptography` for the signature; then writes a 120-commit chain as a log that the three
 verifiers accept, and a copy with one flipped byte that each rejects. 21 mutants, all killed. It found one real bug in the first
 run: the effects writer did not stop when an earlier field had already failed, so a ragged parent list still produced bytes.
+
+### 5.4 P2c, the store as built
+
+`src/store.cho` (edition 9: directory handles) opens the log directory through a `Dir`, so no path is resolved twice and no link is
+followed. `open_log` makes the files if they are missing (`dir_open_new`, write, `fsync`, then `dir_sync`), opens the log for
+appending, takes the `flock`, reads the file whole, cuts a torn tail, runs the verifier's own check and finds the tip. The verifier's
+check was moved out of `verify.cho` into `src/l1.cho` for this (428 vectors and 139 verifier mutants still agree), so the proxy does not carry a second copy.
+`open_store` does the same for `tokens` and `stmts` (their entries are `u32 length, body`). `append` writes the three files in the order D10
+gives and syncs each. Refusals are `Opened::Failed(code)` with codes from 1000 so none can be taken for an errno.
+
+Two things the build changed: the tip is found by decoding each record again after the verifier has accepted them (the verifier
+does not export its tips), which is linear and was not worth a second interface; and `fsync` order is checked with `strace`, which
+CI now installs, because no program output says whether a write was made durable. **The proxy opens it** (second commit of P2c): two optional arguments after the seven, `<log directory> <signing key file>` (positional, like the rest; `--log-dir` and `--key` were the design's spelling). The
+store is opened, locked and scanned *before* the listener, the summary goes to standard error, and `proxy.cho` is now edition 9 (directory
+handles). The authority pin changed on purpose (it now names `fs_read("")`, `dir_read`, `dir_write`, `file_read`, `file_write`), and the claim "never touches the filesystem" is gone from it. **`proxy.cho` is at 1,873 lines**: P2d needs the second split (the upstream I/O helpers `write_all`, `read_until_ready`, `startup_msg`) first. The proxy has no commit to append until P2d.
+
+### 5.5 The second split (before P2d)
+
+`proxy.cho` was 1,873 lines. `src/upstream.cho` (141 lines) now holds the proxy's side of the upstream connection: `put_cstr`, `login_read`,
+`startup_msg`, `write_all`, `read_until_ready`. `proxy.cho` is 1,741 lines. The end-to-end checks and the authority pin are unchanged;
+one proxy mutant's anchor moved with the code it mutates (and now swaps the role for the database name, since the hello
+buffer it used to name is not visible there).
+
+### 5.6 P2d, planned: what the commit sequence needs that does not exist yet
+
+Reading the proxy against D3 to D11 shows that P2d is five pieces, not one. Each is its own commit with its own gate, in this order.
+
+1. **The guard hands over what a commit is made of.** Today `guard.check` decides and renders, then throws away what it computed. The
+   commit needs, per statement, the **IR bytes** (the statement store holds them; their `ir.id` is what the commit names) and the
+   **inferred effects** (the commit's `effects` is their union). `guard.check` gains two output slices: the IR of each allowed statement
+   (a `u32` length, the bytes, one after another, with their ids in a third slice) and the effects, encoded as the commit encodes them,
+   repeats allowed (`build.encode` sorts and de-duplicates). Gate: `tests/guard_check.py` compares the ids and the effect set with
+   hand-written expectations, and the verifier's `ir.id` recomputes each id from the bytes handed over. Size limits are stated and refused
+   with a tag (`transaction-too-large`), not truncated.
+2. **The proxy keeps the store, and `Core` moves out of `proxy.cho`.** The three files, the branch's tip and next `seq`, and the
+   signing seed live in `Core`, which is `res` and may hold `File`s. **The log becomes mandatory:** a proxy without a log would be a
+   proxy that does not do what it is for, and keeping an unlogged mode means dummy files in `Core`. P0 to P2a tests get a temporary
+   log directory from `start_proxy`. `Core` and the per-slot state helpers (`stride()`, the slot layout, `send`, `answer_*`) move to
+   `src/core.cho` so that the commit path can be a module of its own (`src/commitpath.cho`) and `proxy.cho` stays under its ceiling.
+3. **The accumulator and the sequence.** Per client, while a transaction is open: the IR bytes and ids, the effects, whether any is a
+   write, a `ddl` or a `call`, and the hash of the schema snapshot read before the first statement. At the end of the transaction (the
+   client's `COMMIT`, or the end of an autocommit statement): build the commit; for a write `PREPARE TRANSACTION 'cdb:<id>'`; append (D10's
+   order); `COMMIT PREPARED`; advance the tip; release the held answer. A read appends first, then `COMMIT`s. Gate: after a run
+   of mixed statements the log and the stores are accepted by the cancho, Python and Go verifiers **at L2 and IR** (tokens, effects and
+   statements checked), the commits are in the order the statements were run, and PostgreSQL holds exactly the rows the commits name.
+4. **Recovery and the fault table of section 5.** Recovery needs the ids the log holds (a bounded table, 4 MiB: 131,072 commits, stated, refused
+   beyond), the catalog connection at startup, and `pg_prepared_xacts`. The `tools/pgtee.py` kills of section 5, each followed by a restart and
+   an equality check of rows and commits; the two mutants "roll back what the log has" and "commit what it lacks".
+5. **`now()`.** The `select ... extract(epoch from now())` inside the transaction before `PREPARE` (F7), the value recorded in `nondet`.
+
+Not in P2d: concurrency (D6), more than one branch, `changes`/`state`/`code`/`checks` (D9).
