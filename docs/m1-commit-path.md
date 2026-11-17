@@ -324,7 +324,7 @@ permits). **Every `select` is a commit with its fsyncs; the latency is not measu
 
 `src/catalog.cho` now holds the proxy's own connection to PostgreSQL (moved out of `proxy.cho`: the schema snapshot, and `recover`). **Recovery**
 runs at the start of `run`, before anything is accepted: it asks `show max_prepared_transactions` (0 refuses to start: a write could not be two-phase),
-lists `pg_prepared_xacts` whose gid starts `cdb:`, and for each of 64 per pass issues `COMMIT PREPARED` if the log holds the commit its gid names and
+lists `pg_prepared_xacts` whose gid starts `cdb:` **and which belong to the database served** (the view is cluster-wide; found when a mutant run left prepared transactions in other databases and the proxy refused to start, because PostgreSQL will not settle another database's prepared transaction from this connection), and for each of 64 per pass issues `COMMIT PREPARED` if the log holds the commit its gid names and
 `ROLLBACK PREPARED` if not; a `cdb:` gid that is not 64 lowercase hex digits is left alone and counted. The ids the log holds are a table of 1,048,576
 commits (32 MiB; `store.open_log` fills it, `conclude` extends it): a log with more is refused at startup, and a proxy whose table fills refuses further
 commits. A summary goes to standard error when anything was done. **The listener is bound before recovery, so the port is open and connections

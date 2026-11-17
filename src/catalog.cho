@@ -197,7 +197,8 @@ fn gid_state[&g, &i](gid: &g [byte], ids: &i [byte], count: int) -> [] int {
     return found;
 }
 
-// Settle the prepared transactions this proxy may have left (P2-D11): for every `cdb:` gid in `pg_prepared_xacts`, `COMMIT PREPARED` if the
+// Settle the prepared transactions this proxy may have left (P2-D11): for every `cdb:` gid in `pg_prepared_xacts` **of the database it serves** (the view is
+// cluster-wide, and another database's prepared transaction cannot be settled from this connection: PostgreSQL refuses), `COMMIT PREPARED` if the
 // log holds the commit it names, `ROLLBACK PREPARED` if not; a gid that is not `cdb:` and 64 hex digits is left alone. Done on the catalog
 // connection. The status: 0, 1 if PostgreSQL cannot prepare transactions at all (`max_prepared_transactions` is 0), -1 if it could not be
 // asked. The counts of what was done are in `core.aux[3..6]` (committed, rolled back, left alone); `core.aux[2]` is cleared when it is done.
@@ -231,7 +232,7 @@ pub fn recover[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Co
             let gids = alloc_slice[g](64 * 68, byte_of(0));
             var n = 0;
             borrow mut table as &!tw in {
-                r = commitpath.upstream_exec(tw, core, slot, "select gid from pg_prepared_xacts where gid like 'cdb:%' order by prepared");
+                r = commitpath.upstream_exec(tw, core, slot, "select gid from pg_prepared_xacts where gid like 'cdb:%' and database = current_database() order by prepared");
             }
             if r != 0 {
                 status = 0 - 1;

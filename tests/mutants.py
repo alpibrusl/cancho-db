@@ -402,6 +402,7 @@ PROXY = [
     ("proxy: nondeterminism is committed unrecorded", "src/commitpath.cho", "        if kind == 4 {\n            return 2;", "        if kind == 4 {\n            return 0;"),
     ("proxy: the schema is not the transaction's own", "src/commitpath.cho", "crypto.sha256(snapshot, acc[k * shared.acc_stride() + 22528..k * shared.acc_stride() + 22560]);", "crypto.sha256(\"\", acc[k * shared.acc_stride() + 22528..k * shared.acc_stride() + 22560]);"),
     ("proxy: recovery rolls back what the log has", "src/catalog.cho", "                    if held == 1 {\n                        at = build.put_bytes(sql, 0, \"COMMIT PREPARED '\");", "                    if held == 0 {\n                        at = build.put_bytes(sql, 0, \"COMMIT PREPARED '\");"),
+    ("proxy: recovery tries other databases' transactions", "src/catalog.cho", " and database = current_database() order by prepared", " order by prepared"),
     ("proxy: recovery commits what the log lacks", "src/catalog.cho", "    if want < 0 {\n        return 0 - 1;\n    }\n    return found;", "    if want < 0 {\n        return 0 - 1;\n    }\n    return 1;"),
     ("proxy: recovery settles nothing", "src/catalog.cho", "    if status == 0 {\n        region g {", "    if false {\n        region g {"),
     ("proxy: a log failure leaves the transaction prepared", "src/commitpath.cho", "                        upstream_exec(tab, core, b, q[0..gid_sql(q, \"ROLLBACK PREPARED '\", ident)]);", "                        step = 0;"),

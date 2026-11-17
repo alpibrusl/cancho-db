@@ -766,7 +766,7 @@ direct("drop table if exists p2f; create table p2f(a int primary key, b text)")
 
 
 def prepared_xacts():
-    return int(direct("select count(*) from pg_prepared_xacts where gid like 'cdb:%'").stdout.strip() or -1)
+    return int(direct("select count(*) from pg_prepared_xacts where gid like 'cdb:%' and database = current_database()").stdout.strip() or -1)
 
 
 def rows_of():
@@ -814,6 +814,20 @@ def run_window(name, prefix, when, key, expect):
             out = subprocess.run(cmd + [str(ldir / "log")] + argv, capture_output=True, text=True).stdout.strip()
             check("P2d-4 %s: %s accepts the files after recovery" % (name, vname), out.startswith("ok commits=%d" % after[2]), out)
 
+
+# a prepared transaction of another database (the view is cluster-wide) is not this proxy's to settle and must not stop it starting
+direct("drop database if exists p2d_other")
+direct("create database p2d_other")
+subprocess.run(["psql", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-d", "p2d_other", "-c", "begin; create table t(a int); prepare transaction 'cdb:%s'" % ("0" * 64)], capture_output=True, text=True)
+sd = Path(_scratch, "w_other")
+sd.mkdir()
+so, _ = start_logged(sd, Path(_scratch, "key"))
+time.sleep(0.5)
+check("P2d-4: a prepared transaction of another database does not stop the proxy from starting", so.poll() is None)
+so.terminate()
+so.communicate(timeout=10)
+subprocess.run(["psql", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-d", "p2d_other", "-c", "rollback prepared 'cdb:%s'" % ("0" * 64)], capture_output=True, text=True)
+direct("drop database if exists p2d_other")
 
 run_window("before_prepare", "PREPARE TRANSACTION", "before", 1, ((0, "", 0), (0, "", 0), "log has 0 commits"))
 run_window("prepared_no_log", "PREPARE TRANSACTION", "reply", 2, ((1, "", 0), (0, "", 0), "recovery: committed 0, rolled back 1"))
