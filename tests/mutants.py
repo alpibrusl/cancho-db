@@ -391,7 +391,6 @@ LOGIN = [
 
 PROXY = [
     # ---- the event loop (proxy/proxy.cho), judged by tests/proxy_e2e.py against a real PostgreSQL
-    ("proxy: the log directory is not opened", "proxy/proxy.cho", "if logged {\n                                borrow fs as &fr in {", "if false {\n                                borrow fs as &fr in {"),
     ("proxy: the signing key is not required", "proxy/proxy.cho", "    if !keyed {\n", "    if false {\n"),
     ("proxy: non-loopback clients are served", "proxy/proxy.cho", "if !is_loopback(ct, a) {", "if false {"),
     ("proxy: the token is not checked", "proxy/proxy.cho", "if rule != login.login_ok() {", "if false {"),

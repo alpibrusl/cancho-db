@@ -1047,7 +1047,7 @@ fn sweep[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: &k Clock)
     return 0;
 }
 
-fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), clk: &k Clock, host: &n [byte], port: int, cfg: Box[[byte]], cfgi: Box[[int]]) -> [heap, conn_accept, conn_read, conn_write, net_out(""), poll, clock] int {
+fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), clk: &k Clock, host: &n [byte], port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, conn_accept, conn_read, conn_write, net_out(""), poll, clock] int {
     match poller_new() {
         Polling::Ok(p) => {
             var poller = p;
@@ -1055,7 +1055,7 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
                 poller_add_listener(pw, listener, 0);
             }
             let slots = 2 * shared.max_clients();
-            var core = shared.new_core(heap, poller, cfg, cfgi, slots);
+            var core = shared.new_core(heap, poller, cfg, cfgi, kept, slots);
             var tab = conns.empty(heap, 64);
             while true {
                 var ready = 0 - 1;
@@ -1100,6 +1100,7 @@ fn run[&h, &l, &n, &k](heap: &!h Heap, listener: &!l Listener, net: &n Net(""), 
         Polling::Failed(e) => {
             unbox_slice(heap, cfg);
             unbox_slice(heap, cfgi);
+            shared.drop_store(heap, kept);
             return 4;
         }
     }
@@ -1148,7 +1149,7 @@ fn copy_in[&d, &s](dst: &!d [byte], at: int, text: &s [byte]) -> [] int {
 }
 
 // Listen on `listen_port` and serve until the loop ends.
-fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock: &k Clock, host: &n [byte], listen_port: int, server_port: int, cfg: Box[[byte]], cfgi: Box[[int]]) -> [heap, io_write, conn_accept, conn_read, conn_write, net_out(""), net_in(""), poll, clock] int {
+fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock: &k Clock, host: &n [byte], listen_port: int, server_port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, io_write, conn_accept, conn_read, conn_write, net_out(""), net_in(""), poll, clock] int {
     var status = 3;
     match tcp_listen(net, listen_port, 1024, 0) {
         Listening::Ok(l) => {
@@ -1156,13 +1157,14 @@ fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock
             borrow mut listener as &!lh in {
                 listener_nonblocking(lh);
                 io.write_all(io, "listening\n");
-                status = run(heap, lh, net, clock, host, server_port, cfg, cfgi);
+                status = run(heap, lh, net, clock, host, server_port, cfg, cfgi, kept);
             }
             listener_close(listener);
         }
         Listening::Failed(e) => {
             unbox_slice(heap, cfg);
             unbox_slice(heap, cfgi);
+            shared.drop_store(heap, kept);
             status = 3;
         }
     }
@@ -1277,6 +1279,7 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                                 refuse_start(io, "token store", code);
                                                 unbox_slice(heap, cfg);
                                                 unbox_slice(heap, cfgi);
+                                                file_close(logfile);
                                             }
                                             Opened::Ok(tf) => {
                                                 var tokens = tf;
@@ -1285,6 +1288,8 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                                         refuse_start(io, "statement store", code);
                                                         unbox_slice(heap, cfg);
                                                         unbox_slice(heap, cfgi);
+                                                        file_close(tokens);
+                                                        file_close(logfile);
                                                     }
                                                     Opened::Ok(sf) => {
                                                         var stmts = sf;
@@ -1298,14 +1303,14 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                                             io.error_all(io, " bytes of torn tail");
                                                         }
                                                         io.newline(io);
-                                                        status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi);
-                                                        file_close(stmts);
+                                                        borrow seed as &sd2 in {
+                                                            let kept = shared.new_store(heap, logfile, tokens, stmts, contents(sd2), contents(tw), contents(iw)[3], contents(iw)[5]);
+                                                            status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi, kept);
+                                                        }
                                                     }
                                                 }
-                                                file_close(tokens);
                                             }
                                         }
-                                        file_close(logfile);
                                     }
                                 }
                             }
@@ -1333,17 +1338,13 @@ fn main(world: World) -> [] int {
     var listen_port = 0 - 1;
     var server_port = 0 - 1;
     var good = false;
-    var logged = false;
     borrow args as &g in {
         let n = arg_count(g);
-        if n == 8 || n == 10 {
-            logged = n == 10;
+        if n == 10 {
             listen_port = number_of(arg(g, 1));
             server_port = number_of(arg(g, 3));
             good = listen_port > 0 && listen_port < 65536 && server_port > 0 && server_port < 65536 && len(arg(g, 4)) > 0 && len(arg(g, 5)) == 64 && len(arg(g, 6)) > 0 && len(arg(g, 7)) > 0;
-            if logged {
-                good = good && len(arg(g, 8)) > 0 && len(arg(g, 9)) > 0;
-            }
+            good = good && len(arg(g, 8)) > 0 && len(arg(g, 9)) > 0;
             var i = 0;
             while good && i < 64 {
                 if hexval(int_of(arg(g, 5)[i])) < 0 {
@@ -1355,7 +1356,7 @@ fn main(world: World) -> [] int {
     }
     if !good {
         borrow mut io as &!e in {
-            io.error_all(e, "usage: proxy <listen port> <upstream host> <upstream port> <branch> <root key, 64 hex digits> <upstream user> <upstream database> [<log directory> <signing key file, 32 bytes>]\n");
+            io.error_all(e, "usage: proxy <listen port> <upstream host> <upstream port> <branch> <root key, 64 hex digits> <upstream user> <upstream database> <log directory> <signing key file, 32 bytes>\n");
         }
     } else {
         status = 3;
@@ -1390,12 +1391,8 @@ fn main(world: World) -> [] int {
                 borrow net as &nn in {
                     borrow clock as &ck in {
                         borrow mut io as &!o in {
-                            if logged {
-                                borrow fs as &fr in {
-                                    status = with_log(h, o, fr, nn, ck, arg(g, 2), listen_port, server_port, cfg, cfgi, arg(g, 8), arg(g, 9), branch);
-                                }
-                            } else {
-                                status = serve_port(h, o, nn, ck, arg(g, 2), listen_port, server_port, cfg, cfgi);
+                            borrow fs as &fr in {
+                                status = with_log(h, o, fr, nn, ck, arg(g, 2), listen_port, server_port, cfg, cfgi, arg(g, 8), arg(g, 9), branch);
                             }
                         }
                     }

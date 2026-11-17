@@ -101,7 +101,19 @@ pub fn sbuf_max() -> [] int {
     return 512;
 }
 
+// What the proxy keeps of the log directory while it runs (P2d-2): the three files, held open and locked, the signing seed, and where the
+// branch's chain ends. `chain[0]` is the next `seq`, `chain[1]` is 1 if the branch has a tip (its id is `tip`).
+pub res struct Store {
+    log: File,
+    tokens: File,
+    stmts: File,
+    seed: Box[[byte]],
+    tip: Box[[byte]],
+    chain: Box[[int]],
+}
+
 pub res struct Core {
+    store: Store,
     poller: Poller,
     events: Box[[int]],
     state: Box[[int]],
@@ -329,13 +341,14 @@ pub fn consume[&c](core: &!c Core, k: int, n: int) -> [] int {
 }
 
 // A `Core` for `slots` connections, around the poller and the configuration (`cfg` and `cfgi`: see `Core`).
-pub fn new_core[&h](heap: &!h Heap, poller: Poller, cfg: Box[[byte]], cfgi: Box[[int]], slots: int) -> [heap] Core {
-    return Core { poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 4, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)) };
+pub fn new_core[&h](heap: &!h Heap, poller: Poller, cfg: Box[[byte]], cfgi: Box[[int]], kept: Store, slots: int) -> [heap] Core {
+    return Core { store: kept, poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 4, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)) };
 }
 
 // Release everything a `Core` holds.
 pub fn drop_core[&h](heap: &!h Heap, core: Core) -> [heap] int {
-    let Core { poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf } = core;
+    let Core { store, poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf } = core;
+    drop_store(heap, store);
     poller_close(poller);
     unbox_slice(heap, events);
     unbox_slice(heap, state);
@@ -353,5 +366,42 @@ pub fn drop_core[&h](heap: &!h Heap, core: Core) -> [heap] int {
     unbox_slice(heap, aux);
     unbox_slice(heap, hold);
     unbox_slice(heap, sbuf);
+    return 0;
+}
+
+// A `Store` around three open files; `seed` (32 bytes) and `tip` (32 bytes, meaningful if `has` is 1) are copied.
+pub fn new_store[&h, &s, &t](heap: &!h Heap, log: File, tokens: File, stmts: File, seed: &s [byte], tip: &t [byte], next: int, has: int) -> [heap] Store {
+    var sb = box_slice(heap, 32, byte_of(0));
+    var tb = box_slice(heap, 32, byte_of(0));
+    var cb = box_slice(heap, 2, 0);
+    borrow mut sb as &!sw in {
+        var i = 0;
+        while i < 32 {
+            contents(sw)[i] = seed[i];
+            i = i + 1;
+        }
+    }
+    borrow mut tb as &!tw in {
+        var i = 0;
+        while i < 32 {
+            contents(tw)[i] = tip[i];
+            i = i + 1;
+        }
+    }
+    borrow mut cb as &!cw in {
+        contents(cw)[0] = next;
+        contents(cw)[1] = has;
+    }
+    return Store { log: log, tokens: tokens, stmts: stmts, seed: sb, tip: tb, chain: cb };
+}
+
+pub fn drop_store[&h](heap: &!h Heap, kept: Store) -> [heap] int {
+    let Store { log, tokens, stmts, seed, tip, chain } = kept;
+    file_close(log);
+    file_close(tokens);
+    file_close(stmts);
+    unbox_slice(heap, seed);
+    unbox_slice(heap, tip);
+    unbox_slice(heap, chain);
     return 0;
 }

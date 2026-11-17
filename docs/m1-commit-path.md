@@ -254,7 +254,7 @@ gives and syncs each. Refusals are `Opened::Failed(code)` with codes from 1000 s
 
 Two things the build changed: the tip is found by decoding each record again after the verifier has accepted them (the verifier
 does not export its tips), which is linear and was not worth a second interface; and `fsync` order is checked with `strace`, which
-CI now installs, because no program output says whether a write was made durable. **The proxy opens it** (second commit of P2c): two optional arguments after the seven, `<log directory> <signing key file>` (positional, like the rest; `--log-dir` and `--key` were the design's spelling). The
+CI now installs, because no program output says whether a write was made durable. **The proxy opens it** (second commit of P2c): two arguments after the seven, `<log directory> <signing key file>` (**mandatory since P2d-2**; positional, like the rest; `--log-dir` and `--key` were the design's spelling). The
 store is opened, locked and scanned *before* the listener, the summary goes to standard error, and `proxy.cho` is now edition 9 (directory
 handles). The authority pin changed on purpose (it now names `fs_read("")`, `dir_read`, `dir_write`, `file_read`, `file_write`), and the claim "never touches the filesystem" is gone from it. **`proxy.cho` is at 1,873 lines**: P2d needs the second split (the upstream I/O helpers `write_all`, `read_until_ready`, `startup_msg`) first. The proxy has no commit to append until P2d.
 
@@ -293,3 +293,11 @@ Reading the proxy against D3 to D11 shows that P2d is five pieces, not one. Each
 5. **`now()`.** The `select ... extract(epoch from now())` inside the transaction before `PREPARE` (F7), the value recorded in `nondet`.
 
 Not in P2d: concurrency (D6), more than one branch, `changes`/`state`/`code`/`checks` (D9).
+
+### 5.7 P2d-2 as built
+
+`src/shared.cho` holds `Core` and what every part of the proxy uses (the limits, the slot layout, sending and answering), so `proxy.cho`
+is 1,413 lines and the commit path can be a module of its own. `Core` now holds a `Store`: the three open, locked files, the signing
+seed, the branch's tip and the next `seq` (from the scan). The log is mandatory (nine arguments after the program name); the
+P0-P2a end-to-end checks get a log directory of their own per proxy. Nothing appends yet. The proxy mutant "the log directory is not opened" went with the
+optional mode; the two P2c startup mutants that remain are "the signing key is not required" and the checks of section 5.4.

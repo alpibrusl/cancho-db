@@ -68,8 +68,17 @@ def direct(sql):
                           capture_output=True, text=True)
 
 
+_scratch = tempfile.mkdtemp()
+Path(_scratch, "key").write_bytes(bytes(range(32)))
+_runs = [0]
+
+
 def start_proxy(listen, upstream_port, branch="main"):
-    p = subprocess.Popen([PROXY, str(listen), "127.0.0.1", str(upstream_port), branch, ROOT, "postgres", DB],
+    """A proxy with a log directory of its own (the log is not optional, P2d-2): a new one for every start."""
+    _runs[0] += 1
+    logdir = Path(_scratch, "log%d" % _runs[0])
+    logdir.mkdir()
+    p = subprocess.Popen([PROXY, str(listen), "127.0.0.1", str(upstream_port), branch, ROOT, "postgres", DB, str(logdir), str(Path(_scratch, "key"))],
                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     for _ in range(100):
         try:
