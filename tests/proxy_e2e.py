@@ -645,9 +645,14 @@ check("P2c: a log of another key is refused", lp5.returncode == 3 and "foreign-k
 lp6, _ = start_logged(_work / "nothere", _work / "key")
 err6 = lp6.communicate(timeout=10)[1]
 check("P2c: a missing log directory is refused", lp6.returncode == 3, err6)
-lp7, _ = start_logged(_dir, _work / "nokey")
-err7 = lp7.communicate(timeout=10)[1]
-check("P2c: a missing key file is refused", lp7.returncode == 3 and "key" in err7, err7)
+(_work / "fresh").mkdir()
+lp7, _ = start_logged(_work / "fresh", _work / "nokey")
+try:
+    err7 = lp7.communicate(timeout=10)[1]
+except subprocess.TimeoutExpired:
+    lp7.kill()
+    err7 = "it kept running"
+check("P2c: a missing key file is refused, and nothing is created for it", lp7.returncode == 3 and "key file" in err7 and not (_work / "fresh" / "log").exists(), "%s %s" % (lp7.returncode, err7))
 shutil.rmtree(_work, ignore_errors=True)
 
 check("the proxy is still alive after all of it", proxy.poll() is None)
