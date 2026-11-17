@@ -42,6 +42,8 @@ sh scripts/pg_throwaway.sh start 5593
 trap 'sh scripts/pg_throwaway.sh stop 5593' EXIT
 export PG_E2E_PORT=5593
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/proxy_e2e.py build/proxy
+echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
+PG_PORT=5593 N=40 quiet 2 python3 scripts/measure_p2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"
 "$CANCHO" build --std proxy/lexcheck.cho src/lex.cho -o build/lexcheck
 quiet 4 python3 tests/lex_diff.py build/lexcheck 4000 1

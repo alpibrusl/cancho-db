@@ -64,6 +64,7 @@ pub fn reset[&c](core: &!c shared.Core, k: int) -> [] int {
     ai[8 * k + 2] = 0;
     ai[8 * k + 3] = 0;
     ai[8 * k + 5] = 0;
+    ai[8 * k + 6] = 0;
     return 0;
 }
 
@@ -77,18 +78,20 @@ pub fn begin[&c, &s](core: &!c shared.Core, k: int, snapshot: &s [byte]) -> [] i
 }
 
 // Add what the guard allowed (`n` statements: their ids, IR records and effects) to client `k`'s transaction. 0 if it fits, 1 if the
-// transaction would hold more than a commit can name, 2 if a statement is nondeterministic (the commit does not record `now()` yet: P2d-5).
+// transaction would hold more than a commit can name. A `nondet` effect (`now()`, the only one the lowering lets through) is noted: the commit
+// records the transaction's `now()` (P2-D9).
 pub fn add[&c, &i, &x, &f](core: &!c shared.Core, k: int, n: int, ids: &i [byte], irs: &x [byte], effs: &f [byte]) -> [] int {
     let ai = contents(core.acci);
     let acc = contents(core.acc);
     let base = k * shared.acc_stride();
     // effects: kind 4 is nondeterminism; 1, 2 and 3 are what make a commit two-phase
     var wrote = 0;
+    var nondet = 0;
     var at = 0;
     while at + 3 <= len(effs) {
         let kind = int_of(effs[at]);
         if kind == 4 {
-            return 2;
+            nondet = 1;
         }
         if kind >= 1 && kind <= 3 {
             wrote = 1;
@@ -107,7 +110,43 @@ pub fn add[&c, &i, &x, &f](core: &!c shared.Core, k: int, n: int, ids: &i [byte]
     if wrote == 1 {
         ai[8 * k + 3] = 1;
     }
+    if nondet == 1 {
+        ai[8 * k + 6] = 1;
+    }
     return 0;
+}
+
+// The first column of the first row of the last answer in `si`, read as a decimal number: -1 if there is none or it is not one.
+pub fn first_number[&s](si: &s [byte]) -> [] int {
+    var pos = 0;
+    while pos + 5 <= len(si) {
+        let ln = commit.be(si, pos + 1, 4);
+        if ln < 4 {
+            return 0 - 1;
+        }
+        if int_of(si[pos]) == 'D' && pos + 11 <= len(si) {
+            let cl = commit.be(si, pos + 7, 4);
+            var v = 0;
+            var i = 0;
+            if cl == 0 {
+                return 0 - 1;
+            }
+            while i < cl && pos + 11 + i < len(si) {
+                let c = int_of(si[pos + 11 + i]);
+                if c < '0' || c > '9' {
+                    return 0 - 1;
+                }
+                v = v * 10 + c - '0';
+                i = i + 1;
+            }
+            return v;
+        }
+        if int_of(si[pos]) == 'Z' {
+            return 0 - 1;
+        }
+        pos = pos + 1 + ln;
+    }
+    return 0 - 1;
 }
 
 // `prefix`, the commit's gid `cdb:` and 64 hex digits, and a closing quote, into `out`: its length.
@@ -158,8 +197,33 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
         reset(core, k);
         return 2;
     }
+    // `now()` (P2-D9): the transaction's own, read inside it before anything is made durable, and recorded as one int value in `nondet`
+    var nowv = 0 - 1;
+    if ai[8 * k + 6] == 1 {
+        let nr = upstream_exec(tab, core, b, "select (extract(epoch from now()) * 1000000)::bigint");
+        if nr == 0 {
+            nowv = first_number(contents(core.snapin));
+        }
+        if nowv < 0 {
+            if nr >= 0 {
+                upstream_exec(tab, core, b, "ROLLBACK");
+            }
+            reset(core, k);
+            if nr < 0 {
+                return 0 - 1;
+            }
+            return 1;
+        }
+    }
     var result = 0;
     region z {
+        let nd = alloc_slice[z](9, byte_of(0));
+        var nds = 0;
+        if nowv >= 0 {
+            nd[0] = byte_of(1);
+            build.put_be(nd, 1, nowv, 8);
+            nds = 1;
+        }
         let enc = alloc_slice[z](8192, byte_of(0));
         let f = alloc_slice[z](128, byte_of(0));
         let ident = alloc_slice[z](32, byte_of(0));
@@ -183,7 +247,7 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
         if chain[1] == 1 {
             parents = tip[0..32];
         }
-        let elen = build.encode(enc, parents, branch, chain[0], f[0..32], acc[base..base + 32 * n], acc[base + 18432..base + 18432 + ai[8 * k + 2]], f[32..64], f[64..96], f[96..96], 0, f[96..96], f[96..128], f[96..128], 0, f[96..96], contents(core.aux)[1]);
+        let elen = build.encode(enc, parents, branch, chain[0], f[0..32], acc[base..base + 32 * n], acc[base + 18432..base + 18432 + ai[8 * k + 2]], f[32..64], f[64..96], f[96..96], nds, nd[0..9 * nds], f[96..128], f[96..128], 0, f[96..96], contents(core.aux)[1]);
         if elen < 0 {
             result = 2;
         } else {

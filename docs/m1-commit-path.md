@@ -196,8 +196,8 @@ Each is one change with its own gate.
 | **P2a** | **built**: server-to-client framing; transaction tracking; `BEGIN`/`COMMIT`/`ROLLBACK` parsed and answered by the proxy's own state; autocommit wrapped in a transaction; held `CommandComplete`/`ReadyForQuery`; **no log yet** | `psql` transactions, rollbacks, errors inside a transaction (`25P02`), statuses `I`/`T`/`E` on the wire; refused options and mixed messages; the wire tee shows the exact upstream messages; mutants |
 | **P2b** | **built** (section 5.3): the commit builder (`src/build.cho`, sans-io: encode, id, sign) and the store encoders | bytes equal an independent Python encoder's over hand-written commits; the verifier accepts them; mutants; **the signing is checked by the three verifiers** |
 | **P2c** | **store built** (section 5.4): the log directory, the key, append and fsync, the lock, the startup scan, the torn-tail repair | restart reads the log back; torn tails; a second proxy refused; `cancho authority` pinned |
-| **P2d** | **4 of 5 built** (sections 5.8 and 5.9): the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
-| **P2e** | the cost, measured, and the claims | `select` and `insert` latency through the proxy vs direct on the same machine, with the fsyncs on |
+| **P2d** | **built** (sections 5.8 to 5.10): the two-phase sequence, recovery, `now()` | the fault-injection table of section 5, equality of rows and commits at each window, the three verifiers on the files |
+| **P2e** | **built** (section 5.11): the cost, measured, and the claims | `select` and `insert` latency through the proxy vs direct on the same machine, with the fsyncs on |
 
 ## 7. Risks and what needs the owner's decision
 
@@ -316,8 +316,7 @@ commit, `58000` if the log cannot be written (and PostgreSQL is rolled back), an
 
 What it does **not** do yet, stated so that nothing reads as more than it is: **a log failure is not yet exercised** (the fault table is P2d-4: the code
 for `ROLLBACK PREPARED` exists and has no test); **recovery on restart does not exist** (a prepared transaction left by a crash waits for P2d-4);
-**a statement that reads `now()` or any other nondeterminism is refused** (`0A000` `nondeterministic`) instead of being recorded wrongly, until P2d-5;
-`BEGIN; COMMIT` with no statement writes no commit; a token is appended once per connection (a repeat across connections is a duplicate the store
+**a statement that reads `now()` is recorded since P2d-5** (section 5.10; it was refused with `0A000` before, and this paragraph said so: corrected here); `BEGIN; COMMIT` with no statement writes no commit; a token is appended once per connection (a repeat across connections is a duplicate the store
 permits). **Every `select` is a commit with its fsyncs; the latency is not measured** (P2e).
 
 ### 5.9 P2d-4 as built: recovery and the failure windows
@@ -345,3 +344,50 @@ cut at the next start.
 
 Not tested, stated: **`max_prepared_transactions = 0`** refusing to start (the throwaway server has it above 0); a torn tail **and** a prepared
 transaction together (the two repairs are tested apart); more than 64 prepared transactions in one pass (the rest wait for the next).
+
+### 5.10 P2d-5 as built: `now()`
+
+A statement the lowering turns into `Nondet now` (`select now() from t`: `now()` needs a table, ir.md section 6) has the effect `nondet now`, and the
+guard lets it through if the token allows `n`. The transaction notes it. When the transaction ends, **before** anything is made durable, the proxy runs
+`select (extract(epoch from now()) * 1000000)::bigint` inside the same transaction (PostgreSQL's `now()` is the transaction's start, the same for every
+statement in it: F7) and records the answer as one `int` in the commit's `nondet`, in microseconds, as D9 says. A transaction that read no clock records an
+empty `nondet`; one that read it twice records one value, because there is one. If the read fails the transaction is rolled back and nothing is logged.
+
+The test compares the recorded value with **what the client was shown** by its own `select now()`, to the microsecond, in an explicit transaction (two selects, one
+value) and in an autocommit statement (its own value); the three verifiers accept the log, whose `Value` encoding they check. `random()`, `clock_timestamp()` and
+the other sources stay refused by the lowering (`nondeterministic`, `0A000`): only `now()` is recorded.
+
+What this does not give: **replay** (L3) is not specified, so nothing yet *uses* the recorded value; it says what a replay would have to substitute. The value is
+read by a second statement, so a transaction with `now()` costs one more upstream round trip (measured with the rest at P2e).
+
+### 5.11 P2e: what the commit path costs, measured
+
+`scripts/measure_p2e.py` runs the same statements directly against PostgreSQL 16 and through the proxy, with a raw simple-query client (no driver), one
+client after another, `fsync` and `synchronous_commit` **on** for the server (the throwaway config has them off, which would flatter the direct side).
+One machine, a sandbox container, 600 statements each; the numbers are for ordering and magnitude, not for a datasheet. Milliseconds per statement, median
+(95th percentile):
+
+| | direct | through the proxy |
+|---|---|---|
+| `select` of one row by key | 0.06 (0.09) | **6.2 (9.2)** |
+| `insert` of one row, autocommit | 0.06 (0.09) | **6.4 (9.0)** |
+| a transaction of 10 selects with `BEGIN` and `COMMIT` | | 22.3 (28.5) in all: ~1.9 a statement |
+| `select now()` | | 6.4 (8.7) |
+| four clients at once, selects | 23,900 statements/s | **147 statements/s** |
+| one `fsync` of a small file on this disk | 0.15 (0.27) | |
+
+**The proxy is about a hundred times slower than PostgreSQL for a point statement, and a single commit is the whole of it.** Where the 6 ms go, measured
+and not guessed: a `strace` of one statement shows the time between the last byte of the answer and the first `write` to a store, which is the commit being
+built and signed, at about 5.9 ms under `strace`; a cancho program that only calls `ed25519.sign` 200 times takes 3.7 ms a call. **The signature is about
+60 % of the cost**: `std.ed25519.sign` takes only the seed, so it derives the public key (a second scalar multiplication) on every call. The three `fsync`s
+are about 0.45 ms on this disk (0.15 each: a fast disk; on one where an `fsync` costs 2 to 10 ms they would be the largest part and the proxy would be
+a few times slower than here); the schema snapshot is one more round trip to PostgreSQL on every statement (a few tenths of a millisecond), and `BEGIN`,
+`PREPARE TRANSACTION` and `COMMIT PREPARED` are one round trip each.
+
+**Throughput is one commit at a time**, as P2-D6 chose, and it shows: four clients get 147 statements a second together, which is one client's rate (a
+statement every 6.8 ms), not four times it. The log grows by 360 bytes a commit, 71 bytes of statements, and the token once per connection.
+
+What would help, **not done** (each is a change with its own gate, and none is needed for M1's claims): sign with a known public key (the seed is fixed for the
+life of the process, so the proxy can derive it once; needs `std.ed25519` to take it, which is the compiler repository's, not this one's); read the schema snapshot
+once per change instead of per statement; batch commits (group commit: one `fsync` for several clients' commits, which the single-threaded loop does not do).
+**Every `select` is a commit**: for read-heavy work this is the price of an audit that says what was read (P2-D4), and it is a large one.

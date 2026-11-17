@@ -698,11 +698,9 @@ cw.query("insert into p2d values (4, 'd')")
 cw.query("rollback")
 r_read = cw.query("select a from p2d where a = 1")
 r_dup = cw.query("insert into p2d values (1, 'dup')")
-r_now = cw.query("select now() from p2d where a = 1")
 r_post = cw.query("insert into p2d values (5, 'e')")
 check("P2d: the commits answered", tags_of(r_commit) == ["COMMIT"] and tags_of(r_read) == ["SELECT 1"] and tags_of(r_post) == ["INSERT 0 1"], str((r_commit, r_read, r_post)))
-check("P2d: a failing statement and a nondeterministic one are errors, and commit nothing",
-      any(m[0] == "E" for m in r_dup) and any(m[0] == "E" for m in r_now), str((r_dup, r_now)))
+check("P2d: a failing statement is an error, and commits nothing", any(m[0] == "E" for m in r_dup), str(r_dup))
 cw.close()
 time.sleep(0.3)
 rows = direct("select string_agg(a::text, ',' order by a) from p2d").stdout.strip()
@@ -907,7 +905,120 @@ lt.stop()
 argv = ["--root", ROOT, "--tokens", str(ldir / "tokens"), "--stmts", str(ldir / "stmts")]
 out = subprocess.run(["python3", str(ROOT_DIR / "tools" / "verify.py"), str(ldir / "log")] + argv, capture_output=True, text=True).stdout.strip()
 check("P2d-4 live: and the files verify at L2 and IR", out.startswith("ok commits=2"), out)
+
+# a transaction larger than a commit can name is refused (54000) and aborts the transaction, as any refused statement does
+direct("drop table if exists p2l; create table p2l(a int primary key)")
+ld = Path(_scratch, "p2l")
+ld.mkdir()
+lgp, lgport = start_logged(ld, Path(_scratch, "key"))
+lgw = Wire(lgport, good)
+lgw.query("begin")
+answers = [lgw.query("select a from p2l where a = 1") for _ in range(65)]
+refused_at = [i for i, m in enumerate(answers) if any(x[0] == "E" and b"54000" in x[1] for x in m)]
+r_after = lgw.query("select a from p2l where a = 1")
+r_end = lgw.query("rollback")
+check("P2d: the 65th statement of a transaction is refused 54000 (the 64 before it ran), the transaction is then failed (25P02) until ROLLBACK",
+      refused_at == [64] and any(x[0] == "E" and b"25P02" in x[1] for x in r_after) and tags_of(r_end) == ["ROLLBACK"], str((refused_at, r_after, r_end)))
+lgw.close()
+lgp.terminate()
+lgp.communicate(timeout=10)
+check("P2d: ... and nothing of it is in the log", commits_in(ld) == 0, commits_in(ld))
+direct("drop table if exists p2l")
 direct("drop table if exists p2f")
+
+# ---- P2d-5: now() is read inside the transaction and recorded in the commit (P2-D9)
+import datetime
+
+direct("drop table if exists p2n; create table p2n(a int primary key)")
+direct("insert into p2n values (1)")
+nd_dir = Path(_scratch, "p2n")
+nd_dir.mkdir()
+np_, nport = start_logged(nd_dir, Path(_scratch, "key"))
+nw = Wire(nport, good)
+
+
+def effects_start(enc):
+    """Where a commit's effects begin: after the version, parents, branch, seq, schema and statements."""
+    at = 2
+    at += 4 + 32 * struct.unpack(">I", enc[at:at + 4])[0]
+    at += 2 + struct.unpack(">H", enc[at:at + 2])[0] + 8 + 32
+    at += 4 + 32 * struct.unpack(">I", enc[at:at + 4])[0]
+    return at
+
+
+def nondet_start(enc):
+    """Where a commit's nondet list begins: after the effects, the token and principal, and the code hashes."""
+    at = effects_start(enc)
+    n = struct.unpack(">I", enc[at:at + 4])[0]
+    at += 4
+    for _ in range(n):
+        at += 1 + 2 + struct.unpack(">H", enc[at + 1:at + 3])[0]
+    at += 32 + 32
+    at += 4 + 32 * struct.unpack(">I", enc[at:at + 4])[0]
+    return at
+
+
+def values_of(enc):
+    pos = nondet_start(enc)
+    n = struct.unpack(">I", enc[pos:pos + 4])[0]
+    pos += 4
+    vals = []
+    for _ in range(n):
+        tag = enc[pos]
+        if tag == 1:
+            vals.append(struct.unpack(">q", enc[pos + 1:pos + 9])[0])
+            pos += 9
+        elif tag == 0:
+            vals.append(None)
+            pos += 1
+        else:
+            ln = struct.unpack(">I", enc[pos + 1:pos + 5])[0]
+            vals.append(enc[pos + 5:pos + 5 + ln])
+            pos += 5 + ln
+    return vals
+
+
+def micros(text):
+    """A timestamptz as PostgreSQL prints it (`2026-11-17 19:52:01.123456+00`) in microseconds since the epoch."""
+    if len(text) > 3 and text[-3] in "+-" and ":" not in text[-3:]:
+        text += ":00"
+    dt = datetime.datetime.fromisoformat(text)
+    return (dt - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)) // datetime.timedelta(microseconds=1)
+
+
+def first_column(msgs):
+    for k, body in msgs:
+        if k == "D":
+            ln = struct.unpack(">I", body[2:6])[0]
+            return body[6:6 + ln].decode()
+    return None
+
+
+nw.query("begin")
+t1 = first_column(nw.query("select now() from p2n where a = 1"))
+time.sleep(0.05)
+t2 = first_column(nw.query("select now() from p2n where a = 1"))
+nw.query("commit")
+t3 = first_column(nw.query("select now() from p2n where a = 1"))
+nw.query("insert into p2n values (2)")
+nw.close()
+time.sleep(0.3)
+np_.terminate()
+np_.communicate(timeout=10)
+ncommits = read_log(nd_dir / "log")
+check("P2d-5: a statement with now() runs (it was refused before), and in a transaction now() is one value", t1 is not None and t1 == t2 and t3 is not None and t3 != t1, str((t1, t2, t3)))
+check("P2d-5: three commits (the transaction, the autocommit select, the insert)", len(ncommits) == 3, len(ncommits))
+if len(ncommits) == 3:
+    v0, v1, v2 = (values_of(c[4]) for c in ncommits)
+    check("P2d-5: the transaction's commit records now() as ONE int value: exactly the one the client was shown, in microseconds", v0 == [micros(t1)], str((v0, t1, micros(t1))))
+    check("P2d-5: the autocommit select records its own now()", v1 == [micros(t3)] and v1 != v0, str((v1, t3)))
+    check("P2d-5: a commit that read no clock records no nondet value", v2 == [], str(v2))
+    check("P2d-5: the effects of the first two name the nondeterminism (kind 4, `now`)", all((4, b"now") in c[3][3] for c in ncommits[:2]) and (4, b"now") not in ncommits[2][3][3], [c[3][3] for c in ncommits])
+    argv = ["--root", ROOT, "--tokens", str(nd_dir / "tokens"), "--stmts", str(nd_dir / "stmts")]
+    for vname, cmd in [("python", ["python3", str(ROOT_DIR / "tools" / "verify.py")])] + [(v, [v]) for v in VERIFIERS]:
+        out = subprocess.run(cmd + [str(nd_dir / "log")] + argv, capture_output=True, text=True).stdout.strip()
+        check("P2d-5: %s accepts the log with its nondet values at L2 and IR" % vname, out.startswith("ok commits=3"), out)
+direct("drop table if exists p2n")
 
 check("the proxy is still alive after all of it", proxy.poll() is None)
 direct("drop table if exists p0_e2e, p0_big cascade")
