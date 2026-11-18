@@ -212,3 +212,39 @@ cannot be hashed or merged and made every `UPDATE` fail, and the new side of a c
 **Not yet:** the proxy reading `cdb.facts`, `changes` and `state` in the commit, the crash-consistency test (M2b-2); a limit on the number of facts a transaction may carry (the facts text is read
 whole; M2b-2 sets it, with its own rule).
 
+## 9. M2b-2: how the proxy uses the capture (design; nothing here is built)
+
+M2b-2 is the first change to the trusted commit path since P2d, so it is written down, with what was measured for it, before any code. It is two PRs: **M2b-2a** installs the capture and changes
+no commit; **M2b-2b** puts `changes` and `state` in the commit.
+
+**Measured for it** (PostgreSQL 16.15, the throwaway server, a superuser role):
+
+* An **event trigger** on `CREATE TABLE` that calls `cdb.track` on the new table captures writes **in the same transaction**: a table created, then two rows inserted and one updated, gave two net facts
+  (both inserts, the second image of the updated row). Creating a table **without a primary key fails** at the `CREATE TABLE` with `cdb.track: table ev2 has no primary key`. Creating the event trigger
+  needs a **superuser** (PostgreSQL's rule), so the upstream role must be one, or an administrator installs `sql/capture.sql` once and the proxy only checks it is there.
+* `cdb.facts` is about **150 bytes a fact** for an ordinary row (1,000 changed rows: 149,785 bytes). It is a text, read whole.
+
+**Decisions.** Each follows from the above or from M1; the ones marked *Open* change what a client can do and are for the owner.
+
+* **D14. The proxy installs `sql/capture.sql` at start and an event trigger on `CREATE TABLE`.** The file is turned into a generated cancho module (one statement per function, the file's `$$` bodies
+  kept whole) by a tool that has a `--check` mode like the other generated files, and run statement by statement through the proxy's own extended-protocol command. Idempotent, so a restart is safe.
+* **D15. *Open.* A table without a primary key cannot exist behind the proxy.** `CREATE TABLE` of one fails (above), and at start the proxy **refuses to start** if the schema `public` already holds one,
+  naming it. The alternative, skipping such a table and refusing writes to it, leaves a state where `changes` silently misses a table if the refusal has a hole; refusing to start does not. A client that
+  needs a keyless table does not get one until the format has a row identity for it (not in M2).
+* **D16. Reads cost nothing extra.** A transaction whose effects have no `write` or `ddl` has the empty `changes` (a constant computed once, `c068815f...`) and does not ask the database for facts. A
+  write transaction asks `select cdb.facts(txid_current())` in its own transaction **before** building the commit (the facts feed `changes`, which feeds the commit id, which is the prepared transaction's name),
+  then `update cdb.delta set commit_id = <id> where xid = txid_current()` in the same transaction, then `PREPARE TRANSACTION`. That is two more round trips on a write (not measured yet: M2b-2b reports it);
+  the delta rows join the data's fate, because they are inside the prepared transaction.
+* **D17. *Open.* A transaction may carry facts up to a bound; beyond it the commit is refused.** The bound is the size of the facts text the proxy reads: 256 KB, about 1,700 ordinary facts. The refusal is the
+  existing `transaction-too-large` (54000) with the transaction rolled back. *Alternative:* compute the Merkle root inside PostgreSQL (`cdb.changes(xid)`), so that the proxy reads 32 bytes and the bound is
+  gone; it costs a third implementation of the tree (in SQL), checked against the same golden cases. *Recommended:* the bound, now; the SQL root when a user hits it.
+* **D18. `state` of a branch's tip is kept with the tip.** The chain record gains the 32 bytes; recovery at start takes it from the last commit of the branch in the log (the commit holds its own `state`), so
+  there is no new file.
+* **D19. Recovery is unchanged.** The prepared transaction is still `cdb:<id>`; settling it commits or rolls back the data and its delta rows together.
+
+**Gate for M2b-2b:** the `changes` of every commit through the proxy equals the Python reference over the net facts recomputed from the rows of `cdb.delta` with that `commit_id` (the test recomputes the
+net effect itself); the `state` chain recomputes from the log alone; the verifiers at L1 and L2 still accept the log; a kill between `PREPARE TRANSACTION` and `COMMIT PREPARED` leaves, after recovery,
+the data and its delta rows both present or both absent; the cost of the two extra round trips is reported.
+
+**Not in M2b-2:** branches (M2c), `AS OF`, merge, L3 replay.
+
