@@ -1109,8 +1109,29 @@ fn lower_select[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], 
         return fail(sc, 0, e_cannot_lower());
     }
     if from == 0 {
-        // a SELECT with no FROM has no table: the IR requires at least one
-        return fail(sc, 0, e_cannot_lower());
+        // a SELECT with no FROM has no table, which a Select needs. The one thing it can be is a call: `select f(constants)` and nothing else, which is the IR's
+        // statement `Call` (docs/spec/ir.md section 2, tag 5), the form of `cancho_fork('name')` (docs/m2-branches.md D23)
+        if wh != 0 || group != 0 || having != 0 || order != 0 || limit != 0 || offset != 0 || nodes[6 * root + 1] != 0 || nodes[6 * items + 3] != 1 {
+            return fail(sc, 0, e_cannot_lower());
+        }
+        let only = kids[nodes[6 * items + 2]];
+        if nodes[6 * only] == parse.n_star() || nodes[6 * only + 2] < 0 {
+            return fail(sc, 0, e_cannot_lower());
+        }
+        let ex = kids[nodes[6 * only + 2]];
+        if nodes[6 * ex] != parse.n_call() {
+            return fail(sc, 0, e_cannot_lower());
+        }
+        let start = sc[0];
+        r0 = emit_expr(sql, toks, nodes, kids, ex, schema, rs, out, sc);
+        if r0 < 0 {
+            return r0;
+        }
+        // an expression `Call` is the statement `Call` with another tag; a `now()` is a `Nondet` (tag 3) and is no call
+        if int_of(out[start]) != 4 {
+            return fail(sc, 0, e_cannot_lower());
+        }
+        return patch(out, start, 5, 1);
     }
     r0 = w8(out, sc, 6);
     if r0 < 0 {

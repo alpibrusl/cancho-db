@@ -38,7 +38,7 @@ class Tee:
     def fault(self, prefix, when, action):
         """Run `action` (kill the proxy) once, at the first Query whose text starts with `prefix`. `when` is "before": the Query is
         dropped, never reaching the server; "reply": the Query is forwarded and the server's answer to it is dropped, never reaching
-        the proxy; "after": the Query is forwarded and `action` runs at once; "drop": the Query is dropped and the connection (both ends) closed, `action` unused. Each reaches one window of docs/m1-commit-path.md section 4."""
+        the proxy; "after": the Query is forwarded and `action` runs at once; "drop": the Query is dropped and the connection (both ends) closed, `action` unused; "hold": the Query is forwarded, and the server's answer is kept from the proxy until `action` has returned (then sent as it was): a window for something else to happen meanwhile. Each reaches one window of docs/m1-commit-path.md section 4."""
         with self.lock:
             self.faults.append([prefix, when, action])
 
@@ -105,8 +105,10 @@ class Tee:
                 if not d:
                     break
                 if held is not None and held:
-                    held.pop()()          # the answer the proxy was to get is dropped, and the proxy is killed instead
-                    continue
+                    act, forward = held.pop()
+                    act()                 # "reply": the answer the proxy was to get is dropped, and the proxy is killed instead; "hold": it is sent once `act` has returned
+                    if not forward:
+                        continue
                 b.sendall(d)
         except OSError:
             pass
@@ -180,7 +182,11 @@ class Tee:
                             f[2]()
                             continue
                         if f[1] == "reply":
-                            held.append(f[2])
+                            held.append((f[2], False))
+                        elif f[1] == "hold":
+                            u.sendall(msg)
+                            held.append((f[2], True))
+                            continue
                         elif f[1] == "after":
                             u.sendall(msg)
                             f[2]()
@@ -203,7 +209,7 @@ class Tee:
                             f[2]()
                             continue
                         if f[1] == "reply":
-                            held.append(f[2])
+                            held.append((f[2], False))
                         elif f[1] == "after":
                             u.sendall(msg)
                             f[2]()

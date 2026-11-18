@@ -8,6 +8,7 @@ import cdb.login;
 import cdb.guard;
 import cdb.catalog;
 import cdb.commitpath;
+import cdb.forkpath;
 
 // The extended protocol (docs/m1-extended.md, P3b and P3c). The proxy handles one client message at a time and waits for the server's
 // answer to it before the next ("lockstep": `st[cp + 17]` is the message in flight and `xi[8 * cp]` what completes it), so that what it says
@@ -259,7 +260,7 @@ fn ensure_txn[&h, &t, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared
     if st[p + 16] != 0 || st[q + 21] == 1 {
         return (table, 0);
     }
-    let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port);
+    let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port, st[p + 23]);
     table = t1;
     if snap_len < 0 {
         return (table, 0 - 1);
@@ -318,7 +319,7 @@ fn do_parse[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core,
     if refused {
         return table;
     }
-    let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port);
+    let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port, st[p + 23]);
     table = t1;
     if snap_len < 0 {
         borrow mut table as &!tw in {
@@ -342,6 +343,8 @@ fn do_parse[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core,
                 fail(tw, core, k, "0A000", "empty-statement", "an empty statement is not supported");
             } else if vd[6] == 0 && st[p + 16] == 2 {
                 fail(tw, core, k, "25P02", "in-failed-transaction", "current transaction is aborted, commands ignored until end of transaction block");
+            } else if vd[6] == 0 && forkpath.is_fork(vd[7], effs[0..vd[9]]) {
+                fail(tw, core, k, "0A000", "fork-extended-protocol", "cancho_fork is run as a simple query: select cancho_fork('<name>')");
             } else if vd[8] > 2048 || vd[9] > 512 {
                 fail(tw, core, k, "54000", "statement-too-large", "the statement is larger than the proxy records");
             } else {
@@ -573,7 +576,7 @@ fn exec_txn[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core,
     }
     if kind == 1 {
         if ts == 0 {
-            let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port);
+            let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port, st[p + 23]);
             table = t1;
             var r = 0 - 1;
             if snap_len >= 0 {

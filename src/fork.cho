@@ -1,0 +1,120 @@
+edition 9;
+module cdb.fork;
+
+// The fork statement (docs/m2-branches.md D23): `select cancho_fork('<name>')`, read from the text of one statement, and the query the proxy sends upstream in its place.
+//
+// The guard has already lowered the statement to the IR `Call` and checked the token for `call cancho_fork`; what is left for this file is the argument, which the IR holds
+// as an expression and the proxy needs as a name. The shape accepted is exactly `select cancho_fork('<name>')`, with spaces between the words, an optional `;` and nothing else,
+// so that a name is never computed or cast or quoted into something the proxy did not read.
+
+import cdb.upstream;
+
+fn lower_of(c: int) -> [] int {
+    if c >= 'A' && c <= 'Z' {
+        return c + 32;
+    }
+    return c;
+}
+
+fn is_space(c: int) -> [] bool {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+// Skip spaces from `at`: where the next byte that is not one is.
+fn skip[&d](sql: &d [byte], at: int) -> [] int {
+    var i = at;
+    while i < len(sql) && is_space(int_of(sql[i])) {
+        i = i + 1;
+    }
+    return i;
+}
+
+// Whether the word `w` (lower case) is in `sql` at `at`, ignoring the case of the text.
+fn word_at[&d, &w](sql: &d [byte], at: int, word: &w [byte]) -> [] bool {
+    if at + len(word) > len(sql) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if lower_of(int_of(sql[at + i])) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Read `select cancho_fork('<name>')` from `sql`: the length of the name, written to `name`; -1 if the text is not that shape, -2 if it is but the name is not a name a branch
+// can have (1 to 40 of `a-z`, `0-9`, `_`).
+pub fn parse[&d, &n](sql: &d [byte], name: &!n [byte]) -> [] int {
+    var at = skip(sql, 0);
+    if !word_at(sql, at, "select") {
+        return 0 - 1;
+    }
+    at = skip(sql, at + 6);
+    if !word_at(sql, at, "cancho_fork") {
+        return 0 - 1;
+    }
+    at = skip(sql, at + 11);
+    if at >= len(sql) || int_of(sql[at]) != '(' {
+        return 0 - 1;
+    }
+    at = skip(sql, at + 1);
+    if at >= len(sql) || int_of(sql[at]) != '\'' {
+        return 0 - 1;
+    }
+    at = at + 1;
+    let start = at;
+    while at < len(sql) && int_of(sql[at]) != '\'' {
+        at = at + 1;
+    }
+    if at >= len(sql) {
+        return 0 - 1;
+    }
+    let nl = at - start;
+    at = skip(sql, at + 1);
+    if at >= len(sql) || int_of(sql[at]) != ')' {
+        return 0 - 1;
+    }
+    at = skip(sql, at + 1);
+    if at < len(sql) && int_of(sql[at]) == ';' {
+        at = skip(sql, at + 1);
+    }
+    if at != len(sql) {
+        return 0 - 1;
+    }
+    if !upstream.branch_name_ok(sql[start..start + nl]) {
+        return 0 - 2;
+    }
+    var i = 0;
+    while i < nl {
+        name[i] = sql[start + i];
+        i = i + 1;
+    }
+    return nl;
+}
+
+fn put[&o, &t](out: &!o [byte], at: int, text: &t [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        out[at + i] = text[i];
+        i = i + 1;
+    }
+    return at + len(text);
+}
+
+// The query that does the fork upstream (D2, D24): `select cdb.fork('<source schema>', 'cdb_b_<name>') as cancho_fork`, into `out`: its length. The source is the schema of the
+// connection's branch: `public` for the first (`src_len` 0), `cdb_b_<src>` for another.
+pub fn render[&o, &s, &n](out: &!o [byte], src: &s [byte], src_is_first: bool, name: &n [byte]) -> [] int {
+    var at = put(out, 0, "select cdb.fork('");
+    if src_is_first {
+        at = put(out, at, "public");
+    } else {
+        at = put(out, at, "cdb_b_");
+        at = put(out, at, src);
+    }
+    at = put(out, at, "', 'cdb_b_");
+    at = put(out, at, name);
+    at = put(out, at, "') as cancho_fork");
+    return at;
+}

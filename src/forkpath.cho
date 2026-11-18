@@ -1,0 +1,87 @@
+edition 9;
+module cdb.forkpath;
+
+// The proxy's side of a fork (docs/m2-branches.md D23): what is decided when the statement `select cancho_fork('<name>')` arrives, before it runs. The guard has accepted it
+// (the token may `call cancho_fork`); this checks the rest and, if all is well, puts the query that does the copy upstream in the guard's rendering's place. The commit of the new
+// branch is made by `commitpath.conclude` when the statement's transaction ends.
+
+import std.conns;
+import cdb.shared;
+import cdb.commitpath;
+import cdb.fork;
+import cdb.token;
+import cdb.store;
+
+// Whether the statements a message holds are exactly `call cancho_fork`: one statement, one effect, of kind 3 (call), whose target is that name.
+pub fn is_fork[&e](nstmts: int, effs: &e [byte]) -> [] bool {
+    let want = "cancho_fork";
+    if nstmts != 1 || len(effs) != 3 + len(want) || int_of(effs[0]) != 3 || int_of(effs[1]) != 0 || int_of(effs[2]) != len(want) {
+        return false;
+    }
+    var i = 0;
+    while i < len(want) {
+        if int_of(effs[3 + i]) != int_of(want[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn refuse[&t, &c, &a, &b, &d](tab: &!t conns.Table, core: &!c shared.Core, k: int, ts: int, sqlstate: &a [byte], tag: &b [byte], text: &d [byte]) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    if ts == 1 {
+        commitpath.upstream_exec(tab, core, st[p + 1], "ROLLBACK");
+        commitpath.reset(core, k);
+        st[p + 16] = 2;
+    }
+    var status = 'E';
+    if ts == 0 {
+        status = 'I';
+    }
+    shared.answer_error(tab, core, k, status, sqlstate, tag, text);
+    return 0;
+}
+
+// Decide a fork statement of client `k` (its text `sql`; `ts` the client's transaction state). Answers the length of the query now in `core.rend` (the caller sends that instead of
+// the guard's rendering), or -1 if the client has been told it is refused. What the commit will need is left in `core.fkn` for `k`: the source's tip, and the new name.
+pub fn start[&t, &c, &s](tab: &!t conns.Table, core: &!c shared.Core, k: int, ts: int, sql: &s [byte]) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    let rec = contents(core.fkn)[k * shared.fork_rec()..k * shared.fork_rec() + shared.fork_rec()];
+    if ts != 0 {
+        return refuse(tab, core, k, ts, "25001", "fork-in-transaction", "cancho_fork must be a statement of its own, outside a transaction block") - 1;
+    }
+    let nl = fork.parse(sql, rec[34..74]);
+    if nl == 0 - 1 {
+        return refuse(tab, core, k, ts, "0A000", "fork-malformed", "the fork statement is: select cancho_fork('<name>')") - 1;
+    }
+    if nl < 0 {
+        return refuse(tab, core, k, ts, "22023", "fork-bad-name", "a branch name is 1 to 40 characters of a-z, 0-9 and _") - 1;
+    }
+    let name = rec[34..34 + nl];
+    if token.branch_denied(contents(core.tokb)[k * shared.token_max()..k * shared.token_max() + st[p + 12]], name) {
+        return refuse(tab, core, k, ts, "42501", "fork-branch-denied", "the token does not allow the new branch") - 1;
+    }
+    let tk = shared.branch_taken(core, name);
+    if tk == 1 {
+        return refuse(tab, core, k, ts, "42710", "fork-branch-exists", "a branch of that name exists") - 1;
+    }
+    if tk == 2 {
+        return refuse(tab, core, k, ts, "54000", "fork-too-many-branches", "the log holds as many branches as the proxy keeps") - 1;
+    }
+    // what the commit will check is still true: the source's tip is the one the copy is made after
+    let bx = st[p + 23];
+    let chain = contents(core.store.chain);
+    var i = 0;
+    while i < 32 {
+        rec[i] = contents(core.store.tip)[64 * bx + i];
+        i = i + 1;
+    }
+    rec[32] = byte_of(chain[4 + 3 * bx + 2]);
+    rec[33] = byte_of(nl);
+    let names = contents(core.store.names);
+    let sn = names[bx * store.branch_name_max()..bx * store.branch_name_max() + chain[4 + 3 * bx]];
+    return fork.render(contents(core.rend), sn, bx == 0, name);
+}

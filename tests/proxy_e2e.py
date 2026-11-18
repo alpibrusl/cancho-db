@@ -787,6 +787,8 @@ if len(commits) == 4:
     cp3.communicate(timeout=10)
     commits3 = read_log(_d / "log")
     check("M2c-1: a server configured with a new branch starts it: first commit, seq 0, no parent", len(commits3) == 6 and commits3[5][0] == b"dev" and commits3[5][1] == 0 and commits3[5][2] == [], str([(c[0], c[1]) for c in commits3]))
+    # a branch other than the first has a schema of its own, `cdb_b_<name>` (M2c-2, D22): this one is made by hand, there being no fork in this part of the test
+    direct("drop schema if exists cdb_b_dev cascade; create schema cdb_b_dev; create table cdb_b_dev.p2d(a int primary key, b text)")
     cp4, cport4 = start_logged(_d, Path(_scratch, "key"), "main")
     cw4 = Wire(cport4, good, b"dev")
     cw4.query("insert into p2d values (8, 'h')")
@@ -803,6 +805,7 @@ if len(commits) == 4:
     check("M2c-1: and main goes on from main's tip, not from dev's", commits4[7][0] == b"main" and commits4[7][1] == 5 and commits4[7][2] == [cid_of(commits3[4])], str([(c[0], c[1], len(c[2])) for c in commits4[6:]]))
     check("M2c-1: a database that is not a branch of the log is refused as a branch the token does not allow", error_state(refused) == "3D000", str(refused[:60]))
     out = subprocess.run(["python3", str(ROOT_DIR / "tools" / "verify.py"), str(_d / "log")] + argv, capture_output=True, text=True).stdout.strip()
+    direct("drop schema if exists cdb_b_dev cascade")
     check("M2c-1: the log of two branches verifies", out.startswith("ok commits=8 branches=2"), out)
 direct("drop table if exists p2d")
 
