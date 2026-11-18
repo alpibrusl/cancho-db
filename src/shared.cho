@@ -114,15 +114,17 @@ pub fn sbuf_max() -> [] int {
 }
 
 // What the proxy keeps of the log directory while it runs (P2d-2): the three files, held open and locked, the signing seed, and where the
-// branch's chain ends. `chain[0]` is the next `seq`, `chain[1]` is 1 if the branch has a tip (its id is `tip`), `chain[2]` the commits in the log.
+// each branch's chain ends (docs/m2-branches.md D20). `chain[0]` is how many branches there are, `chain[2]` the commits in the log, and branch `b` has three ints from
+// `chain[4 + 3 * b]`: the length of its name (kept in `names`, `store.branch_name_max()` bytes each), its next `seq`, and 1 if it has a tip (its id and `state` are in `tip` at `64 * b`).
 pub res struct Store {
     log: File,
     tokens: File,
     stmts: File,
     // the signing seed (32 bytes) and, after it, its public key (32 bytes), derived once here: a signature that is given the key does not derive it again (`sign_with_public`, half the cost of a commit's signature)
     seed: Box[[byte]],
-    // the id of the branch's last commit (32 bytes), then that commit's `state` (32 bytes)
+    // for each branch the id of its last commit (32 bytes), then that commit's `state` (32 bytes)
     tip: Box[[byte]],
+    names: Box[[byte]],
     chain: Box[[int]],
     // the id of every commit the log holds, 32 bytes each in log order (`chain[2]` of them): recovery asks it which prepared
     // transactions have a commit (P2-D11)
@@ -455,11 +457,13 @@ pub fn drop_core[&h](heap: &!h Heap, core: Core) -> [heap] int {
     return 0;
 }
 
-// A `Store` around three open files; `seed` (32 bytes) and `tip` (64 bytes: the id of the last commit, then its `state`; meaningful if `has` is 1) are copied.
-pub fn new_store[&h, &s, &t, &i](heap: &!h Heap, log: File, tokens: File, stmts: File, seed: &s [byte], tip: &t [byte], next: int, has: int, ids: &i [byte], count: int) -> [heap] Store {
+// A `Store` around three open files; `seed` (32 bytes), the branch table (`tips` 64 bytes each, `names`, `bi` three ints each, `branches` of them: what `store.open_log`
+// filled in) and the `count` ids of `ids` are copied.
+pub fn new_store[&h, &s, &t, &n, &j, &i](heap: &!h Heap, log: File, tokens: File, stmts: File, seed: &s [byte], tips: &t [byte], names: &n [byte], bi: &j [int], branches: int, ids: &i [byte], count: int) -> [heap] Store {
     var sb = box_slice(heap, 64, byte_of(0));
-    var tb = box_slice(heap, 64, byte_of(0));
-    var cb = box_slice(heap, 4, 0);
+    var tb = box_slice(heap, 64 * store.branches_max(), byte_of(0));
+    var nb = box_slice(heap, store.branch_name_max() * store.branches_max(), byte_of(0));
+    var cb = box_slice(heap, 4 + 3 * store.branches_max(), 0);
     var ib = box_slice(heap, 32 * ids_max(), byte_of(0));
     borrow mut sb as &!sw in {
         var i = 0;
@@ -471,15 +475,26 @@ pub fn new_store[&h, &s, &t, &i](heap: &!h Heap, log: File, tokens: File, stmts:
     }
     borrow mut tb as &!tw in {
         var i = 0;
-        while i < 64 {
-            contents(tw)[i] = tip[i];
+        while i < 64 * store.branches_max() {
+            contents(tw)[i] = tips[i];
+            i = i + 1;
+        }
+    }
+    borrow mut nb as &!nw in {
+        var i = 0;
+        while i < store.branch_name_max() * store.branches_max() {
+            contents(nw)[i] = names[i];
             i = i + 1;
         }
     }
     borrow mut cb as &!cw in {
-        contents(cw)[0] = next;
-        contents(cw)[1] = has;
+        contents(cw)[0] = branches;
         contents(cw)[2] = count;
+        var i = 0;
+        while i < 3 * store.branches_max() {
+            contents(cw)[4 + i] = bi[i];
+            i = i + 1;
+        }
     }
     borrow mut ib as &!iw in {
         var i = 0;
@@ -488,16 +503,17 @@ pub fn new_store[&h, &s, &t, &i](heap: &!h Heap, log: File, tokens: File, stmts:
             i = i + 1;
         }
     }
-    return Store { log: log, tokens: tokens, stmts: stmts, seed: sb, tip: tb, chain: cb, ids: ib };
+    return Store { log: log, tokens: tokens, stmts: stmts, seed: sb, tip: tb, names: nb, chain: cb, ids: ib };
 }
 
 pub fn drop_store[&h](heap: &!h Heap, kept: Store) -> [heap] int {
-    let Store { log, tokens, stmts, seed, tip, chain, ids } = kept;
+    let Store { log, tokens, stmts, seed, tip, names, chain, ids } = kept;
     file_close(log);
     file_close(tokens);
     file_close(stmts);
     unbox_slice(heap, seed);
     unbox_slice(heap, tip);
+    unbox_slice(heap, names);
     unbox_slice(heap, chain);
     unbox_slice(heap, ids);
     return 0;

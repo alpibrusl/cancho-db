@@ -32,7 +32,7 @@ FAILED = []
 
 
 def check(name, ok, detail=""):
-    print("%-4s %s%s" % ("ok" if ok else "FAIL", name, ("   " + detail) if detail and not ok else ""))
+    print("%-4s %s%s" % ("ok" if ok else "FAIL", name, ("   " + str(detail)) if detail and not ok else ""))
     if not ok:
         FAILED.append(name)
 
@@ -428,9 +428,9 @@ check("... and a table dropped behind its back is unknown-table (42P01), not a s
 class Wire:
     """A raw client of the proxy: sends simple queries and returns every message up to ReadyForQuery."""
 
-    def __init__(self, port, password):
+    def __init__(self, port, password, db=b"main"):
         self.s = socket.create_connection(("127.0.0.1", port), timeout=15)
-        self.s.sendall(startup_packet() + password_packet(password))
+        self.s.sendall(startup_packet(db) + password_packet(password))
         self.buf = b""
         self.read_until_ready()
 
@@ -776,6 +776,34 @@ if len(commits) == 4:
     check("P2d: a restart reads the tip back and the chain goes on (next seq 4, parent the old tip)", "next seq 4" in err2 and len(commits2) == 5 and commits2[4][1] == 4 and commits2[4][2] == [pyverify.hashlib.sha256(b"cancho-db/commit/v1\x00" + commits2[3][4]).digest()], err2)
     out = subprocess.run(["python3", str(ROOT_DIR / "tools" / "verify.py"), str(_d / "log")] + argv, capture_output=True, text=True).stdout.strip()
     check("P2d: and the longer log verifies", out.startswith("ok commits=5 branches=1"), out)
+    # M2c-1 (docs/m2-branches.md D20, D21): a log can hold several branches, each with its own chain, and the proxy serves every branch of its log
+    cid_of = lambda c: pyverify.hashlib.sha256(b"cancho-db/commit/v1\x00" + c[4]).digest()
+    cp3, cport3 = start_logged(_d, Path(_scratch, "key"), "dev")
+    cw3 = Wire(cport3, good, b"dev")
+    cw3.query("insert into p2d values (7, 'g')")
+    cw3.close()
+    time.sleep(0.3)
+    cp3.terminate()
+    cp3.communicate(timeout=10)
+    commits3 = read_log(_d / "log")
+    check("M2c-1: a server configured with a new branch starts it: first commit, seq 0, no parent", len(commits3) == 6 and commits3[5][0] == b"dev" and commits3[5][1] == 0 and commits3[5][2] == [], str([(c[0], c[1]) for c in commits3]))
+    cp4, cport4 = start_logged(_d, Path(_scratch, "key"), "main")
+    cw4 = Wire(cport4, good, b"dev")
+    cw4.query("insert into p2d values (8, 'h')")
+    cw4.close()
+    cw5 = Wire(cport4, good, b"main")
+    cw5.query("insert into p2d values (9, 'i')")
+    cw5.close()
+    refused = raw(cport4, startup_packet(b"nosuch") + password_packet(good))
+    time.sleep(0.3)
+    cp4.terminate()
+    err4 = cp4.communicate(timeout=10)[1]
+    commits4 = read_log(_d / "log")
+    check("M2c-1: a server configured with main serves dev too, since its log has it: dev goes on from its own tip", len(commits4) == 8 and commits4[6][0] == b"dev" and commits4[6][1] == 1 and commits4[6][2] == [cid_of(commits3[5])], str([(c[0], c[1]) for c in commits4]))
+    check("M2c-1: and main goes on from main's tip, not from dev's", commits4[7][0] == b"main" and commits4[7][1] == 5 and commits4[7][2] == [cid_of(commits3[4])], str([(c[0], c[1], len(c[2])) for c in commits4[6:]]))
+    check("M2c-1: a database that is not a branch of the log is refused as a branch the token does not allow", error_state(refused) == "3D000", str(refused[:60]))
+    out = subprocess.run(["python3", str(ROOT_DIR / "tools" / "verify.py"), str(_d / "log")] + argv, capture_output=True, text=True).stdout.strip()
+    check("M2c-1: the log of two branches verifies", out.startswith("ok commits=8 branches=2"), out)
 direct("drop table if exists p2d")
 
 # ---- P2d-4: the failure windows of docs/m1-commit-path.md section 4, reached from outside (a tee kills the proxy at a chosen message)

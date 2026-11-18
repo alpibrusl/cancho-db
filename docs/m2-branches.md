@@ -348,8 +348,21 @@ M2c turns the one branch the proxy serves (a command-line argument) into several
 
 | Slice | Delivers | Gate |
 |---|---|---|
-| **M2c-1** | the branch table, every tip found at start, the branch per connection, `search_path`, the snapshot per branch; the one branch behaves as before | the whole existing suite; `store_check` with logs of several chains (the L1 vectors of forks and merges); a connection to a branch that is not there is refused; mutants |
+| **M2c-1** | the branch table, every tip found at start, the branch per connection; the one branch behaves as before (**`search_path` and the snapshot per branch moved to M2c-2**, section 11: until a fork exists no branch has a schema of its own to point them at) | the whole existing suite; `store_check` with logs of several chains (the L1 vectors of forks and merges); a connection to a branch that is not there is refused; mutants |
 | **M2c-2** | `sch`, the lowering of `select f(constants)` to `Call`, the fork (copy, track, commit), connections to the new branch | two connections on two branches see their own data and a write in one is not in the other; the fork commit verifies at L1 and L2 (the three verifiers); a token that does not cover the new name cannot fork; a crash between the copy and the commit leaves a schema if and only if a commit; the fork's cost reported |
 
 **Not in M2c:** `AS OF`, merge, deleting a branch, forking another branch than the connection's, a branch of a branch of a name that was removed.
+
+## 11. M2c-1 as built
+
+The proxy's one branch became a table of branches, and a connection has one of them. Nothing a client of a single-branch log can see changed (the whole existing suite passes unchanged).
+
+* **The table** (`store.open_log`): the configured branch is entry 0 whether or not it has a commit; every other branch appears when its first commit is met in the log scan, in log order. For each branch the table has its name (at most
+  `branch_name_max()` = 64 bytes), its next `seq`, whether it has a tip, and the tip (the last commit's id, then its `state`). At most `branches_max()` = 64 branches; a log with more, or a name over 64 bytes, is refused at start as `r_too_big`.
+  `info[3]` and `info[5]` still describe the configured branch, so `tools` and tests that read them are unchanged.
+* **Login** looks the startup database up in the table: found, the token is checked against that branch as before (its `branch` pattern must allow it) and the index is kept in state slot 23; not found, `login-branch-denied` `3D000`, exactly the refusal
+  a database that was not the one branch got before. A server therefore serves every branch its log already holds, though a branch can only come to exist, until M2c-2, by an operator starting a server configured with a new name.
+* **A commit** takes its name, `seq`, parent and parent's `state` from the connection's branch, and advances that branch's chain only.
+* **Moved to M2c-2:** the `search_path` startup option and the schema snapshot per branch. Every branch of M2c-1 shares schema `public`, so there is nothing to point them at, and writing them now would be code no test can exercise. The claim
+  that comes with M2c-1 is therefore the narrow one, C108 to C110 in `claims.md`: chains are independent, and a branch that is not in the log is not reachable.
 

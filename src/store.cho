@@ -310,12 +310,40 @@ pub fn open_store[&h, &d, &n, &m](heap: &!h Heap, dir: &d Dir, name: &n [byte], 
 // 1 if there is a tip, and `tip` (64 bytes) is the id of the branch's last commit and then its `state` (docs/spec/state.md section 4). On refusal `info[1]` is the verifier's rule and
 // `info[2]` the record, for `r_corrupt()`. `ids` receives the id of every commit in the log, 32 bytes each, in order (recovery asks it which
 // commits the log holds, P2-D11): a log of more commits than it holds is refused as `r_too_big()`.
-pub fn open_log[&h, &d, &p, &b, &o, &t, &i](heap: &!h Heap, dir: &d Dir, pk: &p [byte], branch: &b [byte], info: &!o [int], tip: &!t [byte], ids: &!i [byte]) -> [heap, dir_read, dir_write, file_read, file_write] Opened {
+// The log may hold several branches (docs/m2-branches.md D20): `names` (`branch_name_max()` bytes each, NUL-padded) lists them, the configured
+// `branch` first whether or not it has a commit, then the others in the order their first commit appears; `bi` has three ints for each: the length
+// of its name, its next `seq` and 1 if it has a tip; `tip` has 64 bytes for each (id, then `state`); `info[6]` is how many there are (at most
+// `branches_max()`; more, or a name longer than `branch_name_max()`, is `r_too_big()`). `info[3]` and `info[5]` describe the configured branch.
+pub fn branches_max() -> [] int {
+    return 64;
+}
+
+pub fn branch_name_max() -> [] int {
+    return 64;
+}
+
+pub fn open_log[&h, &d, &p, &b, &o, &t, &i, &n, &j](heap: &!h Heap, dir: &d Dir, pk: &p [byte], branch: &b [byte], info: &!o [int], tip: &!t [byte], ids: &!i [byte], names: &!n [byte], bi: &!j [int]) -> [heap, dir_read, dir_write, file_read, file_write] Opened {
     var i = 0;
     while i < 8 {
         info[i] = 0;
         i = i + 1;
     }
+    i = 0;
+    while i < 3 * branches_max() {
+        bi[i] = 0;
+        i = i + 1;
+    }
+    // the configured branch is the first in the table, with or without a commit
+    if len(branch) > branch_name_max() {
+        return Opened::Failed(r_too_big());
+    }
+    i = 0;
+    while i < len(branch) {
+        names[i] = branch[i];
+        i = i + 1;
+    }
+    bi[0] = len(branch);
+    info[6] = 1;
     region hr {
         let head = alloc_slice[hr](40, byte_of(0));
         build.log_header(head, 0, pk);
@@ -407,7 +435,7 @@ pub fn open_log[&h, &d, &p, &b, &o, &t, &i](heap: &!h Heap, dir: &d Dir, pk: &p 
                             info[2] = verdict[1];
                         } else {
                             info[0] = verdict[2];
-                            // the tip of the branch served: the last whole record on it
+                            // the tip of every branch: the last whole record on each
                             let out = alloc_slice[hr](commit.out_len(), 0);
                             let ident = alloc_slice[hr](32, byte_of(0));
                             var at = 40;
@@ -424,15 +452,39 @@ pub fn open_log[&h, &d, &p, &b, &o, &t, &i](heap: &!h Heap, dir: &d Dir, pk: &p 
                                     build.put_bytes(ids, 32 * index, ident);
                                 }
                                 index = index + 1;
-                                if l1.same(enc[bat..bat + out[commit.f_branch_len()]], branch) {
+                                // which branch this commit is on: find its name in the table, or add it
+                                let bname = enc[bat..bat + out[commit.f_branch_len()]];
+                                var bx = 0;
+                                var found = 0 - 1;
+                                while bx < info[6] {
+                                    if l1.same(names[bx * branch_name_max()..bx * branch_name_max() + bi[3 * bx]], bname) {
+                                        found = bx;
+                                    }
+                                    bx = bx + 1;
+                                }
+                                if found < 0 {
+                                    if info[6] >= branches_max() || len(bname) > branch_name_max() {
+                                        code = r_too_big();
+                                    } else {
+                                        found = info[6];
+                                        info[6] = info[6] + 1;
+                                        var nj = 0;
+                                        while nj < len(bname) {
+                                            names[found * branch_name_max() + nj] = bname[nj];
+                                            nj = nj + 1;
+                                        }
+                                        bi[3 * found] = len(bname);
+                                    }
+                                }
+                                if found >= 0 {
                                     var j = 0;
                                     while j < 32 {
-                                        tip[j] = ident[j];
-                                        tip[32 + j] = enc[out[commit.f_state_at()] + j];
+                                        tip[64 * found + j] = ident[j];
+                                        tip[64 * found + 32 + j] = enc[out[commit.f_state_at()] + j];
                                         j = j + 1;
                                     }
-                                    info[3] = out[commit.f_seq_lo()] + 1;
-                                    info[5] = 1;
+                                    bi[3 * found + 1] = out[commit.f_seq_lo()] + 1;
+                                    bi[3 * found + 2] = 1;
                                 }
                                 at = at + 4 + length + 64;
                             }
@@ -466,6 +518,8 @@ pub fn open_log[&h, &d, &p, &b, &o, &t, &i](heap: &!h Heap, dir: &d Dir, pk: &p 
                 file_close(a);
                 return Opened::Failed(code);
             }
+            info[3] = bi[1];
+            info[5] = bi[2];
             return Opened::Ok(a);
         }
     }
