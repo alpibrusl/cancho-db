@@ -92,7 +92,7 @@ pub fn branch_name_ok[&d](name: &d [byte]) -> [] bool {
     var i = 0;
     while i < len(name) {
         let c = int_of(name[i]);
-        if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+        if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
             return false;
         }
         i = i + 1;
