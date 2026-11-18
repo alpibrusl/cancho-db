@@ -392,7 +392,7 @@ LOGIN = [
 PROXY = [
     # ---- the event loop (proxy/proxy.cho), judged by tests/proxy_e2e.py against a real PostgreSQL
     ("proxy: the signing key is not required", "proxy/proxy.cho", "    if !keyed {\n", "    if false {\n"),
-    ("proxy: a write is not prepared first", "src/commitpath.cho", "            if wrote {\n                step = upstream_exec(", "            if false {\n                step = upstream_exec("),
+    ("proxy: a write is not prepared first", "src/commitpath.cho", "            if step == 0 && wrote {\n                step = upstream_exec(", "            if false {\n                step = upstream_exec("),
     ("proxy: a read is prepared too", "src/commitpath.cho", "if kind >= 1 && kind <= 3 {", "if kind >= 0 && kind <= 3 {"),
     ("proxy: the chain does not advance", "src/commitpath.cho", "chain[0] = chain[0] + 1;", "chain[0] = chain[0];"),
     ("proxy: the tip is not remembered", "src/commitpath.cho", "                        tip[j] = ident[j];", "                        tip[j] = tip[j];"),
@@ -423,6 +423,13 @@ PROXY = [
     ("proxy: the capture is not installed", "src/catalog.cho", "    while i < capture_sql.count() {", "    while i < 0 {"),
     ("proxy: a keyless table does not stop the start", "src/catalog.cho", "    if commitpath.first_text_at(contents(core.snapin)) >= 0 {\n        return 1;", "    if false {\n        return 1;"),
     ("proxy: the tables already there are not tracked", "src/catalog.cho", '"select cdb.track_all()"', '"select 1"'),
+    # ---- changes and state in the commit (M2b-2b), judged by tests/changes_e2e.py
+    ("chg: the facts are not asked for", "src/commitpath.cho", '"select case when length(f) > 200000 then \'!\' else f end from (select cdb.facts(txid_current()) as f) s"', '"select \'\'"'),
+    ("chg: state ignores the parent's state", "src/commitpath.cho", "state.state(np, tip[32..32 + 32 * np], chg, stt);", "state.state(0, tip[32..32], chg, stt);"),
+    ("chg: the tip does not keep the state", "src/commitpath.cho", "tip[32 + j] = stt[j];", "tip[32 + j] = byte_of(0);"),
+    ("chg: the delta rows are not stamped with the commit", "src/commitpath.cho", "step = upstream_exec(tab, core, b, q[0..dn]);", "step = 0;"),
+    ("chg: the bound on facts is not asked", "src/commitpath.cho", "length(f) > 200000 then", "length(f) > 20000000 then"),
+    ("chg: a restart does not read the tip's state", "src/store.cho", "tip[32 + j] = enc[out[commit.f_state_at()] + j];", "tip[32 + j] = byte_of(0);"),
     ("proxy: SSLRequest is not answered N", "proxy/proxy.cho", "let no = alloc_slice[r](1, byte_of('N'));", "let no = alloc_slice[r](1, byte_of('S'));"),
     ("proxy: the client's application_name is dropped", "proxy/proxy.cho", "if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {", "if false {"),
     ("proxy: the upstream role is the client's", "src/upstream.cho", "\n    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "\n    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);"),
@@ -486,12 +493,12 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho", "capture_sql.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho", "capture_sql.cho", "state.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
                 try:
-                    judge = "ext_e2e.py" if label.startswith("ext:") else "proxy_e2e.py"
+                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "proxy_e2e.py"
                     r = subprocess.run([sys.executable, str(work / "tests" / judge), str(exe)], capture_output=True,
                                        text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
                     out, code = r.stdout + r.stderr, r.returncode

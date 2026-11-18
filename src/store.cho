@@ -307,7 +307,7 @@ pub fn open_store[&h, &d, &n, &m](heap: &!h Heap, dir: &d Dir, name: &n [byte], 
 
 // Open the log, locked, repaired and checked. `pk` is the server's public key (32 bytes), `branch` the branch served. On success
 // `info` says: [0] commits in the log, [1] and [2] unused (0), [3] the next `seq` on the branch, [4] the bytes of torn tail cut, [5]
-// 1 if there is a tip, and `tip` (32 bytes) is the id of the branch's last commit. On refusal `info[1]` is the verifier's rule and
+// 1 if there is a tip, and `tip` (64 bytes) is the id of the branch's last commit and then its `state` (docs/spec/state.md section 4). On refusal `info[1]` is the verifier's rule and
 // `info[2]` the record, for `r_corrupt()`. `ids` receives the id of every commit in the log, 32 bytes each, in order (recovery asks it which
 // commits the log holds, P2-D11): a log of more commits than it holds is refused as `r_too_big()`.
 pub fn open_log[&h, &d, &p, &b, &o, &t, &i](heap: &!h Heap, dir: &d Dir, pk: &p [byte], branch: &b [byte], info: &!o [int], tip: &!t [byte], ids: &!i [byte]) -> [heap, dir_read, dir_write, file_read, file_write] Opened {
@@ -428,6 +428,7 @@ pub fn open_log[&h, &d, &p, &b, &o, &t, &i](heap: &!h Heap, dir: &d Dir, pk: &p 
                                     var j = 0;
                                     while j < 32 {
                                         tip[j] = ident[j];
+                                        tip[32 + j] = enc[out[commit.f_state_at()] + j];
                                         j = j + 1;
                                     }
                                     info[3] = out[commit.f_seq_lo()] + 1;

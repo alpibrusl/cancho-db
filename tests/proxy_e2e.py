@@ -57,12 +57,21 @@ def client_starts(tee):
 
 def client_queries(tee):
     """What PostgreSQL was sent by clients' connections: not the proxy's own catalog questions."""
-    return [re.sub(r"'cdb:[0-9a-f]{64}'", "'cdb:ID'", q) for q in tee.queries() if not q.startswith("select c.relname, a.attname")]
+    out = []
+    for q in tee.queries():
+        if q.startswith("select c.relname, a.attname"):
+            continue
+        if q.startswith("select case when length(f) > 200000"):
+            q = "FACTS"           # the proxy asks for the transaction's net facts before it builds the commit (M2b-2b)
+        elif q.startswith("update cdb.delta set commit_id"):
+            q = "DELTA ID"        # ... and gives them the commit's id
+        out.append(re.sub(r"'cdb:[0-9a-f]{64}'", "'cdb:ID'", q))
+    return out
 
 
 def client_statements(tee):
     """What clients' statements became upstream: client_queries without the transaction commands the proxy adds itself."""
-    return [q for q in client_queries(tee) if q not in ("BEGIN", "COMMIT", "ROLLBACK") and not q.startswith(("PREPARE TRANSACTION", "COMMIT PREPARED"))]
+    return [q for q in client_queries(tee) if q not in ("BEGIN", "COMMIT", "ROLLBACK", "FACTS", "DELTA ID") and not q.startswith(("PREPARE TRANSACTION", "COMMIT PREPARED"))]
 
 
 def direct(sql):
@@ -482,8 +491,8 @@ check("... and PostgreSQL has not got the row yet (another session sees nothing)
 m = w.query("commit")
 check("COMMIT: CommandComplete COMMIT, ReadyForQuery I", tags_of(m) == ["COMMIT"] and status_of(m) == "I", str(m))
 check("... and the row is there for everyone", direct("select count(*) from p2a").stdout.strip() == "1")
-check("the server was sent BEGIN, the rendering, COMMIT: exactly the proxy's own two transaction commands and the statement",
-      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (1, \'x\')', "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'"], str(client_queries(tee)))
+check("the server was sent BEGIN, the rendering, the facts question, the commit id for the delta rows, PREPARE, COMMIT PREPARED: exactly the proxy's own commands and the statement",
+      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (1, \'x\')', "FACTS", "DELTA ID", "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'"], str(client_queries(tee)))
 
 m = w.query("begin")
 w.query("insert into p2a values (2, 'y')")
@@ -532,7 +541,7 @@ m = w.query("insert into p2a values (10, 'a'); insert into p2a values (11, 'b')"
 check("an autocommit message of two statements: both CommandCompletes, then ReadyForQuery I",
       tags_of(m) == ["INSERT 0 1", "INSERT 0 1"] and status_of(m) == "I", str(m))
 check("... and the server was sent BEGIN, both statements as ONE message, COMMIT",
-      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (10, \'a\'); insert into "p2a" values (11, \'b\')', "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'"],
+      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (10, \'a\'); insert into "p2a" values (11, \'b\')', "FACTS", "DELTA ID", "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'"],
       str(client_queries(tee)))
 
 # the order of a message of several statements: every statement's messages in the server's order, the last tag held for the commit (found in P3: the
@@ -547,7 +556,8 @@ tee.clear()
 m = w.query("insert into p2a values (12, 'c'); insert into p2a values (10, 'dup')")
 check("an autocommit message whose second statement fails: the first statement's tag, then the error (23505), status I: the stream PostgreSQL sends",
       codes_of(m) == ["23505"] and tags_of(m) == ["INSERT 0 1"] and [k for k, _ in m] == ["C", "E", "Z"] and status_of(m) == "I", str(m))
-check("... the server was sent ROLLBACK, and the first statement's row is not there", client_queries(tee)[-1] == "ROLLBACK" and
+check("... the server was sent BEGIN, the two statements and ROLLBACK, and nothing else (no facts question, no PREPARE: a failed statement is not a commit), and the first statement's row is not there",
+      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (12, \'c\'); insert into "p2a" values (10, \'dup\')', "ROLLBACK"] and
       direct("select count(*) from p2a where a = 12").stdout.strip() == "0", str(client_queries(tee)))
 m = w.query("select a from p2a order by a")
 check("a select in autocommit streams its rows: DataRow messages, SELECT n, I", [x for x in m if x[0] == "D"] and tags_of(m)[0].startswith("SELECT") and status_of(m) == "I", str(m[:3]))
@@ -560,7 +570,7 @@ a1 = w.read_until_ready()
 a2 = w.read_until_ready()
 check("two queries pipelined are each answered, in order", tags_of(a1) == ["SELECT 1"] and tags_of(a2) == ["SELECT 1"], str((a1, a2)))
 check("... and the second is not served while the first is in flight: the server sees one transaction after the other",
-      client_queries(tee) == ["BEGIN", 'select pg_sleep(0.3) from "p2a" limit 1', "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'", "BEGIN", 'select "a" from "p2a" where ("a" = 10)', "COMMIT"],
+      client_queries(tee) == ["BEGIN", 'select pg_sleep(0.3) from "p2a" limit 1', "FACTS", "DELTA ID", "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'", "BEGIN", 'select "a" from "p2a" where ("a" = 10)', "COMMIT"],
       str(client_queries(tee)))
 w.close()
 
@@ -791,6 +801,7 @@ def run_window(name, prefix, when, key, expect):
     """Kill the proxy at one window, look at what PostgreSQL and the log hold, restart it (which recovers) and look again. `expect` is
     (prepared before, rows before, commits before, summary on restart, rows after, commits after)."""
     direct("delete from p2f")
+    direct("delete from cdb.delta where tbl = 'p2f'")       # (the cleanup above was a direct write: its facts have no commit)
     ldir = Path(_scratch, "w_" + name)
     ldir.mkdir()
     ft = Tee(PG_PORT)
@@ -818,6 +829,9 @@ def run_window(name, prefix, when, key, expect):
     # equality: the rows PostgreSQL holds are the rows the commits in the log name, one for one
     check("P2d-4 %s: and the rows are exactly the commits (count and identity)" % name,
           len([r for r in after[1].split(",") if r]) == after[2] and (after[2] == 0 or after[1] == str(key)), after)
+    # M2b-2b: the row's delta rows are in the prepared transaction, so after recovery they exist exactly when the row does, each with the commit's id
+    stamped = direct("select count(*) filter (where commit_id is not null) || '|' || count(*) from cdb.delta where tbl = 'p2f'").stdout.strip()
+    check("P2d-4 %s: and the delta rows live or die with the data: %d commit(s), %d stamped delta row(s) of %d" % (name, after[2], after[2], after[2]), stamped == "%d|%d" % (after[2], after[2]), stamped)
     if after[2]:
         argv = ["--root", ROOT, "--tokens", str(ldir / "tokens"), "--stmts", str(ldir / "stmts")]
         for vname, cmd in [("python", ["python3", str(ROOT_DIR / "tools" / "verify.py")])] + [(v, [v]) for v in VERIFIERS]:

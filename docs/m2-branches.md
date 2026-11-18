@@ -212,7 +212,7 @@ cannot be hashed or merged and made every `UPDATE` fail, and the new side of a c
 **Not yet:** the proxy reading `cdb.facts`, `changes` and `state` in the commit, the crash-consistency test (M2b-2); a limit on the number of facts a transaction may carry (the facts text is read
 whole; M2b-2 sets it, with its own rule).
 
-## 9. M2b-2: how the proxy uses the capture (M2b-2a built; M2b-2b is design)
+## 9. M2b-2: how the proxy uses the capture (M2b-2a and M2b-2b built)
 
 M2b-2 is the first change to the trusted commit path since P2d, so it is written down, with what was measured for it, before any code. It is two PRs: **M2b-2a** installs the capture and changes
 no commit; **M2b-2b** puts `changes` and `state` in the commit.
@@ -235,7 +235,7 @@ no commit; **M2b-2b** puts `changes` and `state` in the commit.
   write transaction asks `select cdb.facts(txid_current())` in its own transaction **before** building the commit (the facts feed `changes`, which feeds the commit id, which is the prepared transaction's name),
   then `update cdb.delta set commit_id = <id> where xid = txid_current()` in the same transaction, then `PREPARE TRANSACTION`. That is two more round trips on a write (not measured yet: M2b-2b reports it);
   the delta rows join the data's fate, because they are inside the prepared transaction.
-* **D17. *Open.* A transaction may carry facts up to a bound; beyond it the commit is refused.** The bound is the size of the facts text the proxy reads: 256 KB, about 1,700 ordinary facts. The refusal is the
+* **D17. *Open.* A transaction may carry facts up to a bound; beyond it the commit is refused.** The bound is the size of the facts text the proxy reads. *Corrected in M2b-2b:* this first said 256 KB, about 1,700 ordinary facts; the answer has to fit the proxy's 256 KB read buffer **with its headers**, so the bound is **200,000 bytes** of facts text (`shared.facts_text_max()`), about 1,300 facts of ordinary rows (150 bytes each) and about 700 updates of a table with a long name. The refusal is the
   existing `transaction-too-large` (54000) with the transaction rolled back. *Alternative:* compute the Merkle root inside PostgreSQL (`cdb.changes(xid)`), so that the proxy reads 32 bytes and the bound is
   gone; it costs a third implementation of the tree (in SQL), checked against the same golden cases. *Recommended:* the bound, now; the SQL root when a user hits it.
 * **D18. `state` of a branch's tip is kept with the tip.** The chain record gains the 32 bytes; recovery at start takes it from the last commit of the branch in the log (the commit holds its own `state`), so
@@ -278,4 +278,39 @@ and starts once they are gone, and the start tracks a table that was made while 
 check skipped, `track_all` skipped), all killed.
 
 **Not yet (M2b-2b):** the commit path reading `cdb.facts`, `changes` and `state` in the commit, the bound on facts (D17), the crash-consistency test, and the cost of the two extra round trips on a write.
+
+### 9.2 M2b-2b as built
+
+**A commit now carries real `changes` and `state`.** `commitpath.conclude`, for a transaction that wrote, asks the database (inside the transaction) for `select ... cdb.facts(txid_current())`, hands the text to `state.changes_of`
+(the parser of `C` lines moved from the test tool into `src/state.cho`, so `statecheck` and the proxy run the same code), and builds `state` from the tip's state and these changes. A read has the constant empty `changes`
+(one SHA-256, no round trip). Before `PREPARE TRANSACTION` the delta rows of the transaction are given the commit's id (`update cdb.delta set commit_id = ... where xid = txid_current()`), so they are in the prepared transaction and live
+or die with the data. The tip is now 64 bytes (the commit's id and its `state`); a restart reads the state from the last commit of the log (`commit.f_state_at`, new in the decoder), so the chain goes on across restarts.
+
+**Measured** (`scripts/measure_p2e.py`, 600 statements, two runs each of the proxy from `main` before this change and after it, same machine and compiler, a noisier machine than in section 3: the `select` baseline was 4.9 to 5.3 ms, not 3.7):
+
+| median ms | before | after |
+|---|---|---|
+| `insert` (autocommit, a write) | 5.73, 5.15 | **6.75, 6.68** (+1.3 ms, about 23 %) |
+| `select` (a read) | 4.86, 5.26 | 5.25, 4.37 (no consistent change: a read asks nothing extra) |
+| a transaction of 10 selects | 19.9, 18.7 | 21.4, 20.7 (within the noise) |
+| four clients at once, selects | 191, 208 statements/s | 203, 193 |
+
+A write pays the facts question, the stamping `update`, the capture triggers and one more hash: about 1.3 ms on top of five. **Not measured here:** the same on a disk whose `fsync` is slow (it is the same two round trips, no `fsync`).
+
+**Found while building it:**
+
+* **Large `INSERT`s meet a different limit first.** A transaction of four 250-row inserts is refused by the accumulator (`the transaction is larger than one commit can record`, the existing per-transaction limit on statement text) long before it has many facts, so
+  the facts bound matters for what changes many rows with little text: an `UPDATE` or `DELETE` of a big table. The test uses an `UPDATE` of 900 rows of a table with a long name (245 KB of facts text) and an `UPDATE` of 600 (160 KB, within).
+* **Every write's delta rows are stamped, not only those with net facts.** First built to stamp only when the net facts were non-empty, which left a no-op `UPDATE`'s delta row (equal images) without a commit; it is now stamped (the test found it). A
+  transaction that calls a function (`pg_sleep`) is a write to the commit path, so it pays the facts question too.
+* **`cdb.facts` is capped in SQL, not in the proxy.** The query returns `'!'` instead of a text past the bound, so the refusal is graceful (`54000 transaction-too-large`, rolled back, nothing in the log, the connection goes on) and does not
+  depend on a read that overflows the buffer closing the connection. A mutant that moves the cap far past the buffer is killed by exactly that check.
+
+**Tested** (`tests/changes_e2e.py`, 28 checks, in the gate; and the crash windows of `tests/proxy_e2e.py`): seven kinds of step through the proxy (an autocommit insert; a transaction of insert, update of it, insert, delete; a read; a write that changes
+nothing; DDL; a composite key; 300 rows); then for **every commit of the log**, `changes` and `state` are read from the bytes by a parser written in the test from `commit.md`, the commit's delta rows are read back from the database, the net
+facts are worked out again in the test and `tools/state.py` gives their `changes`: it is the log's; `state` recomputed along the chain; the empty `changes` for the read, the DDL and the no-op; the three verifiers accept the log; the bound is
+refused and leaves nothing; a restart chains the next commit from the recovered state. **Crash consistency** (`proxy_e2e` P2d-4): in all four windows a kill leaves the delta rows exactly when the data is there, each stamped with the commit's id (0 and
+0 for the two windows that roll back, 1 and 1 for the two that commit). Six `chg:` mutants (facts not asked, state ignoring the parent, the tip not keeping the state, delta rows not stamped, the bound off, a restart not reading the state), all killed.
+
+**Not yet:** branches (M2c), `AS OF`, merge, L3 replay; and an independent reading of `spec/state.md` (D13).
 
