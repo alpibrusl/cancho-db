@@ -183,6 +183,11 @@ pub fn sign[&s, &d, &o](seed: &s [byte], ident: &d [byte], out: &!o [byte]) -> [
     return ed25519.sign(seed, ident, out);
 }
 
+// `sign`, with the seed's public key given (`public_key`, once): the key is not derived again (std.ed25519's `sign_with_public`).
+pub fn sign_with_public[&s, &k, &d, &o](seed: &s [byte], pk: &k [byte], ident: &d [byte], out: &!o [byte]) -> [] int {
+    return ed25519.sign_with_public(seed, pk, ident, out);
+}
+
 // The public key of a seed, into the 32 bytes of `out`.
 pub fn public_key[&s, &o](seed: &s [byte], out: &!o [byte]) -> [] int {
     return ed25519.public_key_from_seed(seed, out);

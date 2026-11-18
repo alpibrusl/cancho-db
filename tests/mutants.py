@@ -418,6 +418,7 @@ PROXY = [
     ("proxy: a silent client is never closed", "proxy/proxy.cho", "now - st[p + 11] > shared.hello_ms()", "false"),
     ("proxy: a silent upstream is waited for a minute", "src/shared.cho", "fn login_ms() -> [] int {\n    return 5000;", "fn login_ms() -> [] int {\n    return 60000;"),
     ("proxy: the upstream's bytes lose the last one", "proxy/proxy.cho", "            if !shared.send(tab, core, client, rb[pos..pos + n]) {", "            if !shared.send(tab, core, client, rb[pos..pos + n - 1]) {"),
+    ("proxy: the signing key's public half is not derived", "src/shared.cho", "ed25519.public_key_from_seed(seed, contents(sw)[32..64]);", "contents(sw)[32] = byte_of(0);"),
     ("proxy: SSLRequest is not answered N", "proxy/proxy.cho", "let no = alloc_slice[r](1, byte_of('N'));", "let no = alloc_slice[r](1, byte_of('S'));"),
     ("proxy: the client's application_name is dropped", "proxy/proxy.cho", "if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {", "if false {"),
     ("proxy: the upstream role is the client's", "src/upstream.cho", "\n    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "\n    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);"),
@@ -555,6 +556,7 @@ LEX = [
 
 # ---- the commit builder (src/build.cho, tests/build_check.py against an independent encoder and the verifiers)
 BUILD = [
+    ("build: the signature is made with a key that is not the seed's", "src/build.cho", "return ed25519.sign_with_public(seed, pk, ident, out);", "return ed25519.sign_with_public(seed, seed, ident, out);"),
     ("build: bytes are written mod 255", "src/build.cho", "out[at + i] = byte_of(rest % 256);", "out[at + i] = byte_of(rest % 255);"),
     ("build: effect kinds up to 5", "src/build.cho", "int_of(effs[p]) > 4", "int_of(effs[p]) > 5"),
     ("build: effects are ordered by target only", "src/build.cho", "    if ka != kb {\n        return ka - kb;", "    if false {\n        return ka - kb;"),

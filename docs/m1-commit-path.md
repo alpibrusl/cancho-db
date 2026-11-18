@@ -391,7 +391,26 @@ a few times slower than here); the schema snapshot is one more round trip to Pos
 **Throughput is one commit at a time**, as P2-D6 chose, and it shows: four clients get 147 statements a second together, which is one client's rate (a
 statement every 6.8 ms), not four times it. The log grows by 360 bytes a commit, 71 bytes of statements, and the token once per connection.
 
-What would help, **not done** (each is a change with its own gate, and none is needed for M1's claims): sign with a known public key (the seed is fixed for the
-life of the process, so the proxy can derive it once; needs `std.ed25519` to take it, which is the compiler repository's, not this one's); read the schema snapshot
+What would help, **not done** (each is a change with its own gate, and none is needed for M1's claims): ~~sign with a known public key~~ (**done**, below); read the schema snapshot
 once per change instead of per statement; batch commits (group commit: one `fsync` for several clients' commits, which the single-threaded loop does not do).
 **Every `select` is a commit**: for read-heavy work this is the price of an audit that says what was read (P2-D4), and it is a large one.
+
+**After signing with a known public key** (`std.ed25519.sign_with_public`, compiler PR #794; the proxy derives the key once when the log opens and keeps it
+after the seed, `src/shared.cho`). Measured back to back, the same machine and script, the proxy built from `main` just before this change and the one after
+it, both with the same compiler, 600 statements, medians in ms (95th percentile):
+
+| | before | after |
+|---|---|---|
+| `select` of one row by key, through the proxy | 5.34 (7.17) | **3.71 (5.05)** |
+| `insert`, autocommit, through the proxy | 5.52 (7.37) | **3.93 (5.14)** |
+| `select now()` | 5.66 (7.18) | 3.94 (5.48) |
+| four clients at once, selects | 173 statements/s | **263 statements/s** |
+| a transaction of 10 selects with `BEGIN` and `COMMIT` (60 runs) | 15.9 (20.1) | **19.3 (23.1)** |
+
+A commit is about 1.6 ms (30 %) cheaper, which is what the compiler's own measurement says the saved derivation costs (`ed25519_bench`: a signature 3.77 ms to
+1.94 ms; `docs/ed25519.md` §7 of the compiler repository). **The ten-select transaction got slower in this run, which I do not explain**: it is one commit and
+ten statements, 60 runs each, and the per-statement figure moved the wrong way (1.32 to 1.61 ms); the other rows are 600 runs and agree with each other. It is
+left in rather than dropped, and not claimed as noise: a repeat with more runs would tell. The earlier table above is a different run on a different day
+(6.2 ms for the `select`), which is why the "before" column is measured again here and not copied from it. What is left of a commit is the other half of the
+signature (`R = r*B`), the three `fsync`s, the snapshot round trip and the transaction's own round trips.
+

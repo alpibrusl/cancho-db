@@ -148,9 +148,10 @@ fn main(world: World) -> [] int {
                                         let ident = w[enc_len..enc_len + 32];
                                         build.id(w[0..enc_len], w[enc_len..enc_len + 32]);
                                         put_hex(i, w[enc_len..enc_len + 32]);
-                                        build.sign(d[o[0]..o[0] + 32], w[enc_len..enc_len + 32], w[enc_len + 32..enc_len + 96]);
-                                        put_hex(i, w[enc_len + 32..enc_len + 96]);
+                                        // the key first, then the signature with the key given (the proxy's path: `sign_with_public`); the signature is compared with `cryptography`'s, which derives its own
                                         build.public_key(d[o[0]..o[0] + 32], w[enc_len + 96..enc_len + 128]);
+                                        build.sign_with_public(d[o[0]..o[0] + 32], w[enc_len + 96..enc_len + 128], w[enc_len..enc_len + 32], w[enc_len + 32..enc_len + 96]);
+                                        put_hex(i, w[enc_len + 32..enc_len + 96]);
                                         put_hex(i, w[enc_len + 96..enc_len + 128]);
                                         // the three files a commit goes to: the log's first record, a token store, a statement store
                                         let base = enc_len + 128;
