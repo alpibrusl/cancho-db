@@ -74,6 +74,9 @@ quiet 2 python3 tests/guard_check.py build/guardcheck
 echo "== the commit builder: bytes, ids and signatures against an independent encoder; the three verifiers accept its log"
 "$CANCHO" build --std proxy/buildcheck.cho src/build.cho src/commit.cho -o build/buildcheck
 quiet 2 python3 tests/build_check.py build/buildcheck build/verify build/verify-go
+echo "== facts, changes and state (docs/spec/state.md): the cancho implementation against tools/state.py, the golden cases and values worked by hand"
+"$CANCHO" build --std proxy/statecheck.cho src/state.cho src/build.cho src/commit.cho -o build/statecheck
+quiet 2 python3 tests/state_check.py build/statecheck
 echo "== the log directory: restart, torn tails at every byte, the lock, the order of durable writes (strace)"
 "$CANCHO" build --std proxy/storecheck.cho src/store.cho src/build.cho src/commit.cho src/l1.cho -o build/storecheck
 quiet 2 python3 tests/store_check.py build/storecheck build/verify build/verify-go
@@ -87,6 +90,7 @@ echo "== mutants, lexer";            quiet 1 python3 tests/mutants.py lex "$CANC
 echo "== mutants, parser";          quiet 1 python3 tests/mutants.py parse "$CANCHO"
 echo "== mutants, statements";      quiet 1 python3 tests/mutants.py stmt "$CANCHO"
 echo "== mutants, lowering";        quiet 1 python3 tests/mutants.py lower "$CANCHO"
+echo "== mutants, facts and state"; quiet 1 python3 tests/mutants.py state "$CANCHO"
 echo "== mutants, guard";           quiet 1 python3 tests/mutants.py guard "$CANCHO"
 echo "== mutants, commit builder"; quiet 1 python3 tests/mutants.py build "$CANCHO"
 echo "== mutants, log directory"; quiet 1 python3 tests/mutants.py store "$CANCHO"

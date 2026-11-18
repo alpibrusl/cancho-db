@@ -1,6 +1,6 @@
 # M2: branches, `AS OF`, checked merge, row deltas and replay
 
-**Status: design, with the measurements it rests on (section 3). Nothing here is built.** M1's last slice is merged ([`m1-extended.md`](m1-extended.md)
+**Status: design, with the measurements it rests on (section 3). M2a (section 5) is built: the spec of facts, `changes` and `state` ([`spec/state.md`](spec/state.md)), `src/state.cho` and `tools/state.py`, with golden cases and 20 mutants; nothing else is.** M1's last slice is merged ([`m1-extended.md`](m1-extended.md)
 section 8). This document is written before the code, as the project's practice is: a claim that turns out false is corrected in place, in this file, with the PR
 that corrected it.
 
@@ -103,8 +103,8 @@ Each says what, why, and what was measured. **Open** ones are for the owner (sec
   0x00 || table || pk || kind || H(old) || H(new))` with the encodings of a new spec section (`docs/spec/state.md`, written in M2a with golden vectors); leaves sorted by
   `(table, pk)`; a binary tree, an odd node promoted. A commit with no changed row (a read) has `changes` of the empty root, defined in the spec. The row images are
   **stored beside the chain** (the delta table and, for erasure later, a payload store), as `design.md` says: the chain holds hashes.
-* **D7. `state` is a chain of the changes, not a hash of the contents:** `state_n = SHA-256("cancho-db/state/v1" || state_{n-1} || changes_n)`, `state_0` the
-  empty root, a merge commit folding both parents' states in order. It is O(1) a commit and a function of history. **What it does and does not prove:** that two
+* **D7. `state` is a chain of the changes, not a hash of the contents:** `state = SHA-256("cancho-db/state/v1" || 0x00 || u8(p) || state(parent_0) || ... || changes)`, `p` the number of parents (0, 1 or 2; a merge folds both parents' states in order).
+  *Corrected in M2a:* this section first wrote `state_{n-1} || changes_n` with no parent count and "`state_0` the empty root"; the spec (`spec/state.md` section 4) has the count, so that a root, a normal commit and a merge cannot be confused, and a root has no parent state. It is O(1) a commit and a function of history. **What it does and does not prove:** that two
   logs with the same `state` have the same history of changes, not that the tables hold what the history says. The second is what L3 checks (4.5). A
   content-addressed root (a Merkle tree over all rows) is O(data) a commit and is left to the signed snapshots of M3; **Open (section 6, Q1)**.
 
@@ -146,7 +146,7 @@ Each says what, why, and what was measured. **Open** ones are for the owner (sec
 
 | Slice | Delivers | Gate |
 |---|---|---|
-| **M2a** | `docs/spec/state.md` (fact leaf, Merkle root, state chain, empty root), golden vectors, the fact/state code in cancho and Python | both agree on every vector; tampered fact lists are rejected; L1 and L2 vectors unchanged |
+| **M2a** (**built**, with Q1 and Q3 taken as recommended) | `docs/spec/state.md` (fact leaf, Merkle root, state chain, empty root), golden vectors, the fact/state code in cancho and Python | both agree on every vector; tampered fact lists are rejected; L1 and L2 vectors unchanged |
 | **M2b** | row-delta capture in the commit path: triggers installed for a table, `changes` and `state` in the commit, `scripts/measure_m2.sql` | the log's `changes` equals the Python root of the delta table; a crash between prepare and commit leaves delta and data together; the cost rows of 3.3 reproduced |
 | **M2c** | branches: per-connection branch and `search_path`, snapshot per branch, `cancho_fork`, several chains in one log, `3D000` | two connections on two branches see their own data; the fork commit verifies at L1 and L2; fork cost reported |
 | **M2d** | `AS OF` | the lexer, parser and renderer cases; results equal the copy-at-the-time oracle (D9); `AS OF` write refused; mutants |
