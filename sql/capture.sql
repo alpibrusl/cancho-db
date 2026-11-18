@@ -5,6 +5,9 @@
 --   cdb.capture()   the trigger function (statement level, transition tables): INSERT, UPDATE and DELETE each write their facts
 --   cdb.track(t)    install the three triggers on a table (it needs a primary key; without one the call raises)
 --   cdb.track_all() track every table of the schema `public`
+--   cdb.untrackable()  the tables of `public` the capture cannot track (no primary key, or partitioned), as text: empty when there are none
+--   cdb.on_ddl()    an event trigger function: a table made or altered in `public` is tracked in the same transaction, so its first write is captured; a keyless
+--                   or partitioned one raises and the statement fails
 --   cdb.facts(x)    the NET facts of transaction x as the text `C` takes in tools/state.py: `kind:table:pk:old:new`, hex, `-` for none, in (table, pk) order
 --
 -- A row image is the jsonb text of the row; its hash is SHA-256("cancho-db/row/v1" || 0x00 || that text). A primary key is the jsonb text of the array of its column
@@ -93,3 +96,32 @@ create or replace function cdb.facts(x bigint) returns text language sql stable 
       cross join lateral (select case when c.oh is null then 0 when c.nh is null then 2 else 1 end as kind) k
      where not (c.oh is null and c.nh is null) and c.oh is distinct from c.nh
 $$;
+
+-- The tables of `public` that cannot be tracked: a partitioned table (and its partitions) would record one row under two names, by the path it was written through, and a table
+-- without a primary key has no key for a fact. The proxy refuses to start while there are any (docs/m2-branches.md D15).
+create or replace function cdb.untrackable() returns text language sql stable as $$
+    select coalesce(string_agg(c.relname || case when c.relkind = 'p' or c.relispartition then ' (partitioned)' else ' (no primary key)' end, ', ' order by c.relname), '')
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public' and c.relkind in ('r', 'p')
+       and (c.relkind = 'p' or c.relispartition or not exists (select 1 from pg_index i where i.indrelid = c.oid and i.indisprimary))
+$$;
+
+create or replace function cdb.on_ddl() returns event_trigger language plpgsql as $$
+declare
+    r record;
+    k "char";
+    part boolean;
+    ns name;
+begin
+    for r in select objid from pg_event_trigger_ddl_commands() where object_type = 'table' loop
+        select c.relkind, c.relispartition, n.nspname into k, part, ns from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = r.objid;
+        continue when ns is distinct from 'public' or k not in ('r', 'p');
+        if k = 'p' or part then
+            raise exception 'cdb: partitioned tables are not supported (%)', r.objid::regclass using errcode = '0A000';
+        end if;
+        perform cdb.track(r.objid::regclass);
+    end loop;
+end $$;
+
+drop event trigger if exists cdb_ddl;
+create event trigger cdb_ddl on ddl_command_end when tag in ('CREATE TABLE', 'CREATE TABLE AS', 'ALTER TABLE') execute function cdb.on_ddl();

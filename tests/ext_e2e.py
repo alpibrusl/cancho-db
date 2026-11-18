@@ -24,11 +24,12 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR / "tools"))
-from pgtee import Tee  # noqa: E402
+from pgtee import Tee, ensure_database  # noqa: E402
 import verify as pyverify  # noqa: E402
 
 PG_PORT = int(os.environ.get("PG_E2E_PORT", "5532"))
-DB = os.environ.get("E2E_DB", "postgres")
+DB = os.environ.get("E2E_DB", "cdb_e2e")
+ensure_database(PG_PORT, DB)
 PROXY = sys.argv[1]
 VERIFIERS = os.environ.get("E2E_VERIFIERS", "").split()
 FAILED = []

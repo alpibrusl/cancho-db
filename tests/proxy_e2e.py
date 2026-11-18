@@ -21,10 +21,11 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR / "tools"))
-from pgtee import Tee  # noqa: E402
+from pgtee import Tee, ensure_database  # noqa: E402
 
 PG_PORT = int(os.environ.get("PG_E2E_PORT", "5532"))
-DB = os.environ.get("E2E_DB", "postgres")        # the database the proxy is pointed at: a mutant run gives each worker its own
+DB = os.environ.get("E2E_DB", "cdb_e2e")        # the database the proxy is pointed at: a mutant run gives each worker its own
+ensure_database(PG_PORT, DB)
 PROXY = sys.argv[1]
 MINT = [sys.executable, str(ROOT_DIR / "tools" / "mint.py")]
 FAILED = []
@@ -126,7 +127,7 @@ ALLOW = "r:*,w:*,d:*,c:*,n:*"
 good = mint("password", "--effects", ALLOW)
 direct("drop table if exists p0_e2e, p0_big cascade")
 direct("create table p0_e2e(a int primary key, b text); insert into p0_e2e values (1,'x'),(2,'y'),(3,'z')")
-direct("create table p0_big as select g, md5(g::text) m from generate_series(1,200000) g")
+direct("create table p0_big(g int primary key, m text); insert into p0_big select g, md5(g::text) from generate_series(1,200000) g")
 Q1 = "select a from p0_e2e order by a limit 1"
 
 # ---------------------------------------------------------------- a valid login, and what the proxy lets through
@@ -404,7 +405,7 @@ check("a Terminate from psql is forwarded and the server session ends cleanly",
 
 # the schema is read fresh for each query: what changes around the proxy is seen by the next statement, with no restart
 direct("drop table if exists p0_fresh")
-direct("create table p0_fresh(x int)")
+direct("create table p0_fresh(x int primary key)")
 r = psql(lp, good, "select x from p0_fresh")
 check("a table created behind the proxy's back is visible to the next query", r.returncode == 0, r.stderr)
 direct("alter table p0_fresh add column y int")
@@ -1034,8 +1035,53 @@ if len(ncommits) == 3:
         check("P2d-5: %s accepts the log with its nondet values at L2 and IR" % vname, out.startswith("ok commits=3"), out)
 direct("drop table if exists p2n")
 
+# ---------------------------------------------------------------- M2b-2a: the row-delta capture, installed by the proxy (docs/m2-branches.md D14, D15)
+import hashlib
+check("M2b-2a: the proxy installed the capture: the delta table is there and the table made after the proxy started is tracked (three triggers)",
+      direct("select count(*) from pg_trigger where tgrelid = 'p0_e2e'::regclass and tgname like 'cdb_%'").stdout.strip() == "3" and direct("select count(*) from pg_class where oid = 'cdb.delta'::regclass").stdout.strip() == "1",
+      direct("select count(*) from pg_trigger where tgrelid = 'p0_e2e'::regclass and tgname like 'cdb_%'").stderr)
+direct("delete from cdb.delta where tbl = 'p0_e2e'")
+for sql in ("insert into p0_e2e values (40, 'w')", "update p0_e2e set b = 'v' where a = 40", "delete from p0_e2e where a = 40"):
+    psql(lp, good, sql)
+rows = direct("select op, encode(new_hash, 'hex'), new_row::text from (select case when old_hash is null then 'I' when new_hash is null then 'D' else 'U' end as op, new_hash, new_row, seq from cdb.delta where tbl = 'p0_e2e') d order by seq").stdout.strip().splitlines()
+check("M2b-2a: an insert, an update and a delete made through the proxy are captured, in order (I, U, D)", [r.split("|")[0] for r in rows] == ["I", "U", "D"], rows)
+ins = rows[0].split("|")
+check("M2b-2a: the new-row hash is SHA-256 of 'cancho-db/row/v1', a NUL and the jsonb text of the row (recomputed here)",
+      len(ins) == 3 and hashlib.sha256(b"cancho-db/row/v1\x00" + ins[2].encode()).hexdigest() == ins[1], ins)
+r = psql(lp, good, "create table p0_nokey (x int)")
+check("M2b-2a: a table without a primary key cannot be created through the proxy, and is not created", r.returncode != 0 and "no primary key" in r.stderr and direct("select count(*) from pg_class where relname = 'p0_nokey'").stdout.strip() == "0", r.stderr)
+direct("delete from cdb.delta where tbl = 'p0_keyed'")      # the delta table outlives a run in the same database
+r = psql(lp, good, "create table p0_keyed (id int primary key, v text)")
+check("M2b-2a: a table with a primary key can", r.returncode == 0, r.stderr)
+psql(lp, good, "insert into p0_keyed values (1, 'a')")
+check("M2b-2a: ... and its first write is captured", direct("select count(*) from cdb.delta where tbl = 'p0_keyed'").stdout.strip() == "1")
+direct("drop table p0_keyed")
+# a keyless or partitioned table that is already there: the proxy refuses to start, and names it
+direct("alter event trigger cdb_ddl disable")
+direct("create table p0_keyless (x int)")
+direct("create table p0_part (id int primary key) partition by range (id)")
+_kd = Path(tempfile.mkdtemp())
+kp, _ = start_logged(_kd, _scratch + "/key", wait=False)
+try:
+    kerr = kp.communicate(timeout=15)[1]
+except subprocess.TimeoutExpired:
+    kp.kill()
+    kerr = "timed out"
+check("M2b-2a: with a keyless table and a partitioned table in public the proxy refuses to start (exit 7) and names both",
+      kp.returncode == 7 and "p0_keyless (no primary key)" in kerr and "p0_part (partitioned)" in kerr, "%s %s" % (kp.returncode, kerr))
+check("M2b-2a: a start puts the event trigger back on (it was disabled by hand before the refused start)", direct("select evtenabled from pg_event_trigger where evtname = 'cdb_ddl'").stdout.strip() == "O")
+direct("drop table p0_keyless, p0_part")
+direct("alter event trigger cdb_ddl disable")
+direct("create table p0_pre (id int primary key)")        # made while the event trigger is off: only the proxy's start can track it
+check("M2b-2a: (a table made while the event trigger was off has no triggers yet)", direct("select count(*) from pg_trigger where tgrelid = 'p0_pre'::regclass and tgname like 'cdb_%'").stdout.strip() == "0")
+kp2, _ = start_logged(Path(tempfile.mkdtemp()), _scratch + "/key", wait=True)
+check("M2b-2a: and starts again once they are gone", kp2.poll() is None, kp2.poll())
+check("M2b-2a: ... and its start tracked the table that was already there (three triggers)", direct("select count(*) from pg_trigger where tgrelid = 'p0_pre'::regclass and tgname like 'cdb_%'").stdout.strip() == "3")
+kp2.terminate()
+direct("drop table p0_pre")
+
 check("the proxy is still alive after all of it", proxy.poll() is None)
 direct("drop table if exists p0_e2e, p0_big cascade")
 proxy.terminate()
-print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0, P1d, P2a, P2c, P2d and P2d-4 checks passed")
+print("\n%d checks failed" % len(FAILED) if FAILED else "\nall P0, P1d, P2a, P2c, P2d, P2d-4 and M2b-2a checks passed")
 sys.exit(1 if FAILED else 0)

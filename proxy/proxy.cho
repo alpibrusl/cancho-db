@@ -1055,6 +1055,26 @@ fn run[&h, &l, &n, &k, &o](heap: &!h Heap, io: &!o Io, listener: &!l Listener, n
                         err_nat(io, aux[5]);
                         io.error_all(io, " prepared transaction(s)\n");
                     }
+                    // the row-delta capture is installed before anything is served (docs/m2-branches.md D14, D15)
+                    var ir = 0 - 1;
+                    borrow mut tab as &!tw in {
+                        ir = catalog.install_capture(tw, cw, aux[0]);
+                    }
+                    if ir != 0 {
+                        recovered = 7;
+                        if ir == 1 {
+                            let at = commitpath.first_text_at(contents(cw.snapin));
+                            io.error_all(io, "proxy: these tables cannot be tracked by the row-delta capture (a primary key is needed, and partitioned tables are not supported): ");
+                            io.error_all(io, contents(cw.snapin)[at..at + commit.be(contents(cw.snapin), at - 4, 4)]);
+                            io.error_all(io, "\n");
+                        } else if ir >= 10 {
+                            io.error_all(io, "proxy: the row-delta capture could not be installed (statement ");
+                            err_nat(io, ir - 10);
+                            io.error_all(io, " of sql/capture.sql; creating its event trigger needs a superuser upstream role)\n");
+                        } else {
+                            io.error_all(io, "proxy: the row-delta capture could not be installed: PostgreSQL could not be asked or refused to track the tables\n");
+                        }
+                    }
                 } else if rs == 1 {
                     io.error_all(io, "proxy: PostgreSQL has max_prepared_transactions = 0, so a write cannot be made two-phase: set it above 0\n");
                 } else {
@@ -1112,6 +1132,9 @@ fn run[&h, &l, &n, &k, &o](heap: &!h Heap, io: &!o Io, listener: &!l Listener, n
             shared.drop_core(heap, core);
             if recovered == 1 {
                 return 5;
+            }
+            if recovered == 7 {
+                return 7;
             }
             if recovered < 0 {
                 return 6;

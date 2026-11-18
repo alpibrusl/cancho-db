@@ -212,7 +212,7 @@ cannot be hashed or merged and made every `UPDATE` fail, and the new side of a c
 **Not yet:** the proxy reading `cdb.facts`, `changes` and `state` in the commit, the crash-consistency test (M2b-2); a limit on the number of facts a transaction may carry (the facts text is read
 whole; M2b-2 sets it, with its own rule).
 
-## 9. M2b-2: how the proxy uses the capture (design; nothing here is built)
+## 9. M2b-2: how the proxy uses the capture (M2b-2a built; M2b-2b is design)
 
 M2b-2 is the first change to the trusted commit path since P2d, so it is written down, with what was measured for it, before any code. It is two PRs: **M2b-2a** installs the capture and changes
 no commit; **M2b-2b** puts `changes` and `state` in the commit.
@@ -247,4 +247,35 @@ net effect itself); the `state` chain recomputes from the log alone; the verifie
 the data and its delta rows both present or both absent; the cost of the two extra round trips is reported.
 
 **Not in M2b-2:** branches (M2c), `AS OF`, merge, L3 replay.
+
+### 9.1 M2b-2a as built
+
+The proxy installs the capture at start, after it has settled the prepared transactions and before it serves anyone, through the catalog connection that recovery uses (`catalog.install_capture`):
+the 13 statements of `sql/capture.sql` (turned into `src/capture_sql.cho` by `tools/gen_capture.py`, with a `--check` in the gate), then `select cdb.untrackable()`, then `select cdb.track_all()`.
+**No commit changes yet**: `changes` and `state` are still zero.
+
+* **An event trigger** (`cdb.on_ddl`, on `CREATE TABLE`, `CREATE TABLE AS` and `ALTER TABLE`) tracks a table in the transaction that makes it, so its first write is captured. A keyless table, or a partitioned one, makes the
+  statement fail (`55000` / `0A000`); dropping the key of a tracked table is refused the same way. It is created before the tracking pass, so there is no moment in which a new table is neither tracked nor refused.
+* **A start puts the event trigger back on.** The install drops and re-creates it (`drop event trigger if exists`, then create), so an administrator who disabled it by hand gets it enabled at the next start, even if that start is then
+  refused for a keyless table; tables made while it was off are tracked by the start's `track_all`. (`tests/proxy_e2e.py` checks both.)
+* **`cdb.untrackable()`** lists what the capture cannot track: tables without a primary key and partitioned tables with their partitions. If there are any, **the proxy refuses to start (exit 7) and says which**.
+* **A failed install** names the statement and says what the event trigger needs (a superuser upstream role), exit 7.
+
+**Found while building it:**
+
+* **Partitioned tables are a hole, not a corner.** A write through a partitioned parent fires the parent's statement triggers and a write straight into a partition fires the partition's, so the same row would be recorded under two table
+  names depending on the path it was written through (measured: a row inserted through the parent was captured, one inserted into the partition directly was not captured against the parent). They are therefore refused like keyless tables.
+  The guard cannot create one (`PARTITION BY` is not parsed), so only a table that was already there can trip this.
+* **The guard accepts a column-level `primary key` and refuses a table-level `primary key (a, b)`** (`reserved-word`, `tools/gen_stmt.py`): so D15 does not stop a client from creating tables, but a table made through the proxy has a one-column key. A composite-key
+  table made around the proxy is tracked fine (`tests/capture_check.py` covers one).
+* **An event trigger is per database, and the differential suites share the server's `postgres` database.** The first run of the gate would have broken `ddl_diff` (it makes keyless tables) as soon as an end-to-end test had started a proxy there.
+  The proxy tests (`proxy_e2e`, `ext_e2e`, `drivers_e2e`, `measure_p2e`) now run in their own database, `cdb_e2e` (`E2E_DB` overrides it; mutant workers already had theirs), made on demand by `tools/pgtee.py ensure_database`.
+  Two fixtures that made keyless tables (`p0_big`, `p0_fresh`, `m1_ddl`) have keys now. This is what D15 costs a test suite, and it is the same cost to anyone who points the proxy at a database that has keyless tables.
+
+**Tested:** `tests/proxy_e2e.py` (9 checks): the delta table exists and a table made after the start has three triggers; an insert, an update and a delete through the proxy are captured in order and the new-row hash is recomputed in the test as
+SHA-256 of the prefix and the `jsonb` text; a keyless `CREATE TABLE` through the proxy fails and creates nothing, a keyed one works and its first write is captured; with a keyless and a partitioned table present the proxy exits 7 naming both,
+and starts once they are gone, and the start tracks a table that was made while the event trigger was off. `tests/capture_check.py` grew 11 checks for the event trigger and `untrackable()`. Three proxy mutants (the install loop skipped, the keyless
+check skipped, `track_all` skipped), all killed.
+
+**Not yet (M2b-2b):** the commit path reading `cdb.facts`, `changes` and `state` in the commit, the bound on facts (D17), the crash-consistency test, and the cost of the two extra round trips on a write.
 
