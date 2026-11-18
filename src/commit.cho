@@ -240,7 +240,7 @@ pub fn rule_name(code: int) -> [] &static [byte] {
 
 // Indexes into the `out` slice `decode` fills.
 pub fn out_len() -> [] int {
-    return 13;
+    return 14;
 }
 
 pub fn f_branch_at() -> [] int {
@@ -288,6 +288,11 @@ pub fn f_effects_n() -> [] int {
 
 pub fn f_time_at() -> [] int {
     return 10;
+}
+
+// Where the 32 bytes of `state` are (M2: the chain of changes the next commit of the branch is built on).
+pub fn f_state_at() -> [] int {
+    return 13;
 }
 
 // For the IR check: where the statement hashes start and how many.
@@ -487,6 +492,7 @@ pub fn decode[&d, &o](data: &d [byte], out: &!o [int]) -> [] int {
         }
 
         // changes, state
+        out[f_state_at()] = cur[0] + 32;
         if !skip(data, cur, 64) {
             return bad_encoding();
         }

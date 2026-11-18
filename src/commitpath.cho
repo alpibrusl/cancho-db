@@ -10,6 +10,7 @@ import cdb.token;
 import cdb.shared;
 import cdb.upstream;
 import cdb.login;
+import cdb.state;
 
 // The commit path (docs/m1-commit-path.md, P2d-3): what a transaction has done, and what happens when it ends. Statements are added as
 // the guard allows them; at the end of a transaction (the client's `COMMIT`, or the end of an autocommit statement) the commit is built,
@@ -209,6 +210,12 @@ pub fn first_text_at[&s](si: &s [byte]) -> [] int {
 fn gid_sql[&o, &p, &i](out: &!o [byte], prefix: &p [byte], ident: &i [byte]) -> [] int {
     var at = build.put_bytes(out, 0, prefix);
     at = build.put_bytes(out, at, "cdb:");
+    return hex_sql(out, at, ident);
+}
+
+// The 32 bytes of `ident` as 64 hex digits and a closing quote, into `out` at `at`: the new position.
+fn hex_sql[&o, &i](out: &!o [byte], start: int, ident: &i [byte]) -> [] int {
+    var at = start;
     var j = 0;
     while j < 32 {
         let v = int_of(ident[j]);
@@ -231,7 +238,8 @@ fn hex_digit(v: int) -> [] int {
 // End client `k`'s transaction on its upstream connection: build the commit, make it durable, make it permanent. 0 if it is done (or there
 // was nothing to record); 1 if PostgreSQL refused (nothing is in the log); 2 if the log could not be written (PostgreSQL is rolled back and
 // nothing is in the log); -1 if the upstream was lost, or an upstream step after the log append failed (the log has the commit; the next
-// start's recovery settles PostgreSQL, P2-D11) -- the caller closes the client's connection.
+// start's recovery settles PostgreSQL, P2-D11) -- the caller closes the client's connection; 3 if the transaction changed more than one commit can record (the facts
+// are too many for the answer to fit, docs/m2-branches.md D17: PostgreSQL is rolled back and nothing is in the log).
 pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [conn_read, conn_write, poll, file_write] int {
     let st = contents(core.state);
     let ai = contents(core.acci);
@@ -286,7 +294,9 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
         let sig = alloc_slice[z](64, byte_of(0));
         let tr = alloc_slice[z](shared.token_max() + 8, byte_of(0));
         let lr = alloc_slice[z](8300, byte_of(0));
-        let q = alloc_slice[z](128, byte_of(0));
+        let q = alloc_slice[z](192, byte_of(0));
+        let chg = alloc_slice[z](32, byte_of(0));
+        let stt = alloc_slice[z](32, byte_of(0));
         let tk = contents(core.tokb)[k * shared.token_max()..k * shared.token_max() + st[p + 12]];
         let acc = contents(core.acc);
         let base = k * shared.acc_stride();
@@ -300,11 +310,49 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
         let chain = contents(core.store.chain);
         let tip = contents(core.store.tip);
         var parents = f[96..96];
+        var np = 0;
         if chain[1] == 1 {
             parents = tip[0..32];
+            np = 1;
         }
-        let elen = build.encode(enc, parents, branch, chain[0], f[0..32], acc[base..base + 32 * n], acc[base + 18432..base + 18432 + ai[8 * k + 2]], f[32..64], f[64..96], f[96..96], nds, nd[0..9 * nds], f[96..128], f[96..128], 0, f[96..96], contents(core.aux)[1]);
-        if elen < 0 {
+        // `changes` (docs/m2-branches.md D16): a read has the empty one; a transaction that wrote asks the database, inside the transaction, for its NET facts and the
+        // Merkle root of them is `changes`. 0 if all went well; 1 PostgreSQL refused or the text is not facts; 3 too many facts; -1 the upstream was lost.
+        var fcode = 0;
+        state.changes(0, f[96..128], chg);
+        if wrote {
+            let fr = upstream_exec(tab, core, b, "select case when length(f) > 200000 then '!' else f end from (select cdb.facts(txid_current()) as f) s");
+            if fr < 0 {
+                fcode = 0 - 1;
+            } else if fr != 0 {
+                fcode = 1;
+            } else {
+                let si = contents(core.snapin);
+                let at = first_text_at(si);
+                if at >= 0 {
+                    let tl = commit.be(si, at - 4, 4);
+                    if tl == 1 && int_of(si[at]) == '!' {
+                        fcode = 3;
+                    } else {
+                        let rc = state.changes_of(si, at, at + tl, contents(core.fw), contents(core.fm), contents(core.fe), contents(core.fl), chg);
+                        if rc != 0 {
+                            fcode = 1;
+                        }
+                    }
+                }
+            }
+        }
+        // `state`: the parent's, if there is one, and these changes
+        state.state(np, tip[32..32 + 32 * np], chg, stt);
+        var elen = 0 - 1;
+        if fcode == 0 {
+            elen = build.encode(enc, parents, branch, chain[0], f[0..32], acc[base..base + 32 * n], acc[base + 18432..base + 18432 + ai[8 * k + 2]], f[32..64], f[64..96], f[96..96], nds, nd[0..9 * nds], chg, stt, 0, f[96..96], contents(core.aux)[1]);
+        }
+        if fcode != 0 {
+            if fcode > 0 {
+                upstream_exec(tab, core, b, "ROLLBACK");
+            }
+            result = fcode;
+        } else if elen < 0 {
             result = 2;
         } else {
             build.id(enc[0..elen], ident);
@@ -316,6 +364,12 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
             let ll = build.log_record(lr, 0, enc[0..elen], sig);
             var step = 0;
             if wrote {
+                // the delta rows of this transaction (even those whose net effect is nothing, so that none is left without a commit) take the commit's id, inside the transaction
+                // that is about to be prepared: they live or die with the data
+                let dn = build.put_bytes(q, hex_sql(q, build.put_bytes(q, 0, "update cdb.delta set commit_id = '\\x"), ident) - 1, "'::bytea where xid = txid_current()");
+                step = upstream_exec(tab, core, b, q[0..dn]);
+            }
+            if step == 0 && wrote {
                 step = upstream_exec(tab, core, b, q[0..gid_sql(q, "PREPARE TRANSACTION '", ident)]);
             }
             if step < 0 {
@@ -336,6 +390,7 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
                     var j = 0;
                     while j < 32 {
                         tip[j] = ident[j];
+                        tip[32 + j] = stt[j];
                         j = j + 1;
                     }
                     build.put_bytes(contents(core.store.ids), 32 * chain[2], ident);

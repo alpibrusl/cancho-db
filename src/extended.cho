@@ -626,6 +626,8 @@ fn exec_txn[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core,
             fail(tw, core, k, "40000", "commit-failed", "the database refused to commit the transaction");
         } else if r == 2 {
             fail(tw, core, k, "58000", "log-unavailable", "the commit could not be written to the log, so it was rolled back");
+        } else if r == 3 {
+            fail(tw, core, k, "54000", "transaction-too-large", "the transaction changed more rows than one commit can record, so it was rolled back");
         } else if committing {
             send_tag(tw, core, k, "COMMIT");
         } else {

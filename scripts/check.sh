@@ -37,7 +37,7 @@ echo "== authority";                 sh tests/authority.sh
 echo "== vectors, python verifier";  python3 tests/run_vectors.py vectors -- python3 tools/verify.py
 echo "== vectors, cancho verifier";  python3 tests/run_vectors.py vectors -- build/verify
 echo "== vectors, go verifier";      python3 tests/run_vectors.py vectors -- build/verify-go
-echo "== the proxy builds";          "$CANCHO" build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho -o build/proxy
+echo "== the proxy builds";          "$CANCHO" build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho -o build/proxy
 echo "== the proxy end to end (psql, a real PostgreSQL)"
 sh scripts/pg_throwaway.sh start 5593
 trap 'sh scripts/pg_throwaway.sh stop 5593' EXIT
@@ -50,6 +50,8 @@ sh scripts/drivers_setup.sh
 E2E_VERIFIERS="build/verify" quiet 3 python3 tests/drivers_e2e.py build/proxy
 echo "== row-delta capture (sql/capture.sql) against a snapshot diff, in a real PostgreSQL"
 quiet 3 python3 tests/capture_check.py
+echo "== changes and state in the commits (M2b-2b): recomputed from the database's delta rows, the chain, the bound, a restart"
+E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/changes_e2e.py build/proxy
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
 PG_PORT=5593 N=40 quiet 2 python3 scripts/measure_p2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"

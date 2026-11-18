@@ -559,6 +559,11 @@ fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int
         shared.answer_error(tab, core, client, 73, "58000", "log-unavailable", "the commit could not be written to the log, so it was rolled back");
         return 0;
     }
+    if !failed && r == 3 {
+        st[cp + 18] = 0;
+        shared.answer_error(tab, core, client, 73, "54000", "transaction-too-large", "the statement changed more rows than one commit can record, so it was rolled back");
+        return 0;
+    }
     if !failed && st[cp + 18] > 0 {
         shared.send(tab, core, client, hd[client * shared.hold_max()..client * shared.hold_max() + st[cp + 18]]);
     }
@@ -822,6 +827,8 @@ fn transaction_control[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: i
         shared.answer_error(tab, core, k, 73, "40000", "commit-failed", "the database refused to commit the transaction");
     } else if r == 2 {
         shared.answer_error(tab, core, k, 73, "58000", "log-unavailable", "the commit could not be written to the log, so it was rolled back");
+    } else if r == 3 {
+        shared.answer_error(tab, core, k, 73, "54000", "transaction-too-large", "the transaction changed more rows than one commit can record, so it was rolled back");
     } else if committing {
         shared.answer_tag(tab, core, k, 'I', "COMMIT");
     } else {
@@ -1254,7 +1261,7 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
     var status = 3;
     var seed = box_slice(heap, 32, byte_of(0));
     var pk = box_slice(heap, 32, byte_of(0));
-    var tip = box_slice(heap, 32, byte_of(0));
+    var tip = box_slice(heap, 64, byte_of(0));
     var info = box_slice(heap, 8, 0);
     var idtab = box_slice(heap, 32 * shared.ids_max(), byte_of(0));
     var keyed = false;

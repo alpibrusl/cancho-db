@@ -65,6 +65,16 @@ pub fn snapin_max() -> [] int {
     return 262144;
 }
 
+// The most facts text (`cdb.facts`, about 150 bytes a fact) one commit may carry: the answer must fit `snapin_max()` with its headers, so the SQL says "too large" past this
+// (docs/m2-branches.md D17). `facts_max()` facts is far more than the text allows (a fact is at least 70 bytes of it); it sizes the scratch.
+pub fn facts_text_max() -> [] int {
+    return 200000;
+}
+
+pub fn facts_max() -> [] int {
+    return 4096;
+}
+
 // Per connection `k`, `state[24k..24k+24]` is:
 //
 //     0  kind: 0 free, 1 client sending its startup, 2 client sending its password, 5 login accepted (waiting to be
@@ -111,6 +121,7 @@ pub res struct Store {
     stmts: File,
     // the signing seed (32 bytes) and, after it, its public key (32 bytes), derived once here: a signature that is given the key does not derive it again (`sign_with_public`, half the cost of a commit's signature)
     seed: Box[[byte]],
+    // the id of the branch's last commit (32 bytes), then that commit's `state` (32 bytes)
     tip: Box[[byte]],
     chain: Box[[int]],
     // the id of every commit the log holds, 32 bytes each in log order (`chain[2]` of them): recovery asks it which prepared
@@ -198,6 +209,11 @@ pub res struct Core {
     // held CommandComplete messages, `hold_max()` a slot; a message being collected, `sbuf_max()` a slot
     hold: Box[[byte]],
     sbuf: Box[[byte]],
+    // the scratch that `state.changes_of` works in when a commit is made (one commit at a time): decoded bytes, 9 ints a fact, one fact's encoding, 32 bytes a fact
+    fw: Box[[byte]],
+    fm: Box[[int]],
+    fe: Box[[byte]],
+    fl: Box[[byte]],
 }
 
 // ------------------------------------------------------------------------------------------------ sending
@@ -403,12 +419,12 @@ pub fn consume[&c](core: &!c Core, k: int, n: int) -> [] int {
 
 // A `Core` for `slots` connections, around the poller and the configuration (`cfg` and `cfgi`: see `Core`).
 pub fn new_core[&h](heap: &!h Heap, poller: Poller, cfg: Box[[byte]], cfgi: Box[[int]], kept: Store, slots: int) -> [heap] Core {
-    return Core { store: kept, xstm: box_slice(heap, slots * x_stmts() * x_stmt_rec() + x_stmts() * x_stmt_rec(), byte_of(0)), xprt: box_slice(heap, slots * x_ports() * x_port_rec() + x_ports() * x_port_rec(), byte_of(0)), xi: box_slice(heap, 8 * slots + 8, 0), acc: box_slice(heap, slots * acc_stride() + acc_stride(), byte_of(0)), acci: box_slice(heap, 8 * slots + 8, 0), poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 8, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)) };
+    return Core { store: kept, xstm: box_slice(heap, slots * x_stmts() * x_stmt_rec() + x_stmts() * x_stmt_rec(), byte_of(0)), xprt: box_slice(heap, slots * x_ports() * x_port_rec() + x_ports() * x_port_rec(), byte_of(0)), xi: box_slice(heap, 8 * slots + 8, 0), acc: box_slice(heap, slots * acc_stride() + acc_stride(), byte_of(0)), acci: box_slice(heap, 8 * slots + 8, 0), poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 8, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)), fw: box_slice(heap, facts_text_max() / 2 + 64, byte_of(0)), fm: box_slice(heap, 9 * facts_max() + 9, 0), fe: box_slice(heap, 140000, byte_of(0)), fl: box_slice(heap, 32 * facts_max() + 32, byte_of(0)) };
 }
 
 // Release everything a `Core` holds.
 pub fn drop_core[&h](heap: &!h Heap, core: Core) -> [heap] int {
-    let Core { store, xstm, xprt, xi, acc, acci, poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf } = core;
+    let Core { store, xstm, xprt, xi, acc, acci, poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf, fw, fm, fe, fl } = core;
     drop_store(heap, store);
     unbox_slice(heap, xstm);
     unbox_slice(heap, xprt);
@@ -432,13 +448,17 @@ pub fn drop_core[&h](heap: &!h Heap, core: Core) -> [heap] int {
     unbox_slice(heap, aux);
     unbox_slice(heap, hold);
     unbox_slice(heap, sbuf);
+    unbox_slice(heap, fw);
+    unbox_slice(heap, fm);
+    unbox_slice(heap, fe);
+    unbox_slice(heap, fl);
     return 0;
 }
 
-// A `Store` around three open files; `seed` (32 bytes) and `tip` (32 bytes, meaningful if `has` is 1) are copied.
+// A `Store` around three open files; `seed` (32 bytes) and `tip` (64 bytes: the id of the last commit, then its `state`; meaningful if `has` is 1) are copied.
 pub fn new_store[&h, &s, &t, &i](heap: &!h Heap, log: File, tokens: File, stmts: File, seed: &s [byte], tip: &t [byte], next: int, has: int, ids: &i [byte], count: int) -> [heap] Store {
     var sb = box_slice(heap, 64, byte_of(0));
-    var tb = box_slice(heap, 32, byte_of(0));
+    var tb = box_slice(heap, 64, byte_of(0));
     var cb = box_slice(heap, 4, 0);
     var ib = box_slice(heap, 32 * ids_max(), byte_of(0));
     borrow mut sb as &!sw in {
@@ -451,7 +471,7 @@ pub fn new_store[&h, &s, &t, &i](heap: &!h Heap, log: File, tokens: File, stmts:
     }
     borrow mut tb as &!tw in {
         var i = 0;
-        while i < 32 {
+        while i < 64 {
             contents(tw)[i] = tip[i];
             i = i + 1;
         }
