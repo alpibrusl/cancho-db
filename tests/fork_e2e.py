@@ -184,6 +184,14 @@ check("each branch's chain goes on from its own tip: feat 0, 1, 2 (read of the f
 wr = [c for c in feat if c[6] != EMPTY]
 check("the branch's own write has facts (its `changes` is not empty) and its state chains from its parent's", len(wr) == 1 and wr[0][7] == ref.state([feat[feat.index(wr[0]) - 1][7]], wr[0][6]))
 
+# a table made in the branch is in the branch's schema, and the guard checks statements against that schema's snapshot (D22)
+r = psql(port, "create table feat_only (id int primary key, w text)", db="feat")
+check("DDL on `feat` makes the table in the branch's schema only", r.returncode == 0 and "ERROR" not in r.stderr and direct("select string_agg(table_schema, ',') from information_schema.tables where table_name = 'feat_only'").stdout.strip() == "cdb_b_feat", (r.stderr, direct("select string_agg(table_schema, ',') from information_schema.tables where table_name = 'feat_only'").stdout))
+r = psql(port, "insert into feat_only values (1, 'x'); select w from feat_only", db="feat")
+check("... the guard knows it there (the branch's snapshot), and the connection reads and writes it", r.returncode == 0 and "ERROR" not in r.stderr and r.stdout.split()[-1] == "x", (r.stdout, r.stderr))
+r = psql(port, "select w from feat_only", db="main")
+check("... and main's guard does not: unknown-table", "unknown-table" in r.stderr, r.stderr)
+
 # ---------------------------------------------------------------------------------------------------- refusals leave nothing
 n0, s0 = len(commits(ldir)), schemas()
 cases = [
