@@ -47,6 +47,8 @@ E2E_VERIFIERS="build/verify" quiet 3 python3 tests/ext_e2e.py build/proxy
 echo "== real drivers through the proxy (psycopg 3, psycopg2, pg8000, asyncpg, node-postgres)"
 sh scripts/drivers_setup.sh
 E2E_VERIFIERS="build/verify" quiet 3 python3 tests/drivers_e2e.py build/proxy
+echo "== row-delta capture (sql/capture.sql) against a snapshot diff, in a real PostgreSQL"
+quiet 3 python3 tests/capture_check.py
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
 PG_PORT=5593 N=40 quiet 2 python3 scripts/measure_p2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"

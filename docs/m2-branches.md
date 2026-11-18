@@ -63,6 +63,21 @@ row per fact into a delta table as `jsonb`):
 The deltas of about 300,000 changed rows take **59 MB** (`jsonb` of both row images). A point statement pays nothing visible against the 3.7 ms a
 commit already costs; a bulk update pays an order of magnitude. That is the price of `changes`, and it is paid by the statements that change the most.
 
+**Corrected in M2b-1 (the measurement above was of a prototype).** The real capture (`sql/capture.sql`) hashes both row images with SHA-256, builds its insert with
+`format()` per statement so that one trigger function serves every table and any key, and joins old and new rows by key with a full join. Measured with
+`scripts/measure_m2.sql` (two runs, same machine, PostgreSQL 16.15; the first number of each pair is plain, the second captured):
+
+| | plain | with capture | factor |
+|---|---|---|---|
+| 2,000 single-row inserts, one statement each | 7.3 to 9.5 ms | 222 to 239 ms | **+0.11 ms a statement** (the prototype said +6 microseconds: that was 18 times too small) |
+| one insert of 100,000 rows | 174 to 197 ms | 1,142 to 1,342 ms | 6.5 to 7.7 times (the prototype said 2.3) |
+| one update of 100,000 rows | 319 to 334 ms | 2,090 to 2,745 ms | 6.3 to 8.2 times (the prototype said 11) |
+| one delete of 100,000 rows | 42 ms | 902 to 940 ms | 22 times (the prototype said 5.8) |
+
+A point statement through the proxy costs about 3.7 ms a commit, so 0.11 ms is about 3 % of it; a bulk statement pays 6 to 22 times. The conclusion of section 3.3 stands (the
+price is paid by the statements that change the most) and the figures above replace the prototype's. The 59 MB of deltas is also the prototype's, with both row images as `jsonb`; the real
+table holds the same two images and two hashes, so it is larger.
+
 **3.4 `AS OF` can be answered from the deltas alone.** The state at commit *C* of a table is: the current rows whose key no later delta touched, plus,
 for each key a later delta touched, the *old* image of its **earliest** later delta when that delta is an update or a delete (an insert means the row did not
 exist at *C*). For a 100,000-row table with 70,000 later changes (50,000 updates, 10,000 deletes, 10,000 inserts) this rebuilt the table as of the mark in
@@ -172,3 +187,28 @@ These change what M2 builds. The recommended answer is first; none blocks M2a.
 
 Row-level capabilities, resolution policies, garbage collection of branches, erasure, cold-storage snapshots (M3/M4), `AS OF` on a branch other than the connection's, and a
 content-addressed state root. Each is listed so that its absence is a decision and not an omission.
+
+## 8. M2b-1 as built: the producer's definitions, and the capture SQL
+
+`docs/spec/state.md` leaves three things to the producer; M2b-1 fixes them and builds the database side. **The proxy does not use any of it yet** (M2b-2 wires the commit path).
+
+* **Row image and hash.** An image is PostgreSQL's own `jsonb` text of the row (`to_jsonb(row)::text`: keys in a fixed order, numbers and text normalised; it does not depend on the client or the
+  session). Its hash is `SHA-256("cancho-db/row/v1" || 0x00 || that text)`. **Limit:** a column PostgreSQL's `jsonb` cannot represent exactly is not distinguished (a `float` and a `numeric`
+  that print alike are the same image); a table is a table of what `to_jsonb` shows.
+* **Primary key.** The `jsonb` text of the array of the key's column values in index order (`[3]`, `[3, "b3"]`). A table without a primary key cannot be tracked: `cdb.track` raises `55000`.
+  M2b-2 must decide what the proxy does with a write to such a table (refuse it is the recommendation, with its own rule tag).
+* **Net facts.** `cdb.facts(xid)` reads the transaction's delta rows and gives per `(table, key)` the image before the first change and the image after the last: an insert then an update is
+  one insert, an insert then a delete is nothing, a change and its undoing is nothing, a delete then an insert of the same key is an update, a key change is a delete and an insert. It
+  emits the text `tools/state.py` reads, in `(table, key)` order with PostgreSQL's `bytea` ordering (unsigned bytes, a prefix first), so no re-sorting is needed.
+* **Capture.** Statement-level `AFTER` triggers with transition tables on every tracked table, in the schema `cdb` (`cdb.delta`, `cdb.capture`, `cdb.track`, `cdb.track_all`, `cdb.facts`),
+  idempotent to install. An `UPDATE` is matched old to new by key with a full join: a changed key is a delete and an insert, a swap of two keys is two updates.
+  `TRUNCATE` bypasses row triggers and is not captured; the guard parses no `TRUNCATE` (it is `unsupported-statement`), so a client cannot issue it.
+
+**Tested** (`tests/capture_check.py`, in the gate): 17 transactions named for the rule they exercise and 300 random ones over an integer-key, a composite-key and a text-key table (including
+non-ASCII keys and the empty string), each compared with a **snapshot diff of the table before and after**, rebuilt in Python from the `jsonb` text alone (the hash, the key, the order and the kind);
+a rolled-back transaction leaves no delta row; every facts text is accepted by `tools/state.py`. **The test found two bugs in the SQL when first run**: a `full join` on `is not distinct from`
+cannot be hashed or merged and made every `UPDATE` fail, and the new side of a changed key was given the key `[null]` (the old side's all-null array was picked by `coalesce`). Both are fixed.
+
+**Not yet:** the proxy reading `cdb.facts`, `changes` and `state` in the commit, the crash-consistency test (M2b-2); a limit on the number of facts a transaction may carry (the facts text is read
+whole; M2b-2 sets it, with its own rule).
+
