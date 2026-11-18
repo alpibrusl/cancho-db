@@ -1,0 +1,215 @@
+module cdb.state;
+
+import std.crypto;
+import cdb.build;
+
+// Facts, `changes` and `state` (docs/spec/state.md), sans-io: the encoding of a fact, its leaf, the Merkle root of a commit's
+// leaves, the `changes` hash and the `state` hash. A caller hands over bytes and gets bytes (or a rule number) back; nothing here
+// reads a file, a clock or the network. The Python reference is tools/state.py; tests/state_check.py compares the two.
+
+// The rules a fact can break (spec section 2 and 3), as the numbers these functions answer with.
+pub fn e_kind() -> [] int {
+    return 1;
+}
+
+pub fn e_table() -> [] int {
+    return 2;
+}
+
+pub fn e_pk() -> [] int {
+    return 3;
+}
+
+pub fn e_image() -> [] int {
+    return 4;
+}
+
+pub fn e_order() -> [] int {
+    return 5;
+}
+
+// the output slice is too small
+pub fn e_space() -> [] int {
+    return 6;
+}
+
+fn put_zero32[&o](out: &!o [byte], at: int) -> [] int {
+    if at < 0 || at + 32 > len(out) {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < 32 {
+        out[at + i] = byte_of(0);
+        i = i + 1;
+    }
+    return at + 32;
+}
+
+fn is_zero[&d](h: &d [byte]) -> [] bool {
+    var i = 0;
+    while i < len(h) {
+        if int_of(h[i]) != 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// `old` and `new` are 32 bytes, or empty when the hash is absent. The encoding of the fact (`table || pk || kind || old || new`,
+// spec section 2) is written to `out` at `at`: the new position, or the negative of the rule it breaks.
+pub fn put_fact[&o, &t, &p, &a, &b](out: &!o [byte], at: int, kind: int, table: &t [byte], pk: &p [byte], old: &a [byte], new: &b [byte]) -> [] int {
+    if kind < 0 || kind > 2 {
+        return 0 - e_kind();
+    }
+    if len(table) < 1 || len(table) > 255 {
+        return 0 - e_table();
+    }
+    if len(pk) < 1 || len(pk) > 65535 {
+        return 0 - e_pk();
+    }
+    var want_old = 1;
+    var want_new = 1;
+    if kind == 0 {
+        want_old = 0;
+    }
+    if kind == 2 {
+        want_new = 0;
+    }
+    if len(old) != 32 * want_old || len(new) != 32 * want_new {
+        return 0 - e_image();
+    }
+    if len(old) == 32 && is_zero(old) || len(new) == 32 && is_zero(new) {
+        return 0 - e_image();
+    }
+    var n = build.put_be(out, at, len(table), 2);
+    n = build.put_bytes(out, n, table);
+    n = build.put_be(out, n, len(pk), 4);
+    n = build.put_bytes(out, n, pk);
+    n = build.put_be(out, n, kind, 1);
+    if len(old) == 32 {
+        n = build.put_bytes(out, n, old);
+    } else {
+        n = put_zero32(out, n);
+    }
+    if len(new) == 32 {
+        n = build.put_bytes(out, n, new);
+    } else {
+        n = put_zero32(out, n);
+    }
+    if n < 0 {
+        return 0 - e_space();
+    }
+    return n;
+}
+
+// SHA-256 of `prefix`, a NUL, then each of the parts, into the 32 bytes of `out`.
+fn hash3[&x, &a, &b, &c, &o](prefix: &x [byte], a: &a [byte], b: &b [byte], c: &c [byte], out: &!o [byte]) -> [] int {
+    region r {
+        let sha = alloc_slice[r](crypto.sha256_state_len(), 0);
+        let nul = alloc_slice[r](1, byte_of(0));
+        crypto.sha256_init(sha);
+        crypto.sha256_update(sha, prefix);
+        crypto.sha256_update(sha, nul);
+        crypto.sha256_update(sha, a);
+        crypto.sha256_update(sha, b);
+        crypto.sha256_update(sha, c);
+        crypto.sha256_final(sha, out);
+    }
+    return 0;
+}
+
+// The leaf of an encoded fact (spec section 2), into the 32 bytes of `out`.
+pub fn leaf[&e, &o](enc: &e [byte], out: &!o [byte]) -> [] int {
+    return hash3("cancho-db/fact/v1", enc, "", "", out);
+}
+
+// Whether `(t1, p1)` sorts strictly before `(t2, p2)`: table first, then pk, each an unsigned lexicographic byte string with a prefix first.
+pub fn key_less[&a, &b, &c, &d](t1: &a [byte], p1: &b [byte], t2: &c [byte], p2: &d [byte]) -> [] bool {
+    let c = cmp(t1, t2);
+    if c != 0 {
+        return c < 0;
+    }
+    return cmp(p1, p2) < 0;
+}
+
+fn cmp[&a, &b](x: &a [byte], y: &b [byte]) -> [] int {
+    var i = 0;
+    while i < len(x) && i < len(y) {
+        if int_of(x[i]) != int_of(y[i]) {
+            return int_of(x[i]) - int_of(y[i]);
+        }
+        i = i + 1;
+    }
+    return len(x) - len(y);
+}
+
+// The Merkle root (spec section 3) of the `n` leaves, 32 bytes each, in `lv`, into `out`; `lv` is used up. 32 zero bytes for no leaves.
+pub fn merkle[&l, &o](lv: &!l [byte], n: int, out: &!o [byte]) -> [] int {
+    var m = n;
+    if m == 0 {
+        var z = 0;
+        while z < 32 {
+            out[z] = byte_of(0);
+            z = z + 1;
+        }
+        return 0;
+    }
+    region r {
+        let both = alloc_slice[r](64, byte_of(0));
+        let h = alloc_slice[r](32, byte_of(0));
+        while m > 1 {
+            var k = 0;
+            while 2 * k + 1 < m {
+                var j = 0;
+                while j < 32 {
+                    both[j] = lv[64 * k + j];
+                    both[32 + j] = lv[64 * k + 32 + j];
+                    j = j + 1;
+                }
+                hash3("cancho-db/node/v1", both, "", "", h);
+                j = 0;
+                while j < 32 {
+                    lv[32 * k + j] = h[j];
+                    j = j + 1;
+                }
+                k = k + 1;
+            }
+            if m % 2 == 1 {
+                var j = 0;
+                while j < 32 {
+                    lv[32 * k + j] = lv[32 * (m - 1) + j];
+                    j = j + 1;
+                }
+                k = k + 1;
+            }
+            m = k;
+        }
+        var j = 0;
+        while j < 32 {
+            out[j] = lv[j];
+            j = j + 1;
+        }
+    }
+    return 0;
+}
+
+// `changes` (spec section 3) from the number of facts and their root, into the 32 bytes of `out`.
+pub fn changes[&r, &o](n: int, root: &r [byte], out: &!o [byte]) -> [] int {
+    region g {
+        let cnt = alloc_slice[g](4, byte_of(0));
+        build.put_be(cnt, 0, n, 4);
+        hash3("cancho-db/changes/v1", cnt, root, "", out);
+    }
+    return 0;
+}
+
+// `state` (spec section 4): the `np` parents' states, 32 bytes each in `parents`, and this commit's `changes`, into the 32 bytes of `out`.
+pub fn state[&p, &c, &o](np: int, parents: &p [byte], chg: &c [byte], out: &!o [byte]) -> [] int {
+    region g {
+        let head = alloc_slice[g](1 + len(parents), byte_of(0));
+        build.put_bytes(head, build.put_be(head, 0, np, 1), parents);
+        hash3("cancho-db/state/v1", head, chg, "", out);
+    }
+    return 0;
+}

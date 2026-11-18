@@ -987,6 +987,69 @@ def run_build(cancho):
     return 1 if survivors else 0
 
 
+STATE = [
+    # ---- src/state.cho (docs/spec/state.md), judged by tests/state_check.py
+    ("state: a leaf has another domain prefix", "src/state.cho", '"cancho-db/fact/v1"', '"cancho-db/fact/v2"'),
+    ("state: a node has another domain prefix", "src/state.cho", '"cancho-db/node/v1"', '"cancho-db/node/v2"'),
+    ("state: an unpaired last hash is dropped", "src/state.cho", "if m % 2 == 1 {", "if m % 2 == 2 {"),
+    ("state: a node pairs a hash with itself", "src/state.cho", "both[32 + j] = lv[64 * k + 32 + j];", "both[32 + j] = lv[64 * k + j];"),
+    ("state: changes counts one fact too many", "src/state.cho", "build.put_be(cnt, 0, n, 4);", "build.put_be(cnt, 0, n + 1, 4);"),
+    ("state: the parent count is not in state", "src/state.cho", "build.put_bytes(head, build.put_be(head, 0, np, 1), parents);", "build.put_bytes(head, build.put_be(head, 0, 0, 1), parents);"),
+    ("state: a zero image is accepted", "src/state.cho", "if len(old) == 32 && is_zero(old) || len(new) == 32 && is_zero(new) {", "if false {"),
+    ("state: kind 3 is accepted", "src/state.cho", "if kind < 0 || kind > 2 {", "if kind < 0 || kind > 3 {"),
+    ("state: a table of 256 bytes is accepted", "src/state.cho", "len(table) > 255", "len(table) > 256"),
+    ("state: a delete has a new image", "src/state.cho", "    if kind == 2 {\n        want_new = 0;", "    if kind == 1 {\n        want_new = 0;"),
+    ("state: the table sorts after the key", "src/state.cho", "    if c != 0 {\n        return c < 0;", "    if c != 0 {\n        return c > 0;"),
+    ("state: a repeated key is in order", "src/state.cho", "return cmp(p1, p2) < 0;", "return cmp(p1, p2) <= 0;"),
+    ("state: a prefix sorts after its extension", "src/state.cho", "    return len(x) - len(y);", "    return len(y) - len(x);"),
+    ("state: the kind is not in the encoding", "src/state.cho", "n = build.put_be(out, n, kind, 1);", "n = build.put_be(out, n, 0, 1);"),
+    # ---- tools/state.py
+    ("state.py: the empty root is not zero", "tools/state.py", "root = level[0] if level else ZERO", "root = level[0] if level else sha(b'')"),
+    ("state.py: an unpaired hash is dropped", "tools/state.py", "        if len(level) % 2:\n            nxt.append(level[-1])", "        if False:\n            nxt.append(level[-1])"),
+    ("state.py: a repeated key is in order", "tools/state.py", "not (last < (table, pk))", "not (last <= (table, pk))"),
+    ("state.py: a short image is accepted", "tools/state.py", "len(old) != 32) or (new is not None and len(new) != 32)", "len(old) > 32) or (new is not None and len(new) > 32)"),
+    ("state.py: state leaves out the parent count", "tools/state.py", "bytes([len(parent_states)]), *parent_states", "b'', *parent_states"),
+    ("state.py: parents' states are reversed", "tools/state.py", "bytes([len(parent_states)]), *parent_states", "bytes([len(parent_states)]), *reversed(parent_states)"),
+]
+
+
+def run_state(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in STATE if not only or only in m[0]]
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            for d in ("src", "tools", "proxy"):
+                shutil.copytree(ROOT / d, work / d, ignore=shutil.ignore_patterns("__pycache__"))
+            (work / "tests").mkdir()
+            shutil.copy(ROOT / "tests/state_check.py", work / "tests/state_check.py")
+            shutil.copy(ROOT / "tests/state_cases.txt", work / "tests/state_cases.txt")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "statecheck"
+            b = subprocess.run([cancho, "build", "--std", str(work / "proxy/statecheck.cho"), str(work / "src/state.cho"), str(work / "src/build.cho"), str(work / "src/commit.cho"), "-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            r = subprocess.run([sys.executable, str(work / "tests/state_check.py"), str(exe)], capture_output=True, text=True, timeout=600)
+            if r.returncode == 0:
+                print("SURVIVED %-46s every state check passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in r.stdout.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d check(s), e.g. %s" % (label, len(first), first[0][5:70] if first else "a crash"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run_store(cancho):
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in STORE if not only or only in m[0]]
@@ -1031,6 +1094,8 @@ def run(kind, cancho):
         return run_build(cancho)
     if kind == "store":
         return run_store(cancho)
+    if kind == "state":
+        return run_state(cancho)
     if kind == "lower":
         return run_lower(cancho)
     if kind == "login":
