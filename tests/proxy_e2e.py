@@ -1050,6 +1050,7 @@ check("M2b-2a: the new-row hash is SHA-256 of 'cancho-db/row/v1', a NUL and the 
       len(ins) == 3 and hashlib.sha256(b"cancho-db/row/v1\x00" + ins[2].encode()).hexdigest() == ins[1], ins)
 r = psql(lp, good, "create table p0_nokey (x int)")
 check("M2b-2a: a table without a primary key cannot be created through the proxy, and is not created", r.returncode != 0 and "no primary key" in r.stderr and direct("select count(*) from pg_class where relname = 'p0_nokey'").stdout.strip() == "0", r.stderr)
+direct("delete from cdb.delta where tbl = 'p0_keyed'")      # the delta table outlives a run in the same database
 r = psql(lp, good, "create table p0_keyed (id int primary key, v text)")
 check("M2b-2a: a table with a primary key can", r.returncode == 0, r.stderr)
 psql(lp, good, "insert into p0_keyed values (1, 'a')")
@@ -1068,10 +1069,11 @@ except subprocess.TimeoutExpired:
     kerr = "timed out"
 check("M2b-2a: with a keyless table and a partitioned table in public the proxy refuses to start (exit 7) and names both",
       kp.returncode == 7 and "p0_keyless (no primary key)" in kerr and "p0_part (partitioned)" in kerr, "%s %s" % (kp.returncode, kerr))
+check("M2b-2a: a start puts the event trigger back on (it was disabled by hand before the refused start)", direct("select evtenabled from pg_event_trigger where evtname = 'cdb_ddl'").stdout.strip() == "O")
 direct("drop table p0_keyless, p0_part")
+direct("alter event trigger cdb_ddl disable")
 direct("create table p0_pre (id int primary key)")        # made while the event trigger is off: only the proxy's start can track it
 check("M2b-2a: (a table made while the event trigger was off has no triggers yet)", direct("select count(*) from pg_trigger where tgrelid = 'p0_pre'::regclass and tgname like 'cdb_%'").stdout.strip() == "0")
-direct("alter event trigger cdb_ddl enable")
 kp2, _ = start_logged(Path(tempfile.mkdtemp()), _scratch + "/key", wait=True)
 check("M2b-2a: and starts again once they are gone", kp2.poll() is None, kp2.poll())
 check("M2b-2a: ... and its start tracked the table that was already there (three triggers)", direct("select count(*) from pg_trigger where tgrelid = 'p0_pre'::regclass and tgname like 'cdb_%'").stdout.strip() == "3")

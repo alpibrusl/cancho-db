@@ -256,6 +256,8 @@ the 13 statements of `sql/capture.sql` (turned into `src/capture_sql.cho` by `to
 
 * **An event trigger** (`cdb.on_ddl`, on `CREATE TABLE`, `CREATE TABLE AS` and `ALTER TABLE`) tracks a table in the transaction that makes it, so its first write is captured. A keyless table, or a partitioned one, makes the
   statement fail (`55000` / `0A000`); dropping the key of a tracked table is refused the same way. It is created before the tracking pass, so there is no moment in which a new table is neither tracked nor refused.
+* **A start puts the event trigger back on.** The install drops and re-creates it (`drop event trigger if exists`, then create), so an administrator who disabled it by hand gets it enabled at the next start, even if that start is then
+  refused for a keyless table; tables made while it was off are tracked by the start's `track_all`. (`tests/proxy_e2e.py` checks both.)
 * **`cdb.untrackable()`** lists what the capture cannot track: tables without a primary key and partitioned tables with their partitions. If there are any, **the proxy refuses to start (exit 7) and says which**.
 * **A failed install** names the statement and says what the event trigger needs (a superuser upstream role), exit 7.
 
