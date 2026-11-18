@@ -413,8 +413,8 @@ PROXY = [
     ("fork: a new client's token is taken for stored", "proxy/proxy.cho", "                                contents(core.acci)[8 * k + 4] = 0;", "                                contents(core.acci)[8 * k + 4] = contents(core.acci)[8 * k + 4];"),
     ("fork: the branch's snapshot is the first's", "src/catalog.cho", "                if bx == 0 {\n                    var qi = 0;", "                if true {\n                    var qi = 0;"),
     ("fork: the upstream connection has no search_path", "proxy/proxy.cho", "                    if st[p + 23] > 0 {\n                        // a branch other than the first lives", "                    if false {\n                        // a branch other than the first lives"),
-    ("proxy: the chain does not advance", "src/commitpath.cho", "chain[4 + 3 * bx + 1] = chain[4 + 3 * bx + 1] + 1;", "chain[4 + 3 * bx + 1] = chain[4 + 3 * bx + 1];"),
-    ("proxy: the tip is not remembered", "src/commitpath.cho", "                        tip[j] = ident[j];", "                        tip[j] = tip[j];"),
+    ("proxy: the chain does not advance", "src/commitpath.cho", "chain[4 + 3 * nb + 1] = chain[4 + 3 * nb + 1] + 1;", "chain[4 + 3 * nb + 1] = chain[4 + 3 * nb + 1];"),
+    ("proxy: the tip is not remembered", "src/commitpath.cho", "                        ntip[j] = ident[j];", "                        ntip[j] = ntip[j];"),
     ("proxy: the token is never stored", "src/commitpath.cho", "            if ai[8 * k + 4] == 0 {\n                tl = build.store_record(tr, 0, tk);", "            if false {\n                tl = build.store_record(tr, 0, tk);"),
     ("proxy: the statements are not recorded", "src/commitpath.cho", "build.put_bytes(acc[base + 2048..base + 18432], ai[8 * k + 1], irs);", "ai[8 * k + 1] = ai[8 * k + 1] + 0;"),
     ("proxy: the effects are not recorded", "src/commitpath.cho", "build.put_bytes(acc[base + 18432..base + 22528], ai[8 * k + 2], effs);", "ai[8 * k + 2] = ai[8 * k + 2] + 0;"),
@@ -455,7 +455,7 @@ PROXY = [
     ("proxy: a refused login still opens the upstream", "proxy/proxy.cho", "shared.refuse(tab, core, k, \"FATAL\", login.sqlstate(rule), login.rule_name(rule), \"the capability token was refused\");", "st[p] = 5;"),
     ("proxy: protocol versions are not checked", "proxy/proxy.cho", "} else if kind == login.err_version() {", "} else if false {"),
     # ---- the query path (P1d-2)
-    ("proxy: the rendering is not what is sent", "proxy/proxy.cho", "                    if added == 0 {\n                        run_query(tw, core, k, vd[3]);", "                    if added == 0 {\n                        run_query(tw, core, k, 0);"),
+    ("proxy: the rendering is not what is sent", "proxy/proxy.cho", "run_query(tw, core, k, rl);", "run_query(tw, core, k, 0);"),
     ("proxy: a refused query is sent upstream anyway", "proxy/proxy.cho", "                if verdict != 0 {\n                    refused_query(tw, core, k, vd);", "                if false {\n                    refused_query(tw, core, k, vd);"),
     ("proxy: a Parse message is a protocol violation", "proxy/proxy.cho", "} else if ty == 'P' || ty == 'B' ||", "} else if ty == 'B' ||"),
     ("ext: messages after an unsupported message are answered too", "proxy/proxy.cho", "                        st[p + 15] = 1;\n                    }\n                    shared.consume(core, k, ln + 1);", "                        st[p + 15] = 0;\n                    }\n                    shared.consume(core, k, ln + 1);"),
@@ -1132,7 +1132,7 @@ SQL = [
     ("sql fork: the foreign keys are not copied", "sql/capture.sql", "        execute stmt;", "        null;"),
     ("sql fork: an identity counter skips a number", "sql/capture.sql", "0) + 1, false)', pg_get_serial_sequence", "0) + 1, true)', pg_get_serial_sequence"),
     ("sql fork: a generated column is inserted", "sql/capture.sql", " and a.attnum > 0 and not a.attisdropped and a.attgenerated = '';", " and a.attnum > 0 and not a.attisdropped;"),
-    ("sql fork: the rows are not copied", "sql/capture.sql", "            execute format('insert into %I.%I (%s) overriding system value select", "            execute format('select 1 where false or %s is null or %s is null /* insert into %I.%I (%s) overriding system value select"),
+    ("sql fork: the rows are not copied", "sql/capture.sql", "select %s from %I.%I', dst, r.relname, cols, cols, src, r.relname);", "select %s from %I.%I where false', dst, r.relname, cols, cols, src, r.relname);"),
     ("sql fork: the source's own schema is copied from, whatever was asked", "sql/capture.sql", "where s.nspname = src and c.relkind = 'r' order by c.relname loop", "where s.nspname = 'public' and c.relkind = 'r' order by c.relname loop"),
 ]
 

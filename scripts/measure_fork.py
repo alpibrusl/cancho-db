@@ -55,7 +55,7 @@ env = dict(os.environ, PGPASSWORD=token, PGHOST="127.0.0.1", PGPORT=str(port), P
 direct("create table m_t (id int primary key, a text, b int); create index m_t_b on m_t (b)")
 have, n = 0, 0
 for size in SIZES:
-    direct("insert into m_t select g, md5(g::text), g % 100 from generate_series(%d, %d) g" % (have + 1, size))
+    direct("insert into m_t select g, md5(g::text), g %% 100 from generate_series(%d, %d) g" % (have + 1, size))
     have = size
     via, copy = [], []
     for i in range(3):
