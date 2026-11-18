@@ -5,7 +5,19 @@ untouched in both directions and keeps, per client connection, a list of the cli
 """
 import socket
 import struct
+import subprocess
 import threading
+
+
+def ensure_database(port, name, host="127.0.0.1"):
+    """Make the database `name` if the server has none (the proxy tests run in a database of their own: the proxy installs an event trigger there that refuses a table without
+    a primary key, which would break the differential suites that share the server's `postgres` database)."""
+    if name == "postgres":
+        return
+    have = subprocess.run(["psql", "-At", "-h", host, "-p", str(port), "-U", "postgres", "-d", "postgres", "-c", "select 1 from pg_database where datname = '%s'" % name],
+                          capture_output=True, text=True).stdout.strip()
+    if have != "1":
+        subprocess.run(["psql", "-q", "-h", host, "-p", str(port), "-U", "postgres", "-d", "postgres", "-c", 'create database "%s"' % name], capture_output=True, text=True)
 
 
 class Tee:

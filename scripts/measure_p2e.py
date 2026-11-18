@@ -25,6 +25,10 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 PROXY = sys.argv[1]
 PG_PORT = int(os.environ.get("PG_PORT", "5611"))
+DB = os.environ.get("E2E_DB", "cdb_e2e")   # its own database: the proxy installs an event trigger there (see tools/pgtee.py ensure_database)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+from pgtee import ensure_database  # noqa: E402
+ensure_database(PG_PORT, DB)
 N = int(os.environ.get("N", "600"))
 
 
@@ -108,8 +112,9 @@ def line(name, ms, extra=""):
     print("%-62s median %7.3f  p95 %7.3f  mean %7.3f ms  (n=%d)%s" % (name, statistics.median(ms), ms[int(len(ms) * 0.95) - 1], statistics.mean(ms), len(ms), extra))
 
 
-def psql(sql):
-    subprocess.run(["psql", "-q", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-d", "postgres", "-c", sql], capture_output=True, check=True)
+def psql(sql, db=None):
+    # `alter system` and `pg_reload_conf` are server-wide, so any database does; the table is made in DB
+    subprocess.run(["psql", "-q", "-At", "-h", "127.0.0.1", "-p", str(PG_PORT), "-U", "postgres", "-d", db or DB, "-c", sql], capture_output=True, check=True)
 
 
 # the server: fsync on, as a real deployment has it
@@ -137,7 +142,7 @@ logdir = Path(d, "log")
 logdir.mkdir()
 Path(d, "key").write_bytes(bytes(range(32)))
 port = free_port()
-proc = subprocess.Popen([PROXY, str(port), "127.0.0.1", str(PG_PORT), "main", mint("root"), "postgres", "postgres", str(logdir), str(Path(d, "key"))],
+proc = subprocess.Popen([PROXY, str(port), "127.0.0.1", str(PG_PORT), "main", mint("root"), "postgres", DB, str(logdir), str(Path(d, "key"))],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for _ in range(100):
     try:
@@ -147,7 +152,7 @@ for _ in range(100):
         time.sleep(0.05)
 token = mint("password", "--effects", "r:*,w:*,d:*,c:*,n:*")
 
-direct = Conn(PG_PORT)
+direct = Conn(PG_PORT, db=DB)
 via = Conn(port, token, db="main")
 sel = ["select a from p2e where a = %d" % (1 + i % 1000) for i in range(N)]
 line("select, direct to PostgreSQL", timed(direct, sel))
@@ -192,7 +197,7 @@ def concurrent(name, make, k):
     print("%-62s %5d statements in %.2f s = %7.0f statements/s" % (name, k * len(sqls), wall, k * len(sqls) / wall))
 
 
-concurrent("4 clients at once, selects, direct to PostgreSQL", lambda: Conn(PG_PORT), 4)
+concurrent("4 clients at once, selects, direct to PostgreSQL", lambda: Conn(PG_PORT, db=DB), 4)
 concurrent("4 clients at once, selects, through the proxy (one commit at a time)", lambda: Conn(port, token, db="main"), 4)
 proc.terminate()
 proc.wait(timeout=10)

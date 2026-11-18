@@ -185,6 +185,26 @@ pub fn first_number[&s](si: &s [byte]) -> [] int {
     return 0 - 1;
 }
 
+// Where the first column of the first row of the last answer in `si` starts (its length is the four bytes before it), or -1 if there is no row or the value is null.
+pub fn first_text_at[&s](si: &s [byte]) -> [] int {
+    var pos = 0;
+    while pos + 5 <= len(si) {
+        let ln = commit.be(si, pos + 1, 4);
+        if ln < 4 || int_of(si[pos]) == 'Z' {
+            return 0 - 1;
+        }
+        if int_of(si[pos]) == 'D' && pos + 11 <= len(si) {
+            let cl = commit.be(si, pos + 7, 4);
+            if cl <= 0 || pos + 11 + cl > len(si) {
+                return 0 - 1;
+            }
+            return pos + 11;
+        }
+        pos = pos + 1 + ln;
+    }
+    return 0 - 1;
+}
+
 // `prefix`, the commit's gid `cdb:` and 64 hex digits, and a closing quote, into `out`: its length.
 fn gid_sql[&o, &p, &i](out: &!o [byte], prefix: &p [byte], ident: &i [byte]) -> [] int {
     var at = build.put_bytes(out, 0, prefix);

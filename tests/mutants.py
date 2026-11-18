@@ -419,6 +419,10 @@ PROXY = [
     ("proxy: a silent upstream is waited for a minute", "src/shared.cho", "fn login_ms() -> [] int {\n    return 5000;", "fn login_ms() -> [] int {\n    return 60000;"),
     ("proxy: the upstream's bytes lose the last one", "proxy/proxy.cho", "            if !shared.send(tab, core, client, rb[pos..pos + n]) {", "            if !shared.send(tab, core, client, rb[pos..pos + n - 1]) {"),
     ("proxy: the signing key's public half is not derived", "src/shared.cho", "ed25519.public_key_from_seed(seed, contents(sw)[32..64]);", "contents(sw)[32] = byte_of(0);"),
+    # ---- the row-delta capture (M2b-2a), judged by tests/proxy_e2e.py
+    ("proxy: the capture is not installed", "src/catalog.cho", "    while i < capture_sql.count() {", "    while i < 0 {"),
+    ("proxy: a keyless table does not stop the start", "src/catalog.cho", "    if commitpath.first_text_at(contents(core.snapin)) >= 0 {\n        return 1;", "    if false {\n        return 1;"),
+    ("proxy: the tables already there are not tracked", "src/catalog.cho", '"select cdb.track_all()"', '"select 1"'),
     ("proxy: SSLRequest is not answered N", "proxy/proxy.cho", "let no = alloc_slice[r](1, byte_of('N'));", "let no = alloc_slice[r](1, byte_of('S'));"),
     ("proxy: the client's application_name is dropped", "proxy/proxy.cho", "if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {", "if false {"),
     ("proxy: the upstream role is the client's", "src/upstream.cho", "\n    at = put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);", "\n    at = put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);"),
@@ -482,7 +486,7 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho", "capture_sql.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False

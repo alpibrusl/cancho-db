@@ -89,7 +89,9 @@ setup = """
 create table acc(id int primary key, owner text, bal numeric, note jsonb);
 create table lin(a int, b text, v int, primary key (a, b));
 create table txt(k text primary key, v int);
+alter event trigger cdb_ddl disable;
 create table nopk(x int);
+alter event trigger cdb_ddl enable;
 insert into acc select g, 'o' || g, g * 1.5, jsonb_build_object('n', g) from generate_series(1, 20) g;
 insert into lin select g % 4, 'b' || g, g from generate_series(1, 12) g;
 insert into txt values ('alpha', 1), ('Beta', 2), ('é', 3), ('', 4);
@@ -127,6 +129,26 @@ for name, table, tx in scen:
     if facts:
         ok = ref.run("C " + facts).startswith("ok ")
         check("... and tools/state.py takes them (the format is the reference's)", ok, ref.run("C " + facts))
+
+# the event trigger: a table made in `public` is tracked in the same transaction; a keyless or partitioned one is refused; untrackable() names what is there
+r = psql("create table ev_nokey (x int)")
+check("the event trigger refuses a table without a primary key", r.returncode != 0 and "has no primary key" in r.stderr and psql("select count(*) from pg_class where relname = 'ev_nokey'").stdout.strip() == "0", r.stderr)
+r = psql("create table ev_ctas as select 1 as a")
+check("... also a CREATE TABLE AS", r.returncode != 0 and "has no primary key" in r.stderr, r.stderr)
+r = psql("begin; create table ev_ok (id int primary key, v text); insert into ev_ok values (1, 'a'), (2, 'b'); update ev_ok set v = 'c' where id = 1; select cdb.facts(txid_current()); commit;")
+facts = [l for l in r.stdout.splitlines() if l.startswith("0:")]
+check("a table made in the transaction is tracked in the transaction: two net facts, both inserts (the update folded into the first)", r.returncode == 0 and len(facts) == 1 and len(facts[0].split()) == 2 and all(f.startswith("0:") for f in facts[0].split()), r.stdout + r.stderr)
+r = psql("alter table ev_ok drop constraint ev_ok_pkey")
+check("dropping the primary key of a tracked table is refused", r.returncode != 0 and "has no primary key" in r.stderr, r.stderr)
+r = psql("alter table ev_ok add column w int")
+check("an ALTER that keeps the key is fine", r.returncode == 0, r.stderr)
+psql("alter event trigger cdb_ddl disable; create table ev_k (x int); create table ev_p (id int primary key) partition by range (id); alter event trigger cdb_ddl enable;")
+u = psql("select cdb.untrackable()").stdout.strip()
+check("cdb.untrackable() names the keyless and the partitioned tables, and only those (nopk is the test's own)", u == "ev_k (no primary key), ev_p (partitioned), nopk (no primary key)", u)
+r = psql("create table ev_p1 partition of ev_p for values from (0) to (10)")
+check("a partition cannot be made while the trigger is on (0A000)", r.returncode != 0 and "partitioned tables are not supported" in r.stderr, r.stderr)
+psql("drop table ev_k, ev_p, ev_ok, nopk")
+check("... and untrackable() is empty again", psql("select cdb.untrackable()").stdout.strip() == "")
 
 # rollback leaves nothing
 before_n = int(psql("select count(*) from cdb.delta").stdout)

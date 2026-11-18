@@ -90,7 +90,7 @@ listen = psql("begin; listen foo; prepare transaction 'cdb-m1-4';").stderr.decod
 psql("rollback;")
 fact("2pc.cannot_prepare_temp", temp.strip().splitlines()[-1] if temp.strip() else "(no error)", "temporary" in temp)
 fact("2pc.cannot_prepare_listen", listen.strip().splitlines()[-1] if listen.strip() else "(no error)", "LISTEN" in listen)
-ddl = psql("begin; create table m1_ddl(a int); prepare transaction 'cdb-m1-5';").stderr.decode()
+ddl = psql("begin; create table m1_ddl(a int primary key); prepare transaction 'cdb-m1-5';").stderr.decode()
 left = out("select gid from pg_prepared_xacts where gid = 'cdb-m1-5'")
 psql("rollback prepared 'cdb-m1-5'; drop table if exists m1_ddl;")
 fact("2pc.ddl_can_prepare", "prepared gid=%s" % left, left == "cdb-m1-5")

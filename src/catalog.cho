@@ -8,6 +8,7 @@ import cdb.upstream;
 import cdb.snapshot;
 import cdb.commitpath;
 import cdb.build;
+import cdb.capture_sql;
 
 // The proxy's own connection to PostgreSQL (slot kind 6, one question at a time): the schema snapshot, read fresh for every query, and
 // recovery (docs/m1-commit-path.md P2-D11), which settles the prepared transactions a crash left.
@@ -274,4 +275,40 @@ pub fn recover[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Co
         aux[2] = 0;
     }
     return (table, status);
+}
+
+// The row-delta capture (docs/m2-branches.md D14 and D15), installed through the catalog connection in slot `slot`: the statements of sql/capture.sql, then the question
+// whether any table of `public` cannot be tracked, then every table tracked. Answers 0; 1 if a table cannot be tracked (the names are the first column of the last answer, in
+// `core.snapin`: `first_text_at`); 10 + i if statement i failed (a role that is not a superuser fails at the event trigger); 3 if tracking the tables failed; -1 if PostgreSQL
+// could not be asked.
+pub fn install_capture[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, slot: int) -> [conn_read, conn_write, poll] int {
+    var i = 0;
+    while i < capture_sql.count() {
+        let r = commitpath.upstream_exec(tab, core, slot, capture_sql.stmt(i));
+        if r < 0 {
+            return 0 - 1;
+        }
+        if r != 0 {
+            return 10 + i;
+        }
+        i = i + 1;
+    }
+    var r = commitpath.upstream_exec(tab, core, slot, "select cdb.untrackable()");
+    if r < 0 {
+        return 0 - 1;
+    }
+    if r != 0 {
+        return 3;
+    }
+    if commitpath.first_text_at(contents(core.snapin)) >= 0 {
+        return 1;
+    }
+    r = commitpath.upstream_exec(tab, core, slot, "select cdb.track_all()");
+    if r < 0 {
+        return 0 - 1;
+    }
+    if r != 0 {
+        return 3;
+    }
+    return 0;
 }
