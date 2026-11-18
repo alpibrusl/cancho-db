@@ -556,7 +556,8 @@ tee.clear()
 m = w.query("insert into p2a values (12, 'c'); insert into p2a values (10, 'dup')")
 check("an autocommit message whose second statement fails: the first statement's tag, then the error (23505), status I: the stream PostgreSQL sends",
       codes_of(m) == ["23505"] and tags_of(m) == ["INSERT 0 1"] and [k for k, _ in m] == ["C", "E", "Z"] and status_of(m) == "I", str(m))
-check("... the server was sent ROLLBACK, and the first statement's row is not there", client_queries(tee)[-1] == "ROLLBACK" and
+check("... the server was sent BEGIN, the two statements and ROLLBACK, and nothing else (no facts question, no PREPARE: a failed statement is not a commit), and the first statement's row is not there",
+      client_queries(tee) == ["BEGIN", 'insert into "p2a" values (12, \'c\'); insert into "p2a" values (10, \'dup\')', "ROLLBACK"] and
       direct("select count(*) from p2a where a = 12").stdout.strip() == "0", str(client_queries(tee)))
 m = w.query("select a from p2a order by a")
 check("a select in autocommit streams its rows: DataRow messages, SELECT n, I", [x for x in m if x[0] == "D"] and tags_of(m)[0].startswith("SELECT") and status_of(m) == "I", str(m[:3]))
