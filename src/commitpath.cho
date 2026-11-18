@@ -288,7 +288,7 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
             result = 2;
         } else {
             build.id(enc[0..elen], ident);
-            build.sign(contents(core.store.seed), ident, sig);
+            build.sign_with_public(contents(core.store.seed)[0..32], contents(core.store.seed)[32..64], ident, sig);
             var tl = 0;
             if ai[8 * k + 4] == 0 {
                 tl = build.store_record(tr, 0, tk);

@@ -6,6 +6,7 @@ import std.conns;
 import std.io;
 import std.addr;
 import std.bytes;
+import std.ed25519;
 import cdb.commit;
 import cdb.login;
 import cdb.store;
@@ -108,6 +109,7 @@ pub res struct Store {
     log: File,
     tokens: File,
     stmts: File,
+    // the signing seed (32 bytes) and, after it, its public key (32 bytes), derived once here: a signature that is given the key does not derive it again (`sign_with_public`, half the cost of a commit's signature)
     seed: Box[[byte]],
     tip: Box[[byte]],
     chain: Box[[int]],
@@ -435,7 +437,7 @@ pub fn drop_core[&h](heap: &!h Heap, core: Core) -> [heap] int {
 
 // A `Store` around three open files; `seed` (32 bytes) and `tip` (32 bytes, meaningful if `has` is 1) are copied.
 pub fn new_store[&h, &s, &t, &i](heap: &!h Heap, log: File, tokens: File, stmts: File, seed: &s [byte], tip: &t [byte], next: int, has: int, ids: &i [byte], count: int) -> [heap] Store {
-    var sb = box_slice(heap, 32, byte_of(0));
+    var sb = box_slice(heap, 64, byte_of(0));
     var tb = box_slice(heap, 32, byte_of(0));
     var cb = box_slice(heap, 4, 0);
     var ib = box_slice(heap, 32 * ids_max(), byte_of(0));
@@ -445,6 +447,7 @@ pub fn new_store[&h, &s, &t, &i](heap: &!h Heap, log: File, tokens: File, stmts:
             contents(sw)[i] = seed[i];
             i = i + 1;
         }
+        ed25519.public_key_from_seed(seed, contents(sw)[32..64]);
     }
     borrow mut tb as &!tw in {
         var i = 0;
