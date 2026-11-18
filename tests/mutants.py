@@ -392,7 +392,7 @@ LOGIN = [
 PROXY = [
     # ---- the event loop (proxy/proxy.cho), judged by tests/proxy_e2e.py against a real PostgreSQL
     ("proxy: the signing key is not required", "proxy/proxy.cho", "    if !keyed {\n", "    if false {\n"),
-    ("proxy: a write is not prepared first", "src/commitpath.cho", "            if wrote {\n                step = upstream_exec(", "            if false {\n                step = upstream_exec("),
+    ("proxy: a write is not prepared first", "src/commitpath.cho", "            if step == 0 && wrote {\n                step = upstream_exec(", "            if false {\n                step = upstream_exec("),
     ("proxy: a read is prepared too", "src/commitpath.cho", "if kind >= 1 && kind <= 3 {", "if kind >= 0 && kind <= 3 {"),
     ("proxy: the chain does not advance", "src/commitpath.cho", "chain[0] = chain[0] + 1;", "chain[0] = chain[0];"),
     ("proxy: the tip is not remembered", "src/commitpath.cho", "                        tip[j] = ident[j];", "                        tip[j] = tip[j];"),
