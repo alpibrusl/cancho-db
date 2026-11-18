@@ -3,7 +3,7 @@
 
     python3 tests/state_check.py build/statecheck
 
-  1. the golden cases (vectors/state/cases.txt) are what tools/state.py writes now, and are never edited by hand;
+  1. the golden cases (tests/state_cases.txt) are what tools/state.py writes now, and are never edited by hand;
   2. two values are computed here by straight-line code that shares nothing with tools/state.py, and `openssl dgst` agrees on the first: the empty `changes`, and the
      `changes` of three facts (so the tree shape, the odd carry and the three prefixes are pinned by a second reading of the spec);
   3. statecheck answers every golden case as written;
@@ -36,7 +36,7 @@ def run_tool(lines):
 
 
 # 1. the cases are reproducible
-golden = (ROOT / "vectors/state/cases.txt").read_text().splitlines()
+golden = (ROOT / "tests/state_cases.txt").read_text().splitlines()
 made = [line + " => " + ref.run(line) for line in ref.cases()]
 check("the golden cases are what tools/state.py writes (%d)" % len(golden), made == golden)
 

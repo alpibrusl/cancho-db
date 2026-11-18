@@ -1024,7 +1024,7 @@ def run_state(cancho):
                 shutil.copytree(ROOT / d, work / d, ignore=shutil.ignore_patterns("__pycache__"))
             (work / "tests").mkdir()
             shutil.copy(ROOT / "tests/state_check.py", work / "tests/state_check.py")
-            shutil.copytree(ROOT / "vectors/state", work / "vectors/state")
+            shutil.copy(ROOT / "tests/state_cases.txt", work / "tests/state_cases.txt")
             f = work / rel
             text = f.read_text()
             if text.count(old) != 1:

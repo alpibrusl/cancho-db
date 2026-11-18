@@ -78,7 +78,7 @@ The empty `changes` (n = 0) is `SHA-256("cancho-db/changes/v1" || 0x00 || 00 00 
 changes(∅) = c068815f658b62c1cc6ebe55e18dc1306c029787ffdef0076eaf1ec5467af9ea   (checked against `openssl dgst` by tests/state_check.py)
 ```
 
-`vectors/state/cases.txt` holds the cases, one per line as `COMMAND => RESULT`, written by `tools/state.py --vectors` and never edited by hand. The two commands:
+`tests/state_cases.txt` holds the cases, one per line as `COMMAND => RESULT`, written by `tools/state.py --vectors` and never edited by hand. The two commands:
 
 ```
 C FACT FACT ...        FACT = kind:table:pk:old:new, every field hex, an absent hash written -;     RESULT: ok HEX(changes) | error RULE

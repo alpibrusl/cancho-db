@@ -2,7 +2,7 @@
 """Reference for docs/spec/state.md: the leaf of a fact, `changes` over a commit's facts, and `state` over parents' states.
 
     python3 tools/state.py            reads commands from standard input, one per line, writes one result line each
-    python3 tools/state.py --vectors  writes the golden cases (vectors/state/cases.txt) to standard output
+    python3 tools/state.py --vectors  writes the golden cases (tests/state_cases.txt) to standard output
 
 Commands:   C FACT ...   FACT = kind:table:pk:old:new, hex fields, `-` for an absent hash   ->  ok HEX | error RULE
             S P PARENT... CHANGES   (all hex)                                              ->  ok HEX
