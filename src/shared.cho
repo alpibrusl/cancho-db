@@ -141,8 +141,36 @@ pub fn acc_stride() -> [] int {
     return 32 * 64 + 16384 + 4096 + 32;
 }
 
+// The extended protocol (docs/m1-extended.md P3-D3): per client slot `k`, `xstm` holds `x_stmts()` statement records (0 is the unnamed one) of `x_stmt_rec()` bytes:
+// [0] 1 if used, [1] kind (0 an ordinary statement, 1 BEGIN, 2 COMMIT, 3 ROLLBACK), [2..4] bytes of IR records, [4..6] bytes of effects, [6] length of the name,
+// [8..40] the statement's id, [40..104] its name, [104..2152] its IR as store records, [2152..2664] its effects. `xprt` holds `x_ports()` portal records
+// (0 is the unnamed one) of `x_port_rec()` bytes: [0] 1 if used, [1] the statement it runs, [2] 1 once it has been executed, [3] the length of the name, [8..72] the name.
+// `xi` at `8 * k`: [0] what completes the message in flight (0 none, 1 Parse, 2 Bind, 3 Describe, 4 Execute, 5 Close, 6 Sync), [1] the statement record the last Parse made, or -1.
+pub fn x_stmts() -> [] int {
+    return 33;
+}
+
+pub fn x_stmt_rec() -> [] int {
+    return 2664;
+}
+
+pub fn x_ports() -> [] int {
+    return 17;
+}
+
+pub fn x_port_rec() -> [] int {
+    return 72;
+}
+
+pub fn x_name_max() -> [] int {
+    return 63;
+}
+
 pub res struct Core {
     store: Store,
+    xstm: Box[[byte]],
+    xprt: Box[[byte]],
+    xi: Box[[int]],
     acc: Box[[byte]],
     acci: Box[[int]],
     poller: Poller,
@@ -373,13 +401,16 @@ pub fn consume[&c](core: &!c Core, k: int, n: int) -> [] int {
 
 // A `Core` for `slots` connections, around the poller and the configuration (`cfg` and `cfgi`: see `Core`).
 pub fn new_core[&h](heap: &!h Heap, poller: Poller, cfg: Box[[byte]], cfgi: Box[[int]], kept: Store, slots: int) -> [heap] Core {
-    return Core { store: kept, acc: box_slice(heap, slots * acc_stride() + acc_stride(), byte_of(0)), acci: box_slice(heap, 8 * slots + 8, 0), poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 8, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)) };
+    return Core { store: kept, xstm: box_slice(heap, slots * x_stmts() * x_stmt_rec() + x_stmts() * x_stmt_rec(), byte_of(0)), xprt: box_slice(heap, slots * x_ports() * x_port_rec() + x_ports() * x_port_rec(), byte_of(0)), xi: box_slice(heap, 8 * slots + 8, 0), acc: box_slice(heap, slots * acc_stride() + acc_stride(), byte_of(0)), acci: box_slice(heap, 8 * slots + 8, 0), poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 8, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)) };
 }
 
 // Release everything a `Core` holds.
 pub fn drop_core[&h](heap: &!h Heap, core: Core) -> [heap] int {
-    let Core { store, acc, acci, poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf } = core;
+    let Core { store, xstm, xprt, xi, acc, acci, poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf } = core;
     drop_store(heap, store);
+    unbox_slice(heap, xstm);
+    unbox_slice(heap, xprt);
+    unbox_slice(heap, xi);
     unbox_slice(heap, acc);
     unbox_slice(heap, acci);
     poller_close(poller);

@@ -59,8 +59,15 @@ class Tee:
             self.messages = []
 
     def queries(self):
+        """The simple Queries, and the proxy's own commands (BEGIN, COMMIT, PREPARE TRANSACTION...), which it sends as a Parse under the name `cdb_x`."""
         with self.lock:
-            return [d for k, d in self.messages if k == "Query"]
+            out, msgs = [], list(self.messages)
+        for i, (k, d) in enumerate(msgs):
+            if k == "Query":
+                out.append(d)
+            elif k == "Parse" and i + 1 < len(msgs) and msgs[i + 1][0] == "Parse.detail" and "name='cdb_x'" in msgs[i + 1][1]:
+                out.append(d)
+        return out
 
     def kinds(self):
         with self.lock:
@@ -170,6 +177,25 @@ class Tee:
                     name, sql, rest = body.split(b"\0", 2)
                     self._note("Parse", sql.decode(errors="replace"))
                     self._note("Parse.detail", "name=%r params=%d" % (name.decode(errors="replace"), struct.unpack(">H", rest[:2])[0]))
+                    # the proxy's own commands go by the extended protocol (src/commitpath.cho): the fault rules match a Parse's text as a Query's
+                    f = self._fault_for(sql.decode(errors="replace"))
+                    if f is not None:
+                        if f[1] == "drop":
+                            for sock in (u, c):
+                                try:
+                                    sock.shutdown(socket.SHUT_RDWR)
+                                except OSError:
+                                    pass
+                            return
+                        if f[1] == "before":
+                            f[2]()
+                            continue
+                        if f[1] == "reply":
+                            held.append(f[2])
+                        elif f[1] == "after":
+                            u.sendall(msg)
+                            f[2]()
+                            continue
                 elif t == b"B":
                     portal, rest = body.split(b"\0", 1)
                     stmt, rest = rest.split(b"\0", 1)

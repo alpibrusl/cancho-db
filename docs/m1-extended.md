@@ -120,3 +120,36 @@ Python verifier's own inference). 8 mutants (lexer 4, parser 2, lowering 3 and o
 (`emit_close` of a leaf falls through to the same result) and was dropped.
 
 Not yet: nothing in the proxy reads `$n` from a client (P3b); a `Parse` still reaches the proxy's refusal of the extended protocol.
+
+## 8. P3b, P3c and P3d as built
+
+**P3b/P3c: `src/extended.cho` (about 800 lines) and the proxy's frame loop.** The proxy takes `Parse`, `Bind`, `Describe`, `Execute`, `Close`,
+`Sync` and `Flush` (the function-call and copy messages get one `0A000` and are discarded). A `Parse` goes through the guard and the
+server is sent the *rendering*; `Bind` and `Execute` are forwarded; a statement is counted into the commit accumulator at the first `Execute`
+of its portal; an implicit transaction is begun before the first `Parse` or `Bind` and committed (the P2d sequence) at `Sync`. `Flush` is
+appended after every forwarded message because PostgreSQL buffers extended-protocol replies until `Flush` or `Sync` and the proxy must see each
+reply to know the message is complete (P3-D1). A refusal is flavor 1 (the proxy says the error and answers `Sync` itself), a server error is
+flavor 2 (the server's own `Sync` answer); both discard messages up to `Sync`.
+
+**Two things measured while building it, which changed the design:**
+
+1. The proxy's *own* commands (`BEGIN`, `COMMIT`, `PREPARE TRANSACTION`...) were simple `Query` messages. A simple `Query` destroys the client's
+   unnamed statement and portal, so psycopg 3's and pg8000's pipelines broke when the proxy committed between two of their groups. The proxy
+   now sends its commands through the extended protocol under the names `cdb_x` / `cdb_p` (client names starting with `cdb` are refused, `0A000`),
+   so the client's unnamed objects survive. The tee reports those `Parse`s as the proxy's commands (`Tee.queries()`), so the P2 tests read the same
+   sequences as before.
+2. The listener is open *before* start-up recovery has run (a client is served only after it); the "upstream is down" test used to stop the
+   upstream right after the first connection and raced the recovery. It now waits for an answered query first.
+
+**Gate.** `tests/ext_e2e.py` (raw messages; the driver sequences of section 2 get PostgreSQL's own answers, message for message; refusals; error
+flows; commit counts per implicit/explicit transaction; both verifiers at L2 and IR; a narrowed token), five mutants judged by it
+(`tests/mutants.py`, labels `ext:`), and `tests/drivers_e2e.py` (P3d): psycopg 3, psycopg2, pg8000, asyncpg and node-postgres each connect with a
+token, run a parametrised select, an insert, a two-insert transaction that commits, one that rolls back, a prepared statement reused (where
+the driver has one) and `executemany` where it has one; the rows read are right, the committed rows are there and the rolled-back one is not,
+and the log of the whole session is accepted by both verifiers. Two mutants were judged equivalent and removed, not left surviving: the `T`
+branch of the proxy's own `Sync` answer after a refusal (a refusal inside a transaction always makes the state `E` first) and the failed-transaction
+check in `do_execute` (`do_parse` refuses first; a portal bound before the failure is destroyed by PostgreSQL's own rule, not tested here).
+
+**Not in the gate: pgx (Go).** Its sequence was measured (F-series) and replayed raw in `ext_e2e.py`, but a pgx program through the proxy is
+not run in CI (it needs a Go toolchain and a module download); psycopg 3 in this environment returns `bytes` for `text` columns, as it does
+directly against PostgreSQL, so the driver test compares values, not Python types.

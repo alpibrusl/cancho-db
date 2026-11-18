@@ -1,0 +1,795 @@
+edition 9;
+module cdb.extended;
+
+import std.conns;
+import cdb.commit;
+import cdb.shared;
+import cdb.login;
+import cdb.guard;
+import cdb.catalog;
+import cdb.commitpath;
+
+// The extended protocol (docs/m1-extended.md, P3b and P3c). The proxy handles one client message at a time and waits for the server's
+// answer to it before the next ("lockstep": `st[cp + 17]` is the message in flight and `xi[8 * cp]` what completes it), so that what it says
+// to the client itself (an error, the answer to a transaction statement) can never fall in the middle of what the server says.
+//
+//   Parse     the guard sees the text: one statement, or one transaction statement; the server gets the RENDERING under the same name
+//   Bind      a portal runs a statement; forwarded as it is
+//   Describe  forwarded; the answer for a transaction statement is made here
+//   Execute   the moment a statement counts: it is added to the open transaction and the commit sequence ends it (P2d), forwarded
+//   Close     forwarded, and the tables follow
+//   Sync      forwarded; the server's `ReadyForQuery` ends the implicit transaction (held for the commit, as in the simple protocol)
+//   Flush     forwarded
+//
+// A refusal is an `ErrorResponse` made here and every message up to `Sync` discarded, as PostgreSQL does after an error; the transaction it
+// is in is rolled back at once (the server is quiet: lockstep) and `Sync` is answered here.
+
+fn sb(k: int) -> [] int {
+    return k * shared.x_stmts() * shared.x_stmt_rec();
+}
+
+fn pb(k: int) -> [] int {
+    return k * shared.x_ports() * shared.x_port_rec();
+}
+
+// Forget every statement and portal of client `k`.
+pub fn reset[&c](core: &!c shared.Core, k: int) -> [] int {
+    let xs = contents(core.xstm);
+    let xp = contents(core.xprt);
+    let xi = contents(core.xi);
+    var i = 0;
+    while i < shared.x_stmts() {
+        xs[sb(k) + i * shared.x_stmt_rec()] = byte_of(0);
+        i = i + 1;
+    }
+    i = 0;
+    while i < shared.x_ports() {
+        xp[pb(k) + i * shared.x_port_rec()] = byte_of(0);
+        i = i + 1;
+    }
+    xi[8 * k] = 0;
+    xi[8 * k + 1] = 0 - 1;
+    xi[8 * k + 2] = 0;
+    return 0;
+}
+
+// The index of the NUL at or after `from` and before `to` in `m`, or -1.
+fn nul_at[&m](m: &m [byte], from: int, to: int) -> [] int {
+    var i = from;
+    while i < to {
+        if int_of(m[i]) == 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn same[&a, &b](x: &a [byte], y: &b [byte]) -> [] bool {
+    if len(x) != len(y) {
+        return false;
+    }
+    var i = 0;
+    while i < len(x) {
+        if x[i] != y[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// A name the proxy keeps for its own commands (`cdb_x`, `cdb_p`): a client's statement or portal may not start with `cdb`.
+fn reserved[&n](name: &n [byte]) -> [] bool {
+    return len(name) >= 3 && int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'b';
+}
+
+// The statement of client `k` named `name` (0 is the unnamed one), or -1.
+fn find_stmt[&c, &n](core: &!c shared.Core, k: int, name: &n [byte]) -> [] int {
+    let xs = contents(core.xstm);
+    var i = 0;
+    while i < shared.x_stmts() {
+        let r = sb(k) + i * shared.x_stmt_rec();
+        if int_of(xs[r]) == 1 && int_of(xs[r + 6]) == len(name) && same(xs[r + 40..r + 40 + len(name)], name) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn find_port[&c, &n](core: &!c shared.Core, k: int, name: &n [byte]) -> [] int {
+    let xp = contents(core.xprt);
+    var i = 0;
+    while i < shared.x_ports() {
+        let r = pb(k) + i * shared.x_port_rec();
+        if int_of(xp[r]) == 1 && int_of(xp[r + 3]) == len(name) && same(xp[r + 8..r + 8 + len(name)], name) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn free_stmt[&c](core: &!c shared.Core, k: int) -> [] int {
+    let xs = contents(core.xstm);
+    var i = 1;
+    while i < shared.x_stmts() {
+        if int_of(xs[sb(k) + i * shared.x_stmt_rec()]) == 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn free_port[&c](core: &!c shared.Core, k: int) -> [] int {
+    let xp = contents(core.xprt);
+    var i = 1;
+    while i < shared.x_ports() {
+        if int_of(xp[pb(k) + i * shared.x_port_rec()]) == 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// ------------------------------------------------------------------------------------------------ what is said to the client
+
+// The held `CommandComplete` (the newest tag of the open implicit transaction) goes first: anything the proxy says itself follows what the server said.
+fn release_held[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let hd = contents(core.hold);
+    let p = shared.stride() * k;
+    if st[p + 18] > 0 {
+        shared.send(tab, core, k, hd[k * shared.hold_max()..k * shared.hold_max() + st[p + 18]]);
+        st[p + 18] = 0;
+    }
+    return 0;
+}
+
+// A message of no body (`ParseComplete`, `BindComplete`, `CloseComplete`, `NoData`): the type byte and the length 4.
+fn send_empty[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, ty: int) -> [conn_write, poll] int {
+    release_held(tab, core, k);
+    region r {
+        let m = alloc_slice[r](8, byte_of(0));
+        m[0] = byte_of(ty);
+        m[4] = byte_of(4);
+        shared.send(tab, core, k, m[0..5]);
+    }
+    return 0;
+}
+
+// `ParameterDescription` of no parameters, then `NoData`: what Describe of a transaction statement answers.
+fn send_describe_none[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> [conn_write, poll] int {
+    release_held(tab, core, k);
+    region r {
+        let m = alloc_slice[r](16, byte_of(0));
+        m[0] = byte_of('t');
+        m[4] = byte_of(6);
+        m[5] = byte_of(0);
+        m[6] = byte_of(0);
+        m[7] = byte_of('n');
+        m[11] = byte_of(4);
+        shared.send(tab, core, k, m[0..12]);
+    }
+    return 0;
+}
+
+fn send_tag[&t, &c, &a](tab: &!t conns.Table, core: &!c shared.Core, k: int, tag: &a [byte]) -> [conn_write, poll] int {
+    release_held(tab, core, k);
+    region r {
+        let m = alloc_slice[r](128, byte_of(0));
+        let ln = len(tag) + 5;
+        m[0] = byte_of('C');
+        m[3] = byte_of(ln / 256 % 256);
+        m[4] = byte_of(ln % 256);
+        var i = 0;
+        while i < len(tag) {
+            m[5 + i] = tag[i];
+            i = i + 1;
+        }
+        shared.send(tab, core, k, m[0..6 + len(tag)]);
+    }
+    return 0;
+}
+
+// A refusal: what PostgreSQL does after an error. The open transaction is rolled back now (the server is quiet), the error is said, and
+// every message up to `Sync` is discarded (`st[p + 15]` is 1: `Sync` is then answered here).
+fn fail[&t, &c, &a, &b, &d](tab: &!t conns.Table, core: &!c shared.Core, k: int, sqlstate: &a [byte], tag: &b [byte], text: &d [byte]) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    let up = st[p + 1];
+    let q = shared.stride() * up;
+    release_held(tab, core, k);
+    if st[q + 21] == 1 {
+        commitpath.upstream_exec(tab, core, up, "ROLLBACK");
+        st[q + 21] = 0;
+        st[q + 22] = 0;
+        commitpath.reset(core, k);
+    } else if st[p + 16] == 1 {
+        commitpath.upstream_exec(tab, core, up, "ROLLBACK");
+        commitpath.reset(core, k);
+        st[p + 16] = 2;
+    }
+    region r {
+        let buf = alloc_slice[r](640, byte_of(0));
+        let n = login.error_response(buf, "ERROR", sqlstate, tag, text);
+        shared.send(tab, core, k, buf[0..n]);
+    }
+    st[p + 15] = 1;
+    return 0;
+}
+
+// ------------------------------------------------------------------------------------------------ sending to the server
+
+// Send `data` to client `k`'s server connection; the message is now in flight and `class` is what completes it.
+fn forward[&t, &c, &d](tab: &!t conns.Table, core: &!c shared.Core, k: int, data: &d [byte], class: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let xi = contents(core.xi);
+    let p = shared.stride() * k;
+    shared.send(tab, core, st[p + 1], data);
+    if class > 0 && class < 6 {
+        // the server answers a Parse, Bind, Describe, Execute or Close only when it is flushed (or at `Sync`): the proxy waits for the answer before
+        // the next message, so it asks for it with a Flush of its own (which has no answer)
+        region r {
+            let f = alloc_slice[r](8, byte_of(0));
+            f[0] = byte_of('H');
+            f[4] = byte_of(4);
+            shared.send(tab, core, st[p + 1], f[0..5]);
+        }
+    }
+    if class > 0 {
+        st[p + 17] = 1;
+        xi[8 * k] = class;
+        xi[8 * k + 2] = 0;
+    }
+    return 0;
+}
+
+// An implicit transaction for the statement about to run, if the client has none: the server is sent `BEGIN` and the proxy notes that it
+// is its own (it ends at `Sync`: the commit sequence, P2d). 0 if there is one or it was opened, -1 if the server could not be asked.
+fn ensure_txn[&h, &t, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    let up = st[p + 1];
+    let q = shared.stride() * up;
+    var table = tab;
+    if st[p + 16] != 0 || st[q + 21] == 1 {
+        return (table, 0);
+    }
+    let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port);
+    table = t1;
+    if snap_len < 0 {
+        return (table, 0 - 1);
+    }
+    var r = 0;
+    borrow mut table as &!tw in {
+        r = commitpath.upstream_exec(tw, core, up, "BEGIN");
+    }
+    if r != 0 {
+        return (table, 0 - 1);
+    }
+    st[q + 21] = 1;
+    st[q + 22] = 0;
+    st[p + 18] = 0;
+    commitpath.begin(core, k, contents(core.snap)[0..snap_len]);
+    return (table, 0);
+}
+
+// ------------------------------------------------------------------------------------------------ the messages
+
+fn do_parse[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, k: int, ln: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+    let st = contents(core.state);
+    let mb = contents(core.mbuf);
+    let xs = contents(core.xstm);
+    let xi = contents(core.xi);
+    let p = shared.stride() * k;
+    let base = k * shared.msg_max();
+    let end = base + 1 + ln;
+    var table = tab;
+    let ne = nul_at(mb, base + 5, end);
+    var qe = 0 - 1;
+    if ne >= 0 {
+        qe = nul_at(mb, ne + 1, end);
+    }
+    if ne < 0 || qe < 0 || end - qe - 1 < 2 {
+        borrow mut table as &!tw in {
+            shared.refuse(tw, core, k, "FATAL", "08P01", "protocol-violation", "a Parse message is malformed");
+        }
+        return table;
+    }
+    let name = mb[base + 5..ne];
+    let sql = mb[ne + 1..qe];
+    var refused = false;
+    borrow mut table as &!tw in {
+        if reserved(name) {
+            fail(tw, core, k, "0A000", "reserved-name", "a statement name may not start with cdb: the proxy's own commands use those");
+            refused = true;
+        } else if len(name) > shared.x_name_max() {
+            fail(tw, core, k, "54000", "name-too-long", "the statement name is too long");
+            refused = true;
+        } else if len(name) > 0 && find_stmt(core, k, name) >= 0 {
+            fail(tw, core, k, "42P05", "duplicate-prepared-statement", "the prepared statement already exists");
+            refused = true;
+        }
+    }
+    if refused {
+        return table;
+    }
+    let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port);
+    table = t1;
+    if snap_len < 0 {
+        borrow mut table as &!tw in {
+            fail(tw, core, k, "08006", "catalog-unavailable", "the schema could not be read, so the statement was not checked");
+        }
+        return table;
+    }
+    var fwd = 0;
+    region r {
+        let vd = alloc_slice[r](16, 0);
+        let ids = alloc_slice[r](512, byte_of(0));
+        let irs = alloc_slice[r](16384, byte_of(0));
+        let effs = alloc_slice[r](8192, byte_of(0));
+        let verdict = guard.check(heap, contents(core.tokb)[k * shared.token_max()..k * shared.token_max() + st[p + 12]], contents(core.snap)[0..snap_len], sql, contents(core.rend), vd, ids, irs, effs);
+        borrow mut table as &!tw in {
+            if verdict != 0 {
+                fail(tw, core, k, guard.sqlstate(vd), guard.tag(vd), "the statement was not run");
+            } else if vd[6] == 0 && vd[7] > 1 {
+                fail(tw, core, k, "0A000", "multiple-statements", "a prepared statement is one statement");
+            } else if vd[6] == 0 && vd[7] == 0 {
+                fail(tw, core, k, "0A000", "empty-statement", "an empty statement is not supported");
+            } else if vd[6] == 0 && st[p + 16] == 2 {
+                fail(tw, core, k, "25P02", "in-failed-transaction", "current transaction is aborted, commands ignored until end of transaction block");
+            } else if vd[8] > 2048 || vd[9] > 512 {
+                fail(tw, core, k, "54000", "statement-too-large", "the statement is larger than the proxy records");
+            } else {
+                var idx = 0;
+                if len(name) > 0 {
+                    idx = free_stmt(core, k);
+                }
+                if idx < 0 {
+                    fail(tw, core, k, "54000", "too-many-statements", "too many prepared statements");
+                } else {
+                    let rec = sb(k) + idx * shared.x_stmt_rec();
+                    xs[rec] = byte_of(1);
+                    xs[rec + 1] = byte_of(vd[6]);
+                    xs[rec + 2] = byte_of(vd[8] / 256 % 256);
+                    xs[rec + 3] = byte_of(vd[8] % 256);
+                    xs[rec + 4] = byte_of(vd[9] / 256 % 256);
+                    xs[rec + 5] = byte_of(vd[9] % 256);
+                    xs[rec + 6] = byte_of(len(name));
+                    var i = 0;
+                    while i < 32 && vd[6] == 0 {
+                        xs[rec + 8 + i] = ids[i];
+                        i = i + 1;
+                    }
+                    i = 0;
+                    while i < len(name) {
+                        xs[rec + 40 + i] = name[i];
+                        i = i + 1;
+                    }
+                    i = 0;
+                    while i < vd[8] {
+                        xs[rec + 104 + i] = irs[i];
+                        i = i + 1;
+                    }
+                    i = 0;
+                    while i < vd[9] {
+                        xs[rec + 2152 + i] = effs[i];
+                        i = i + 1;
+                    }
+                    xi[8 * k + 1] = idx;
+                    if vd[6] > 0 {
+                        send_empty(tw, core, k, '1');
+                    } else {
+                        // the server gets the rendering, under the same name and with the client's parameter types
+                        let out = contents(core.qout);
+                        var at = 5;
+                        var ok = 5 + len(name) + 1 + vd[3] + 1 + (end - qe - 1) <= len(out);
+                        if ok {
+                            out[0] = byte_of('P');
+                            var j = 0;
+                            while j < len(name) {
+                                out[at + j] = name[j];
+                                j = j + 1;
+                            }
+                            at = at + len(name);
+                            out[at] = byte_of(0);
+                            at = at + 1;
+                            j = 0;
+                            while j < vd[3] {
+                                out[at + j] = contents(core.rend)[j];
+                                j = j + 1;
+                            }
+                            at = at + vd[3];
+                            out[at] = byte_of(0);
+                            at = at + 1;
+                            j = qe + 1;
+                            while j < end {
+                                out[at] = mb[j];
+                                at = at + 1;
+                                j = j + 1;
+                            }
+                            out[1] = byte_of((at - 1) / 16777216 % 256);
+                            out[2] = byte_of((at - 1) / 65536 % 256);
+                            out[3] = byte_of((at - 1) / 256 % 256);
+                            out[4] = byte_of((at - 1) % 256);
+                            fwd = at;
+                        } else {
+                            xs[rec] = byte_of(0);
+                            fail(tw, core, k, "54000", "statement-too-large", "the statement is larger than the proxy forwards");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if fwd > 0 {
+        // the statement runs in a transaction of the proxy's own if the client has none, and it is begun BEFORE the server sees any message of the group: a
+        // simple `BEGIN` between a Parse or a Bind and its Execute would end the implicit transaction and destroy the unnamed portal
+        let (t2, ok) = ensure_txn(heap, table, core, net, host, port, k);
+        table = t2;
+        borrow mut table as &!tw in {
+            if ok < 0 {
+                contents(core.xstm)[sb(k) + xi[8 * k + 1] * shared.x_stmt_rec()] = byte_of(0);
+                fail(tw, core, k, "08006", "upstream-unavailable", "the database could not begin a transaction");
+            } else {
+                forward(tw, core, k, contents(core.qout)[0..fwd], 1);
+            }
+        }
+    }
+    return table;
+}
+
+fn do_bind[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, k: int, ln: int) -> [heap, net_out(""), conn_read, conn_write, poll] conns.Table {
+    let mb = contents(core.mbuf);
+    let xs = contents(core.xstm);
+    let xp = contents(core.xprt);
+    let base = k * shared.msg_max();
+    let end = base + 1 + ln;
+    var table = tab;
+    let pe = nul_at(mb, base + 5, end);
+    var se = 0 - 1;
+    if pe >= 0 {
+        se = nul_at(mb, pe + 1, end);
+    }
+    if pe < 0 || se < 0 {
+        borrow mut table as &!tw in {
+            shared.refuse(tw, core, k, "FATAL", "08P01", "protocol-violation", "a Bind message is malformed");
+        }
+        return table;
+    }
+    let pname = mb[base + 5..pe];
+    let sname = mb[pe + 1..se];
+    var ordinary = false;
+    borrow mut table as &!tw in {
+        let si = find_stmt(core, k, sname);
+        var pi = 0;
+        var dup = false;
+        if len(pname) > 0 {
+            dup = find_port(core, k, pname) >= 0;
+            pi = free_port(core, k);
+        }
+        if reserved(pname) {
+            fail(tw, core, k, "0A000", "reserved-name", "a portal name may not start with cdb: the proxy's own commands use those");
+        } else if dup {
+            fail(tw, core, k, "42P03", "duplicate-cursor", "the portal already exists");
+        } else if len(pname) > shared.x_name_max() {
+            fail(tw, core, k, "54000", "name-too-long", "the portal name is too long");
+        } else if si < 0 {
+            fail(tw, core, k, "26000", "invalid-sql-statement-name", "the prepared statement does not exist");
+        } else if pi < 0 {
+            fail(tw, core, k, "54000", "too-many-portals", "too many portals");
+        } else {
+            let rec = pb(k) + pi * shared.x_port_rec();
+            xp[rec] = byte_of(1);
+            xp[rec + 1] = byte_of(si);
+            xp[rec + 2] = byte_of(0);
+            xp[rec + 3] = byte_of(len(pname));
+            var i = 0;
+            while i < len(pname) {
+                xp[rec + 8 + i] = pname[i];
+                i = i + 1;
+            }
+            if int_of(xs[sb(k) + si * shared.x_stmt_rec() + 1]) > 0 {
+                send_empty(tw, core, k, '2');
+            } else {
+                ordinary = true;
+            }
+        }
+    }
+    if ordinary {
+        // see `do_parse`: the implicit transaction is begun before the server sees the Bind
+        let (t2, ok) = ensure_txn(heap, table, core, net, host, port, k);
+        table = t2;
+        borrow mut table as &!tw in {
+            if ok < 0 {
+                fail(tw, core, k, "08006", "upstream-unavailable", "the database could not begin a transaction");
+            } else {
+                forward(tw, core, k, mb[base..base + ln + 1], 2);
+            }
+        }
+    }
+    return table;
+}
+
+fn do_describe[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, ln: int) -> [conn_read, conn_write, poll] int {
+    let mb = contents(core.mbuf);
+    let xs = contents(core.xstm);
+    let xp = contents(core.xprt);
+    let base = k * shared.msg_max();
+    let end = base + 1 + ln;
+    let ne = nul_at(mb, base + 6, end);
+    if ln < 6 || ne < 0 {
+        shared.refuse(tab, core, k, "FATAL", "08P01", "protocol-violation", "a Describe message is malformed");
+        return 0;
+    }
+    let name = mb[base + 6..ne];
+    let which = int_of(mb[base + 5]);
+    var kind = 0;
+    if which == 'S' {
+        let si = find_stmt(core, k, name);
+        if si < 0 {
+            fail(tab, core, k, "26000", "invalid-sql-statement-name", "the prepared statement does not exist");
+            return 0;
+        }
+        kind = int_of(xs[sb(k) + si * shared.x_stmt_rec() + 1]);
+        if kind > 0 {
+            send_describe_none(tab, core, k);
+            return 0;
+        }
+    } else {
+        let pi = find_port(core, k, name);
+        if pi < 0 {
+            fail(tab, core, k, "34000", "invalid-cursor-name", "the portal does not exist");
+            return 0;
+        }
+        kind = int_of(xs[sb(k) + int_of(xp[pb(k) + pi * shared.x_port_rec() + 1]) * shared.x_stmt_rec() + 1]);
+        if kind > 0 {
+            send_empty(tab, core, k, 'n');
+            return 0;
+        }
+    }
+    forward(tab, core, k, mb[base..base + ln + 1], 3);
+    return 0;
+}
+
+// A transaction statement Executed (`kind` 1 BEGIN, 2 COMMIT, 3 ROLLBACK): the proxy's own record of the client's transaction, the server told only what
+// P2 tells it, the tag said here without `ReadyForQuery` (that is `Sync`'s).
+fn exec_txn[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, k: int, kind: int) -> [heap, net_out(""), conn_read, conn_write, poll, file_write] conns.Table {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    let up = st[p + 1];
+    let q = shared.stride() * up;
+    var table = tab;
+    let ts = st[p + 16];
+    if st[q + 21] == 1 {
+        borrow mut table as &!tw in {
+            fail(tw, core, k, "0A000", "mixed-transaction-control", "a transaction statement may not follow a statement of the same implicit transaction");
+        }
+        return table;
+    }
+    if kind == 1 {
+        if ts == 0 {
+            let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port);
+            table = t1;
+            var r = 0 - 1;
+            if snap_len >= 0 {
+                borrow mut table as &!tw in {
+                    r = commitpath.upstream_exec(tw, core, up, "BEGIN");
+                }
+            }
+            borrow mut table as &!tw in {
+                if r != 0 {
+                    fail(tw, core, k, "08006", "upstream-unavailable", "the database could not begin a transaction");
+                } else {
+                    st[p + 16] = 1;
+                    commitpath.begin(core, k, contents(core.snap)[0..snap_len]);
+                    send_tag(tw, core, k, "BEGIN");
+                }
+            }
+        } else if ts == 1 {
+            borrow mut table as &!tw in {
+                fail(tw, core, k, "25001", "transaction-in-progress", "there is already a transaction in progress");
+            }
+        } else {
+            borrow mut table as &!tw in {
+                fail(tw, core, k, "25P02", "in-failed-transaction", "current transaction is aborted, commands ignored until end of transaction block");
+            }
+        }
+        return table;
+    }
+    borrow mut table as &!tw in {
+        let committing = kind == 2 && ts == 1;
+        var r = 0;
+        if ts != 0 {
+            if committing {
+                r = commitpath.conclude(tw, core, k);
+            } else {
+                r = commitpath.upstream_exec(tw, core, up, "ROLLBACK");
+                commitpath.reset(core, k);
+            }
+            st[p + 16] = 0;
+        }
+        if ts == 0 {
+            if kind == 2 {
+                send_tag(tw, core, k, "COMMIT");
+            } else {
+                send_tag(tw, core, k, "ROLLBACK");
+            }
+        } else if r < 0 {
+            contents(core.aux)[2] = 1;
+            shared.finish(tw, core, k);
+        } else if r == 1 {
+            fail(tw, core, k, "40000", "commit-failed", "the database refused to commit the transaction");
+        } else if r == 2 {
+            fail(tw, core, k, "58000", "log-unavailable", "the commit could not be written to the log, so it was rolled back");
+        } else if committing {
+            send_tag(tw, core, k, "COMMIT");
+        } else {
+            send_tag(tw, core, k, "ROLLBACK");
+        }
+    }
+    return table;
+}
+
+fn do_execute[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, k: int, ln: int) -> [heap, net_out(""), conn_read, conn_write, poll, file_write] conns.Table {
+    let st = contents(core.state);
+    let mb = contents(core.mbuf);
+    let xs = contents(core.xstm);
+    let xp = contents(core.xprt);
+    let p = shared.stride() * k;
+    let base = k * shared.msg_max();
+    let end = base + 1 + ln;
+    var table = tab;
+    let ne = nul_at(mb, base + 5, end);
+    if ln < 9 || ne < 0 || end - ne - 1 != 4 {
+        borrow mut table as &!tw in {
+            shared.refuse(tw, core, k, "FATAL", "08P01", "protocol-violation", "an Execute message is malformed");
+        }
+        return table;
+    }
+    let name = mb[base + 5..ne];
+    let pi = find_port(core, k, name);
+    if pi < 0 {
+        borrow mut table as &!tw in {
+            fail(tw, core, k, "34000", "invalid-cursor-name", "the portal does not exist");
+        }
+        return table;
+    }
+    let prec = pb(k) + pi * shared.x_port_rec();
+    let si = int_of(xp[prec + 1]);
+    let rec = sb(k) + si * shared.x_stmt_rec();
+    let kind = int_of(xs[rec + 1]);
+    if kind > 0 {
+        return exec_txn(heap, table, core, net, host, port, k, kind);
+    }
+    if st[p + 16] == 2 {
+        borrow mut table as &!tw in {
+            fail(tw, core, k, "25P02", "in-failed-transaction", "current transaction is aborted, commands ignored until end of transaction block");
+        }
+        return table;
+    }
+    let (t1, ok) = ensure_txn(heap, table, core, net, host, port, k);
+    table = t1;
+    if ok < 0 {
+        borrow mut table as &!tw in {
+            fail(tw, core, k, "08006", "upstream-unavailable", "the database could not begin a transaction");
+        }
+        return table;
+    }
+    borrow mut table as &!tw in {
+        // the statement counts the first time its portal runs: a portal run again (it was suspended) is the same statement
+        if int_of(xp[prec + 2]) == 0 {
+            let irl = int_of(xs[rec + 2]) * 256 + int_of(xs[rec + 3]);
+            let efl = int_of(xs[rec + 4]) * 256 + int_of(xs[rec + 5]);
+            let added = commitpath.add(core, k, 1, xs[rec + 8..rec + 40], xs[rec + 104..rec + 104 + irl], xs[rec + 2152..rec + 2152 + efl]);
+            if added != 0 {
+                fail(tw, core, k, "54000", "transaction-too-large", "the transaction is larger than one commit can record");
+            } else {
+                xp[prec + 2] = byte_of(1);
+                forward(tw, core, k, mb[base..base + ln + 1], 4);
+            }
+        } else {
+            forward(tw, core, k, mb[base..base + ln + 1], 4);
+        }
+    }
+    return table;
+}
+
+fn do_close[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, ln: int) -> [conn_write, poll] int {
+    let mb = contents(core.mbuf);
+    let xs = contents(core.xstm);
+    let xp = contents(core.xprt);
+    let base = k * shared.msg_max();
+    let end = base + 1 + ln;
+    let ne = nul_at(mb, base + 6, end);
+    if ln < 6 || ne < 0 {
+        shared.refuse(tab, core, k, "FATAL", "08P01", "protocol-violation", "a Close message is malformed");
+        return 0;
+    }
+    let name = mb[base + 6..ne];
+    var ours = false;
+    if int_of(mb[base + 5]) == 'S' {
+        let si = find_stmt(core, k, name);
+        if si >= 0 {
+            ours = int_of(xs[sb(k) + si * shared.x_stmt_rec() + 1]) > 0;
+            xs[sb(k) + si * shared.x_stmt_rec()] = byte_of(0);
+        }
+    } else {
+        let pi = find_port(core, k, name);
+        if pi >= 0 {
+            xp[pb(k) + pi * shared.x_port_rec()] = byte_of(0);
+        }
+    }
+    if ours {
+        send_empty(tab, core, k, '3');
+    } else {
+        forward(tab, core, k, mb[base..base + ln + 1], 5);
+    }
+    return 0;
+}
+
+fn do_sync[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int, ln: int) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let mb = contents(core.mbuf);
+    let p = shared.stride() * k;
+    let base = k * shared.msg_max();
+    if st[p + 15] == 1 {
+        // the refusal was ours: the server has been told nothing since, so `ReadyForQuery` is said here, with the state the proxy keeps
+        st[p + 15] = 0;
+        var status = 'I';
+        if st[p + 16] == 1 {
+            status = 'T';
+        } else if st[p + 16] == 2 {
+            status = 'E';
+        }
+        release_held(tab, core, k);
+        region r {
+            let z = alloc_slice[r](8, byte_of(0));
+            let n = login.ready_for_query(z, status);
+            shared.send(tab, core, k, z[0..n]);
+        }
+        return 0;
+    }
+    st[p + 15] = 0;
+    forward(tab, core, k, mb[base..base + ln + 1], 6);
+    return 0;
+}
+
+// Client `k` has a whole extended-protocol message at the start of its buffer: act on it. The caller consumes it.
+pub fn handle[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, k: int) -> [heap, net_out(""), conn_read, conn_write, poll, file_write] conns.Table {
+    let mb = contents(core.mbuf);
+    let base = k * shared.msg_max();
+    let ty = int_of(mb[base]);
+    let ln = commit.be(mb, base + 1, 4);
+    var table = tab;
+    if contents(core.state)[shared.stride() * k + 15] != 0 && ty != 'S' {
+        // an error has been said (by the proxy or by the server) since this message was framed: it is discarded, as every message up to `Sync` is
+        return table;
+    }
+    if ty == 'P' {
+        return do_parse(heap, table, core, net, host, port, k, ln);
+    }
+    if ty == 'B' {
+        return do_bind(heap, table, core, net, host, port, k, ln);
+    }
+    if ty == 'E' {
+        return do_execute(heap, table, core, net, host, port, k, ln);
+    }
+    borrow mut table as &!tw in {
+        if ty == 'D' {
+            do_describe(tw, core, k, ln);
+        } else if ty == 'C' {
+            do_close(tw, core, k, ln);
+        } else if ty == 'S' {
+            do_sync(tw, core, k, ln);
+        } else {
+            // Flush: nothing is owed, so the next message may follow at once
+            forward(tw, core, k, mb[base..base + ln + 1], 0);
+        }
+    }
+    return table;
+}

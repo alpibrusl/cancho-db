@@ -281,6 +281,8 @@ proxy2.terminate()
 silent_tee.stop()
 dead_tee = Tee(PG_PORT)
 proxy3 = start_proxy(free_port(), dead_tee.port)
+# the listener is open before recovery has run: a query that is answered shows the proxy is serving, and only then does the upstream go
+psql(int(proxy3.args[1]), good, "select 1")
 dead_tee.stop()
 p3 = proxy3.args[1]
 r = psql(int(p3), good, "select 1")
