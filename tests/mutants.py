@@ -397,8 +397,24 @@ PROXY = [
     ("proxy: every connection commits on the first branch", "src/commitpath.cho", "        let bx = st[p + 23];", "        let bx = 0;"),
     ("proxy: login does not remember the connection's branch", "proxy/proxy.cho", "                                    st[p + 23] = which;", "                                    st[p + 23] = 0;"),
     ("proxy: a database that is no branch of the log is let in", "proxy/proxy.cho", "                                    rule = login.login_branch_denied();\n                                }", "                                    rule = login.login_ok();\n                                }"),
-    ("proxy: the chain does not advance", "src/commitpath.cho", "chain[4 + 3 * bx + 1] = chain[4 + 3 * bx + 1] + 1;", "chain[4 + 3 * bx + 1] = chain[4 + 3 * bx + 1];"),
-    ("proxy: the tip is not remembered", "src/commitpath.cho", "                        tip[j] = ident[j];", "                        tip[j] = tip[j];"),
+    # ---- the fork (M2c-2), judged by tests/fork_e2e.py
+    ("fork: the new branch's first commit has the source's seq", "src/commitpath.cho", "            seqno = 0;", "            seqno = seqno;"),
+    ("fork: the commit is on the source branch", "src/commitpath.cho", "            branch = fk[34..34 + int_of(fk[33])];", "            branch = branch;"),
+    ("fork: a source that moved is not noticed", "src/commitpath.cho", "            if moved {\n                fcode = 4;", "            if false {\n                fcode = 4;"),
+    ("fork: the new branch is not entered in the table", "src/commitpath.cho", "                        chain[0] = chain[0] + 1;", "                        chain[0] = chain[0] + 0;"),
+    ("fork: the new branch's tip is the source's", "src/commitpath.cho", "let ntip = contents(core.store.tip)[64 * nb..64 * nb + 64];", "let ntip = contents(core.store.tip)[64 * bx..64 * bx + 64];"),
+    ("fork: the token's branch pattern is not checked", "src/forkpath.cho", "    if token.branch_denied(", "    if false && token.branch_denied("),
+    ("fork: a fork inside a transaction is let through", "src/forkpath.cho", "    if ts != 0 {\n        return refuse(", "    if false {\n        return refuse("),
+    ("fork: a taken name is let through", "src/forkpath.cho", "    if tk == 1 {", "    if tk == 9 {"),
+    ("fork: the name is not validated", "src/fork.cho", "    if !upstream.branch_name_ok(sql[start..start + nl]) {", "    if false {"),
+    ("fork: a branch is always forked from the first", "src/fork.cho", "    if src_is_first {", "    if true {"),
+    ("fork: a fork is not recognised", "src/forkpath.cho", "    if nstmts != 1 ||", "    if nstmts != 7 ||"),
+    ("fork: the extended protocol runs a fork", "src/extended.cho", "} else if vd[6] == 0 && forkpath.is_fork(vd[7], effs[0..vd[9]]) {", "} else if false {"),
+    ("fork: a new client's token is taken for stored", "proxy/proxy.cho", "                                contents(core.acci)[8 * k + 4] = 0;", "                                contents(core.acci)[8 * k + 4] = contents(core.acci)[8 * k + 4];"),
+    ("fork: the branch's snapshot is the first's", "src/catalog.cho", "                if bx == 0 {\n                    var qi = 0;", "                if true {\n                    var qi = 0;"),
+    ("fork: the upstream connection has no search_path", "proxy/proxy.cho", "                    if st[p + 23] > 0 {\n                        // a branch other than the first lives", "                    if false {\n                        // a branch other than the first lives"),
+    ("proxy: the chain does not advance", "src/commitpath.cho", "chain[4 + 3 * nb + 1] = chain[4 + 3 * nb + 1] + 1;", "chain[4 + 3 * nb + 1] = chain[4 + 3 * nb + 1];"),
+    ("proxy: the tip is not remembered", "src/commitpath.cho", "                        ntip[j] = ident[j];", "                        ntip[j] = ntip[j];"),
     ("proxy: the token is never stored", "src/commitpath.cho", "            if ai[8 * k + 4] == 0 {\n                tl = build.store_record(tr, 0, tk);", "            if false {\n                tl = build.store_record(tr, 0, tk);"),
     ("proxy: the statements are not recorded", "src/commitpath.cho", "build.put_bytes(acc[base + 2048..base + 18432], ai[8 * k + 1], irs);", "ai[8 * k + 1] = ai[8 * k + 1] + 0;"),
     ("proxy: the effects are not recorded", "src/commitpath.cho", "build.put_bytes(acc[base + 18432..base + 22528], ai[8 * k + 2], effs);", "ai[8 * k + 2] = ai[8 * k + 2] + 0;"),
@@ -439,7 +455,7 @@ PROXY = [
     ("proxy: a refused login still opens the upstream", "proxy/proxy.cho", "shared.refuse(tab, core, k, \"FATAL\", login.sqlstate(rule), login.rule_name(rule), \"the capability token was refused\");", "st[p] = 5;"),
     ("proxy: protocol versions are not checked", "proxy/proxy.cho", "} else if kind == login.err_version() {", "} else if false {"),
     # ---- the query path (P1d-2)
-    ("proxy: the rendering is not what is sent", "proxy/proxy.cho", "                    if added == 0 {\n                        run_query(tw, core, k, vd[3]);", "                    if added == 0 {\n                        run_query(tw, core, k, 0);"),
+    ("proxy: the rendering is not what is sent", "proxy/proxy.cho", "run_query(tw, core, k, rl);", "run_query(tw, core, k, 0);"),
     ("proxy: a refused query is sent upstream anyway", "proxy/proxy.cho", "                if verdict != 0 {\n                    refused_query(tw, core, k, vd);", "                if false {\n                    refused_query(tw, core, k, vd);"),
     ("proxy: a Parse message is a protocol violation", "proxy/proxy.cho", "} else if ty == 'P' || ty == 'B' ||", "} else if ty == 'B' ||"),
     ("ext: messages after an unsupported message are answered too", "proxy/proxy.cho", "                        st[p + 15] = 1;\n                    }\n                    shared.consume(core, k, ln + 1);", "                        st[p + 15] = 0;\n                    }\n                    shared.consume(core, k, ln + 1);"),
@@ -496,12 +512,12 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho", "capture_sql.cho", "state.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho", "capture_sql.cho", "state.cho", "fork.cho", "forkpath.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
                 try:
-                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "proxy_e2e.py"
+                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "fork_e2e.py" if label.startswith("fork:") else "proxy_e2e.py"
                     r = subprocess.run([sys.executable, str(work / "tests" / judge), str(exe)], capture_output=True,
                                        text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
                     out, code = r.stdout + r.stderr, r.returncode
@@ -1105,6 +1121,55 @@ def run_store(cancho):
     return 1 if survivors else 0
 
 
+# ---- sql/capture.sql, judged by tests/capture_check.py (the capture, the event trigger and cdb.fork)
+SQL = [
+    ("sql: the delta rows do not say their schema", "sql/capture.sql", "sc text := TG_TABLE_SCHEMA;", "sc text := 'public';"),
+    ("sql: a table made in a branch schema is not tracked", "sql/capture.sql", "ns not like 'cdb\\_b\\_%')", "ns not like 'zzz')"),
+    ("sql: track_all skips the branches", "sql/capture.sql", "where (s.nspname = 'public' or s.nspname like 'cdb\\_b\\_%') and c.relkind = 'r' loop", "where s.nspname = 'public' and c.relkind = 'r' loop"),
+    ("sql: untrackable skips the branches", "sql/capture.sql", "     where (n.nspname = 'public' or n.nspname like 'cdb\\_b\\_%') and c.relkind in ('r', 'p')\n       and (c.relkind", "     where n.nspname = 'public' and c.relkind in ('r', 'p')\n       and (c.relkind"),
+    ("sql fork: the copy is tracked while it is filled (it records facts)", "sql/capture.sql", "        continue when current_setting('cdb.forking', true) = 'on';", "        continue when false;"),
+    ("sql fork: the copy is not tracked afterwards", "sql/capture.sql", "        perform cdb.track(r.t);\n    end loop;\n    perform set_config('cdb.forking', 'off', true);", "        null;\n    end loop;\n    perform set_config('cdb.forking', 'off', true);"),
+    ("sql fork: the foreign keys are not copied", "sql/capture.sql", "        execute stmt;", "        null;"),
+    ("sql fork: an identity counter skips a number", "sql/capture.sql", "0) + 1, false)', pg_get_serial_sequence", "0) + 1, true)', pg_get_serial_sequence"),
+    ("sql fork: a generated column is inserted", "sql/capture.sql", " and a.attnum > 0 and not a.attisdropped and a.attgenerated = '';", " and a.attnum > 0 and not a.attisdropped;"),
+    ("sql fork: the rows are not copied", "sql/capture.sql", "select %s from %I.%I', dst, r.relname, cols, cols, src, r.relname);", "select %s from %I.%I where false', dst, r.relname, cols, cols, src, r.relname);"),
+    ("sql fork: the source's own schema is copied from, whatever was asked", "sql/capture.sql", "where s.nspname = src and c.relkind = 'r' order by c.relname loop", "where s.nspname = 'public' and c.relkind = 'r' order by c.relname loop"),
+]
+
+
+def run_sql(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in SQL if not only or only in m[0]]
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            for d in ("sql", "tools"):
+                shutil.copytree(ROOT / d, work / d, ignore=shutil.ignore_patterns("__pycache__"))
+            (work / "tests").mkdir()
+            shutil.copy(ROOT / "tests" / "capture_check.py", work / "tests" / "capture_check.py")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            try:
+                r = subprocess.run([sys.executable, str(work / "tests" / "capture_check.py")], capture_output=True, text=True, timeout=900)
+                rc, out = r.returncode, r.stdout + r.stderr
+            except subprocess.TimeoutExpired:
+                rc, out = 1, "FAIL timed out"
+            if rc == 0:
+                print("SURVIVED %-46s every capture check passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in out.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d check(s), e.g. %s" % (label, len(first), first[0][5:70] if first else "a crash: " + out.strip().splitlines()[-1][:60]))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
     if kind == "guard":
         return run_guard(cancho)
@@ -1112,6 +1177,8 @@ def run(kind, cancho):
         return run_build(cancho)
     if kind == "store":
         return run_store(cancho)
+    if kind == "sql":
+        return run_sql(cancho)
     if kind == "state":
         return run_state(cancho)
     if kind == "lower":

@@ -15,6 +15,7 @@ import cdb.store;
 import cdb.upstream;
 import cdb.shared;
 import cdb.commitpath;
+import cdb.forkpath;
 import cdb.catalog;
 import cdb.extended;
 
@@ -133,6 +134,9 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: 
                                     }
                                     bq = bq + 1;
                                 }
+                                if which > 0 && !upstream.branch_name_ok(database) {
+                                    which = 0 - 1;
+                                }
                                 if which >= 0 {
                                     rule = login.check(blob[0..n], database, database, cfg[0..32], now / 4294967296, now % 4294967296);
                                     st[p + 23] = which;
@@ -153,6 +157,9 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: 
                                     q = q + 1;
                                 }
                                 st[p + 12] = n - 32;
+                                // this client's token is not in the token store yet, whatever the connection that had this slot before it had (a second token on a reused slot
+                                // was never stored, and L2 then found its commits without a token)
+                                contents(core.acci)[8 * k + 4] = 0;
                                 st[p] = 5;
                                 st[p + 4] = 0;
                                 shared.settle(tab, core, k);
@@ -373,6 +380,12 @@ fn pair_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core,
                     at = upstream.put_cstr(msg, at, cfg[32 + ci[2]..32 + ci[2] + ci[3]]);
                     at = upstream.put_cstr(msg, at, "database");
                     at = upstream.put_cstr(msg, at, cfg[32 + ci[4]..32 + ci[4] + ci[5]]);
+                    if st[p + 23] > 0 {
+                        // a branch other than the first lives in its own schema (docs/m2-branches.md D22)
+                        let bn = contents(core.store.names);
+                        let bl = contents(core.store.chain)[4 + 3 * st[p + 23]];
+                        at = upstream.put_branch_option(msg, at, bn[st[p + 23] * store.branch_name_max()..st[p + 23] * store.branch_name_max() + bl]);
+                    }
                     at = upstream.put_cstr(msg, at, "application_name");
                     if st[p + 8] >= 0 && at + st[p + 9] + 4 < 1000 {
                         at = upstream.put_cstr(msg, at, hb[k * shared.hello_size() + st[p + 8]..k * shared.hello_size() + st[p + 8] + st[p + 9]]);
@@ -573,6 +586,16 @@ fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int
     if !failed && r == 2 {
         st[cp + 18] = 0;
         shared.answer_error(tab, core, client, 73, "58000", "log-unavailable", "the commit could not be written to the log, so it was rolled back");
+        return 0;
+    }
+    if !failed && r == 4 {
+        st[cp + 18] = 0;
+        shared.answer_error(tab, core, client, 73, "40001", "fork-raced", "the branch changed while it was being copied, so the fork was rolled back; try again");
+        return 0;
+    }
+    if !failed && r == 5 {
+        st[cp + 18] = 0;
+        shared.answer_error(tab, core, client, 73, "42710", "fork-branch-exists", "a branch of that name was made meanwhile, so the fork was rolled back");
         return 0;
     }
     if !failed && r == 3 {
@@ -962,7 +985,7 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core
         return table;
     }
     let sql = mb[base + 5..base + ln];
-    let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port);
+    let (t1, snap_len) = catalog.read_snapshot(heap, table, core, net, host, port, st[p + 23]);
     table = t1;
     // the transaction state the client is in decides what is said, and what is sent
     let ts = st[p + 16];
@@ -994,14 +1017,24 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core
                 } else if ts == 2 {
                     run_query(tw, core, k, vd[3]);
                 } else {
-                    if ts == 0 {
-                        commitpath.begin(core, k, contents(core.snap)[0..snap_len]);
+                    // a fork (docs/m2-branches.md D23): checked here, and its query put in the guard's rendering's place
+                    var rl = vd[3];
+                    if forkpath.is_fork(vd[7], effs[0..vd[9]]) {
+                        rl = forkpath.start(tw, core, k, ts, sql);
                     }
-                    let added = commitpath.add(core, k, vd[7], ids, irs[0..vd[8]], effs[0..vd[9]]);
-                    if added == 0 {
-                        run_query(tw, core, k, vd[3]);
-                    } else {
-                        refuse_unrecordable(tw, core, k, added);
+                    if rl >= 0 {
+                        if ts == 0 {
+                            commitpath.begin(core, k, contents(core.snap)[0..snap_len]);
+                        }
+                        let added = commitpath.add(core, k, vd[7], ids, irs[0..vd[8]], effs[0..vd[9]]);
+                        if added == 0 {
+                            if forkpath.is_fork(vd[7], effs[0..vd[9]]) {
+                                st[p + 24] = 1;
+                            }
+                            run_query(tw, core, k, rl);
+                        } else {
+                            refuse_unrecordable(tw, core, k, added);
+                        }
                     }
                 }
             }

@@ -83,6 +83,43 @@ pub fn startup_msg[&m, &c, &s](msg: &!m [byte], cfg: &c [byte], ci: &s [int], na
     return at;
 }
 
+// Whether `name` can be the name of a branch that has a schema of its own (docs/m2-branches.md D20): 1 to 40 of `a-z`, `0-9` and `_`. The first branch, the configured one,
+// has the schema `public` and may be called anything.
+pub fn branch_name_ok[&d](name: &d [byte]) -> [] bool {
+    if len(name) < 1 || len(name) > 40 {
+        return false;
+    }
+    var i = 0;
+    while i < len(name) {
+        let c = int_of(name[i]);
+        if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Put the startup option that makes `cdb_b_<branch>` the schema unqualified names resolve in (D22) into `msg` at `at`: where it ends.
+pub fn put_branch_option[&m, &b](msg: &!m [byte], at: int, branch: &b [byte]) -> [] int {
+    var n = put_cstr(msg, at, "options");
+    let pre = "-c search_path=cdb_b_";
+    var j = 0;
+    while j < len(pre) {
+        msg[n] = pre[j];
+        n = n + 1;
+        j = j + 1;
+    }
+    j = 0;
+    while j < len(branch) {
+        msg[n] = branch[j];
+        n = n + 1;
+        j = j + 1;
+    }
+    msg[n] = byte_of(0);
+    return n + 1;
+}
+
 // Send all of `data` on connection `slot`, waiting if the kernel is slow: false if it fails. The catalog connection is never
 // the busy one, and its messages are small.
 pub fn write_all[&t, &d](tab: &!t conns.Table, slot: int, data: &d [byte]) -> [conn_write] bool {

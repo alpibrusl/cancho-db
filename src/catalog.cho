@@ -4,6 +4,7 @@ module cdb.catalog;
 import std.conns;
 import cdb.commit;
 import cdb.shared;
+import cdb.store;
 import cdb.upstream;
 import cdb.snapshot;
 import cdb.commitpath;
@@ -59,7 +60,7 @@ pub fn catalog_open[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shar
 
 // The schema snapshot, fresh from the catalog, into `core.snap`: its length, or -1 if the catalog cannot be asked. The one
 // connection is kept between questions and opened again if PostgreSQL has closed it.
-pub fn read_snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
+pub fn read_snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core, net: &n Net(""), host: &n [byte], port: int, bx: int) -> [heap, net_out(""), conn_read, conn_write, poll] (conns.Table, int) {
     let aux = contents(core.aux);
     let si = contents(core.snapin);
     var table = tab;
@@ -74,7 +75,20 @@ pub fn read_snapshot[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c sha
             let slot = aux[0];
             var answered = 0 - 1;
             region r {
-                let sql = snapshot.sql();
+                // the connection's branch: the schema `public` for the first, `cdb_b_<name>` for the others (docs/m2-branches.md D22)
+                let qb = alloc_slice[r](len(snapshot.sql()) + 4 * store.branch_name_max(), byte_of(0));
+                var ql = len(snapshot.sql());
+                if bx == 0 {
+                    var qi = 0;
+                    while qi < ql {
+                        qb[qi] = snapshot.sql()[qi];
+                        qi = qi + 1;
+                    }
+                } else {
+                    let nm = contents(core.store.names)[bx * store.branch_name_max()..bx * store.branch_name_max() + contents(core.store.chain)[4 + 3 * bx]];
+                    ql = snapshot.sql_for(qb, nm);
+                }
+                let sql = qb[0..ql];
                 let msg = alloc_slice[r](len(sql) + 8, byte_of(0));
                 msg[0] = byte_of('Q');
                 let ln = len(sql) + 5;

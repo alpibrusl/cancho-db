@@ -21,11 +21,13 @@ create table if not exists cdb.delta (
     commit_id bytea,
     tbl text not null,
     pk bytea not null,
+    sch text not null default 'public',
     old_hash bytea,
     new_hash bytea,
     old_row jsonb,
     new_row jsonb
 );
+alter table cdb.delta add column if not exists sch text not null default 'public';
 create index if not exists delta_xid on cdb.delta (xid);
 create index if not exists delta_commit on cdb.delta (commit_id) where commit_id is not null;
 
@@ -39,20 +41,21 @@ declare
     onclause text;
     pkexpr text;
     t text := TG_TABLE_NAME;
+    sc text := TG_TABLE_SCHEMA;
 begin
     -- key columns are never null, so plain equality is the join (and is what a full join needs to be hash- or merge-joinable)
     select string_agg(format('o.%1$I = n.%1$I', c), ' and ') into onclause from unnest(pkcols) c;
     select format('convert_to(jsonb_build_array(%s)::text, ''UTF8'')', string_agg(format('%%1$s.%I', c), ', ')) into pkexpr from unnest(pkcols) c;
     if TG_OP = 'INSERT' then
-        execute format('insert into cdb.delta(tbl, pk, new_hash, new_row) select %L, %s, cdb.row_hash(to_jsonb(n)), to_jsonb(n) from new_rows n', t, format(pkexpr, 'n'));
+        execute format('insert into cdb.delta(sch, tbl, pk, new_hash, new_row) select %L, %L, %s, cdb.row_hash(to_jsonb(n)), to_jsonb(n) from new_rows n', sc, t, format(pkexpr, 'n'));
     elsif TG_OP = 'DELETE' then
-        execute format('insert into cdb.delta(tbl, pk, old_hash, old_row) select %L, %s, cdb.row_hash(to_jsonb(o)), to_jsonb(o) from old_rows o', t, format(pkexpr, 'o'));
+        execute format('insert into cdb.delta(sch, tbl, pk, old_hash, old_row) select %L, %L, %s, cdb.row_hash(to_jsonb(o)), to_jsonb(o) from old_rows o', sc, t, format(pkexpr, 'o'));
     else
         -- matched by primary key: an update; a row only in the old image is a delete of its key, only in the new one an insert (a changed key). A row of the new side
         -- with no old row has a null first key column in `o`, which is how the two sides are told apart (key columns are never null)
-        execute format($f$insert into cdb.delta(tbl, pk, old_hash, new_hash, old_row, new_row)
-            select %L, case when o.%I is null then %s else %s end, cdb.row_hash(to_jsonb(o)), cdb.row_hash(to_jsonb(n)), to_jsonb(o), to_jsonb(n)
-            from old_rows o full join new_rows n on %s$f$, t, pkcols[1], format(pkexpr, 'n'), format(pkexpr, 'o'), onclause);
+        execute format($f$insert into cdb.delta(sch, tbl, pk, old_hash, new_hash, old_row, new_row)
+            select %L, %L, case when o.%I is null then %s else %s end, cdb.row_hash(to_jsonb(o)), cdb.row_hash(to_jsonb(n)), to_jsonb(o), to_jsonb(n)
+            from old_rows o full join new_rows n on %s$f$, sc, t, pkcols[1], format(pkexpr, 'n'), format(pkexpr, 'o'), onclause);
     end if;
     return null;
 end $$;
@@ -80,7 +83,7 @@ declare
     r record;
     n int := 0;
 begin
-    for r in select c.oid::regclass as t from pg_class c join pg_namespace s on s.oid = c.relnamespace where s.nspname = 'public' and c.relkind = 'r' loop
+    for r in select c.oid::regclass as t from pg_class c join pg_namespace s on s.oid = c.relnamespace where (s.nspname = 'public' or s.nspname like 'cdb\_b\_%') and c.relkind = 'r' loop
         perform cdb.track(r.t);
         n := n + 1;
     end loop;
@@ -100,11 +103,54 @@ $$;
 -- The tables of `public` that cannot be tracked: a partitioned table (and its partitions) would record one row under two names, by the path it was written through, and a table
 -- without a primary key has no key for a fact. The proxy refuses to start while there are any (docs/m2-branches.md D15).
 create or replace function cdb.untrackable() returns text language sql stable as $$
-    select coalesce(string_agg(c.relname || case when c.relkind = 'p' or c.relispartition then ' (partitioned)' else ' (no primary key)' end, ', ' order by c.relname), '')
+    select coalesce(string_agg(case when n.nspname = 'public' then '' else n.nspname || '.' end || c.relname || case when c.relkind = 'p' or c.relispartition then ' (partitioned)' else ' (no primary key)' end, ', ' order by c.relname), '')
       from pg_class c join pg_namespace n on n.oid = c.relnamespace
-     where n.nspname = 'public' and c.relkind in ('r', 'p')
+     where (n.nspname = 'public' or n.nspname like 'cdb\_b\_%') and c.relkind in ('r', 'p')
        and (c.relkind = 'p' or c.relispartition or not exists (select 1 from pg_index i where i.indrelid = c.oid and i.indisprimary))
 $$;
+
+-- A fork (docs/m2-branches.md D2, D24): schema `dst` gets a copy of every table of schema `src` (columns, defaults, constraints and indexes by `like ... including all`, then
+-- the foreign keys between the copies, and identity counters set past the copied rows), and the copies are tracked afterwards, so that the copying is a base and records no
+-- facts. Returns the number of tables. Views, functions and types are not copied; a column default that calls a sequence goes on using the source's sequence.
+create or replace function cdb.fork(src text, dst text) returns int language plpgsql as $$
+declare
+    r record;
+    n int := 0;
+    old_path text := current_setting('search_path');
+    cols text;
+    fks text[];
+    stmt text;
+begin
+    perform set_config('cdb.forking', 'on', true);
+    perform set_config('client_min_messages', 'warning', true);
+    execute format('create schema %I', dst);
+    for r in select c.relname from pg_class c join pg_namespace s on s.oid = c.relnamespace where s.nspname = src and c.relkind = 'r' order by c.relname loop
+        execute format('create table %I.%I (like %I.%I including all)', dst, r.relname, src, r.relname);
+        select string_agg(quote_ident(a.attname), ', ' order by a.attnum) into cols
+          from pg_attribute a where a.attrelid = format('%I.%I', src, r.relname)::regclass and a.attnum > 0 and not a.attisdropped and a.attgenerated = '';
+        if cols is not null then
+            execute format('insert into %I.%I (%s) overriding system value select %s from %I.%I', dst, r.relname, cols, cols, src, r.relname);
+        end if;
+        for cols in select a.attname from pg_attribute a where a.attrelid = format('%I.%I', src, r.relname)::regclass and a.attidentity <> '' loop
+            execute format('select setval(%L, coalesce((select max(%I) from %I.%I), 0) + 1, false)', pg_get_serial_sequence(format('%I.%I', dst, r.relname), cols), cols, dst, r.relname);
+        end loop;
+        n := n + 1;
+    end loop;
+    -- foreign keys: written as the source prints them with its own schema on the path, then run with the copy's on it
+    perform set_config('search_path', quote_ident(src), true);
+    select coalesce(array_agg(format('alter table %s add constraint %I %s', c.conrelid::regclass::text, c.conname, pg_get_constraintdef(c.oid)) order by c.conrelid::regclass::text, c.conname), '{}') into fks
+      from pg_constraint c join pg_class t on t.oid = c.conrelid join pg_namespace s on s.oid = t.relnamespace where s.nspname = src and c.contype = 'f';
+    perform set_config('search_path', quote_ident(dst), true);
+    foreach stmt in array fks loop
+        execute stmt;
+    end loop;
+    perform set_config('search_path', old_path, true);
+    for r in select c.oid::regclass as t from pg_class c join pg_namespace s on s.oid = c.relnamespace where s.nspname = dst and c.relkind = 'r' loop
+        perform cdb.track(r.t);
+    end loop;
+    perform set_config('cdb.forking', 'off', true);
+    return n;
+end $$;
 
 create or replace function cdb.on_ddl() returns event_trigger language plpgsql as $$
 declare
@@ -115,7 +161,9 @@ declare
 begin
     for r in select objid from pg_event_trigger_ddl_commands() where object_type = 'table' loop
         select c.relkind, c.relispartition, n.nspname into k, part, ns from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = r.objid;
-        continue when ns is distinct from 'public' or k not in ('r', 'p');
+        -- a fork's own copying (cdb.fork) makes tables that are a base and not a change: it tracks them itself, afterwards
+        continue when current_setting('cdb.forking', true) = 'on';
+        continue when (ns is distinct from 'public' and ns not like 'cdb\_b\_%') or k not in ('r', 'p');
         if k = 'p' or part then
             raise exception 'cdb: partitioned tables are not supported (%)', r.objid::regclass using errcode = '0A000';
         end if;

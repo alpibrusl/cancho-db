@@ -213,6 +213,64 @@ for n in range(300):
         bad.append((n, got[:120], " ".join(allf)[:120], ops))
 check("300 random transactions over three tables: the SQL's facts are the snapshot diff's, every time", not bad, bad[:2])
 
+# ---- cdb.fork (docs/m2-branches.md D2, D24, D26): a copy that is a base and not a change
+FDB = DB + "_fork"
+psql("drop database if exists %s" % FDB, db="postgres")
+psql("create database %s" % FDB, db="postgres")
+r = psql(None, db=FDB, file=str(ROOT / "sql/capture.sql"))
+check("fork: sql/capture.sql installs in a fresh database", r.returncode == 0, r.stderr)
+fixture = """
+create table par(id int primary key, name text);
+create table kid(id int generated always as identity primary key, par_id int references par(id) on delete cascade, v text default 'd');
+create table ser(id serial primary key, w int);
+create table gen(a int primary key, b int generated always as (a * 2) stored);
+create index kid_v on kid (v);
+insert into par select g, 'p' || g from generate_series(1, 5) g;
+insert into kid(par_id, v) select 1 + g % 5, 'v' || g from generate_series(1, 12) g;
+insert into ser(w) values (1), (2);
+insert into gen(a) values (1), (2), (3);
+"""
+r = psql(fixture, db=FDB)
+check("fork: the fixture is made", r.returncode == 0, r.stderr)
+r = psql("begin; select cdb.fork('public', 'cdb_b_x'); select 'FACTS[' || cdb.facts(txid_current()) || ']'; commit;", db=FDB)
+check("fork: copies four tables and the transaction records no facts", r.returncode == 0 and r.stdout.split() == ["4", "FACTS[]"], (r.stdout, r.stderr))
+check("fork: the copy has no delta rows at all", psql("select count(*) from cdb.delta where sch <> 'public'", db=FDB).stdout.strip() == "0")
+
+
+def dump(schema):
+    parts = []
+    for t, order in [("par", "id"), ("kid", "id"), ("ser", "id"), ("gen", "a")]:
+        parts.append(psql("select coalesce(string_agg(to_jsonb(x)::text, ' ' order by %s), '') from %s.%s x" % (order, schema, t), db=FDB).stdout.strip())
+    return parts
+
+
+check("fork: every table of the copy holds the rows of the source, generated column included", dump("cdb_b_x") == dump("public") and all(dump("public")), dump("cdb_b_x"))
+r = psql("select count(*) from pg_constraint c join pg_class t on t.oid = c.conrelid join pg_class f on f.oid = c.confrelid join pg_namespace n on n.oid = t.relnamespace join pg_namespace m on m.oid = f.relnamespace "
+         "where c.contype = 'f' and n.nspname = 'cdb_b_x' and m.nspname = 'cdb_b_x'", db=FDB)
+check("fork: the foreign key is in the copy and points at the copy", r.stdout.strip() == "1", r.stdout + r.stderr)
+r = psql("insert into cdb_b_x.kid(par_id) values (99)", db=FDB)
+check("fork: ... and is enforced there", r.returncode != 0 and "violates foreign key" in r.stderr, r.stderr)
+r = psql("begin; insert into cdb_b_x.kid(par_id) values (2) returning id; select cdb.facts(txid_current()); commit;", db=FDB)
+check("fork: an identity column goes on past the copied rows (13, the failed insert above took one: 14), the write is a fact", r.returncode == 0 and r.stdout.split("\n")[0] == "14" and r.stdout.count(":") == 4 and len(r.stdout.split("\n")[1].split()) == 1, r.stdout + r.stderr)
+check("fork: its delta row says which schema it was in", psql("select string_agg(sch || '.' || tbl, ',') from cdb.delta where sch <> 'public'", db=FDB).stdout.strip() == "cdb_b_x.kid", psql("select string_agg(sch || '.' || tbl, ',') from cdb.delta where sch <> 'public'", db=FDB).stdout)
+check("fork: a write in the branch is not in the source, and one in the source is not in the branch",
+      psql("select count(*) from public.kid", db=FDB).stdout.strip() == "12" and psql("insert into public.kid(par_id) values (3); select count(*) from cdb_b_x.kid", db=FDB).stdout.split()[-1] == "13")
+r = psql("create table cdb_b_x.later(a int, b int)", db=FDB)
+check("fork: a keyless table made in the branch is refused, as in the first", r.returncode != 0 and "has no primary key" in r.stderr, r.stderr)
+r = psql("begin; create table cdb_b_x.later(a int primary key); insert into cdb_b_x.later values (1); select cdb.facts(txid_current()); commit;", db=FDB)
+check("fork: a table made in the branch is tracked at once", r.returncode == 0 and r.stdout.count(":") == 4, r.stdout + r.stderr)
+r = psql("begin; select cdb.fork('cdb_b_x', 'cdb_b_y'); select cdb.facts(txid_current()); commit;", db=FDB)
+check("fork: a branch forks too, and the copy has the branch's own rows", r.returncode == 0 and psql("select count(*) from cdb_b_y.kid", db=FDB).stdout.strip() == "13" and r.stdout.split()[0] == "5", (r.stdout, r.stderr))
+r = psql("begin; select cdb.fork('public', 'cdb_b_z'); rollback; select count(*) from pg_namespace where nspname = 'cdb_b_z'", db=FDB)
+check("fork: a rolled-back fork leaves no schema", r.returncode == 0 and r.stdout.split()[-1] == "0", r.stdout + r.stderr)
+r = psql("select cdb.fork('public', 'cdb_b_x')", db=FDB)
+check("fork: a name that is taken is refused", r.returncode != 0 and "already exists" in r.stderr, r.stderr)
+r = psql("alter event trigger cdb_ddl disable; create table cdb_b_x.nopk2(x int); alter event trigger cdb_ddl enable; select cdb.untrackable()", db=FDB)
+check("fork: untrackable() names a keyless table of a branch, with its schema", r.stdout.strip().endswith("cdb_b_x.nopk2 (no primary key)"), r.stdout + r.stderr)
+psql("drop table cdb_b_x.nopk2", db=FDB)
+check("fork: untrackable() and track_all() see the branches' tables", psql("select cdb.untrackable()", db=FDB).stdout.strip() == "" and psql("select cdb.track_all()", db=FDB).stdout.strip() == "14", psql("select cdb.track_all()", db=FDB).stdout)
+psql("drop database if exists %s" % FDB, db="postgres")
+
 psql("drop database if exists %s" % DB, db="postgres")
 print("\n%d checks failed" % len(FAILED) if FAILED else "\nall capture checks passed")
 sys.exit(1 if FAILED else 0)

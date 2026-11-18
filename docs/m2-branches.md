@@ -321,7 +321,7 @@ M2c turns the one branch the proxy serves (a command-line argument) into several
 
 **Measured for it** (PostgreSQL 16.15; `forkexp`: two tables of 100,000 and 1,000 rows, the capture installed):
 
-* The fork as one transaction (`create schema`, `create table ... (like ... including all)`, `insert ... select`, then `cdb.track` of each copy) takes **about 125 ms** for 101,000 rows, and **the transaction records no facts**
+* The fork as one transaction (`create schema`, `create table ... (like ... including all)`, `insert ... select`, then `cdb.track` of each copy) takes **about 125 ms** for 101,000 rows *(corrected in M2c-2: 261 ms for the copy alone on a table of three columns and an index, 293 ms through the proxy, section 12)*, and **the transaction records no facts**
   (`cdb.facts` is empty): the copy is made before the triggers exist, so it is a base and not a change. A connection started with `-c search_path=cdb_b_feat` (the startup `options`) sees only its branch; an `UPDATE` there left `main` untouched.
 * **`cdb.delta` names a table, not its schema**: a write to `acc` in two branches is two rows of the same `tbl`. Within one commit this is harmless (a commit is on one branch) but the store needs the schema for merge and `AS OF`.
 * **The guard cannot lower `select cancho_fork('x')` today**: `cannot-lower`, as for `select now()` with no `FROM`. The IR already has a `Call` statement whose effect is `call <fn>` (`ir.md` §1, §2) and the token already grants `call` effects, so
@@ -340,7 +340,7 @@ M2c turns the one branch the proxy serves (a command-line argument) into several
   `agent-7` and nothing else; a token for `main` alone cannot fork at all (L2 would refuse the commit, so the proxy refuses first).
 * **D24. The fork commit** has `branch` the new name, `seq` 0, `parents` the source branch's tip (none if the source has no commit: then it is a root), `statements` the IR hash of the call, `effects` `call cancho_fork`, `changes` the empty root and
   `state` the chain over the source tip's `state` and that. It is made in the transaction that copies the tables (the proxy's `PREPARE TRANSACTION`, the log, `COMMIT PREPARED`), so the schema exists exactly when the commit does and a crash is settled by the recovery that already exists.
-* **D25. The copy is of what is committed, which is the source's tip**: the proxy runs one commit at a time and the fork is one of them, so none interleaves. **Limits, stated:** the fork blocks the proxy's loop for as long as the copy takes (about 125 ms for 101,000 rows; 2.5 s a million) and is bounded by the upstream
+* **D25. The copy is of what is committed, which is the source's tip**: the proxy runs one commit at a time and the fork is one of them, so none interleaves. **Limits, stated:** the fork blocks the proxy's loop for as long as the copy takes (about 290 ms for 101,000 rows through the proxy, *corrected in M2c-2 from 125 ms*; 2.5 s a million is the copy alone and not re-measured) and is bounded by the upstream
   wait (5 s), so a bigger fork fails and rolls back with an error; a branch holds a full copy of the tables.
 * **D26. `cdb.delta` gets a `sch` column** (the table's schema, from the trigger), so a branch's deltas can be told apart; `cdb.on_ddl` and `cdb.track_all` handle `cdb_b_*` as well as `public`.
 
@@ -365,4 +365,21 @@ The proxy's one branch became a table of branches, and a connection has one of t
 * **A commit** takes its name, `seq`, parent and parent's `state` from the connection's branch, and advances that branch's chain only.
 * **Moved to M2c-2:** the `search_path` startup option and the schema snapshot per branch. Every branch of M2c-1 shares schema `public`, so there is nothing to point them at, and writing them now would be code no test can exercise. The claim
   that comes with M2c-1 is therefore the narrow one, C108 to C110 in `claims.md`: chains are independent, and a branch that is not in the log is not reachable.
+
+## 12. M2c-2 as built
+
+`select cancho_fork('<name>')` makes a branch. What was built, and where it differs from section 10:
+
+* **The statement.** The lowering turns a bare `select f(constants)` (one item, no FROM, no WHERE, GROUP, ORDER, LIMIT, no DISTINCT) into the IR statement `Call` (ir.md section 2, tag 5; `now()` stays a `Nondet` and is refused); the guard checks the token for `call cancho_fork` as for any statement. The text is then read by `src/fork.cho` for exactly `select cancho_fork('<name>')`
+  (spaces, an optional `;`, nothing else): a computed or second argument is `fork-malformed`, a name outside `[a-z0-9_]{1,40}` is `fork-bad-name`.
+* **Decided before it runs** (`src/forkpath.cho`): it must be the only statement and outside a transaction block (`fork-in-transaction`, 25001); the token's `branch` pattern must allow the NEW name (`fork-branch-denied`, 42501); the name must not be in the table (`fork-branch-exists`, 42710) and the table not full
+  (`fork-too-many-branches`, 54000). The proxy then sends upstream, in place of the guard's rendering, `select cdb.fork('<source schema>', 'cdb_b_<name>')`, and notes the source's tip. **Simple protocol only**: a Parse of the statement is `fork-extended-protocol` (0A000), since its argument would be a parameter.
+* **The copy** (`cdb.fork` in `sql/capture.sql`): `create table ... (like ... including all)` and `insert ... select` of every table (generated columns left to be computed, identity columns set past the copied rows), the foreign keys between the copies, then `cdb.track` of each; the event trigger skips the copy's own `CREATE TABLE`s (`cdb.forking`) so that the copy is a base and records no facts.
+  `cdb.delta` has the `sch` column (D26); the event trigger, `cdb.track_all` and `cdb.untrackable` handle `cdb_b_*`. **Not copied:** views, functions, types, and sequences: a `serial` column's default goes on drawing from the source's sequence.
+* **The commit** (`commitpath.conclude`): the first of the new branch (seq 0, parent the source's tip, `call cancho_fork`, empty `changes`, `state` over the source's state and it), made in the transaction that did the copy (`PREPARE TRANSACTION`, log, `COMMIT PREPARED`). The branch enters the table only when its commit is in the log. **Two checks at commit time:** if the source branch's tip is not the one noted when the fork began (another connection committed on the source while the copy ran), the fork is rolled back,
+  `fork-raced` (40001), and can be tried again; if the name is in the table or the table is full by then, `fork-branch-exists` (42710, rolled back). The second is defensive: two forks of one name cannot both get past PostgreSQL's own `create schema`, and a table filling in between needs 64 branches; it has no test.
+* **A connection to the branch** opens its upstream session with `-c search_path=cdb_b_<name>` and its guard reads the snapshot of that schema (`snapshot.sql_for`); a branch that is not the first and whose name is not a plain one cannot be connected to.
+* **Found on the way, and fixed:** the flag that says a client's token is in the token store (`acci[8k + 4]`) was never cleared when another client took the slot, so a second, different token was never stored and L2 refused its commits (`token-missing`). Every earlier test used one token. A client now starts with it cleared, so a token is stored once per connection and the store may hold it more than once.
+* **Cost** (`scripts/measure_fork.py`, one table of three columns and an index, median of three): 63 ms through the proxy for 1,000 rows (the copy alone 49 ms) and 293 ms for 101,000 (261 ms). The proxy's own part, the guard, the commit and the log, is 14 to 32 ms. This is slower than section 3's 125 ms for 101,000 rows (a different table: its shape was not recorded, so the cause is not known); that claim is corrected in place at sections 3 and 10 (C113).
+  The proxy's loop waits for the copy.
 

@@ -37,7 +37,7 @@ echo "== authority";                 sh tests/authority.sh
 echo "== vectors, python verifier";  python3 tests/run_vectors.py vectors -- python3 tools/verify.py
 echo "== vectors, cancho verifier";  python3 tests/run_vectors.py vectors -- build/verify
 echo "== vectors, go verifier";      python3 tests/run_vectors.py vectors -- build/verify-go
-echo "== the proxy builds";          "$CANCHO" build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho -o build/proxy
+echo "== the proxy builds";          "$CANCHO" build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho -o build/proxy
 echo "== the proxy end to end (psql, a real PostgreSQL)"
 sh scripts/pg_throwaway.sh start 5593
 trap 'sh scripts/pg_throwaway.sh stop 5593' EXIT
@@ -52,6 +52,8 @@ echo "== row-delta capture (sql/capture.sql) against a snapshot diff, in a real 
 quiet 3 python3 tests/capture_check.py
 echo "== changes and state in the commits (M2b-2b): recomputed from the database's delta rows, the chain, the bound, a restart"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/changes_e2e.py build/proxy
+echo "== the fork (M2c-2): the schema per branch, the commit on the new branch, refusals, the race, the crash windows"
+E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/fork_e2e.py build/proxy
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
 PG_PORT=5593 N=40 quiet 2 python3 scripts/measure_p2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"
@@ -99,5 +101,6 @@ echo "== mutants, facts and state"; quiet 1 python3 tests/mutants.py state "$CAN
 echo "== mutants, guard";           quiet 1 python3 tests/mutants.py guard "$CANCHO"
 echo "== mutants, commit builder"; quiet 1 python3 tests/mutants.py build "$CANCHO"
 echo "== mutants, log directory"; quiet 1 python3 tests/mutants.py store "$CANCHO"
+echo "== mutants, capture SQL and cdb.fork"; quiet 1 python3 tests/mutants.py sql "$CANCHO"
 echo "== mutants, proxy (end to end, four at once)"; quiet 1 python3 tests/mutants.py proxy "$CANCHO"
 echo "all green"

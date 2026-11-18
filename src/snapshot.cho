@@ -11,6 +11,63 @@ pub fn sql() -> [] &static [byte] {
     return "select c.relname, a.attname from pg_class c join pg_namespace n on n.oid = c.relnamespace join pg_attribute a on a.attrelid = c.oid where n.nspname = 'public' and c.relkind in ('r', 'p') and a.attnum > 0 and not a.attisdropped order by c.relname, a.attnum; select indexname, tablename from pg_indexes where schemaname = 'public' order by indexname";
 }
 
+// The same two questions for the schema `cdb_b_<branch>` (docs/m2-branches.md D22), written into `out`: its length, or -1 if `out` is too small. The schema's name is
+// put where `'public'` stands in `sql()`, both times.
+pub fn sql_for[&o, &b](out: &!o [byte], branch: &b [byte]) -> [] int {
+    let q = sql();
+    var at = 0;
+    var i = 0;
+    while i < len(q) {
+        if i + 8 <= len(q) && is_public(q, i) {
+            let pre = "'cdb_b_";
+            var j = 0;
+            while j < len(pre) {
+                if at >= len(out) {
+                    return 0 - 1;
+                }
+                out[at] = pre[j];
+                at = at + 1;
+                j = j + 1;
+            }
+            j = 0;
+            while j < len(branch) {
+                if at >= len(out) {
+                    return 0 - 1;
+                }
+                out[at] = branch[j];
+                at = at + 1;
+                j = j + 1;
+            }
+            if at >= len(out) {
+                return 0 - 1;
+            }
+            out[at] = byte_of('\'');
+            at = at + 1;
+            i = i + 8;
+        } else {
+            if at >= len(out) {
+                return 0 - 1;
+            }
+            out[at] = q[i];
+            at = at + 1;
+            i = i + 1;
+        }
+    }
+    return at;
+}
+
+fn is_public[&d](q: &d [byte], at: int) -> [] bool {
+    let w = "'public'";
+    var k = 0;
+    while k < 8 {
+        if q[at + k] != w[k] {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
 // A name that can be written into the snapshot's text: not empty, and none of the bytes that text uses.
 fn plain_name[&d](data: &d [byte]) -> [] bool {
     if len(data) == 0 || len(data) > 63 {
