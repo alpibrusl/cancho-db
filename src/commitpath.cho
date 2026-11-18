@@ -11,6 +11,7 @@ import cdb.shared;
 import cdb.upstream;
 import cdb.login;
 import cdb.state;
+import cdb.store;
 
 // The commit path (docs/m1-commit-path.md, P2d-3): what a transaction has done, and what happens when it ends. Statements are added as
 // the guard allows them; at the end of a transaction (the client's `COMMIT`, or the end of an autocommit statement) the commit is built,
@@ -304,14 +305,15 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
         build.put_bytes(f, 0, acc[base + 22528..base + 22560]);
         token.prefix_id(tk, token.blocks(tk), f[32..64]);
         token.principal_of(tk, f[64..96]);
-        let cfg = contents(core.cfg);
-        let ci = contents(core.cfgi);
-        let branch = cfg[32 + ci[0]..32 + ci[0] + ci[1]];
+        // the connection's branch (state slot 23, set at login): its name, where its chain ends, and its tip
+        let bx = st[p + 23];
         let chain = contents(core.store.chain);
-        let tip = contents(core.store.tip);
+        let names = contents(core.store.names);
+        let branch = names[bx * store.branch_name_max()..bx * store.branch_name_max() + chain[4 + 3 * bx]];
+        let tip = contents(core.store.tip)[64 * bx..64 * bx + 64];
         var parents = f[96..96];
         var np = 0;
-        if chain[1] == 1 {
+        if chain[4 + 3 * bx + 2] == 1 {
             parents = tip[0..32];
             np = 1;
         }
@@ -345,7 +347,7 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
         state.state(np, tip[32..32 + 32 * np], chg, stt);
         var elen = 0 - 1;
         if fcode == 0 {
-            elen = build.encode(enc, parents, branch, chain[0], f[0..32], acc[base..base + 32 * n], acc[base + 18432..base + 18432 + ai[8 * k + 2]], f[32..64], f[64..96], f[96..96], nds, nd[0..9 * nds], chg, stt, 0, f[96..96], contents(core.aux)[1]);
+            elen = build.encode(enc, parents, branch, chain[4 + 3 * bx + 1], f[0..32], acc[base..base + 32 * n], acc[base + 18432..base + 18432 + ai[8 * k + 2]], f[32..64], f[64..96], f[96..96], nds, nd[0..9 * nds], chg, stt, 0, f[96..96], contents(core.aux)[1]);
         }
         if fcode != 0 {
             if fcode > 0 {
@@ -395,8 +397,8 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
                     }
                     build.put_bytes(contents(core.store.ids), 32 * chain[2], ident);
                     chain[2] = chain[2] + 1;
-                    chain[0] = chain[0] + 1;
-                    chain[1] = 1;
+                    chain[4 + 3 * bx + 1] = chain[4 + 3 * bx + 1] + 1;
+                    chain[4 + 3 * bx + 2] = 1;
                     ai[8 * k + 4] = 1;
                     var fin = 0;
                     if wrote {

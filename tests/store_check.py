@@ -54,12 +54,13 @@ class Chain:
     def commit(self, branch=b"main"):
         seq = self.n.get(branch, 0)
         parents = [self.tip[branch]] if branch in self.tip else []
+        stt = rb(32)
         enc = b"".join([u16(1), lst(parents), u16(len(branch)) + branch, u64(seq), rb(32), lst([rb(32)]), lst([]), rb(32), rb(32),
-                        lst([]), lst([]), rb(32), rb(32), lst([]), u64(1_700_000_000_000 + seq)])
+                        lst([]), lst([]), rb(32), stt, lst([]), u64(1_700_000_000_000 + seq)])
         cid = hashlib.sha256(DOMAIN + enc).digest()
         self.tip[branch], self.n[branch] = cid, seq + 1
         token, stmt = rb(rng.randrange(1, 40)), rb(rng.randrange(1, 30))
-        return {"enc": enc, "sig": SK.sign(cid), "id": cid, "token": token, "stmt": stmt}
+        return {"enc": enc, "sig": SK.sign(cid), "id": cid, "state": stt, "token": token, "stmt": stmt}
 
 
 def log_record(c): return u32(len(c["enc"])) + c["enc"] + c["sig"]
@@ -67,11 +68,14 @@ def store_record(b): return u32(len(b)) + b
 
 
 LAST_ERR = [""]
+LAST_BRANCHES = [[]]
 
 
 def run(d, key, branch, mode, stdin="", timeout=60):
     r = subprocess.run([STORE, str(d), str(key), branch, mode], input=stdin, capture_output=True, text=True, timeout=timeout)
-    LAST_ERR[0] = r.stderr
+    lines = r.stderr.splitlines(keepends=True)
+    LAST_ERR[0] = "".join(x for x in lines if not x.startswith("branch "))
+    LAST_BRANCHES[0] = [x.split() for x in lines if x.startswith("branch ")]
     return r.stdout.strip(), r.returncode
 
 
@@ -151,6 +155,30 @@ check("... and for a log of two branches, all five in log order", LAST_ERR[0].st
 check("main's tip among two branches", out == "ok commits=5 next=2 torn=0 tip=%s" % mixed[2]["id"].hex(), out)
 out, rc = run(d2, key, "dev", "open")
 check("dev's tip among two branches", out == "ok commits=5 next=3 torn=0 tip=%s" % mixed[4]["id"].hex(), out)
+
+# the branch table (docs/m2-branches.md D20): the configured branch first, then the others as their first commit appears; each with next seq, tip
+out, rc = run(d2, key, "main", "open")
+check("table, configured main: main then dev", LAST_BRANCHES[0] == [["branch", "main", "next", "2", "has", "1", "tip", mixed[2]["id"].hex() + mixed[2]["state"].hex()],
+                                                                    ["branch", "dev", "next", "3", "has", "1", "tip", mixed[4]["id"].hex() + mixed[4]["state"].hex()]], LAST_BRANCHES[0])
+out, rc = run(d2, key, "dev", "open")
+check("table, configured dev: dev then main", [b[1] for b in LAST_BRANCHES[0]] == ["dev", "main"] and [b[3] for b in LAST_BRANCHES[0]] == ["3", "2"], LAST_BRANCHES[0])
+out, rc = run(d2, key, "fresh", "open")
+check("table, configured fresh (no commits): fresh first with no tip, then main, dev", LAST_BRANCHES[0][0][1:6] == ["fresh", "next", "0", "has", "0"] and [b[1] for b in LAST_BRANCHES[0]] == ["fresh", "main", "dev"], LAST_BRANCHES[0])
+dz = work / "z"
+dz.mkdir()
+out, rc = run(dz, key, "main", "open")
+check("table of an empty log: the configured branch alone, no tip", LAST_BRANCHES[0] == [["branch", "main", "next", "0", "has", "0", "tip", "0" * 128]], LAST_BRANCHES[0])
+# 64 branches fit; a 65th is refused
+many = Chain()
+mc = [many.commit(("b%d" % i).encode()) for i in range(65)]
+dm = work / "many"
+dm.mkdir()
+(dm / "log").write_bytes(HEAD + b"".join(log_record(c) for c in mc[:63]))
+out, rc = run(dm, key, "main", "open")
+check("64 branches (63 and the configured) fit", out.startswith("ok commits=63") and len(LAST_BRANCHES[0]) == 64, (out, len(LAST_BRANCHES[0])))
+(dm / "log").write_bytes(HEAD + b"".join(log_record(c) for c in mc[:64]))
+out, rc = run(dm, key, "main", "open")
+check("a 65th branch is refused as too big", out.startswith("refused") and "too" in out, out)
 
 # a log of more commits than the table holds (64 here) is refused, not truncated
 big = Chain()

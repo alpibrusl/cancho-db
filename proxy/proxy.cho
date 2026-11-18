@@ -122,7 +122,23 @@ fn hello_progress[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: 
                                 var now = 0;
                                 now = clock_unix_ms(clk);
                                 let database = hb[base + st[p + 6]..base + st[p + 6] + st[p + 7]];
-                                rule = login.check(blob[0..n], database, cfg[32 + ci[0]..32 + ci[0] + ci[1]], cfg[0..32], now / 4294967296, now % 4294967296);
+                                // the database named at startup is a branch of the log (docs/m2-branches.md D21); one that is not is refused as a branch the token does not allow
+                                let bnames = contents(core.store.names);
+                                let bchain = contents(core.store.chain);
+                                var which = 0 - 1;
+                                var bq = 0;
+                                while bq < bchain[0] {
+                                    if bytes.equal(bnames[bq * store.branch_name_max()..bq * store.branch_name_max() + bchain[4 + 3 * bq]], database) {
+                                        which = bq;
+                                    }
+                                    bq = bq + 1;
+                                }
+                                if which >= 0 {
+                                    rule = login.check(blob[0..n], database, database, cfg[0..32], now / 4294967296, now % 4294967296);
+                                    st[p + 23] = which;
+                                } else {
+                                    rule = login.login_branch_denied();
+                                }
                             }
                             if rule != login.login_ok() {
                                 shared.refuse(tab, core, k, "FATAL", login.sqlstate(rule), login.rule_name(rule), "the capability token was refused");
@@ -1261,7 +1277,9 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
     var status = 3;
     var seed = box_slice(heap, 32, byte_of(0));
     var pk = box_slice(heap, 32, byte_of(0));
-    var tip = box_slice(heap, 64, byte_of(0));
+    var tip = box_slice(heap, 64 * store.branches_max(), byte_of(0));
+    var bnames = box_slice(heap, store.branch_name_max() * store.branches_max(), byte_of(0));
+    var binfo = box_slice(heap, 3 * store.branches_max(), 0);
     var info = box_slice(heap, 8, 0);
     var idtab = box_slice(heap, 32 * shared.ids_max(), byte_of(0));
     var keyed = false;
@@ -1311,8 +1329,10 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                     borrow pk as &pr in {
                         borrow mut info as &!iw in {
                             borrow mut idtab as &!xw in {
+                                borrow mut bnames as &!nw in {
+                                borrow mut binfo as &!bw in {
                                 borrow mut tip as &!tw in {
-                                    match store.open_log(heap, dr, contents(pr), branch, contents(iw), contents(tw), contents(xw)) {
+                                    match store.open_log(heap, dr, contents(pr), branch, contents(iw), contents(tw), contents(xw), contents(nw), contents(bw)) {
                                         Opened::Failed(code) => {
                                             refuse_start(io, "log", code);
                                             if code == store.r_corrupt() {
@@ -1357,7 +1377,7 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                                             }
                                                             io.newline(io);
                                                             borrow seed as &sd2 in {
-                                                                let kept = shared.new_store(heap, logfile, tokens, stmts, contents(sd2), contents(tw), contents(iw)[3], contents(iw)[5], contents(xw), contents(iw)[0]);
+                                                                let kept = shared.new_store(heap, logfile, tokens, stmts, contents(sd2), contents(tw), contents(nw), contents(bw), contents(iw)[6], contents(xw), contents(iw)[0]);
                                                                 status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi, kept);
                                                             }
                                                         }
@@ -1366,6 +1386,8 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                             }
                                         }
                                     }
+                                }
+                                }
                                 }
                             }
                         }
@@ -1378,6 +1400,8 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
     unbox_slice(heap, seed);
     unbox_slice(heap, pk);
     unbox_slice(heap, tip);
+    unbox_slice(heap, bnames);
+    unbox_slice(heap, binfo);
     unbox_slice(heap, info);
     unbox_slice(heap, idtab);
     return status;

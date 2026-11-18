@@ -167,6 +167,25 @@ fn append_all[&h, &o, &d, &l](heap: &!h Heap, io: &!o Io, dir: &d Dir, log: &!l 
 }
 
 // `data` as hex on standard error, after `label`, then a newline.
+fn err_nat[&o](io: &!o Io, n: int) -> [err_write] int {
+    region r {
+        let digits = alloc_slice[r](24, byte_of(0));
+        var at = 24;
+        var v = n;
+        if v == 0 {
+            at = at - 1;
+            digits[at] = byte_of('0');
+        }
+        while v > 0 {
+            at = at - 1;
+            digits[at] = byte_of('0' + v % 10);
+            v = v / 10;
+        }
+        io.error_all(io, digits[at..24]);
+    }
+    return 0;
+}
+
 fn err_hex[&o, &d](io: &!o Io, label: &static [byte], data: &d [byte]) -> [err_write] int {
     region r {
         let hex = alloc_slice[r](2 * len(data) + 1, byte_of(0));
@@ -186,13 +205,17 @@ fn err_hex[&o, &d](io: &!o Io, label: &static [byte], data: &d [byte]) -> [err_w
 
 fn serve[&h, &o, &d, &p, &b, &m](heap: &!h Heap, io: &!o Io, dir: &d Dir, pk: &p [byte], branch: &b [byte], mode: &m [byte]) -> [heap, io_read, io_write, err_write, dir_read, dir_write, file_read, file_write] int {
     var info = box_slice(heap, 8, 0);
-    var tip = box_slice(heap, 64, byte_of(0));
+    var tip = box_slice(heap, 64 * store.branches_max(), byte_of(0));
+    var bnames = box_slice(heap, store.branch_name_max() * store.branches_max(), byte_of(0));
+    var binfo = box_slice(heap, 3 * store.branches_max(), 0);
     var ids = box_slice(heap, 32 * 64, byte_of(0));
     var st = 1;
     borrow mut info as &!iw in {
         borrow mut tip as &!tw in {
             borrow mut ids as &!dw in {
-                match store.open_log(heap, dir, pk, branch, contents(iw), contents(tw), contents(dw)) {
+              borrow mut bnames as &!nw in {
+               borrow mut binfo as &!bw in {
+                match store.open_log(heap, dir, pk, branch, contents(iw), contents(tw), contents(dw), contents(nw), contents(bw)) {
                     Opened::Failed(code) => {
                         io.write_all(io, "refused ");
                         if code >= 1000 {
@@ -211,6 +234,18 @@ fn serve[&h, &o, &d, &p, &b, &m](heap: &!h Heap, io: &!o Io, dir: &d Dir, pk: &p
                         var log = lf;
                         print_line(io, contents(iw), contents(tw));
                         err_hex(io, "ids ", contents(dw)[0..32 * contents(iw)[0]]);
+                        // the branch table: one line `branch NAME next HAS TIPHEX` for each, in table order
+                        var bq = 0;
+                        while bq < contents(iw)[6] {
+                            io.error_all(io, "branch ");
+                            io.error_all(io, contents(nw)[bq * store.branch_name_max()..bq * store.branch_name_max() + contents(bw)[3 * bq]]);
+                            io.error_all(io, " next ");
+                            err_nat(io, contents(bw)[3 * bq + 1]);
+                            io.error_all(io, " has ");
+                            err_nat(io, contents(bw)[3 * bq + 2]);
+                            err_hex(io, " tip ", contents(tw)[64 * bq..64 * bq + 64]);
+                            bq = bq + 1;
+                        }
                         st = 0;
                         if int_of(mode[0]) == 'h' {
                             // hold: wait for standard input to close
@@ -234,9 +269,13 @@ fn serve[&h, &o, &d, &p, &b, &m](heap: &!h Heap, io: &!o Io, dir: &d Dir, pk: &p
                     }
                 }
             }
+               }
+              }
         }
     }
     unbox_slice(heap, ids);
+    unbox_slice(heap, bnames);
+    unbox_slice(heap, binfo);
     unbox_slice(heap, info);
     unbox_slice(heap, tip);
     return st;
