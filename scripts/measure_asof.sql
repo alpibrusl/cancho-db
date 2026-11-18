@@ -4,7 +4,7 @@
 \set ON_ERROR_STOP 1
 \timing off
 
-drop table if exists ao_t cascade;
+drop table if exists ao_t, ao_copy cascade;
 \i sql/capture.sql
 alter table cdb.delta add column if not exists ord bigint;
 create index if not exists delta_ord on cdb.delta (sch, tbl, ord);
