@@ -569,7 +569,7 @@ a1 = w.read_until_ready()
 a2 = w.read_until_ready()
 check("two queries pipelined are each answered, in order", tags_of(a1) == ["SELECT 1"] and tags_of(a2) == ["SELECT 1"], str((a1, a2)))
 check("... and the second is not served while the first is in flight: the server sees one transaction after the other",
-      client_queries(tee) == ["BEGIN", 'select pg_sleep(0.3) from "p2a" limit 1', "FACTS", "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'", "BEGIN", 'select "a" from "p2a" where ("a" = 10)', "COMMIT"],
+      client_queries(tee) == ["BEGIN", 'select pg_sleep(0.3) from "p2a" limit 1', "FACTS", "DELTA ID", "PREPARE TRANSACTION 'cdb:ID'", "COMMIT PREPARED 'cdb:ID'", "BEGIN", 'select "a" from "p2a" where ("a" = 10)', "COMMIT"],
       str(client_queries(tee)))
 w.close()
 
