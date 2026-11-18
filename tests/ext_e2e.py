@@ -315,6 +315,17 @@ check("a refusal there: the error, then ReadyForQuery E", errs(r) == ["42P01"] o
 check("... status E", status(r) == "E", r)
 v.run(Query("rollback"))
 
+# messages the proxy does not support (a function call, COPY data): ONE error, everything up to Sync discarded (here a whole Parse/Bind/Execute that would otherwise be answered), Sync answered
+tee.clear()
+fcall = msg(b"F", struct.pack(">IhhH", 1234, 0, 0, 0) + struct.pack(">h", 0))
+r = v.run(fcall, Parse("", "select a from xe where a = $1"), Bind("", "", [b"1"]), Execute(), Sync())
+check("a function-call message: one 0A000, the Parse, Bind and Execute after it are discarded, ReadyForQuery I", errs(r) == ["0A000"] and kinds(r) == "EZ" and status(r) == "I", r)
+check("... and none of them reached the server", not [d for k, d in tee.messages if k in ("Parse", "Bind", "Execute") and "xe" in str(d) and "cdb_x" not in str(d)], tee.messages)
+r = v.run(msg(b"d", b"abc"), Parse("", "select a from xe where a = $1"), Bind("", "", [b"1"]), Execute(), Sync())
+check("COPY data (d): the same", errs(r) == ["0A000"] and kinds(r) == "EZ" and status(r) == "I", r)
+r = v.run(Query("select a from xe where a = 1"))
+check("... and the connection is fine after both", kinds(r) == "TDCZ", r)
+
 r = v.run(Parse("dup", "select 1 from xe where a = $1"), Sync())
 r = v.run(Parse("dup", "select 1 from xe where a = $1"), Sync())
 check("a named statement parsed twice is 42P05, as in PostgreSQL", errs(r) == ["42P05"], r)
