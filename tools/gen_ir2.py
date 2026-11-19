@@ -267,3 +267,22 @@ def add(g):
                 [(R, b"t"), (R, b"t.a"), (R, b"t.secret")]), token=mint("narrow", (b"*", [(R, b"t"), (R, b"t.a")]))),
        stmts_store(Select2([a(b"a")], [From(b"t")], order=[Order(a(b"secret"))])), no("effect-denied", 0),
        token=mint("narrow", (b"*", [(R, b"t"), (R, b"t.a")])))
+
+    # ----------------------------------------------------- history reads (docs/spec/ir.md section 6.1, docs/m2-branches.md D29): a table's Name may end in `@<64 hex digits>`
+    HEX = hashlib.sha256(b"a commit").hexdigest().encode()
+    HEX2 = hashlib.sha256(b"another commit").hexdigest().encode()
+    hist, hist2 = b"orders@" + HEX, b"orders@" + HEX2
+    sel_h = Select2([Col(hist, b"id")], [From(hist)])
+    good("ir2_history_name_is_read_as_written", sel_h, [(R, hist), (R, hist + b".id")])
+    mismatch("ir2_history_suffix_dropped_from_the_recorded_effects", sel_h, [(R, b"orders"), (R, b"orders.id")])
+    mismatch("ir2_history_another_commit_recorded", sel_h, [(R, hist2), (R, hist2 + b".id")])
+    plain = mint("plain", (b"*", [(R, b"orders"), (R, b"orders.*")]))
+    ir("ir2_history_effect_denied_for_a_token_of_the_plain_table", commits(([sel_h], [(R, hist), (R, hist + b".id")]), token=plain), stmts_store(sel_h), no("effect-denied", 0), token=plain)
+    hist_tok = mint("history", (b"*", [(R, b"orders@*")]))
+    ir("ir2_history_effect_allowed_by_a_history_token", commits(([sel_h], [(R, hist), (R, hist + b".id")]), token=hist_tok), stmts_store(sel_h), ok(1), token=hist_tok)
+    prefix_tok = mint("prefix", (b"*", [(R, b"orders*")]))
+    ir("ir2_history_effect_allowed_by_a_prefix_pattern", commits(([sel_h], [(R, hist), (R, hist + b".id")]), token=prefix_tok), stmts_store(sel_h), ok(1), token=prefix_tok)
+    cur = Select2([Col(b"orders", b"id")], [From(b"orders")])
+    ir("ir2_history_token_does_not_allow_the_current_table", commits(([cur], [(R, b"orders"), (R, b"orders.id")]), token=hist_tok), stmts_store(cur), no("effect-denied", 0), token=hist_tok)
+    join_h = Select2([Col(hist, b"id"), Col(b"orders", b"id")], [From(hist), From(b"orders", 1, Op(EQ, Col(hist, b"id"), Col(b"orders", b"id")))])
+    good("ir2_history_joined_to_the_current_table", join_h, [(R, b"orders"), (R, b"orders.id"), (R, hist), (R, hist + b".id")])

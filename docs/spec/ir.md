@@ -192,6 +192,18 @@ magic**: the grammar does not show in it.
 one; a `Case` with no pairs; an `In` with no members; any count larger than the bytes left; and, in a `CHODBST1` store, any v2 tag
 or operator (a v1 store holds v1 statements only).
 
+### 6.1 History reads: a table's name may end in `@<commit id>`
+
+A statement that reads a table **as it was** at a commit (`docs/m2-branches.md` D27 to D31) writes that table's `Name`, in `from` and in every `Col` that refers to it, as the table's name, `@`, and the commit's id as 64 lower-case hexadecimal digits: `orders@3f2a...`. **This is a convention about what a `Name` holds and not a new
+construct: nothing in this specification, and no verifier, treats such a `Name` differently from any other.** What follows from the rules already here is the point of it:
+
+* the statement's id hashes the commit that was read, so two reads of one table at two commits are two statements in the log;
+* inference gives `read orders@3f2a...` and `read orders@3f2a....id` (§3, with the name as written), so a recorded set that drops the suffix, or names another commit, is `effects-mismatch`;
+* a token's pattern matches the name as written (`token.md` §2): `orders` and `orders.*` do **not** permit a history read, `orders@*` does, and so does `orders*`, any pattern that is a prefix of the name and ends in `*`, which is the sharp edge of that rule and not a feature to rely on. A token that may read the current rows may not read the past unless it says so;
+* the `.` rule (§2) holds: the `@` and the hex digits contain none.
+
+Whether the commit exists, belongs to the branch, and is what the data was read as of, is the producer's business and not checked by L1 or L2. Vectors: `ir2_history_*` (`tools/gen_ir2.py`): accepted by all three verifiers, the suffix dropped, another commit recorded, a token of the plain table denied, a history token and a prefix token allowed, a history token denied the current table, and a history read joined to the current table.
+
 ## 7. Vectors
 
 IR vectors (v2 ones have a `CHODBST2` store) are L2 vectors (`token.md` §7) with a `NAME.stmts`, and an `args` line that adds `--stmts {dir}/NAME.stmts`.

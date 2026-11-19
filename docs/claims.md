@@ -165,6 +165,7 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
 | C112 | **A fork that is refused or fails leaves nothing**: a name taken, malformed, or not a name, a fork in a transaction block, a token whose branch pattern does not cover the name, the extended protocol, and a source that moved while it was copied (`fork-raced`) leave no schema and no commit; a crash before `PREPARE`, after it, before `COMMIT PREPARED` and after it leaves the schema if and only if the commit is in the log. | `tests/fork_e2e.py` (nine refusal cases, the race made with a held answer in `tools/pgtee.py`, four crash windows each verified after recovery) | the second commit-time check (name or table full since) is defensive and not exercised |
 | C113 | **A fork costs 63 ms through the proxy for 1,000 rows and 293 ms for 101,000** (the copy alone 49 and 261 ms), and the proxy's loop waits for it. This corrects the 125 ms for 101,000 rows of m2-branches.md section 3 (a different table; the cause of the difference is not known). | `scripts/measure_fork.py`, median of three | one machine, one table of three columns and an index; no concurrent load |
 | C114 | **A token is stored in the token store once per connection** (it was once per connection slot, so a second distinct token never was: L2 then refused its commits as `token-missing`). | `tests/fork_e2e.py` (two tokens on reused slots, every verifier), mutant `a new client's token is taken for stored` | the store may hold one token several times |
+| C115 | **A table's name carrying `@<commit id>` is an ordinary `Name` to all three verifiers**: the statement id hashes the commit, the effects name it, a recorded set without it or with another commit is `effects-mismatch`, a token of the plain table is denied and a history token (`orders@*`) is allowed. | 8 vectors `ir2_history_*`, hand-written expected results, accepted by the Python, cancho and Go verifiers without any change to them | the convention is not checked by L1 or L2 beyond what a name is: that the commit exists and was the one read is the producer's claim until L3 |
 
 ### IR version 2 ([`spec/ir.md`](spec/ir.md) section 6)
 
@@ -239,9 +240,10 @@ C1 to C9 are L1 ([`spec/commit.md`](spec/commit.md)).
   and passed all 428 without a fix; I re-ran its code and its tool-call log shows no read outside its directory. Same
   caveats as before (instruction-enforced, same model family). Its six open points are written into `ir.md` section 6.
 - **The proxy checks queries, and the subset is small.** The parser reads expressions, SELECT, INSERT, UPDATE, DELETE and the closed DDL,
-  `src/lower.cho` turns them into IR and the proxy refuses what the token or the subset does not allow, but a `SELECT` with no `FROM`,
-  a sub-select, a CTE, a function as a table, `BEGIN` and every extended-protocol client are refused today: most applications cannot yet use it. The
-  lowering does not type-check, and the schema snapshot covers the `public` schema's ordinary tables only.
+  `src/lower.cho` turns them into IR and the proxy refuses what the token or the subset does not allow: a sub-select, a CTE, a set operation, a window
+  function, `RETURNING`, `ON CONFLICT`, a function as a table, `RIGHT`/`FULL`/`CROSS`/`NATURAL` joins and a `SELECT` with no `FROM` (but for `select f(constants)`, the fork's form)
+  are refused today, so many applications cannot yet use it. *(Corrected in M2d-1: this said that `BEGIN` and every extended-protocol client were refused as well; both have worked since P2 and P3.)* The
+  lowering does not type-check, and the schema snapshot covers the ordinary tables of the connection's branch's schema only.
 - **The statement parser's differentials are as good as their generators.** The plan comparison for SELECT and DML runs over three
   small tables, and plans show joins and clauses, not every alias or name. The statement-count differential of the lexer cannot
   see a lexing error that keeps statement boundaries (for example, a doubled quote ending a string preserves quote parity); the
