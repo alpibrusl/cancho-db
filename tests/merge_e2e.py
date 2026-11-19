@@ -178,7 +178,7 @@ def merged_state(base, t, s):
 
 def net_facts_of(commit_id_hex):
     """The facts `changes` is the root of, from the delta rows stamped with the commit: first image before, last image after, per key, in the spec's order."""
-    rows = direct("select tbl || '|' || encode(pk, 'hex') || '|' || seq || '|' || coalesce(encode(old_hash, 'hex'), '') || '|' || coalesce(encode(new_hash, 'hex'), '') from cdb.delta where commit_id = decode('%s', 'hex')" % commit_id_hex).stdout.split()
+    rows = direct("select tbl || '|' || encode(kc, 'hex') || '|' || seq || '|' || coalesce(encode(old_hash, 'hex'), '') || '|' || coalesce(encode(new_hash, 'hex'), '') from cdb.delta where commit_id = decode('%s', 'hex')" % commit_id_hex).stdout.split()
     per = {}
     for line in sorted(rows, key=lambda r: int(r.split("|")[2])):
         tbl, pk, seq, o, n = line.split("|")

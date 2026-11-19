@@ -84,23 +84,21 @@ def reset():
     for sc in direct("select nspname from pg_namespace where nspname like 'cdb\\_b\\_%'").stdout.split():
         direct('drop schema "%s" cascade' % sc)
     if direct("select to_regclass('cdb.delta')").stdout.strip():
-        direct("delete from cdb.delta; delete from cdb.mark")
+        direct("delete from cdb.delta; delete from cdb.mark; delete from cdb.cur")
 
 
 def run_all(log, deltas, base=None, live=False):
     outs = []
     dump = Path(work) / "live.tsv"
     if live:
-        # the rows as a file (section 3b): the first verifier (python3 tools/l3a.py) reads the database itself with --live, the others this file
+        # the rows as a file (section 9, version 2: the plain key and the salts are what the database keeps in cdb.cur)
         schemas = ["public"] + direct("select nspname from pg_namespace where nspname like 'cdb\\_b\\_%' order by 1").stdout.split()
         subprocess.run([sys.executable, str(ROOT_DIR / "tools" / "export_live.py"), str(dump)] + schemas + ["--"] + PSQL, check=True)
     for n, v in enumerate(VERIFIERS):
         cmd = v.split() + [str(log), "--deltas", str(deltas)]
         if base:
             cmd += ["--base", str(base)]
-        if live and n == 0:
-            cmd += ["--live", " ".join(PSQL)]
-        elif live:
+        if live:
             cmd += ["--live-dump", str(dump)]
         outs.append(subprocess.run(cmd, capture_output=True, text=True).stdout.strip())
     return outs
@@ -137,21 +135,26 @@ proc.terminate()
 proc.communicate(timeout=10)
 deltas = work / "deltas.tsv"
 r = export(deltas)
-check("the delta store is exported", r.returncode == 0 and deltas.read_text().startswith("CHODBDL1\n"), r.stderr)
+check("the delta store is exported", r.returncode == 0 and deltas.read_text().startswith("CHODBDL2\n"), r.stderr)
 outs = run_all(ldir / "log", deltas, live=True)
-check("every verifier: ok, with the live tables compared (%s)" % outs[0], all(re.fullmatch(r"ok commits=\d+ facts=\d+ branches=2 final", o) for o in outs), outs)
+check("every verifier: ok, with the live tables compared (%s)" % outs[0], all(re.fullmatch(r"ok commits=\d+ facts=\d+ branches=2 erased=0 final", o) for o in outs), outs)
 outs = run_all(ldir / "log", deltas)
-check("without the live tables: ok", all(re.fullmatch(r"ok commits=\d+ facts=\d+ branches=2", o) for o in outs), outs)
+check("without the live tables: ok", all(re.fullmatch(r"ok commits=\d+ facts=\d+ branches=2 erased=0", o) for o in outs), outs)
 
 # ------------------------------------------------------------------------------------------------ cheating
-direct("alter table m_par disable trigger user")
-direct("update m_par set name = 'evil' where id = 3")
-direct("alter table m_par enable trigger user")
+# (ALTER TABLE ... DISABLE TRIGGER fires the proxy's own DDL trigger, which puts the capture back: a change that the capture does not see is made with the replica role)
+direct("set session_replication_role = replica; update m_par set name = 'evil' where id = 3")
 outs = run_all(ldir / "log", deltas, live=True)
 check("a row changed in the database behind the proxy's back: replay-final", all(o == "reject rule=replay-final record=-1" for o in outs), outs)
+direct("set session_replication_role = replica; update m_par set name = 'c' where id = 3")
+outs = run_all(ldir / "log", deltas, live=True)
+check("... and put back as it was (the row's image and salt again): ok again", all(o.endswith("final") and o.startswith("ok") for o in outs), outs)
 direct("update m_par set name = 'c' where id = 3")
 outs = run_all(ldir / "log", deltas, live=True)
-check("... and put back: ok again", all(o.endswith("final") and o.startswith("ok") for o in outs), outs)
+check("a write through the triggers that changes nothing keeps the row's salt: still ok", all(o.endswith("final") and o.startswith("ok") for o in outs), outs)
+direct("update m_par set name = 'c2' where id = 3")
+outs = run_all(ldir / "log", deltas, live=True)
+check("a change through the triggers (recorded, but not stamped by any commit of the log, with a new salt): replay-final", all(o == "reject rule=replay-final record=-1" for o in outs), outs)
 direct("delete from m_kid where id = 2")
 outs = run_all(ldir / "log", deltas, live=True)
 check("a row deleted behind its back (the trigger records it, unstamped): replay-final", all(o == "reject rule=replay-final record=-1" for o in outs), outs)
@@ -178,7 +181,8 @@ f3[6] = "00" * 32 if f3[6] else f3[6]
 variant("a hash changed (its image kept)", [lines[0]] + ["\t".join(f3)] + rows[1:], "facts-image")
 extra = rows[0].split("\t")
 extra[0] = str(max(int(r.split("\t")[0]) for r in rows) + 1)
-extra[4] = extra[4] + "00"       # (a copy of a line with the same key and images nets to the same facts: not a change; another key is a fact the log never committed to)
+extra[4] = extra[4][:-2] + ("00" if extra[4][-2:] != "00" else "01")       # (a copy of a line with the same key and images nets to the same facts: not a change; another key is a fact the log never committed to)
+extra[11], extra[12] = "", ""                                              # with its plain key erased, so that it is the changes that give it away and not the key's commitment
 variant("a line for another key added to a commit", [lines[0]] + rows + ["\t".join(extra)], "changes-mismatch")
 g = rows[0].split("\t")
 other = [r.split("\t")[1] for r in rows if r.split("\t")[1] != g[1]][0]
@@ -192,6 +196,9 @@ direct("create table m_par (id int primary key, name text)")
 direct("insert into m_par values (1, 'pre'), (2, 'pre2')")
 ldir2 = Path(tempfile.mkdtemp(dir=work))
 proc, port = start(ldir2)
+# the base: the rows as the capture found them, with the salts it gave them (cdb.cur), read before anything is changed
+base_rows = direct("select encode(convert_to('m_par', 'UTF8'), 'hex') || E'\\t' || encode(c.pk, 'hex') || E'\\t' || encode(c.key_salt, 'hex') || E'\\t' || encode(convert_to(to_jsonb(p)::text, 'UTF8'), 'hex') || E'\\t' || encode(c.salt, 'hex') "
+                   "from m_par p join cdb.cur c on c.sch = 'public' and c.tbl = 'm_par' and c.pk = convert_to(jsonb_build_array(p.id)::text, 'UTF8') order by p.id").stdout
 psql(port, "update m_par set name = 'changed' where id = 1")
 psql(port, "insert into m_par values (3, 'new')")
 time.sleep(0.3)
@@ -201,11 +208,10 @@ d2 = work / "deltas2.tsv"
 export(d2)
 outs = run_all(ldir2 / "log", d2)
 check("rows that were there before the proxy, no base: replay-precondition", all(o.startswith("reject rule=replay-precondition") for o in outs), outs)
-base_rows = direct("select encode(convert_to('m_par', 'UTF8'), 'hex') || E'\\t' || encode(convert_to(jsonb_build_array(id)::text, 'UTF8'), 'hex') || E'\\t' || encode(convert_to(jsonb_build_object('id', id, 'name', name)::text, 'UTF8'), 'hex') from (values (1, 'pre'), (2, 'pre2')) v(id, name)").stdout
 base = work / "base.tsv"
-base.write_text("CHODBBS1\n" + base_rows)
+base.write_text("CHODBBS2\n" + base_rows)
 outs = run_all(ldir2 / "log", d2, base=base, live=True)
-check("... with the base (the rows then): ok, final", all(re.fullmatch(r"ok commits=\d+ facts=\d+ branches=1 final", o) for o in outs), outs)
+check("... with the base (the rows then): ok, final", all(re.fullmatch(r"ok commits=\d+ facts=\d+ branches=1 erased=0 final", o) for o in outs), outs)
 
 reset()
 print("\n%d checks failed" % len(FAILED) if FAILED else "\nall L3a checks passed")

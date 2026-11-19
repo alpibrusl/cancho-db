@@ -8,10 +8,14 @@
 --   cdb.untrackable()  the tables of `public` the capture cannot track (no primary key, or partitioned), as text: empty when there are none
 --   cdb.on_ddl()    an event trigger function: a table made or altered in `public` is tracked in the same transaction, so its first write is captured; a keyless
 --                   or partitioned one raises and the statement fails
+--   cdb.on_drop()   an event trigger function: a dropped table's salts (cdb.cur) are dropped with it
 --   cdb.facts(x)    the NET facts of transaction x as the text `C` takes in tools/state.py: `kind:table:pk:old:new`, hex, `-` for none, in (table, pk) order
 --
--- A row image is the jsonb text of the row; its hash is SHA-256("cancho-db/row/v1" || 0x00 || that text). A primary key is the jsonb text of the array of its column
--- values, in index order. Both are PostgreSQL's own canonical jsonb text, which does not depend on the client or on the session.
+-- Version 2 (docs/m2g-erasure.md, docs/spec/l3a.md section 9). A row image is the jsonb text of the row; each version of a row has a random 16-byte salt and its hash is
+-- SHA-256("cancho-db/row/v2" || 0x00 || salt || that text). A primary key is the jsonb text of the array of its column values, in index order ("the plain key"); the fact's
+-- `pk` is a commitment to it, SHA-256("cancho-db/key/v1" || 0x00 || key_salt || plain key), the salt being the key's own, made when the row is inserted. Both texts are PostgreSQL's
+-- own canonical jsonb text, which does not depend on the client or on the session. The salts of the rows as they stand are in `cdb.cur`, the old and new salt of every fact in
+-- `cdb.delta`. Nothing but the hashes and the commitments is in the log; erasing a row means destroying its images, salts and plain keys (docs/m2g-erasure.md).
 
 create schema if not exists cdb;
 
@@ -20,7 +24,7 @@ create table if not exists cdb.delta (
     xid bigint not null default txid_current(),
     commit_id bytea,
     tbl text not null,
-    pk bytea not null,
+    pk bytea,
     sch text not null default 'public',
     old_hash bytea,
     new_hash bytea,
@@ -28,6 +32,12 @@ create table if not exists cdb.delta (
     new_row jsonb
 );
 alter table cdb.delta add column if not exists sch text not null default 'public';
+alter table cdb.delta alter column pk drop not null;
+-- version 2: the commitment to the key (what a fact's `pk` is), the key's and the row versions' salts. `pk` is the plain key and the images and salts are the payloads: null once erased.
+alter table cdb.delta add column if not exists kc bytea;
+alter table cdb.delta add column if not exists key_salt bytea;
+alter table cdb.delta add column if not exists old_salt bytea;
+alter table cdb.delta add column if not exists new_salt bytea;
 alter table cdb.delta add column if not exists ord bigint;
 create index if not exists delta_ord on cdb.delta (sch, tbl, ord) where ord is not null;
 
@@ -42,8 +52,40 @@ create index if not exists mark_sch on cdb.mark (sch, ord);
 create index if not exists delta_xid on cdb.delta (xid);
 create index if not exists delta_commit on cdb.delta (commit_id) where commit_id is not null;
 
-create or replace function cdb.row_hash(r jsonb) returns bytea language sql immutable as $$
-    select sha256(convert_to('cancho-db/row/v1', 'UTF8') || '\x00'::bytea || convert_to(r::text, 'UTF8'))
+-- The salts of the rows as they stand (the rows of every tracked table, keyed by the plain key): the key's salt, the salt of the current version, and the commitment.
+create table if not exists cdb.cur (
+    sch text not null,
+    tbl text not null,
+    pk bytea not null,
+    key_salt bytea not null,
+    salt bytea not null,
+    kc bytea not null,
+    primary key (sch, tbl, pk)
+);
+
+-- Refuses a database that holds deltas of version 1 (unsalted): its history cannot be made erasable, and the two versions are not mixed in one delta store (docs/m2g-erasure.md Q13).
+do $$
+begin
+    if exists (select 1 from cdb.delta where kc is null) then
+        raise exception 'cdb: this database holds delta rows of version 1 (unsalted); the capture is version 2' using errcode = '55000';
+    end if;
+end $$;
+
+create or replace function cdb.rnd() returns bytea language sql volatile as $$
+    select decode(replace(gen_random_uuid()::text, '-', ''), 'hex')
+$$;
+
+-- The hash of a row image with its salt (a version 2 row hash); a null salt is a row the capture knows nothing of, and raises rather than hash it unsalted.
+create or replace function cdb.row_hash2(salt bytea, r jsonb) returns bytea language plpgsql immutable as $$
+begin
+    if salt is null then
+        raise exception 'cdb: a row without a salt (it was not written through a tracked table)' using errcode = '55000';
+    end if;
+    return sha256(convert_to('cancho-db/row/v2', 'UTF8') || '\x00'::bytea || salt || convert_to(r::text, 'UTF8'));
+end $$;
+
+create or replace function cdb.key_commit(salt bytea, plain bytea) returns bytea language sql immutable as $$
+    select sha256(convert_to('cancho-db/key/v1', 'UTF8') || '\x00'::bytea || salt || plain)
 $$;
 
 -- A name for a row alias that no column of `rel` has: `to_jsonb(n)` is the COLUMN n if the table has one and not the row, so the aliases of the capture (and of cdb.merge) are made not to be a column's name.
@@ -66,20 +108,43 @@ declare
     pkexpr text;
     t text := TG_TABLE_NAME;
     sc text := TG_TABLE_SCHEMA;
-    tpl text;
 begin
     -- key columns are never null, so plain equality is the join (and is what a full join needs to be hash- or merge-joinable)
     select string_agg(format('%1$s.%3$I = %2$s.%3$I', ao, an, c), ' and ') into onclause from unnest(pkcols) c;
     select format('convert_to(jsonb_build_array(%s)::text, ''UTF8'')', string_agg(format('%%1$s.%I', c), ', ')) into pkexpr from unnest(pkcols) c;
     if TG_OP = 'INSERT' then
-        execute format('insert into cdb.delta(sch, tbl, pk, new_hash, new_row) select %L, %L, %s, cdb.row_hash(to_jsonb(%I)), to_jsonb(%I) from new_rows %I', sc, t, format(pkexpr, an), an, an, an);
+        -- a new row: its key's salt and its first version's salt are made here, remembered in cdb.cur, and written beside the fact
+        execute format($q$with j as materialized (select %1$s as pk, to_jsonb(%2$I) as r, cdb.rnd() as ks, cdb.rnd() as s from new_rows %2$I),
+                               c as (insert into cdb.cur (sch, tbl, pk, key_salt, salt, kc) select %3$L, %4$L, j.pk, j.ks, j.s, cdb.key_commit(j.ks, j.pk) from j)
+                          insert into cdb.delta (sch, tbl, pk, kc, key_salt, new_hash, new_salt, new_row)
+                          select %3$L, %4$L, j.pk, cdb.key_commit(j.ks, j.pk), j.ks, cdb.row_hash2(j.s, j.r), j.s, j.r from j$q$,
+                       format(pkexpr, an), an, sc, t);
     elsif TG_OP = 'DELETE' then
-        execute format('insert into cdb.delta(sch, tbl, pk, old_hash, old_row) select %L, %L, %s, cdb.row_hash(to_jsonb(%I)), to_jsonb(%I) from old_rows %I', sc, t, format(pkexpr, ao), ao, ao, ao);
+        execute format($q$with j as materialized (select %1$s as pk, to_jsonb(%2$I) as r from old_rows %2$I),
+                               k as materialized (select j.pk, j.r, c.salt as os, c.key_salt as cks, c.kc as ckc from j left join cdb.cur c on c.sch = %3$L and c.tbl = %4$L and c.pk = j.pk),
+                               d as (delete from cdb.cur c using k where c.sch = %3$L and c.tbl = %4$L and c.pk = k.pk)
+                          insert into cdb.delta (sch, tbl, pk, kc, key_salt, old_hash, old_salt, old_row)
+                          select %3$L, %4$L, k.pk, k.ckc, k.cks, cdb.row_hash2(k.os, k.r), k.os, k.r from k$q$,
+                       format(pkexpr, ao), ao, sc, t);
     else
         -- matched by primary key: an update; a row only in the old image is a delete of its key, only in the new one an insert (a changed key). A row of the new side
-        -- with no old row has a null first key column in the old alias, which is how the two sides are told apart (key columns are never null)
-        execute format('insert into cdb.delta(sch, tbl, pk, old_hash, new_hash, old_row, new_row) select %L, %L, case when %I.%I is null then %s else %s end, cdb.row_hash(to_jsonb(%I)), cdb.row_hash(to_jsonb(%I)), to_jsonb(%I), to_jsonb(%I) from old_rows %I full join new_rows %I on %s',
-                       sc, t, ao, pkcols[1], format(pkexpr, an), format(pkexpr, ao), ao, an, ao, an, ao, an, onclause);
+        -- with no old row has a null first key column in the old alias, which is how the two sides are told apart (key columns are never null). An update keeps the key's
+        -- salt and commitment and gives the row a new salt (the old one again if the image did not change, so that a write that changes nothing is no fact); an insert gets both; a delete drops the row's entry in cdb.cur
+        execute format($q$with j as materialized (select case when %1$I.%5$I is null then null else %6$s end as opk, case when %2$I.%5$I is null then null else %7$s end as npk,
+                                                         to_jsonb(%1$I) as o, to_jsonb(%2$I) as n, cdb.rnd() as ks
+                                                    from old_rows %1$I full join new_rows %2$I on %8$s),
+                               k as materialized (select j.opk, j.npk, j.o, j.n, j.ks, c.salt as os, c.key_salt as cks, c.kc as ckc, case when j.o = j.n then c.salt else cdb.rnd() end as s
+                                                    from j left join cdb.cur c on c.sch = %3$L and c.tbl = %4$L and c.pk = j.opk),
+                               u as (update cdb.cur c set salt = k.s from k where k.opk is not null and k.npk is not null and c.sch = %3$L and c.tbl = %4$L and c.pk = k.opk),
+                               d as (delete from cdb.cur c using k where k.opk is not null and k.npk is null and c.sch = %3$L and c.tbl = %4$L and c.pk = k.opk),
+                               i as (insert into cdb.cur (sch, tbl, pk, key_salt, salt, kc) select %3$L, %4$L, k.npk, k.ks, k.s, cdb.key_commit(k.ks, k.npk) from k where k.opk is null)
+                          insert into cdb.delta (sch, tbl, pk, kc, key_salt, old_hash, new_hash, old_salt, new_salt, old_row, new_row)
+                          select %3$L, %4$L, coalesce(k.opk, k.npk), case when k.opk is null then cdb.key_commit(k.ks, k.npk) else k.ckc end, case when k.opk is null then k.ks else k.cks end,
+                                 case when k.opk is null then null else cdb.row_hash2(k.os, k.o) end, case when k.npk is null then null else cdb.row_hash2(k.s, k.n) end,
+                                 case when k.opk is null then null else k.os end, case when k.npk is null then null else k.s end,
+                                 case when k.opk is null then null else k.o end, case when k.npk is null then null else k.n end
+                            from k$q$,
+                       ao, an, sc, t, pkcols[1], format(pkexpr, ao), format(pkexpr, an), onclause);
     end if;
     return null;
 end $$;
@@ -101,6 +166,10 @@ begin
     execute format('drop trigger if exists cdb_del on %s', tbl);
     ao := cdb.free_alias(tbl, 'cdb_o');
     an := cdb.free_alias(tbl, 'cdb_n');
+    -- rows that are already in the table (a base: written before the capture, or copied by a fork, whose entries in cdb.cur were copied first) get a salt each
+    execute format('insert into cdb.cur (sch, tbl, pk, key_salt, salt, kc) select %L, %L, x.pk, x.ks, cdb.rnd(), cdb.key_commit(x.ks, x.pk) from (select convert_to(jsonb_build_array(%s)::text, ''UTF8'') as pk, cdb.rnd() as ks from %s) x on conflict do nothing',
+                   (select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = tbl), (select c.relname from pg_class c where c.oid = tbl),
+                   (select string_agg(format('%I', c), ', ') from unnest(string_to_array(cols, ',')) c), tbl);
     execute format('create trigger cdb_ins after insert on %s referencing new table as new_rows for each statement execute function cdb.capture(%L, %L, %L)', tbl, cols, ao, an);
     execute format('create trigger cdb_upd after update on %s referencing old table as old_rows new table as new_rows for each statement execute function cdb.capture(%L, %L, %L)', tbl, cols, ao, an);
     execute format('create trigger cdb_del after delete on %s referencing old table as old_rows for each statement execute function cdb.capture(%L, %L, %L)', tbl, cols, ao, an);
@@ -121,9 +190,9 @@ end $$;
 -- The net facts of transaction x: per (table, key) the image before the first change and the image after the last; a row inserted and deleted in the same
 -- transaction, or changed and changed back, is no fact. Sorted as docs/spec/state.md section 3 sorts (unsigned bytes, a prefix first).
 create or replace function cdb.facts(x bigint) returns text language sql stable as $$
-    select coalesce(string_agg(k.kind::text || ':' || encode(convert_to(c.tbl, 'UTF8'), 'hex') || ':' || encode(c.pk, 'hex') || ':' || coalesce(encode(c.oh, 'hex'), '-') || ':' || coalesce(encode(c.nh, 'hex'), '-'),
-                                ' ' order by convert_to(c.tbl, 'UTF8'), c.pk), '')
-      from (select tbl, pk, (array_agg(old_hash order by seq))[1] as oh, (array_agg(new_hash order by seq desc))[1] as nh from cdb.delta where xid = x group by tbl, pk) c
+    select coalesce(string_agg(k.kind::text || ':' || encode(convert_to(c.tbl, 'UTF8'), 'hex') || ':' || encode(c.kc, 'hex') || ':' || coalesce(encode(c.oh, 'hex'), '-') || ':' || coalesce(encode(c.nh, 'hex'), '-'),
+                                ' ' order by convert_to(c.tbl, 'UTF8'), c.kc), '')
+      from (select tbl, kc, (array_agg(old_hash order by seq))[1] as oh, (array_agg(new_hash order by seq desc))[1] as nh from cdb.delta where xid = x group by tbl, kc) c
       cross join lateral (select case when c.oh is null then 0 when c.nh is null then 2 else 1 end as kind) k
      where not (c.oh is null and c.nh is null) and c.oh is distinct from c.nh
 $$;
@@ -173,6 +242,8 @@ begin
         execute stmt;
     end loop;
     perform set_config('search_path', old_path, true);
+    -- the copies keep the salts of the rows they were copied from (the fork commit has no facts: the branch starts from the source's hashes), then are tracked
+    insert into cdb.cur (sch, tbl, pk, key_salt, salt, kc) select dst, c.tbl, c.pk, c.key_salt, c.salt, c.kc from cdb.cur c where c.sch = src;
     for r in select c.oid::regclass as t from pg_class c join pg_namespace s on s.oid = c.relnamespace where s.nspname = dst and c.relkind = 'r' loop
         perform cdb.track(r.t);
     end loop;
@@ -372,3 +443,12 @@ end $$;
 
 drop event trigger if exists cdb_ddl;
 create event trigger cdb_ddl on ddl_command_end when tag in ('CREATE TABLE', 'CREATE TABLE AS', 'ALTER TABLE') execute function cdb.on_ddl();
+
+-- A dropped table (or schema, with its tables) takes its entries in cdb.cur with it: a table made again under the name must not inherit the salts of the one before.
+create or replace function cdb.on_drop() returns event_trigger language plpgsql as $$
+begin
+    delete from cdb.cur c using pg_event_trigger_dropped_objects() d where d.object_type = 'table' and c.sch = d.schema_name and c.tbl = d.object_name;
+end $$;
+
+drop event trigger if exists cdb_drop;
+create event trigger cdb_drop on sql_drop execute function cdb.on_drop();

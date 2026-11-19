@@ -165,7 +165,7 @@ cs = commits()
 check("the log has one commit per step that made one (a read is a commit too): %d" % len(steps), len(cs) == len(steps), len(cs))
 EMPTY = bytes.fromhex(ref.run("C")[3:])
 rows_by_commit = {}
-for line in direct("select encode(commit_id, 'hex') || '|' || tbl || '|' || encode(pk, 'hex') || '|' || seq || '|' || coalesce(encode(old_hash, 'hex'), '') || '|' || coalesce(encode(new_hash, 'hex'), '') from cdb.delta where commit_id is not null and tbl in ('ch1', 'ch2', 'ch3', '%s') order by seq" % LONG).stdout.splitlines():
+for line in direct("select encode(commit_id, 'hex') || '|' || tbl || '|' || encode(kc, 'hex') || '|' || seq || '|' || coalesce(encode(old_hash, 'hex'), '') || '|' || coalesce(encode(new_hash, 'hex'), '') from cdb.delta where commit_id is not null and tbl in ('ch1', 'ch2', 'ch3', '%s') order by seq" % LONG).stdout.splitlines():
     cid, tbl, pk, seq, o, n = line.split("|")
     rows_by_commit.setdefault(cid, []).append((tbl, pk, int(seq), o or None, n or None))
 

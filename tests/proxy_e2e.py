@@ -1088,11 +1088,11 @@ check("M2b-2a: the proxy installed the capture: the delta table is there and the
 direct("delete from cdb.delta where tbl = 'p0_e2e'")
 for sql in ("insert into p0_e2e values (40, 'w')", "update p0_e2e set b = 'v' where a = 40", "delete from p0_e2e where a = 40"):
     psql(lp, good, sql)
-rows = direct("select op, encode(new_hash, 'hex'), new_row::text from (select case when old_hash is null then 'I' when new_hash is null then 'D' else 'U' end as op, new_hash, new_row, seq from cdb.delta where tbl = 'p0_e2e') d order by seq").stdout.strip().splitlines()
+rows = direct("select op, encode(new_hash, 'hex'), new_row::text, encode(new_salt, 'hex') from (select case when old_hash is null then 'I' when new_hash is null then 'D' else 'U' end as op, new_hash, new_row, new_salt, seq from cdb.delta where tbl = 'p0_e2e') d order by seq").stdout.strip().splitlines()
 check("M2b-2a: an insert, an update and a delete made through the proxy are captured, in order (I, U, D)", [r.split("|")[0] for r in rows] == ["I", "U", "D"], rows)
 ins = rows[0].split("|")
-check("M2b-2a: the new-row hash is SHA-256 of 'cancho-db/row/v1', a NUL and the jsonb text of the row (recomputed here)",
-      len(ins) == 3 and hashlib.sha256(b"cancho-db/row/v1\x00" + ins[2].encode()).hexdigest() == ins[1], ins)
+check("M2b-2a: the new-row hash is SHA-256 of 'cancho-db/row/v2', a NUL, the row's 16-byte salt and the jsonb text of the row (recomputed here)",
+      len(ins) == 4 and len(ins[3]) == 32 and hashlib.sha256(b"cancho-db/row/v2\x00" + bytes.fromhex(ins[3]) + ins[2].encode()).hexdigest() == ins[1], ins)
 r = psql(lp, good, "create table p0_nokey (x int)")
 check("M2b-2a: a table without a primary key cannot be created through the proxy, and is not created", r.returncode != 0 and "no primary key" in r.stderr and direct("select count(*) from pg_class where relname = 'p0_nokey'").stdout.strip() == "0", r.stderr)
 direct("delete from cdb.delta where tbl = 'p0_keyed'")      # the delta table outlives a run in the same database
@@ -1121,6 +1121,10 @@ direct("create table p0_pre (id int primary key)")        # made while the event
 check("M2b-2a: (a table made while the event trigger was off has no triggers yet)", direct("select count(*) from pg_trigger where tgrelid = 'p0_pre'::regclass and tgname like 'cdb_%'").stdout.strip() == "0")
 kp2, _ = start_logged(Path(tempfile.mkdtemp()), _scratch + "/key", wait=True)
 check("M2b-2a: and starts again once they are gone", kp2.poll() is None, kp2.poll())
+for _ in range(60):
+    if direct("select count(*) from pg_trigger where tgrelid = 'p0_pre'::regclass and tgname like 'cdb_%'").stdout.strip() == "3":
+        break
+    time.sleep(0.1)
 check("M2b-2a: ... and its start tracked the table that was already there (three triggers)", direct("select count(*) from pg_trigger where tgrelid = 'p0_pre'::regclass and tgname like 'cdb_%'").stdout.strip() == "3")
 kp2.terminate()
 direct("drop table p0_pre")
