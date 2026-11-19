@@ -46,27 +46,40 @@ create or replace function cdb.row_hash(r jsonb) returns bytea language sql immu
     select sha256(convert_to('cancho-db/row/v1', 'UTF8') || '\x00'::bytea || convert_to(r::text, 'UTF8'))
 $$;
 
+-- A name for a row alias that no column of `rel` has: `to_jsonb(n)` is the COLUMN n if the table has one and not the row, so the aliases of the capture (and of cdb.merge) are made not to be a column's name.
+create or replace function cdb.free_alias(rel regclass, base text) returns text language plpgsql stable as $$
+declare
+    a text := base;
+begin
+    while exists (select 1 from pg_attribute where attrelid = rel and attname = a and attnum > 0 and not attisdropped) loop
+        a := a || '_';
+    end loop;
+    return a;
+end $$;
+
 create or replace function cdb.capture() returns trigger language plpgsql as $$
 declare
     pkcols text[] := string_to_array(TG_ARGV[0], ',');
+    ao text := TG_ARGV[1];
+    an text := TG_ARGV[2];
     onclause text;
     pkexpr text;
     t text := TG_TABLE_NAME;
     sc text := TG_TABLE_SCHEMA;
+    tpl text;
 begin
     -- key columns are never null, so plain equality is the join (and is what a full join needs to be hash- or merge-joinable)
-    select string_agg(format('o.%1$I = n.%1$I', c), ' and ') into onclause from unnest(pkcols) c;
+    select string_agg(format('%1$s.%3$I = %2$s.%3$I', ao, an, c), ' and ') into onclause from unnest(pkcols) c;
     select format('convert_to(jsonb_build_array(%s)::text, ''UTF8'')', string_agg(format('%%1$s.%I', c), ', ')) into pkexpr from unnest(pkcols) c;
     if TG_OP = 'INSERT' then
-        execute format('insert into cdb.delta(sch, tbl, pk, new_hash, new_row) select %L, %L, %s, cdb.row_hash(to_jsonb(n)), to_jsonb(n) from new_rows n', sc, t, format(pkexpr, 'n'));
+        execute format('insert into cdb.delta(sch, tbl, pk, new_hash, new_row) select %L, %L, %s, cdb.row_hash(to_jsonb(%I)), to_jsonb(%I) from new_rows %I', sc, t, format(pkexpr, an), an, an, an);
     elsif TG_OP = 'DELETE' then
-        execute format('insert into cdb.delta(sch, tbl, pk, old_hash, old_row) select %L, %L, %s, cdb.row_hash(to_jsonb(o)), to_jsonb(o) from old_rows o', sc, t, format(pkexpr, 'o'));
+        execute format('insert into cdb.delta(sch, tbl, pk, old_hash, old_row) select %L, %L, %s, cdb.row_hash(to_jsonb(%I)), to_jsonb(%I) from old_rows %I', sc, t, format(pkexpr, ao), ao, ao, ao);
     else
         -- matched by primary key: an update; a row only in the old image is a delete of its key, only in the new one an insert (a changed key). A row of the new side
-        -- with no old row has a null first key column in `o`, which is how the two sides are told apart (key columns are never null)
-        execute format($f$insert into cdb.delta(sch, tbl, pk, old_hash, new_hash, old_row, new_row)
-            select %L, %L, case when o.%I is null then %s else %s end, cdb.row_hash(to_jsonb(o)), cdb.row_hash(to_jsonb(n)), to_jsonb(o), to_jsonb(n)
-            from old_rows o full join new_rows n on %s$f$, sc, t, pkcols[1], format(pkexpr, 'n'), format(pkexpr, 'o'), onclause);
+        -- with no old row has a null first key column in the old alias, which is how the two sides are told apart (key columns are never null)
+        execute format('insert into cdb.delta(sch, tbl, pk, old_hash, new_hash, old_row, new_row) select %L, %L, case when %I.%I is null then %s else %s end, cdb.row_hash(to_jsonb(%I)), cdb.row_hash(to_jsonb(%I)), to_jsonb(%I), to_jsonb(%I) from old_rows %I full join new_rows %I on %s',
+                       sc, t, ao, pkcols[1], format(pkexpr, an), format(pkexpr, ao), ao, an, ao, an, ao, an, onclause);
     end if;
     return null;
 end $$;
@@ -74,6 +87,8 @@ end $$;
 create or replace function cdb.track(tbl regclass) returns void language plpgsql as $$
 declare
     cols text;
+    ao text;
+    an text;
 begin
     select string_agg(a.attname, ',' order by array_position(i.indkey::int2[], a.attnum)) into cols
       from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any (i.indkey)
@@ -84,9 +99,11 @@ begin
     execute format('drop trigger if exists cdb_ins on %s', tbl);
     execute format('drop trigger if exists cdb_upd on %s', tbl);
     execute format('drop trigger if exists cdb_del on %s', tbl);
-    execute format('create trigger cdb_ins after insert on %s referencing new table as new_rows for each statement execute function cdb.capture(%L)', tbl, cols);
-    execute format('create trigger cdb_upd after update on %s referencing old table as old_rows new table as new_rows for each statement execute function cdb.capture(%L)', tbl, cols);
-    execute format('create trigger cdb_del after delete on %s referencing old table as old_rows for each statement execute function cdb.capture(%L)', tbl, cols);
+    ao := cdb.free_alias(tbl, 'cdb_o');
+    an := cdb.free_alias(tbl, 'cdb_n');
+    execute format('create trigger cdb_ins after insert on %s referencing new table as new_rows for each statement execute function cdb.capture(%L, %L, %L)', tbl, cols, ao, an);
+    execute format('create trigger cdb_upd after update on %s referencing old table as old_rows new table as new_rows for each statement execute function cdb.capture(%L, %L, %L)', tbl, cols, ao, an);
+    execute format('create trigger cdb_del after delete on %s referencing old table as old_rows for each statement execute function cdb.capture(%L, %L, %L)', tbl, cols, ao, an);
 end $$;
 
 create or replace function cdb.track_all() returns int language plpgsql as $$
@@ -200,6 +217,138 @@ begin
           from (select distinct on (d.pk) d.old_row from cdb.delta d where d.sch = %2$L and d.tbl = %3$L and (d.ord > %4$s or d.ord is null and d.xid = txid_current()) order by d.pk, coalesce(d.ord, 9223372036854775807), d.seq) e
          where e.old_row is not null
     $f$, rel::regclass, sc, tb, n, pkexpr);
+end $$;
+
+-- A merge (docs/m2-branches.md D34 to D37): the three-way merge of the tables of schema `ssch` (the source) into those of `tsch` (the target), key by key and by state, the base being the tables of `bsch` `AS OF`
+-- place `bord` (cdb.asof). Source unchanged from the base: the target's row stays; target unchanged, source changed: the source's version is applied; both changed to one image: nothing; both changed to
+-- different images, or one deleted and the other changed: a conflict. All tables are looked at before anything is applied, and a conflict anywhere raises 'merge-conflict' (the keys, ten at most) so that the
+-- transaction rolls back; so does a source row PostgreSQL refuses ('merge-constraint') and a table the two sides do not both have, with the same columns ('merge-schema-differs'). Deletes are applied children first,
+-- then updates and inserts parents first. The applying is by ordinary statements, so the capture records it as the net facts of the transaction. Nothing here makes a temporary table: a transaction that did
+-- cannot be prepared. Returns the number of rows applied.
+create or replace function cdb.merge(tsch text, ssch text, bsch text, bord bigint) returns int language plpgsql as $$
+declare
+    tabs text[];
+    ordered text[] := '{}';
+    t text;
+    n int;
+    pk text;
+    cols text;
+    pkq text;
+    q text;
+    conflicts text[] := '{}';
+    nconf int := 0;
+    one text[];
+    dels jsonb[] := '{}';
+    upds jsonb[] := '{}';
+    inss jsonb[] := '{}';
+    i int;
+    applied int := 0;
+    rc int;
+    rcols text;
+    ra text;
+    progress boolean;
+begin
+    select coalesce(array_agg(c.relname::text order by c.relname), '{}') into tabs from pg_class c join pg_namespace s on s.oid = c.relnamespace where s.nspname = tsch and c.relkind = 'r';
+    if tabs is distinct from (select coalesce(array_agg(c.relname::text order by c.relname), '{}') from pg_class c join pg_namespace s on s.oid = c.relnamespace where s.nspname = ssch and c.relkind = 'r') then
+        raise exception 'merge-schema-differs: the two branches do not have the same tables' using errcode = '55000';
+    end if;
+    foreach t in array tabs loop
+        if (select array_agg(a.attname || ':' || a.atttypid order by a.attnum) from pg_attribute a where a.attrelid = format('%I.%I', tsch, t)::regclass and a.attnum > 0 and not a.attisdropped)
+           is distinct from (select array_agg(a.attname || ':' || a.atttypid order by a.attnum) from pg_attribute a where a.attrelid = format('%I.%I', ssch, t)::regclass and a.attnum > 0 and not a.attisdropped) then
+            raise exception 'merge-schema-differs: table % has other columns on the two branches', t using errcode = '55000';
+        end if;
+        if to_regclass(format('%I.%I', bsch, t)) is null then
+            raise exception 'merge-schema-differs: table % did not exist at the merge base', t using errcode = '55000';
+        end if;
+    end loop;
+    -- parents before children, by the foreign keys among the tables
+    loop
+        progress := false;
+        foreach t in array tabs loop
+            if not (t = any (ordered)) and not exists (
+                select 1 from pg_constraint c join pg_class r on r.oid = c.confrelid join pg_namespace rs on rs.oid = r.relnamespace
+                 where c.contype = 'f' and c.conrelid = format('%I.%I', tsch, t)::regclass and rs.nspname = tsch and r.relname::text <> t and r.relname::text = any (tabs) and not (r.relname::text = any (ordered))) then
+                ordered := ordered || t;
+                progress := true;
+            end if;
+        end loop;
+        exit when not progress;
+    end loop;
+    foreach t in array tabs loop
+        if not (t = any (ordered)) then
+            ordered := ordered || t;
+        end if;
+    end loop;
+    n := coalesce(array_length(ordered, 1), 0);
+    -- every table: the classification of every key, in one pass
+    for i in 1 .. n loop
+        t := ordered[i];
+        ra := cdb.free_alias(format('%I.%I', tsch, t)::regclass, 'cdb_r');
+        select string_agg(format('%I.%I', ra, a.attname), ', ' order by array_position(ix.indkey::int2[], a.attnum)) into pk
+          from pg_index ix join pg_attribute a on a.attrelid = ix.indrelid and a.attnum = any (ix.indkey) where ix.indrelid = format('%I.%I', tsch, t)::regclass and ix.indisprimary;
+        q := format($f$
+            with m as materialized (
+                select coalesce(t.k, s.k, b.k) as k, b.j as bj, t.j as tj, s.j as sj
+                  from (select jsonb_build_array(%1$s) as k, to_jsonb(%7$I) as j from cdb.asof(null::%2$I.%3$I, %4$s) %7$I) b
+                  full join (select jsonb_build_array(%1$s) as k, to_jsonb(%7$I) as j from %5$I.%3$I %7$I) t on t.k = b.k
+                  full join (select jsonb_build_array(%1$s) as k, to_jsonb(%7$I) as j from %6$I.%3$I %7$I) s on s.k = coalesce(t.k, b.k))
+            select (select coalesce(array_agg(%3$L || ' ' || k::text order by k::text), '{}') from (select k from m where tj is distinct from bj and sj is distinct from bj and tj is distinct from sj order by k::text limit 10) c),
+                   (select count(*) from m where tj is distinct from bj and sj is distinct from bj and tj is distinct from sj),
+                   (select coalesce(jsonb_agg(k), '[]') from m where tj is not distinct from bj and sj is distinct from bj and sj is null),
+                   (select coalesce(jsonb_agg(sj), '[]') from m where tj is not distinct from bj and sj is distinct from bj and sj is not null and tj is not null),
+                   (select coalesce(jsonb_agg(sj), '[]') from m where tj is not distinct from bj and sj is distinct from bj and sj is not null and tj is null)$f$, pk, bsch, t, bord, tsch, ssch, ra);
+        declare
+            c_keys text[];
+            c_n bigint;
+            d jsonb;
+            u jsonb;
+            ins jsonb;
+        begin
+            execute q into c_keys, c_n, d, u, ins;
+            nconf := nconf + c_n;
+            conflicts := conflicts || c_keys;
+            dels := dels || d;
+            upds := upds || u;
+            inss := inss || ins;
+        end;
+    end loop;
+    if nconf > 0 then
+        raise exception 'merge-conflict: % key(s) changed differently on both branches: %', nconf, array_to_string(conflicts[1:10], ', ') using errcode = '40001';
+    end if;
+    begin
+        -- deletes, children first
+        for i in reverse n .. 1 loop
+            t := ordered[i];
+            if jsonb_array_length(dels[i]) > 0 then
+                select string_agg(format('x.%I', a.attname), ', ' order by array_position(ix.indkey::int2[], a.attnum)) into pk
+                  from pg_index ix join pg_attribute a on a.attrelid = ix.indrelid and a.attnum = any (ix.indkey) where ix.indrelid = format('%I.%I', tsch, t)::regclass and ix.indisprimary;
+                execute format('delete from %1$I.%2$I x using jsonb_array_elements($1) e(k) where jsonb_build_array(%3$s) = e.k', tsch, t, pk) using dels[i];
+                get diagnostics rc := row_count;
+                applied := applied + rc;
+            end if;
+        end loop;
+        -- updates and inserts, parents first
+        for i in 1 .. n loop
+            t := ordered[i];
+            select string_agg(format('x.%I', a.attname), ', ' order by array_position(ix.indkey::int2[], a.attnum)) into pk
+              from pg_index ix join pg_attribute a on a.attrelid = ix.indrelid and a.attnum = any (ix.indkey) where ix.indrelid = format('%I.%I', tsch, t)::regclass and ix.indisprimary;
+            select string_agg(format('r.%I', a.attname), ', ' order by array_position(ix.indkey::int2[], a.attnum)) into pkq
+              from pg_index ix join pg_attribute a on a.attrelid = ix.indrelid and a.attnum = any (ix.indkey) where ix.indrelid = format('%I.%I', tsch, t)::regclass and ix.indisprimary;
+            select string_agg(quote_ident(a.attname), ', ' order by a.attnum), string_agg('r.' || quote_ident(a.attname), ', ' order by a.attnum) into cols, rcols
+              from pg_attribute a where a.attrelid = format('%I.%I', tsch, t)::regclass and a.attnum > 0 and not a.attisdropped and a.attgenerated = '';
+            if jsonb_array_length(upds[i]) > 0 then
+                execute format('update %1$I.%2$I x set (%3$s) = row(%6$s) from jsonb_populate_recordset(null::%1$I.%2$I, $1) r where jsonb_build_array(%4$s) = jsonb_build_array(%5$s)', tsch, t, cols, pk, pkq, rcols) using upds[i];
+                applied := applied + jsonb_array_length(upds[i]);
+            end if;
+            if jsonb_array_length(inss[i]) > 0 then
+                execute format('insert into %1$I.%2$I (%3$s) overriding system value select %3$s from jsonb_populate_recordset(null::%1$I.%2$I, $1)', tsch, t, cols) using inss[i];
+                applied := applied + jsonb_array_length(inss[i]);
+            end if;
+        end loop;
+    exception when integrity_constraint_violation then
+        raise exception 'merge-constraint: %', sqlerrm using errcode = sqlstate;
+    end;
+    return applied;
 end $$;
 
 create or replace function cdb.on_ddl() returns event_trigger language plpgsql as $$
