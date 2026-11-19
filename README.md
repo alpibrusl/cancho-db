@@ -26,12 +26,13 @@ lowered to the IR and its effects checked against the token before PostgreSQL se
 transaction is one signed, hash-chained commit, made durable before PostgreSQL commits (a two-phase commit, settled by recovery after a crash). Simple and extended protocol; only loopback clients are served.
 The SQL is a subset (no subqueries, CTEs, set operations or window functions; a closed set of DDL): [`docs/claims.md`](docs/claims.md) lists what is refused.
 
-**M2 (row changes, branches, `AS OF`, merge): built, but for the replay verifier** ([`docs/m2-branches.md`](docs/m2-branches.md)).
+**M2 (row changes, branches, `AS OF`, merge, the replay verifier L3a): built** ([`docs/m2-branches.md`](docs/m2-branches.md)).
 Built: **row-delta capture** (triggers installed by the proxy; every commit carries the real `changes` and `state`), and **branches**:
 `select cancho_fork('name')` copies the data into a schema of its own and starts a new chain in the log; a connection chooses its branch by the database name.
 **`AS OF`**: `select ... from t as of '<commit id>'` reads a table as a commit left it (on any branch; the commit is named in the statement, so the log records which past was read, and a token must grant it).
 **`cancho_merge`**: `select cancho_merge('<source>')` merges a branch into the connection's branch (a three-way merge by key against the common ancestor read `AS OF`): one commit with two parents, or nothing if there is a conflict.
-Not built: the replay verifier (L3a), recording of bound values, snapshots and erasure. Without `--stmts`, L2
+**L3a (delta replay)** ([`docs/spec/l3a.md`](docs/spec/l3a.md)): given the delta store the database keeps, a verifier checks that each commit's `changes` and `state` are what the stored row changes give, that the changes fit together, and (given a dump of the tables) that the tables hold exactly what they say; in cancho (`proxy/l3averify.cho`), in Python (`tools/l3a.py`) and as a third reading by a separate agent session (`tests/third/`), on 72 golden cases.
+Not built: recording of bound values (L3b), snapshots and erasure. Without `--stmts`, L2
 checks only the commit's *recorded* effect set against its token; with it, the recorded set is shown to equal what the
 statements infer. That the store holds what was actually executed is L3's (see [`docs/claims.md`](docs/claims.md)), which says what is claimed, what each claim rests on, and what is *not*
 claimed.
@@ -99,6 +100,10 @@ Runs what CI runs: formatting, vectors regenerate byte for byte, all three verif
 the authority report, the attenuation property over thousands of random tokens, 4,500 differentially fuzzed inputs (the
 verifiers agree and none crashes), the parser, lowering and row-capture differentials against PostgreSQL, the proxy and fork end to end, and about 700 mutants (every one must make a check fail; the proxy
 ones take about an hour). Needs `python3` with `cryptography`, the cancho compiler at the revision in [`cancho.toml`](cancho.toml), `go`, `strace`, `psql` and a PostgreSQL 16 server (the script starts a throwaway one).
+
+## Landing page
+
+`site/index.html`, published by `.github/workflows/pages.yml` on a push to `main` (Settings > Pages > Source must be "GitHub Actions").
 
 ## Licence
 

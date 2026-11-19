@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cancho-db</title>
+<meta name="description" content="A Postgres-compatible database whose commit path is verifiable: every write is a signed, hash-chained commit.">
+<style>
+:root{--bg:#fbfaf7;--fg:#1d1f21;--mute:#5d646b;--line:#dcd9d2;--accent:#a4471f;--code:#f1eee8;--card:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#16181a;--fg:#e8e6e1;--mute:#9aa1a8;--line:#2d3135;--accent:#e08a5f;--code:#1f2326;--card:#1b1e20}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.6 ui-serif,Georgia,"Iowan Old Style",serif}
+main{max-width:46rem;margin:0 auto;padding:3rem 1rem 4rem}
+h1{font-size:2.4rem;margin:0 0 .25rem;letter-spacing:-.02em}
+h2{font-size:1.25rem;margin:2.5rem 0 .75rem;border-top:1px solid var(--line);padding-top:1.5rem}
+.lead{font-size:1.2rem;color:var(--mute);margin:.25rem 0 1.5rem}
+a{color:var(--accent)}
+code,pre{font:.88rem/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);border-radius:4px}
+code{padding:.1rem .3rem}
+pre{padding:1rem;overflow-x:auto;border:1px solid var(--line)}
+pre code{padding:0;background:none}
+ul{padding-left:1.2rem}li{margin:.4rem 0}
+.grid{display:grid;gap:.75rem;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));margin:1rem 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:.9rem 1rem}
+.card b{display:block;margin-bottom:.2rem}
+.card span{color:var(--mute);font-size:.95rem}
+.tag{font:.75rem ui-monospace,monospace;color:var(--mute)}
+footer{margin-top:3rem;color:var(--mute);font-size:.9rem;border-top:1px solid var(--line);padding-top:1rem}
+</style>
+</head>
+<body>
+<main>
+<h1>cancho-db</h1>
+<p class="lead">The database you can let agents write to.</p>
+<p>A Postgres-compatible proxy whose commit path is verifiable. Every write becomes a signed, hash-chained commit that records <em>who</em> wrote, under <em>which capability</em>, and <em>running which code</em>. Written in <a href="https://github.com/alpibrusl/cancho">cancho</a>, no C and no foreign call; working name.</p>
+
+<div class="grid">
+<div class="card"><b>Capability tokens</b><span>A chain of signed blocks that can only narrow. The token is the password; a statement outside it never reaches PostgreSQL.</span></div>
+<div class="card"><b>Effect-checked</b><span>Every statement is parsed, lowered to an IR and its effects checked against the token first. A refusal carries a rule tag.</span></div>
+<div class="card"><b>Signed log</b><span>One Ed25519-signed, hash-chained commit per transaction, durable before PostgreSQL commits.</span></div>
+<div class="card"><b>Branches, <code>AS OF</code>, merge</b><span>Fork a branch, read a table as any past commit left it, merge three-way by key.</span></div>
+</div>
+
+<h2>Check it yourself</h2>
+<p>Three levels of verification, each by a verifier that needs nothing but SHA-256 and Ed25519 (and the specs):</p>
+<ul>
+<li><b>L1, integrity:</b> is the log intact, in order, and not cut short? <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/commit.md">commit.md</a></li>
+<li><b>L2, authority:</b> was each commit allowed by the token it presented, and do its recorded effects equal what its statements do? <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/token.md">token.md</a>, <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/ir.md">ir.md</a></li>
+<li><b>L3a, delta replay:</b> is the data the history of the facts the log commits to, and do the tables hold exactly what the row changes say? <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/l3a.md">l3a.md</a></li>
+</ul>
+<pre><code>$ ./verify vectors/ok_chain3.log
+ok commits=3 branches=1
+$ ./verify vectors/seq_skips.log
+reject rule=seq-gap record=1
+$ ./l3averify log --deltas deltas.tsv --live-dump live.tsv
+ok commits=15 facts=19 branches=2 final</code></pre>
+<p>Each verifier exists more than once, written from the spec alone, and they must agree on every golden vector: cancho, Python, Go (L1 and L2) and a separate agent's reading (L3a). Mutation tests make sure a check that is removed is noticed.</p>
+
+<h2>Use it</h2>
+<pre><code>$ proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres ./log ./signing.key
+$ psql -h 127.0.0.1 -p 5440 -U agent -d main -c "select cancho_fork('feature')"
+$ psql -h 127.0.0.1 -p 5440 -U agent -d feature       # the database name is the branch</code></pre>
+<p>psql, psycopg 2 and 3, pg8000, asyncpg and node-postgres connect with a capability token as the password. The SQL is a subset (no subqueries, CTEs, set operations or window functions); <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">claims.md</a> lists what is claimed, what each claim rests on, and what is <em>not</em> claimed.</p>
+
+<h2>Status</h2>
+<ul>
+<li><b>M0</b> spec and verifiers (L1, L2, statement IR): built.</li>
+<li><b>M1</b> the proxy in front of PostgreSQL: built.</li>
+<li><b>M2</b> row-change capture, branches, <code>AS OF</code>, merge: built. The replay verifier (L3a) is built in Python and cancho with a third independent reading; <span class="tag">recording bound values, snapshots and erasure are not.</span></li>
+</ul>
+
+<footer>
+<a href="https://github.com/alpibrusl/cancho-db">Source</a> · <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/design.md">Design</a> · <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">Claims</a> · EUPL-1.2 · Alpibru S.L.
+</footer>
+</main>
+</body>
+</html>
