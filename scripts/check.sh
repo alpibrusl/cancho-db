@@ -60,6 +60,11 @@ echo "== the fork (M2c-2): the schema per branch, the commit on the new branch, 
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/fork_e2e.py build/proxy
 echo "== AS OF (M2d): every commit of a random session read back against a copy made then, on two branches"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/asof_e2e.py build/proxy
+echo "== L3a, delta replay (M2f-1): the golden cases are reproducible, and the verifier agrees with them"
+python3 tools/gen_l3a.py --check
+quiet 2 python3 tests/l3a_check.py "python3 tools/l3a.py"
+echo "== L3a over a real session: the live tables compared, and the ways to cheat refused"
+quiet 3 python3 tests/l3a_e2e.py build/proxy
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
 PG_PORT=5593 N=40 quiet 2 python3 scripts/measure_p2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"
@@ -108,5 +113,6 @@ echo "== mutants, guard";           quiet 1 python3 tests/mutants.py guard "$CAN
 echo "== mutants, commit builder"; quiet 1 python3 tests/mutants.py build "$CANCHO"
 echo "== mutants, log directory"; quiet 1 python3 tests/mutants.py store "$CANCHO"
 echo "== mutants, capture SQL and cdb.fork"; quiet 1 python3 tests/mutants.py sql "$CANCHO"
+echo "== mutants, L3a verifier"; quiet 1 python3 tests/mutants.py l3a "$CANCHO"
 echo "== mutants, proxy (end to end, four at once)"; quiet 1 python3 tests/mutants.py proxy "$CANCHO"
 echo "all green"
