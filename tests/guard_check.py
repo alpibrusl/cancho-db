@@ -67,8 +67,14 @@ def no(tok, sql, kind, tag, state, stmt=0): CASES.append((tok, sql, "refused %d 
 # ---- AS OF (docs/m2-branches.md D27 to D29): a token of the current rows does not allow a read of the past; one that names it does; the statement is sent as it was written
 HX = "3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f"
 HIST_ORDERS = token("history orders", [(R, "orders@*")])
-ok(ALL, "select id from orders as of '" + HX + "'", 'select "id" from "orders" as of \'' + HX + '\'')
-ok(HIST_ORDERS, "select id from orders as of '" + HX + "'", 'select "id" from "orders" as of \'' + HX + '\'')
+CALL = 'cdb.asof(null::"orders", cdb.ord(\'' + HX + '\'))'
+ok(ALL, "select id from orders as of '" + HX + "'", 'select "id" from ' + CALL + ' as "orders"')
+ok(HIST_ORDERS, "select id from orders as of '" + HX + "'", 'select "id" from ' + CALL + ' as "orders"')
+ok(ALL, "select o.id from orders as of '" + HX + "' o where o.total > 1", 'select "o"."id" from ' + CALL + ' as "o" where ("o"."total" > 1)')
+ok(ALL, "select o.id from orders as of '" + HX + "' o, orders", 'select "o"."id" from ' + CALL + ' as "o", "orders"')
+ok(ALL, "select ' as of ''" + HX + "''' from orders", "select ' as of ''" + HX + "''' from \"orders\"")
+ok(ALL, "select '\"orders\" as of ''" + HX + "''' from orders", "select '\"orders\" as of ''" + HX + "''' from \"orders\"")
+ok(ALL, "select id from orders where id = 1; select id from orders as of '" + HX + "'", 'select "id" from "orders" where ("id" = 1); select "id" from ' + CALL + ' as "orders"')
 no(READ_ORDERS, "select id from orders as of '" + HX + "'", 3, "effect-denied", "42501")
 no(RW_ORDERS, "select id from orders as of '" + HX + "'", 3, "effect-denied", "42501")
 no(HIST_ORDERS, "select id from orders", 3, "effect-denied", "42501")

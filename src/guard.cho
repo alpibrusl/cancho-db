@@ -5,6 +5,7 @@ import cdb.lex;
 import cdb.parse;
 import cdb.stmt;
 import cdb.lower;
+import cdb.asof;
 import cdb.ir;
 import cdb.token;
 import cdb.build;
@@ -305,8 +306,16 @@ pub fn check[&h, &k, &m, &q, &o, &r, &d, &x, &f](heap: &!h Heap, tk: &k [byte], 
     unbox_slice(heap, rb);
     unbox_slice(heap, sb);
     unbox_slice(heap, ib);
+    // `AS OF` becomes the call that answers it (docs/m2-branches.md D31)
+    var sent = written;
     if vd[0] == 0 && written >= 0 {
-        vd[3] = written;
+        sent = asof.rewrite(heap, out, written);
+        if sent < 0 {
+            mark(vd, 2, parse.e_too_big(), 0 - 1, 0);
+        }
+    }
+    if vd[0] == 0 && written >= 0 {
+        vd[3] = sent;
         vd[7] = nst;
         vd[8] = irat;
         vd[9] = effat;

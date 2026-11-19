@@ -230,6 +230,24 @@ fn hex_sql[&o, &i](out: &!o [byte], start: int, ident: &i [byte]) -> [] int {
     return at + 1;
 }
 
+// The decimal digits of `n` (not negative) into `out` at `at`: the new position.
+fn dec_sql[&o](out: &!o [byte], at: int, n: int) -> [] int {
+    var digits = 1;
+    var t = n;
+    while t >= 10 {
+        t = t / 10;
+        digits = digits + 1;
+    }
+    var i = digits;
+    var v = n;
+    while i > 0 {
+        out[at + i - 1] = byte_of('0' + v % 10);
+        v = v / 10;
+        i = i - 1;
+    }
+    return at + digits;
+}
+
 fn hex_digit(v: int) -> [] int {
     if v < 10 {
         return '0' + v;
@@ -296,7 +314,7 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
         let sig = alloc_slice[z](64, byte_of(0));
         let tr = alloc_slice[z](shared.token_max() + 8, byte_of(0));
         let lr = alloc_slice[z](8300, byte_of(0));
-        let q = alloc_slice[z](192, byte_of(0));
+        let q = alloc_slice[z](512, byte_of(0));
         let chg = alloc_slice[z](32, byte_of(0));
         let stt = alloc_slice[z](32, byte_of(0));
         let tk = contents(core.tokb)[k * shared.token_max()..k * shared.token_max() + st[p + 12]];
@@ -396,7 +414,23 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
             if wrote {
                 // the delta rows of this transaction (even those whose net effect is nothing, so that none is left without a commit) take the commit's id, inside the transaction
                 // that is about to be prepared: they live or die with the data
-                let dn = build.put_bytes(q, hex_sql(q, build.put_bytes(q, 0, "update cdb.delta set commit_id = '\\x"), ident) - 1, "'::bytea where xid = txid_current()");
+                // and the commit's place in the log is noted, for `AS OF` (docs/m2-branches.md D30): its id, the schema of its branch and its index in the log, one statement
+                var at = build.put_bytes(q, 0, "with m as (insert into cdb.mark(commit_id, sch, ord) values ('\\x");
+                at = hex_sql(q, at, ident);
+                at = build.put_bytes(q, at - 1, "'::bytea, '");
+                if forking || bx > 0 {
+                    at = build.put_bytes(q, at, "cdb_b_");
+                    at = build.put_bytes(q, at, branch);
+                } else {
+                    at = build.put_bytes(q, at, "public");
+                }
+                at = build.put_bytes(q, at, "', ");
+                at = dec_sql(q, at, chain[2]);
+                at = build.put_bytes(q, at, ")) update cdb.delta set commit_id = '\\x");
+                at = hex_sql(q, at, ident);
+                at = build.put_bytes(q, at - 1, "'::bytea, ord = ");
+                at = dec_sql(q, at, chain[2]);
+                let dn = build.put_bytes(q, at, " where xid = txid_current()");
                 step = upstream_exec(tab, core, b, q[0..dn]);
             }
             if step == 0 && wrote {

@@ -37,7 +37,7 @@ echo "== authority";                 sh tests/authority.sh
 echo "== vectors, python verifier";  python3 tests/run_vectors.py vectors -- python3 tools/verify.py
 echo "== vectors, cancho verifier";  python3 tests/run_vectors.py vectors -- build/verify
 echo "== vectors, go verifier";      python3 tests/run_vectors.py vectors -- build/verify-go
-echo "== the proxy builds";          "$CANCHO" build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho -o build/proxy
+echo "== the proxy builds";          "$CANCHO" build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho src/asof.cho -o build/proxy
 echo "== the proxy end to end (psql, a real PostgreSQL)"
 sh scripts/pg_throwaway.sh start 5593
 trap 'sh scripts/pg_throwaway.sh stop 5593' EXIT
@@ -54,6 +54,8 @@ echo "== changes and state in the commits (M2b-2b): recomputed from the database
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/changes_e2e.py build/proxy
 echo "== the fork (M2c-2): the schema per branch, the commit on the new branch, refusals, the race, the crash windows"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/fork_e2e.py build/proxy
+echo "== AS OF (M2d): every commit of a random session read back against a copy made then, on two branches"
+E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/asof_e2e.py build/proxy
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
 PG_PORT=5593 N=40 quiet 2 python3 scripts/measure_p2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"
@@ -76,7 +78,7 @@ echo "== name resolution in the lowering against PostgreSQL (42P01, 42703, 42702
 quiet 2 python3 tests/lower_diff.py build/lowercheck 4000 1
 quiet 2 python3 tests/lower_diff.py build/lowercheck 4000 2
 echo "== the query guard: hand-written verdicts over tokens minted outside src/"
-"$CANCHO" build --std proxy/guardcheck.cho src/commit.cho src/token.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/build.cho -o build/guardcheck
+"$CANCHO" build --std proxy/guardcheck.cho src/commit.cho src/token.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/build.cho src/asof.cho -o build/guardcheck
 quiet 2 python3 tests/guard_check.py build/guardcheck
 echo "== the commit builder: bytes, ids and signatures against an independent encoder; the three verifiers accept its log"
 "$CANCHO" build --std proxy/buildcheck.cho src/build.cho src/commit.cho -o build/buildcheck

@@ -26,10 +26,10 @@ lowered to the IR and its effects checked against the token before PostgreSQL se
 transaction is one signed, hash-chained commit, made durable before PostgreSQL commits (a two-phase commit, settled by recovery after a crash). Simple and extended protocol; only loopback clients are served.
 The SQL is a subset (no subqueries, CTEs, set operations or window functions; a closed set of DDL): [`docs/claims.md`](docs/claims.md) lists what is refused.
 
-**M2 (row changes, branches, `AS OF`, merge): in progress** ([`docs/m2-branches.md`](docs/m2-branches.md)).
+**M2 (row changes, branches, `AS OF`, merge): in progress, merge to come** ([`docs/m2-branches.md`](docs/m2-branches.md)).
 Built: **row-delta capture** (triggers installed by the proxy; every commit carries the real `changes` and `state`), and **branches**:
 `select cancho_fork('name')` copies the data into a schema of its own and starts a new chain in the log; a connection chooses its branch by the database name.
-Under way: **`AS OF`** (designed, with the history-read convention of the IR specified and its vectors accepted by the three verifiers).
+**`AS OF`**: `select ... from t as of '<commit id>'` reads a table as a commit left it (on any branch; the commit is named in the statement, so the log records which past was read, and a token must grant it).
 Not built: `cancho_merge`, the replay verifier (L3a), recording of bound values, snapshots and erasure. Without `--stmts`, L2
 checks only the commit's *recorded* effect set against its token; with it, the recorded set is shown to equal what the
 statements infer. That the store holds what was actually executed is L3's (see [`docs/claims.md`](docs/claims.md)), which says what is claimed, what each claim rests on, and what is *not*
@@ -76,7 +76,7 @@ reject rule=effects-mismatch record=0
 ## The proxy
 
 ```console
-$ cancho build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho -o proxy
+$ cancho build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho src/asof.cho -o proxy
 $ proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres ./log ./signing.key   # listen port, upstream host and port, first branch, root key, upstream role, database, log directory, signing key (32 bytes)
 $ PGPASSWORD=$(python3 tools/mint.py password) psql -h 127.0.0.1 -p 5440 -U agent -d main -c 'select 1'
 $ PGPASSWORD=... psql -h 127.0.0.1 -p 5440 -U agent -d main -c "select cancho_fork('feature')"
@@ -86,7 +86,7 @@ $ PGPASSWORD=... psql -h 127.0.0.1 -p 5440 -U agent -d feature      # the databa
 The password is `base64url(token ‖ the last key's seed)`; `tools/mint.py` makes one for the test keys. The upstream role must be allowed to create triggers and event
 triggers (the row-change capture is installed at start), and every table needs a primary key. The log directory holds the log, the tokens and the statements, which the verifiers read:
 `build/verify log --root $ROOT --tokens ./log/tokens --stmts ./log/stmts`. The gates are `tests/proxy_e2e.py`, `tests/ext_e2e.py`, `tests/drivers_e2e.py`, `tests/changes_e2e.py` and
-`tests/fork_e2e.py`, against a real PostgreSQL and the stock clients.
+`tests/fork_e2e.py` and `tests/asof_e2e.py`, against a real PostgreSQL and the stock clients.
 
 ## Test
 
