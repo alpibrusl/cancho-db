@@ -1259,6 +1259,8 @@ L3A = [
     ('l3a: a fork from an older commit is accepted', 'if last.get(src) != parents[0]:', 'if False:'),
     ("l3a: the base is not the first branch's", 'maps[branch] = dict(base) if branch == first else {}', 'maps[branch] = {}'),
     ('l3a: every branch is in the first schema', 'return "public" if branch == first else "cdb_b_" + branch', 'return "public"'),
+    ('l3a: the last line may lack its newline', '    if data and not data.endswith("\\n"):', '    if False:'),
+    ('l3a: a key may be twice in the base', '        if k in base:', '        if False:'),
     ('l3a: the live tables are not compared', '        if seen[b] != m:', '        if False:'),
 ]
 
@@ -1302,6 +1304,98 @@ def run_l3a(cancho):
     print("%d mutants, %d not killed" % (count, len(survivors)))
     return 1 if survivors else 0
 
+# ---- the L3a verifier in cancho (src/l3a.cho), judged by the golden cases of tests/l3a
+L3A_CHO = [
+    ("l3a-cho: the store's magic is not checked", "    if !bytes.starts_with(text, magic) {", "    if false {"),
+    ("l3a-cho: the first line may go on", "    if first != len(magic) || int_of(text[len(text) - 1]) != 10 {", "    if int_of(text[len(text) - 1]) != 10 {"),
+    ("l3a-cho: a line may have more fields than it should", "    return count == n;", "    return count <= n;"),
+    ("l3a-cho: a seq may not be digits", "                if int_of(text[k]) < '0' || int_of(text[k]) > '9' {", "                if false {"),
+    ("l3a-cho: a seq may have a leading zero", "            if se - sa > 1 && int_of(text[sa]) == '0' {", "            if false {"),
+    ("l3a-cho: a seq may repeat", "            if seen {\n                good = false;", "            if false {\n                good = false;"),
+    ("l3a-cho: the last line may lack its newline", "    if first != len(magic) || int_of(text[len(text) - 1]) != 10 {", "    if first != len(magic) {"),
+    ("l3a-cho: a key may be twice in the base", "            if twice {\n                rule = store_malformed();", "            if false {\n                rule = store_malformed();"),
+    ("l3a-cho: hex may be in capitals", "c >= 'a' && c <= 'f';", "c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F';"),
+    ("l3a-cho: hex may be of an odd length", "    if b <= a || (b - a) % 2 != 0 {", "    if b <= a {"),
+    ("l3a-cho: a commit id may be of any length", "meta[b + 3] - meta[b + 2] != 64 || ", ""),
+    ("l3a-cho: a hash may be of any length", "if he != ha && (he - ha != 64 || !hex_text(text, ha, he)) {", "if he != ha && !hex_text(text, ha, he) {"),
+    ("l3a-cho: a row may have no hash", "        if good && meta[b + 11] == meta[b + 10] && meta[b + 13] == meta[b + 12] {", "        if false {"),
+    ("l3a-cho: a schema may be empty", "        if good && meta[b + 5] <= meta[b + 4] {", "        if false {"),
+    ("l3a-cho: a table need not be hex", "        if good && !hex_text(text, meta[b + 6], meta[b + 7]) {", "        if false {"),
+    ("l3a-cho: a key need not be hex", "        if good && !hex_text(text, meta[b + 8], meta[b + 9]) {", "        if false {"),
+    ("l3a-cho: an image need not be hex", "            if ie != ia && !hex_text(text, ia, ie) {", "            if false {"),
+    ("l3a-cho: a row of no commit is let through", "            if ci < 0 {\n                rule = store_foreign_row();", "            if false {\n                rule = store_foreign_row();"),
+    ("l3a-cho: a row in another schema is let through", "                if !schema_is(dtext[dmeta[m + 4]..dmeta[m + 5]], name, bi == first_bi) {", "                if false {"),
+    ("l3a-cho: rows on a commit that only read are let through", "            if rule == 0 && hi > lo && ci[8 * i + 3] == 0 {", "            if false {"),
+    ("l3a-cho: a call is not a write", "                    if kind == 1 || kind == 2 || kind == 3 {", "                    if kind == 1 || kind == 2 {"),
+    ("l3a-cho: a hash may lack its image", "                    if he > ha != ie > ia {", "                    if false {"),
+    ("l3a-cho: an image need not be its hash", "                        if !same32(tmp32, 0, hs, 32 * (2 * row + side)) {", "                        if false {"),
+    ("l3a-cho: changes are not compared", "                if code != 0 || !same32(digest, 0, enc, cat) {", "                if false {"),
+    ("l3a-cho: changes are the log's own without the facts", "                if code != 0 || !same32(digest, 0, enc, cat) {", "                if code != 0 {"),
+    ("l3a-cho: a fact that nets to nothing is a fact", "                    } else if oldp && newp && same32(hs, 32 * (2 * gi[g]), hs, 32 * (2 * gi[1 * g1 + g] + 1)) {", "                    } else if false {"),
+    ("l3a-cho: a row of the same key is a new fact", "                        same = bytes.equal(dtext[dmeta[pm + 6]..dmeta[pm + 7]], dtext[dmeta[m + 6]..dmeta[m + 7]]) && bytes.equal(dtext[dmeta[pm + 8]..dmeta[pm + 9]], dtext[dmeta[m + 8]..dmeta[m + 9]]);", "                        same = false;"),
+    ("l3a-cho: the netting ignores the table", "                        same = bytes.equal(dtext[dmeta[pm + 6]..dmeta[pm + 7]], dtext[dmeta[m + 6]..dmeta[m + 7]]) && ", "                        same = "),
+    ("l3a-cho: the netting takes the first new image", "                    gi[1 * g1 + ng - 1] = ord[k];", "                    if !same {\n                        gi[1 * g1 + ng - 1] = ord[k];\n                    }"),
+    ("l3a-cho: seq does not order the changes of a key", "    return bytes.compare(text[meta[a]..meta[a + 1]], text[meta[b]..meta[b + 1]]) < 0;", "    return false;"),
+    ("l3a-cho: seq is compared as text only", "    if la != lb {\n        return la < lb;\n    }\n", ""),
+    ("l3a-cho: an unknown parent is let through", "                    if pi < 0 {\n                        rule = state_mismatch();", "                    if pi < 0 {\n                        rule = 0;"),
+    ("l3a-cho: state is not compared", "                    if !same32(want, 0, enc, ci[8 * i + 4]) {", "                    if false {"),
+    ("l3a-cho: a fork is not checked against its parent's tip", "                        if ci[o_bl + src] != p0 {", "                        if false {"),
+    ("l3a-cho: a fork starts empty", "== src {\n                                        gi[3 * g1 + j] = pos;", "== src && false {\n                                        gi[3 * g1 + j] = pos;"),
+    ("l3a-cho: a fork copies into the wrong branch", "                            ck[gi[3 * g1 + j] + 1] = byte_of(bi % 256);", "                            ck[gi[3 * g1 + j] + 1] = byte_of(src % 256);"),
+    ("l3a-cho: the base is not the first branch's", "        if rule == 0 && first_bi >= 0 && has_base {", "        if false {"),
+    ("l3a-cho: an insert of a key that is there is let through", "                            if cur >= 0 {\n                                rule = replay_precondition();", "                            if false {\n                                rule = replay_precondition();"),
+    ("l3a-cho: an update of an absent key is let through", "                        } else if cur < 0 || !same32(hs, 32 * cur, hs, 32 * (2 * gi[g])) {", "                        } else if !same32(hs, 32 * cur, hs, 32 * (2 * gi[g])) {"),
+    ("l3a-cho: an update from another image is let through", "                        } else if cur < 0 || !same32(hs, 32 * cur, hs, 32 * (2 * gi[g])) {", "                        } else if cur < 0 {"),
+    ("l3a-cho: a delete does not remove", "                            if gi[2 * g1 + g] == 2 {", "                            if false {"),
+    ("l3a-cho: an update keeps the old image", "                                maps = map.put(heap, maps, keybuf[0..kn], 2 * gi[1 * g1 + g] + 1);", "                                maps = map.put(heap, maps, keybuf[0..kn], 2 * gi[g]);"),
+    ("l3a-cho: facts are not counted", "                            nfacts = nfacts + 1;", "                            nfacts = nfacts;"),
+    ("l3a-cho: a live row of no branch's schema is let through", "                if bi < 0 {\n                    rule = replay_final();", "                if bi < 0 {\n                    rule = 0;"),
+    ("l3a-cho: a live key may be twice", "                    if twice || cur < 0 || !same32(tmp32, 0, hs, 32 * cur) {", "                    if cur < 0 || !same32(tmp32, 0, hs, 32 * cur) {"),
+    ("l3a-cho: a live row may be unknown", "                    if twice || cur < 0 || !same32(tmp32, 0, hs, 32 * cur) {", "                    if twice || !same32(tmp32, 0, hs, 32 * cur) {"),
+    ("l3a-cho: a live row may differ", "                    if twice || cur < 0 || !same32(tmp32, 0, hs, 32 * cur) {", "                    if twice || cur < 0 {"),
+    ("l3a-cho: a row the dump lacks is let through", "                if held != dumped {", "                if false {"),
+    ("l3a-cho: the first branch's schema is cdb_b_", "        return bytes.equal(schema, \"public\");", "        return bytes.starts_with(schema, \"cdb_b_\");"),
+]
+
+
+def run_l3a_cho(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in L3A_CHO if not only or only in m[0]]
+    survivors = []
+    for label, old, new in table:
+        old, new = old.replace("\\n", "\n"), new.replace("\\n", "\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / "src" / "l3a.cho"
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "l3averify"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/l3averify.cho")] + [str(work / "src" / n) for n in ("l3a.cho", "commit.cho", "build.cho", "state.cho")] + ["-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            try:
+                r = subprocess.run([sys.executable, str(ROOT / "tests/l3a_check.py"), str(exe)], capture_output=True, text=True, timeout=300)
+                rc, out = r.returncode, r.stdout
+            except subprocess.TimeoutExpired:
+                rc, out = 1, "FAIL timed out"
+            if rc == 0:
+                print("SURVIVED %-46s every L3a case passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in out.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d case(s), e.g. %s" % (label, len(first), first[0][5:70] if first else "a crash"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 
 def run(kind, cancho):
     if kind == "guard":
@@ -1314,6 +1408,8 @@ def run(kind, cancho):
         return run_sql(cancho)
     if kind == "l3a":
         return run_l3a(cancho)
+    if kind == "l3a-cho":
+        return run_l3a_cho(cancho)
     if kind == "state":
         return run_state(cancho)
     if kind == "lower":

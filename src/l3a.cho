@@ -1,0 +1,1035 @@
+module cdb.l3a;
+
+import std.bytes;
+import std.map;
+import std.crypto;
+import cdb.build;
+import cdb.commit;
+import cdb.state;
+
+// L3a (docs/spec/l3a.md), run over a log that has already passed L1: the delta store, then every commit in log order, then (if the live dump was given) the
+// tables. It reads the three text files as hex text and compares text where the spec compares bytes (lower-case hex orders as its bytes do); it decodes a hash or
+// an image only to hash it. `verdict` (6 ints): the rule code (`ok()` for none), the commit it names (-1 for none), then the commits, facts and branches counted
+// and whether step 7 ran. Nothing here panics on any input: every index is checked against what was parsed.
+
+pub fn ok() -> [] int {
+    return 0;
+}
+
+pub fn store_malformed() -> [] int {
+    return 1;
+}
+
+pub fn store_foreign_row() -> [] int {
+    return 2;
+}
+
+pub fn facts_image() -> [] int {
+    return 3;
+}
+
+pub fn changes_mismatch() -> [] int {
+    return 4;
+}
+
+pub fn state_mismatch() -> [] int {
+    return 5;
+}
+
+pub fn replay_precondition() -> [] int {
+    return 6;
+}
+
+pub fn replay_unsupported() -> [] int {
+    return 7;
+}
+
+pub fn replay_final() -> [] int {
+    return 8;
+}
+
+pub fn log_malformed() -> [] int {
+    return 9;
+}
+
+pub fn rule_name(code: int) -> [] &static [byte] {
+    if code == 1 {
+        return "store-malformed";
+    }
+    if code == 2 {
+        return "store-foreign-row";
+    }
+    if code == 3 {
+        return "facts-image";
+    }
+    if code == 4 {
+        return "changes-mismatch";
+    }
+    if code == 5 {
+        return "state-mismatch";
+    }
+    if code == 6 {
+        return "replay-precondition";
+    }
+    if code == 7 {
+        return "replay-unsupported";
+    }
+    if code == 8 {
+        return "replay-final";
+    }
+    return "log-malformed";
+}
+
+// Ints in a parsed delta row: nine fields as (start, end) pairs, then the index of the commit the row belongs to (-1 until known).
+fn dstride() -> [] int {
+    return 20;
+}
+
+fn is_lower_hex(c: int) -> [] bool {
+    return c >= '0' && c <= '9' || c >= 'a' && c <= 'f';
+}
+
+// `text[a..b]` is lower-case hex of an even length, not empty.
+fn hex_text[&t](text: &t [byte], a: int, b: int) -> [] bool {
+    if b <= a || (b - a) % 2 != 0 {
+        return false;
+    }
+    var i = a;
+    while i < b {
+        if !is_lower_hex(int_of(text[i])) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The end of the line that starts at `a` (the position of its newline, or the end of the text).
+fn line_end[&t](text: &t [byte], a: int) -> [] int {
+    var e = a;
+    while e < len(text) && int_of(text[e]) != 10 {
+        e = e + 1;
+    }
+    return e;
+}
+
+// The tab-separated fields of `text[a..e]` into `meta` from `at` (start, end for each); true when there are exactly `n`.
+fn fields[&t, &m](text: &t [byte], a: int, e: int, n: int, meta: &!m [int], at: int) -> [] bool {
+    var count = 0;
+    var s = a;
+    var p = a;
+    while p <= e {
+        if p == e || int_of(text[p]) == 9 {
+            if count >= n {
+                return false;
+            }
+            meta[at + 2 * count] = s;
+            meta[at + 2 * count + 1] = p;
+            count = count + 1;
+            s = p + 1;
+        }
+        p = p + 1;
+    }
+    return count == n;
+}
+
+// The lines after the first of `text`, which must be exactly `magic`, each split into `nf` fields at `stride` ints a row: the number of rows, or -1.
+// `meta` has room for one row more than there are newlines.
+fn parse_lines[&t, &g, &m](text: &t [byte], magic: &g [byte], nf: int, stride: int, meta: &!m [int]) -> [] int {
+    if !bytes.starts_with(text, magic) {
+        return 0 - 1;
+    }
+    let first = line_end(text, 0);
+    // the first line is the magic, and every line ends with a newline: the last one too
+    if first != len(magic) || int_of(text[len(text) - 1]) != 10 {
+        return 0 - 1;
+    }
+    var p = first + 1;
+    var n = 0;
+    while p < len(text) {
+        let e = line_end(text, p);
+        if !fields(text, p, e, nf, meta, n * stride) {
+            return 0 - 1;
+        }
+        n = n + 1;
+        p = e + 1;
+    }
+    return n;
+}
+
+fn newlines[&t](text: &t [byte]) -> [] int {
+    return bytes.count_byte(text, 10) + 2;
+}
+
+// The hex text `text[a..b]` decoded into `out` at `at`.
+fn decode_into[&t, &o](text: &t [byte], a: int, b: int, out: &!o [byte], at: int) -> [] int {
+    return state.hexdec(text, a, b, out, at);
+}
+
+// The delta rows: how many, or -1 for `store-malformed`. A seq twice is malformed; so is a row with neither hash.
+pub fn read_deltas[&h, &t, &m](heap: &!h Heap, text: &t [byte], meta: &!m [int]) -> [heap] int {
+    let n = parse_lines(text, "CHODBDL1", 9, dstride(), meta);
+    var good = n >= 0;
+    var seqs = map.empty(heap, 64, 0, 21);
+    var i = 0;
+    while good && i < n {
+        let b = i * dstride();
+        // seq: digits, no leading zero unless it is "0", and new
+        let sa = meta[b];
+        let se = meta[b + 1];
+        if se <= sa {
+            good = false;
+        } else {
+            var k = sa;
+            while k < se {
+                if int_of(text[k]) < '0' || int_of(text[k]) > '9' {
+                    good = false;
+                }
+                k = k + 1;
+            }
+            if se - sa > 1 && int_of(text[sa]) == '0' {
+                good = false;
+            }
+        }
+        if good {
+            var seen = false;
+            borrow seqs as &sm in {
+                seen = map.has(sm, text[sa..se]);
+            }
+            if seen {
+                good = false;
+            } else {
+                seqs = map.put(heap, seqs, text[sa..se], i);
+            }
+        }
+        // commit: 64 hex; schema: not empty; table, key: hex; hashes: absent or 64 hex; images: absent or hex
+        if good && (meta[b + 3] - meta[b + 2] != 64 || !hex_text(text, meta[b + 2], meta[b + 3])) {
+            good = false;
+        }
+        if good && meta[b + 5] <= meta[b + 4] {
+            good = false;
+        }
+        if good && !hex_text(text, meta[b + 6], meta[b + 7]) {
+            good = false;
+        }
+        if good && !hex_text(text, meta[b + 8], meta[b + 9]) {
+            good = false;
+        }
+        var f = 5;
+        while good && f < 7 {
+            let ha = meta[b + 2 * f];
+            let he = meta[b + 2 * f + 1];
+            if he != ha && (he - ha != 64 || !hex_text(text, ha, he)) {
+                good = false;
+            }
+            f = f + 1;
+        }
+        f = 7;
+        while good && f < 9 {
+            let ia = meta[b + 2 * f];
+            let ie = meta[b + 2 * f + 1];
+            if ie != ia && !hex_text(text, ia, ie) {
+                good = false;
+            }
+            f = f + 1;
+        }
+        if good && meta[b + 11] == meta[b + 10] && meta[b + 13] == meta[b + 12] {
+            good = false;
+        }
+        meta[b + 18] = 0 - 1;
+        i = i + 1;
+    }
+    map.drop(heap, seqs);
+    if !good {
+        return 0 - 1;
+    }
+    return n;
+}
+
+// Row order for the netting: commit, table, key, then seq (shorter first, then as text: the seqs have no leading zero).
+fn row_less[&t, &m](text: &t [byte], meta: &m [int], x: int, y: int) -> [] bool {
+    let a = x * dstride();
+    let b = y * dstride();
+    if meta[a + 18] != meta[b + 18] {
+        return meta[a + 18] < meta[b + 18];
+    }
+    var f = 3;
+    while f <= 4 {
+        let c = bytes.compare(text[meta[a + 2 * f]..meta[a + 2 * f + 1]], text[meta[b + 2 * f]..meta[b + 2 * f + 1]]);
+        if c != 0 {
+            return c < 0;
+        }
+        f = f + 1;
+    }
+    let la = meta[a + 1] - meta[a];
+    let lb = meta[b + 1] - meta[b];
+    if la != lb {
+        return la < lb;
+    }
+    return bytes.compare(text[meta[a]..meta[a + 1]], text[meta[b]..meta[b + 1]]) < 0;
+}
+
+// `ord[0..n]` (row numbers) put in `row_less` order; `ord[n + 1..2 * n + 1]` is the scratch.
+fn sort_rows[&t, &m, &o](text: &t [byte], meta: &m [int], ord: &!o [int], n: int) -> [] int {
+    let tmp0 = n + 1;
+    var width = 1;
+    while width < n {
+        var lo = 0;
+        while lo < n {
+            var mid = lo + width;
+            if mid > n {
+                mid = n;
+            }
+            var hi = lo + 2 * width;
+            if hi > n {
+                hi = n;
+            }
+            var i = lo;
+            var j = mid;
+            var k = lo;
+            while k < hi {
+                if i < mid && (j >= hi || !row_less(text, meta, ord[j], ord[i])) {
+                    ord[tmp0 + k] = ord[i];
+                    i = i + 1;
+                } else {
+                    ord[tmp0 + k] = ord[j];
+                    j = j + 1;
+                }
+                k = k + 1;
+            }
+            lo = lo + 2 * width;
+        }
+        var c = 0;
+        while c < n {
+            ord[c] = ord[tmp0 + c];
+            c = c + 1;
+        }
+        width = width * 2;
+    }
+    return 0;
+}
+
+// Whether `schema` is the name of the schema of branch `name`: `public` for the first, `cdb_b_<name>` for any other.
+fn schema_is[&s, &n](schema: &s [byte], name: &n [byte], is_first: bool) -> [] bool {
+    if is_first {
+        return bytes.equal(schema, "public");
+    }
+    return bytes.starts_with(schema, "cdb_b_") && bytes.equal(schema[6..len(schema)], name);
+}
+
+// The map key of a row: the branch (two bytes), the table and the key as hex text, written into `out`; its length.
+fn row_key[&a, &b, &o](bi: int, table: &a [byte], key: &b [byte], out: &!o [byte]) -> [] int {
+    out[0] = byte_of(bi / 256);
+    out[1] = byte_of(bi % 256);
+    var at = 2;
+    var i = 0;
+    while i < len(table) {
+        out[at] = table[i];
+        at = at + 1;
+        i = i + 1;
+    }
+    out[at] = byte_of(':');
+    at = at + 1;
+    i = 0;
+    while i < len(key) {
+        out[at] = key[i];
+        at = at + 1;
+        i = i + 1;
+    }
+    return at;
+}
+
+// The base (section 3) or the live dump (section 3b): the rows, `nf` fields each; the number of rows, or -1. Fields are hex but for the schema.
+fn read_rows[&t, &m](text: &t [byte], magic: &static [byte], nf: int, meta: &!m [int]) -> [] int {
+    let n = parse_lines(text, magic, nf, 2 * nf, meta);
+    var good = n >= 0;
+    var i = 0;
+    while good && i < n {
+        var f = 0;
+        if nf == 4 {
+            // the schema is any text that is not empty
+            if meta[8 * i + 1] <= meta[8 * i] {
+                good = false;
+            }
+            f = 1;
+        }
+        while good && f < nf {
+            if !hex_text(text, meta[2 * nf * i + 2 * f], meta[2 * nf * i + 2 * f + 1]) {
+                good = false;
+            }
+            f = f + 1;
+        }
+        i = i + 1;
+    }
+    if !good {
+        return 0 - 1;
+    }
+    return n;
+}
+
+// Copies `src[a..b]` into `out` at `at`; the new position.
+fn put_text[&s, &o](out: &!o [byte], at: int, src: &s [byte], a: int, b: int) -> [] int {
+    var i = a;
+    var p = at;
+    while i < b {
+        out[p] = src[i];
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+// Whether the 32 bytes of `x` at `a` are those of `y` at `b`.
+fn same32[&x, &y](xs: &x [byte], a: int, ys: &y [byte], b: int) -> [] bool {
+    var i = 0;
+    while i < 32 {
+        if int_of(xs[a + i]) != int_of(ys[b + i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The log, the delta store, the base and the live dump (the last two when `has_base`, `has_live`) are checked. `first_name` names the first branch when `has_first`.
+
+// The number of commits whose framing is whole (`commit.md` section 4); if the log is cut or not a log, `verdict[0..2]` say `log-malformed` and the record.
+fn count_commits[&d, &o](data: &d [byte], verdict: &!o [int]) -> [] int {
+    var n = 0;
+    if len(data) < 40 || !bytes.equal(data[0..8], "CHODBLG1") {
+        verdict[0] = log_malformed();
+        return 0;
+    }
+    var at = 40;
+    while at < len(data) {
+        if len(data) - at < 4 {
+            verdict[0] = log_malformed();
+            verdict[1] = n;
+            return n;
+        }
+        let length = commit.be(data, at, 4);
+        if len(data) - at - 4 < length + 64 {
+            verdict[0] = log_malformed();
+            verdict[1] = n;
+            return n;
+        }
+        at = at + 4 + length + 64;
+        n = n + 1;
+    }
+    return n;
+}
+
+// The checks of `run`, on the arrays it has made: `ci` per commit (8 ints: where its encoding is and its length, its branch, whether it has a write, where its state is, its parents' count and place;
+// then, per branch, its first commit, the last commit visited on it, whether its map exists), `dmeta`/`bmeta`/`lmeta` the parsed files, `ord` the row order and its scratch, `gi` five
+// arrays of `len(gi) / 5` (the groups' first and last rows and kinds, and the copied keys' offsets and values), `fmeta` the facts' scratch; bytes: the commit ids, the hashes, and scratch.
+fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &bg, &kb, &tt, &ww, &fe, &fl, &kk, &lv](heap: &!h Heap, data: &d [byte], dtext: &t [byte], has_base: bool, btext: &b [byte], has_live: bool, ltext: &l [byte], has_first: bool, first_name: &f [byte], ncommits: int, verdict: &!o [int], ci: &!c [int], dmeta: &!m1 [int], bmeta: &!m2 [int], lmeta: &!m3 [int], ord: &!q [int], gi: &!g [int], fmeta: &!fm [int], ids: &!i1 [byte], hs: &!hh [byte], big: &!bg [byte], keybuf: &!kb [byte], ft: &!tt [byte], w: &!ww [byte], fenc: &!fe [byte], flv: &!fl [byte], ck: &!kk [byte], lh: &!lv [byte]) -> [heap] int {
+    var rule = 0;
+    var bad_at = 0 - 1;
+    var nfacts = 0;
+    var nbranches = 0;
+    let nc1 = ncommits + 1;
+    let o_bf = 8 * nc1;
+    let o_bl = o_bf + nc1;
+    let o_bm = o_bl + nc1;
+    let g1 = len(gi) / 5;
+    var idmap = map.empty(heap, 64, 0 - 1, 31);
+    var brmap = map.empty(heap, 16, 0 - 1, 33);
+    var maps = map.empty(heap, 256, 0 - 1, 35);
+    var seen = map.empty(heap, 16, 0, 37);
+    var bseen = map.empty(heap, 16, 0, 41);
+
+    region r {
+        let out = alloc_slice[r](commit.out_len(), 0);
+        // ---- the log (its framing is already known good: `count_commits`)
+        // per commit: where its encoding starts and how long it is, its branch, whether it has a write/DDL/call effect, where its state is, its parents (count, where)
+        var i = 0;
+        while i < o_bf + 3 * nc1 {
+            ci[i] = 0;
+            i = i + 1;
+        }
+        i = 0;
+        while i < nc1 {
+            ci[o_bl + i] = 0 - 1;
+            i = i + 1;
+        }
+        // the first commit of each branch (for its name) and the last commit visited on it, and whether its map exists
+        var at = 40;
+        i = 0;
+        while rule == 0 && i < ncommits {
+            let length = commit.be(data, at, 4);
+            let enc = data[at + 4..at + 4 + length];
+            ci[8 * i] = at + 4;
+            ci[8 * i + 1] = length;
+            at = at + 4 + length + 64;
+            if commit.decode(enc, out) != commit.ok() {
+                rule = log_malformed();
+                bad_at = i;
+            } else {
+                let bat = out[commit.f_branch_at()];
+                let blen = out[commit.f_branch_len()];
+                var bi = 0 - 1;
+                borrow brmap as &m in {
+                    bi = map.get(m, enc[bat..bat + blen], 0 - 1);
+                }
+                if bi < 0 {
+                    bi = nbranches;
+                    brmap = map.put(heap, brmap, enc[bat..bat + blen], bi);
+                    ci[o_bf + bi] = i;
+                    nbranches = nbranches + 1;
+                }
+                ci[8 * i + 2] = bi;
+                var e = 0;
+                var eat = out[commit.f_effects_at()];
+                var writes = 0;
+                while e < out[commit.f_effects_n()] {
+                    let kind = int_of(enc[eat]);
+                    if kind == 1 || kind == 2 || kind == 3 {
+                        writes = 1;
+                    }
+                    eat = eat + 3 + commit.be(enc, eat + 1, 2);
+                    e = e + 1;
+                }
+                ci[8 * i + 3] = writes;
+                ci[8 * i + 4] = out[commit.f_state_at()];
+                ci[8 * i + 5] = out[commit.f_parents()];
+                ci[8 * i + 6] = out[commit.f_parents_at()];
+                build.id(enc, ids[32 * i..32 * i + 32]);
+                idmap = map.put(heap, idmap, ids[32 * i..32 * i + 32], i);
+            }
+            i = i + 1;
+        }
+
+        // ---- the stores
+        var nrows = 0;
+        var nbase = 0;
+        var nlive = 0;
+        if rule == 0 {
+            nrows = read_deltas(heap, dtext, dmeta);
+            if nrows < 0 {
+                rule = store_malformed();
+            }
+        }
+        if rule == 0 && has_base {
+            nbase = read_rows(btext, "CHODBBS1", 3, bmeta);
+            if nbase < 0 {
+                rule = store_malformed();
+            }
+        }
+        if rule == 0 && has_live {
+            nlive = read_rows(ltext, "CHODBLV1", 4, lmeta);
+            if nlive < 0 {
+                rule = store_malformed();
+            }
+        }
+
+        if rule != 0 {
+            nrows = 0;
+            nbase = 0;
+            nlive = 0;
+        }
+        // the hashes of the rows (old at 2r, new at 2r+1) and of the base rows (2*nrows + j), 32 bytes each; and a place to decode an image
+        let tmp32 = alloc_slice[r](32, byte_of(0));
+        // scratch for the commit loop: made once, a region is not freed until its end
+        let digest = alloc_slice[r](32, byte_of(0));
+        let want = alloc_slice[r](32, byte_of(0));
+        let pst = alloc_slice[r](96, byte_of(0));
+        // a key twice in the base is malformed (section 3)
+        var k = 0;
+        while rule == 0 && k < nbase {
+            let m = 6 * k;
+            let n = row_key(0, btext[bmeta[m]..bmeta[m + 1]], btext[bmeta[m + 2]..bmeta[m + 3]], keybuf);
+            var twice = false;
+            borrow bseen as &bs in {
+                twice = map.has(bs, keybuf[0..n]);
+            }
+            if twice {
+                rule = store_malformed();
+            } else {
+                bseen = map.put(heap, bseen, keybuf[0..n], k);
+            }
+            k = k + 1;
+        }
+        k = 0;
+        while rule == 0 && k < nrows {
+            let m = k * dstride();
+            var side = 0;
+            while side < 2 {
+                let ha = dmeta[m + 10 + 2 * side];
+                let he = dmeta[m + 11 + 2 * side];
+                if he > ha {
+                    state.hexdec(dtext, ha, he, hs, 32 * (2 * k + side));
+                }
+                side = side + 1;
+            }
+            // which commit the row is of: one that is not in the log is foreign
+            state.hexdec(dtext, dmeta[m + 2], dmeta[m + 3], tmp32, 0);
+            var ci = 0 - 1;
+            borrow idmap as &im in {
+                ci = map.get(im, tmp32, 0 - 1);
+            }
+            if ci < 0 {
+                rule = store_foreign_row();
+            }
+            dmeta[m + 18] = ci;
+            k = k + 1;
+        }
+        k = 0;
+        while rule == 0 && k < nbase {
+            let m = 6 * k;
+            let n = state.hexdec(btext, bmeta[m + 4], bmeta[m + 5], big, 0);
+            state.row_hash(big[0..n], tmp32);
+            put_text(hs, 32 * (2 * nrows + k), tmp32, 0, 32);
+            k = k + 1;
+        }
+
+        // ---- the rows in order
+        k = 0;
+        while k < nrows {
+            ord[k] = k;
+            k = k + 1;
+        }
+        if rule == 0 {
+            sort_rows(dtext, dmeta, ord, nrows);
+        }
+
+        // the first branch
+        var first_bi = 0 - 1;
+        if has_first {
+            borrow brmap as &m in {
+                first_bi = map.get(m, first_name, 0 - 1);
+            }
+        } else if ncommits > 0 {
+            first_bi = ci[2];
+        }
+        if rule == 0 && first_bi >= 0 && has_base {
+            k = 0;
+            while k < nbase {
+                let m = 6 * k;
+                let n = row_key(first_bi, btext[bmeta[m]..bmeta[m + 1]], btext[bmeta[m + 2]..bmeta[m + 3]], keybuf);
+                maps = map.put(heap, maps, keybuf[0..n], 2 * nrows + k);
+                k = k + 1;
+            }
+        }
+
+        // ---- the commits
+        var rp = 0;
+        i = 0;
+        while rule == 0 && i < ncommits {
+            let eat = ci[8 * i];
+            let enc = data[eat..eat + ci[8 * i + 1]];
+            let bi = ci[8 * i + 2];
+            let bn = ci[o_bf + bi];
+            let bnat = out[0];
+            // the name of the branch: from the encoding of its first commit
+            commit.decode(data[ci[8 * bn]..ci[8 * bn] + ci[8 * bn + 1]], out);
+            let name = data[ci[8 * bn] + out[commit.f_branch_at()]..ci[8 * bn] + out[commit.f_branch_at()] + out[commit.f_branch_len()]];
+            let lo = rp;
+            while rp < nrows && dmeta[ord[rp] * dstride() + 18] == i {
+                rp = rp + 1;
+            }
+            let hi = rp;
+            // 1. the rows belong here
+            k = lo;
+            while rule == 0 && k < hi {
+                let m = ord[k] * dstride();
+                if !schema_is(dtext[dmeta[m + 4]..dmeta[m + 5]], name, bi == first_bi) {
+                    rule = store_foreign_row();
+                }
+                k = k + 1;
+            }
+            if rule == 0 && hi > lo && ci[8 * i + 3] == 0 {
+                rule = store_foreign_row();
+            }
+            // 2. the images
+            k = lo;
+            while rule == 0 && k < hi {
+                let row = ord[k];
+                let m = row * dstride();
+                var side = 0;
+                while rule == 0 && side < 2 {
+                    let ha = dmeta[m + 10 + 2 * side];
+                    let he = dmeta[m + 11 + 2 * side];
+                    let ia = dmeta[m + 14 + 2 * side];
+                    let ie = dmeta[m + 15 + 2 * side];
+                    if he > ha != ie > ia {
+                        rule = facts_image();
+                    } else if he > ha {
+                        let n = state.hexdec(dtext, ia, ie, big, 0);
+                        state.row_hash(big[0..n], tmp32);
+                        if !same32(tmp32, 0, hs, 32 * (2 * row + side)) {
+                            rule = facts_image();
+                        }
+                    }
+                    side = side + 1;
+                }
+                k = k + 1;
+            }
+            // 3. changes: the facts, netted by (table, key) over the rows in seq order
+            var ng = 0;
+            var nf = 0;
+            var tlen = 0;
+            if rule == 0 {
+                k = lo;
+                while k < hi {
+                    let m = ord[k] * dstride();
+                    var same = false;
+                    if k > lo {
+                        let pm = ord[k - 1] * dstride();
+                        same = bytes.equal(dtext[dmeta[pm + 6]..dmeta[pm + 7]], dtext[dmeta[m + 6]..dmeta[m + 7]]) && bytes.equal(dtext[dmeta[pm + 8]..dmeta[pm + 9]], dtext[dmeta[m + 8]..dmeta[m + 9]]);
+                    }
+                    if !same {
+                        gi[ng] = ord[k];
+                        ng = ng + 1;
+                    }
+                    gi[1 * g1 + ng - 1] = ord[k];
+                    tlen = tlen + (dmeta[m + 7] - dmeta[m + 6]) + (dmeta[m + 9] - dmeta[m + 8]) + 140;
+                    k = k + 1;
+                }
+                var g = 0;
+                while g < ng {
+                    let fm = gi[g] * dstride();
+                    let lm = gi[1 * g1 + g] * dstride();
+                    let oldp = dmeta[fm + 11] > dmeta[fm + 10];
+                    let newp = dmeta[lm + 13] > dmeta[lm + 12];
+                    var kind = 1;
+                    if !oldp && !newp {
+                        kind = 0 - 1;
+                    } else if oldp && newp && same32(hs, 32 * (2 * gi[g]), hs, 32 * (2 * gi[1 * g1 + g] + 1)) {
+                        kind = 0 - 1;
+                    } else if !oldp {
+                        kind = 0;
+                    } else if !newp {
+                        kind = 2;
+                    }
+                    gi[2 * g1 + g] = kind;
+                    if kind >= 0 {
+                        nf = nf + 1;
+                    }
+                    g = g + 1;
+                }
+                // the text `kind:table:key:old:new` of each fact, separated by spaces
+                var tp = 0;
+                g = 0;
+                while g < ng {
+                    if gi[2 * g1 + g] >= 0 {
+                        let fm = gi[g] * dstride();
+                        let lm = gi[1 * g1 + g] * dstride();
+                        ft[tp] = byte_of('0' + gi[2 * g1 + g]);
+                        ft[tp + 1] = byte_of(':');
+                        tp = put_text(ft, tp + 2, dtext, dmeta[fm + 6], dmeta[fm + 7]);
+                        ft[tp] = byte_of(':');
+                        tp = put_text(ft, tp + 1, dtext, dmeta[fm + 8], dmeta[fm + 9]);
+                        ft[tp] = byte_of(':');
+                        if dmeta[fm + 11] > dmeta[fm + 10] {
+                            tp = put_text(ft, tp + 1, dtext, dmeta[fm + 10], dmeta[fm + 11]);
+                        } else {
+                            ft[tp + 1] = byte_of('-');
+                            tp = tp + 2;
+                        }
+                        ft[tp] = byte_of(':');
+                        if dmeta[lm + 13] > dmeta[lm + 12] {
+                            tp = put_text(ft, tp + 1, dtext, dmeta[lm + 12], dmeta[lm + 13]);
+                        } else {
+                            ft[tp + 1] = byte_of('-');
+                            tp = tp + 2;
+                        }
+                        ft[tp] = byte_of(' ');
+                        tp = tp + 1;
+                    }
+                    g = g + 1;
+                }
+                var le = tp;
+                if le > 0 {
+                    le = le - 1;
+                }
+                let code = state.changes_of(ft, 0, le, w, fmeta, fenc, flv, digest);
+                let cat = ci[8 * i + 4] - 32;
+                if code != 0 || !same32(digest, 0, enc, cat) {
+                    rule = changes_mismatch();
+                }
+            }
+            // 4. state
+            if rule == 0 {
+                let np = ci[8 * i + 5];
+                let pat = ci[8 * i + 6];
+                var p = 0;
+                while rule == 0 && p < np {
+                    var pi = 0 - 1;
+                    borrow idmap as &im in {
+                        pi = map.get(im, enc[pat + 32 * p..pat + 32 * p + 32], 0 - 1);
+                    }
+                    if pi < 0 {
+                        rule = state_mismatch();
+                    } else {
+                        let pe = ci[8 * pi];
+                        put_text(pst, 32 * p, data, pe + ci[8 * pi + 4], pe + ci[8 * pi + 4] + 32);
+                    }
+                    p = p + 1;
+                }
+                if rule == 0 {
+                    state.state(np, pst[0..32 * np], enc[ci[8 * i + 4] - 32..ci[8 * i + 4]], want);
+                    if !same32(want, 0, enc, ci[8 * i + 4]) {
+                        rule = state_mismatch();
+                    }
+                }
+            }
+            // 6. a branch's first commit copies the map of the branch its first parent is on
+            if rule == 0 && ci[o_bm + bi] == 0 {
+                var src = 0 - 1;
+                if ci[8 * i + 5] > 0 {
+                    var p0 = 0 - 1;
+                    borrow idmap as &im in {
+                        p0 = map.get(im, enc[ci[8 * i + 6]..ci[8 * i + 6] + 32], 0 - 1);
+                    }
+                    if p0 >= 0 {
+                        src = ci[8 * p0 + 2];
+                        if ci[o_bl + src] != p0 {
+                            rule = replay_unsupported();
+                        }
+                    } else {
+                        rule = replay_unsupported();
+                    }
+                    if rule == 0 {
+                        // the entries of `src`, copied under `bi`
+                        var n = 0;
+                        var total = 0;
+                        borrow maps as &mm in {
+                            var e = 0;
+                            while e < map.entries(mm) {
+                                if map.is_live(mm, e) {
+                                    let key = map.key_at(mm, e);
+                                    if int_of(key[0]) * 256 + int_of(key[1]) == src {
+                                        n = n + 1;
+                                        total = total + len(key);
+                                    }
+                                }
+                                e = e + 1;
+                            }
+                        }
+                        var j = 0;
+                        var pos = 0;
+                        borrow maps as &mm in {
+                            var e = 0;
+                            while e < map.entries(mm) {
+                                if map.is_live(mm, e) {
+                                    let key = map.key_at(mm, e);
+                                    if int_of(key[0]) * 256 + int_of(key[1]) == src {
+                                        gi[3 * g1 + j] = pos;
+                                        pos = put_text(ck, pos, key, 0, len(key));
+                                        gi[4 * g1 + j] = map.value_at(mm, e);
+                                        j = j + 1;
+                                    }
+                                }
+                                e = e + 1;
+                            }
+                        }
+                        gi[3 * g1 + n] = pos;
+                        j = 0;
+                        while j < n {
+                            ck[gi[3 * g1 + j]] = byte_of(bi / 256);
+                            ck[gi[3 * g1 + j] + 1] = byte_of(bi % 256);
+                            maps = map.put(heap, maps, ck[gi[3 * g1 + j]..gi[3 * g1 + j + 1]], gi[4 * g1 + j]);
+                            j = j + 1;
+                        }
+                    }
+                }
+                ci[o_bm + bi] = 1;
+            }
+            // 5. the facts, in order, against the map of the branch
+            if rule == 0 {
+                var g = 0;
+                while rule == 0 && g < ng {
+                    if gi[2 * g1 + g] >= 0 {
+                        let fm = gi[g] * dstride();
+                        let kn = row_key(bi, dtext[dmeta[fm + 6]..dmeta[fm + 7]], dtext[dmeta[fm + 8]..dmeta[fm + 9]], keybuf);
+                        var cur = 0 - 1;
+                        borrow maps as &mm in {
+                            cur = map.get(mm, keybuf[0..kn], 0 - 1);
+                        }
+                        if gi[2 * g1 + g] == 0 {
+                            if cur >= 0 {
+                                rule = replay_precondition();
+                            }
+                        } else if cur < 0 || !same32(hs, 32 * cur, hs, 32 * (2 * gi[g])) {
+                            rule = replay_precondition();
+                        }
+                        if rule == 0 {
+                            if gi[2 * g1 + g] == 2 {
+                                borrow mut maps as &!mm in {
+                                    map.remove(mm, keybuf[0..kn]);
+                                }
+                            } else {
+                                maps = map.put(heap, maps, keybuf[0..kn], 2 * gi[1 * g1 + g] + 1);
+                            }
+                            nfacts = nfacts + 1;
+                        }
+                    }
+                    g = g + 1;
+                }
+            }
+            ci[o_bl + bi] = i;
+            if rule != 0 {
+                bad_at = i;
+            }
+            i = i + 1;
+        }
+
+        // ---- 7. the tables
+        if rule == 0 && has_live {
+            k = 0;
+            while rule == 0 && k < nlive {
+                let m = 8 * k;
+                // which branch's schema
+                var bi = 0 - 1;
+                var c = 0;
+                while c < ncommits && bi < 0 {
+                    let cb = ci[8 * c + 2];
+                    if ci[o_bf + cb] == c {
+                        let bn = ci[8 * c];
+                        commit.decode(data[bn..bn + ci[8 * c + 1]], out);
+                        let name = data[bn + out[commit.f_branch_at()]..bn + out[commit.f_branch_at()] + out[commit.f_branch_len()]];
+                        if schema_is(ltext[lmeta[m]..lmeta[m + 1]], name, cb == first_bi) {
+                            bi = cb;
+                        }
+                    }
+                    c = c + 1;
+                }
+                if bi < 0 {
+                    rule = replay_final();
+                } else {
+                    let kn = row_key(bi, ltext[lmeta[m + 2]..lmeta[m + 3]], ltext[lmeta[m + 4]..lmeta[m + 5]], keybuf);
+                    var twice = false;
+                    borrow seen as &sm in {
+                        twice = map.has(sm, keybuf[0..kn]);
+                    }
+                    var cur = 0 - 1;
+                    borrow maps as &mm in {
+                        cur = map.get(mm, keybuf[0..kn], 0 - 1);
+                    }
+                    let n = state.hexdec(ltext, lmeta[m + 6], lmeta[m + 7], big, 0);
+                    state.row_hash(big[0..n], tmp32);
+                    if twice || cur < 0 || !same32(tmp32, 0, hs, 32 * cur) {
+                        rule = replay_final();
+                    } else {
+                        seen = map.put(heap, seen, keybuf[0..kn], k);
+                    }
+                }
+                k = k + 1;
+            }
+            if rule == 0 {
+                var held = 0;
+                var dumped = 0;
+                borrow maps as &mm in {
+                    held = map.size(mm);
+                }
+                borrow seen as &sm in {
+                    dumped = map.size(sm);
+                }
+                if held != dumped {
+                    rule = replay_final();
+                }
+            }
+        }
+    }
+
+    verdict[0] = rule;
+    verdict[1] = bad_at;
+    verdict[2] = ncommits;
+    verdict[3] = nfacts;
+    verdict[4] = nbranches;
+    map.drop(heap, idmap);
+    map.drop(heap, brmap);
+    map.drop(heap, maps);
+    map.drop(heap, seen);
+    map.drop(heap, bseen);
+    return 0;
+}
+
+// The log, the delta store, the base and the live dump (the last two when `has_base`, `has_live`) are checked. `first_name` names the first branch when `has_first`.
+// Everything that grows with the input is on the heap (a region holds 64 KiB): sized from the text of the files, and handed to `body`.
+pub fn run[&h, &d, &t, &b, &l, &f, &o](heap: &!h Heap, data: &d [byte], dtext: &t [byte], has_base: bool, btext: &b [byte], has_live: bool, ltext: &l [byte], has_first: bool, first_name: &f [byte], verdict: &!o [int]) -> [heap] int {
+    verdict[0] = 0;
+    verdict[1] = 0 - 1;
+    verdict[2] = 0;
+    verdict[3] = 0;
+    verdict[4] = 0;
+    let nc = count_commits(data, verdict);
+    if verdict[0] != 0 {
+        return 0;
+    }
+    let nd = newlines(dtext);
+    let nbm = newlines(btext);
+    let nlm = newlines(ltext);
+    let ents = nd + nbm + 2;
+    let total = len(dtext) + 140 * nd + 8;
+    var b_ci = box_slice(heap, 11 * (nc + 1), 0);
+    var b_dm = box_slice(heap, dstride() * nd, 0);
+    var b_bm = box_slice(heap, 6 * nbm, 0);
+    var b_lm = box_slice(heap, 8 * nlm, 0);
+    var b_or = box_slice(heap, 2 * nd + 2, 0);
+    var b_gi = box_slice(heap, 5 * ents, 0);
+    var b_fm = box_slice(heap, 9 * nd + 9, 0);
+    var b_id = box_slice(heap, 32 * nc + 32, byte_of(0));
+    var b_hs = box_slice(heap, 32 * (2 * nd + nbm) + 32, byte_of(0));
+    var b_bg = box_slice(heap, len(dtext) / 2 + len(btext) / 2 + len(ltext) / 2 + 64, byte_of(0));
+    var b_kb = box_slice(heap, len(dtext) + len(btext) + len(ltext) + 64, byte_of(0));
+    var b_ft = box_slice(heap, total, byte_of(0));
+    var b_w = box_slice(heap, total / 2 + 16, byte_of(0));
+    var b_fe = box_slice(heap, total + 512, byte_of(0));
+    var b_fl = box_slice(heap, 32 * nd + 32, byte_of(0));
+    var b_ck = box_slice(heap, len(dtext) + len(btext) + 4 * ents + 8, byte_of(0));
+    var b_lh = box_slice(heap, 32 * nlm + 32, byte_of(0));
+    borrow mut b_ci as &!w1 in {
+        borrow mut b_dm as &!w2 in {
+            borrow mut b_bm as &!w3 in {
+                borrow mut b_lm as &!w4 in {
+                    borrow mut b_or as &!w5 in {
+                        borrow mut b_gi as &!w6 in {
+                            borrow mut b_fm as &!w7 in {
+                                borrow mut b_id as &!w8 in {
+                                    borrow mut b_hs as &!w9 in {
+                                        borrow mut b_bg as &!w10 in {
+                                            borrow mut b_kb as &!w11 in {
+                                                borrow mut b_ft as &!w12 in {
+                                                    borrow mut b_w as &!w13 in {
+                                                        borrow mut b_fe as &!w14 in {
+                                                            borrow mut b_fl as &!w15 in {
+                                                                borrow mut b_ck as &!w16 in {
+                                                                    borrow mut b_lh as &!w17 in {
+                                                                        body(heap, data, dtext, has_base, btext, has_live, ltext, has_first, first_name, nc, verdict, contents(w1), contents(w2), contents(w3), contents(w4), contents(w5), contents(w6), contents(w7), contents(w8), contents(w9), contents(w10), contents(w11), contents(w12), contents(w13), contents(w14), contents(w15), contents(w16), contents(w17));
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unbox_slice(heap, b_ci);
+    unbox_slice(heap, b_dm);
+    unbox_slice(heap, b_bm);
+    unbox_slice(heap, b_lm);
+    unbox_slice(heap, b_or);
+    unbox_slice(heap, b_gi);
+    unbox_slice(heap, b_fm);
+    unbox_slice(heap, b_id);
+    unbox_slice(heap, b_hs);
+    unbox_slice(heap, b_bg);
+    unbox_slice(heap, b_kb);
+    unbox_slice(heap, b_ft);
+    unbox_slice(heap, b_w);
+    unbox_slice(heap, b_fe);
+    unbox_slice(heap, b_fl);
+    unbox_slice(heap, b_ck);
+    unbox_slice(heap, b_lh);
+    return 0;
+}

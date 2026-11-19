@@ -119,6 +119,11 @@ fn hash3[&x, &a, &b, &c, &o](prefix: &x [byte], a: &a [byte], b: &b [byte], c: &
     return 0;
 }
 
+// The hash of a row's image (spec section 2 of state.md): SHA-256 of "cancho-db/row/v1", a NUL, the image; into the 32 bytes of `out`.
+pub fn row_hash[&i, &o](image: &i [byte], out: &!o [byte]) -> [] int {
+    return hash3("cancho-db/row/v1", image, "", "", out);
+}
+
 // The leaf of an encoded fact (spec section 2), into the 32 bytes of `out`.
 pub fn leaf[&e, &o](enc: &e [byte], out: &!o [byte]) -> [] int {
     return hash3("cancho-db/fact/v1", enc, "", "", out);

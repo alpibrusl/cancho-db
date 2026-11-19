@@ -16,7 +16,7 @@ or a key, only hashes and compares them as bytes.
 
 ## 2. The delta store
 
-A text file of lines ending `\n`. The first line is exactly `CHODBDL1`. Every other line is one **delta row** of nine fields separated by one tab (0x09), in this order; a field that is "absent" is empty:
+A text file of lines, **each ending `\n`, the last too**. The first line is exactly `CHODBDL1`. Every other line is one **delta row** of nine fields separated by one tab (0x09), in this order; a field that is "absent" is empty:
 
 ```
 seq        decimal, no sign, no leading zero (except 0), unique in the file
@@ -30,7 +30,7 @@ old_image  hex of the image, or absent
 new_image  hex of the image, or absent
 ```
 
-Rows may come in any order; `seq` orders the changes of one commit (a change with a lower `seq` happened first). **`store-malformed`**: a first line that is not `CHODBDL1`; a line without nine fields; a field that is not what is
+Rows may come in any order; `seq` orders the changes of one commit (a change with a lower `seq` happened first). **`store-malformed`**: a file whose last byte is not `\n` (an empty file included); a blank line; a first line that is not `CHODBDL1`; a line without nine fields; a field that is not what is
 said above (an odd or non-hex digit, a hash that is not 32 bytes, a `seq` repeated, an empty `commit`, `schema`, `table` or `key`); a row with neither hash.
 
 A row is **well formed as to images** if `old_hash` is absent exactly when `old_image` is, `new_hash` exactly when `new_image`, and a present hash is the hash of the present image: otherwise **`facts-image`**.
@@ -38,7 +38,7 @@ A row is **well formed as to images** if `old_hash` is absent exactly when `old_
 ## 3. The base
 
 An optional file: the first line `CHODBBS1`, then one row per line of three tab-separated hex fields `table`, `key`, `image`: the rows of the log's first branch's tables before its first commit. Without one the base is empty. A line that does not
-have three well-formed fields is `store-malformed`.
+have three well-formed fields, or a `(table, key)` that appears twice, is `store-malformed`; so is a file that does not end with `\n`.
 
 ## 3b. The live dump
 
@@ -66,6 +66,9 @@ names another. The commits are visited **in log order**; for each, in this order
    delete needs it present with a hash equal to the fact's `old_hash`. An insert and an update set the hash to `new_hash`; a delete removes the key.
 6. **`replay-unsupported`**: the commit starts a branch (no earlier commit is on it) and its first parent is not the last commit visited on another branch, so that the map it must copy is not known.
 
+**Order of 5 and 6.** Step 6 is judged *before* step 5 for the same commit (a commit that starts a branch is refused as `replay-unsupported` before its facts are tried against a map that does not exist); the numbers
+name the rules, not the order of the two.
+
 **Branches.** There is one map for each branch. The first branch's map starts as the base. **A branch's first commit** takes a **copy of the map of the branch its first parent is on**, as it is now (the first parent is that branch's last commit visited:
 step 6), and then applies its own facts, of which a fork has none; with no parent it starts from an empty map (the first branch's, from the base). **A merge commit applies the facts it recorded to its own branch's map**; L3a does not redo the merge, whose result is what the facts say and which steps 3 to 5 check.
 
@@ -85,3 +88,18 @@ rejection, `2` for a usage error or a file that cannot be read.
 
 `tests/l3a/` holds the golden cases, written by `tools/gen_l3a.py` and never edited by hand: for each case `NAME.log`, `NAME.deltas`, optionally `NAME.base` and `NAME.live`, `NAME.expect` (the line a verifier must write) and `NAME.args` (the extra arguments:
 `--base` and `--live-dump` stand for the files of the case, `--first-branch NAME`). `tests/l3a_check.py` runs a verifier over all of them.
+
+## 8. Points settled by the third reading
+
+A separate agent session wrote a verifier from this page and the vectors alone (`tests/third/l3a_third.py`, M2f-3); it passed all 63 vectors then existing on its first run and listed what the page leaves open. These are settled here, and the vectors that test them are `bad_store_no_final_newline`, `bad_store_blank_line`, `bad_store_header_without_newline`, `bad_base_no_final_newline`, `bad_base_key_twice`, `bad_base_key_twice_other_image`, `bad_live_no_final_newline`, `store_schema_not_utf8`, `live_schema_not_utf8`.
+
+* **Every line ends with a newline**, the last too (sections 2, 3, 3b); an empty file, a file without a final newline and a blank line are `store-malformed`. A file of only its first line and `\n` is valid (no rows).
+* **A key twice in the base** is `store-malformed` (it was "the later line wins" in the first two verifiers).
+* **Hex is lower-case** (section 1): a capital digit is `store-malformed`. An empty image field is an absent image.
+* **The order of whole-file checks:** the log, then the delta store, the base and the live dump, each completely; `store-malformed` and `log-malformed` come before any commit is visited and carry `record=-1` where they belong to no commit. Then the rows of no commit (`store-foreign-row`, `-1`), then the commits.
+* **`facts=M` and `branches=B`** in the answer: M is the number of facts (section 4) over all commits, not of delta rows; B is the number of distinct branches of the log.
+* **A log L1 would refuse** is not judged: a verifier may answer `log-malformed` (with any record) or follow the rules as far as they go. Parents are earlier commits in a log that passes L1; for one that does not, what a parent that comes later does is not defined here. A first branch named with `--first-branch` that is not in the log is not defined either (the first two verifiers read it as a branch that exists in no commit, so no branch is the first branch).
+* **Sizes:** a `seq` is a decimal number of any length (compared as a number, without a limit); a table over 255 bytes or a key over 65,535 (state.md) makes the facts unencodable and the commit `changes-mismatch`; a hash of 32 zero bytes is not special to L3a (it is not the hash of any image, so a row with an image is `facts-image`).
+* **The files are bytes.** A schema name is any bytes without a tab or a newline and is compared as bytes (a verifier that decodes the files as UTF-8 text refuses a store that the others read: the third reading did, and was amended).
+* **Branch names and schemas:** a branch is the first branch's schema `public` or `cdb_b_<name>`; the name is the bytes of the log's branch field compared with the bytes of the schema text. A branch named `public` that is not first has the schema `cdb_b_public`.
+* **Command line:** the log, `--deltas` (required), and optionally `--base`, `--live-dump`, `--first-branch`, each given once; anything else, or a file that cannot be read, is a usage error: exit `2`, a message on standard error and no verdict.

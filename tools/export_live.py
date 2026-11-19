@@ -24,7 +24,7 @@ def main(argv):
     lines = ["CHODBLV1"]
     for sch in schemas:
         for (t,) in q("select c.relname from pg_class c join pg_namespace s on s.oid = c.relnamespace where s.nspname = '%s' and c.relkind = 'r' order by 1" % sch):
-            cols = [c[0] for c in q("select a.attname from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any (i.indkey) where i.indrelid = '%s.\\"%s\\"'::regclass and i.indisprimary order by array_position(i.indkey::int2[], a.attnum)" % (sch, t))]
+            cols = [c[0] for c in q("select a.attname from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any (i.indkey) where i.indrelid = '%s.%s'::regclass and i.indisprimary order by array_position(i.indkey::int2[], a.attnum)" % (sch, '"%s"' % t))]
             if not cols:
                 continue
             key = "jsonb_build_array(%s)::text" % ", ".join('r."%s"' % c for c in cols)

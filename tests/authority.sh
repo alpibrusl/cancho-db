@@ -17,6 +17,16 @@ for never in "the network" "signals" "other programs" "foreign code"; do
 done
 echo "verifier authority ok: $got"
 
+# the L3a verifier: the files named on its command line and the console, and nothing else
+out=$("$CANCHO" authority proxy/l3averify.cho src/l3a.cho src/commit.cho src/build.cho src/state.cho --std)
+got=$(performs_of "$out")
+want='args err_write file_read fs_read("") heap io_write '
+[ "$got" = "$want" ] || { echo "L3a verifier authority changed: performs [$got], expected [$want]" >&2; exit 1; }
+for never in "the network" "signals" "other programs" "foreign code"; do
+    never_in "$out" "$never" || { echo "L3a verifier: no longer says it never touches $never" >&2; exit 1; }
+done
+echo "L3a verifier authority ok: $got"
+
 # the proxy: the network (unbounded: this compiler revision has one Net per program, so a program that listens and dials
 # cannot carry a narrowed one, docs/net-bounds.md section 1), the clock, the console, the filesystem (since P2c: the key file and the
 # log directory, nothing else is named, and the report does not narrow `fs_read("")`), and no signal, program or foreign code. When the report can bound the network this must change on purpose.

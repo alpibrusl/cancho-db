@@ -63,8 +63,14 @@ E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/asof_e2e.py b
 echo "== L3a, delta replay (M2f-1): the golden cases are reproducible, and the verifier agrees with them"
 python3 tools/gen_l3a.py --check
 quiet 2 python3 tests/l3a_check.py "python3 tools/l3a.py"
+echo "== L3a verifier in cancho"; "$CANCHO" build --std proxy/l3averify.cho src/l3a.cho src/commit.cho src/build.cho src/state.cho -o build/l3averify
+quiet 2 python3 tests/l3a_check.py build/l3averify
+echo "== L3a, the third reading"; quiet 2 python3 tests/l3a_check.py "python3 tests/third/l3a_third.py"
+quiet 2 python3 tests/l3a_fuzz.py "python3 tests/third/l3a_third.py" build/l3averify 300 7
+quiet 2 python3 tests/l3a_fuzz.py "python3 tools/l3a.py" build/l3averify 500 1
+quiet 3 python3 tests/l3a_scale.py "python3 tools/l3a.py" build/l3averify 300
 echo "== L3a over a real session: the live tables compared, and the ways to cheat refused"
-quiet 3 python3 tests/l3a_e2e.py build/proxy
+quiet 3 python3 tests/l3a_e2e.py build/proxy "python3 tools/l3a.py" build/l3averify
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
 PG_PORT=5593 N=40 quiet 2 python3 scripts/measure_p2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"
@@ -114,5 +120,6 @@ echo "== mutants, commit builder"; quiet 1 python3 tests/mutants.py build "$CANC
 echo "== mutants, log directory"; quiet 1 python3 tests/mutants.py store "$CANCHO"
 echo "== mutants, capture SQL and cdb.fork"; quiet 1 python3 tests/mutants.py sql "$CANCHO"
 echo "== mutants, L3a verifier"; quiet 1 python3 tests/mutants.py l3a "$CANCHO"
+echo "== mutants, L3a verifier in cancho"; quiet 1 python3 tests/mutants.py l3a-cho "$CANCHO"
 echo "== mutants, proxy (end to end, four at once)"; quiet 1 python3 tests/mutants.py proxy "$CANCHO"
 echo "all green"
