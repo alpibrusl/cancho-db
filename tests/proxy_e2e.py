@@ -63,7 +63,7 @@ def client_queries(tee):
             continue
         if q.startswith("select case when length(f) > 200000"):
             q = "FACTS"           # the proxy asks for the transaction's net facts before it builds the commit (M2b-2b)
-        elif q.startswith("update cdb.delta set commit_id"):
+        elif q.startswith("update cdb.delta set commit_id") or q.startswith("with m as (insert into cdb.mark"):
             q = "DELTA ID"        # ... and gives them the commit's id
         out.append(re.sub(r"'cdb:[0-9a-f]{64}'", "'cdb:ID'", q))
     return out
