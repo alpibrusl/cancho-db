@@ -204,6 +204,29 @@ construct: nothing in this specification, and no verifier, treats such a `Name` 
 
 Whether the commit exists, belongs to the branch, and is what the data was read as of, is the producer's business and not checked by L1 or L2. Vectors: `ir2_history_*` (`tools/gen_ir2.py`): accepted by all three verifiers, the suffix dropped, another commit recorded, a token of the plain table denied, a history token and a prefix token allowed, a history token denied the current table, and a history read joined to the current table.
 
+## 8. Version 3 (DRAFT, not built): constants are payloads
+
+**Status: a design for [`../m2g-erasure.md`](../m2g-erasure.md) D-E7 and Q14, not built; no verifier reads it yet.** Versions 1 and 2 are unchanged and keep their stores.
+
+*Why.* A `Const` holds a value in clear in the statement store, and the statement id in the log hashes it unsalted, so a literal that a person could guess is recoverable from the log alone, and a statement cannot be erased without making L2 refuse the commit that cites it (m2g-erasure.md section 2b).
+
+*What changes.* A store that starts `CHODBST3` holds **records** of a new form, and a v3 statement is a v2 statement whose constants have been **lifted out**:
+
+```
+Expr  += 6 Hole  vtype:u8                  // in place of a `Const`: only the type tag of its `Value` (commit.md §2) stays
+record = u32 length  0x03  shape:Statement  chash:Hash  payload
+payload = 0x00                              // erased: the constants and the salt are gone
+        | 0x01  salt:bytes16(16 bytes)  n:u32  n Values     // the constants, in the order of their `Hole`s (prefix order), and the salt
+chash   = SHA-256( "cancho-db/consts/v1" || 0x00 || salt || u32(n) || the n Values as written )
+id      = SHA-256( "cancho-db/stmt/v3" || 0x00 || encoding(shape) || chash )
+```
+
+*What a verifier checks.* The id of a record is computed from the shape and `chash` alone, so a statement whose payload was erased has the id the log recorded. Inference (§3) runs on the shape (a `Hole` has no effect: no effect ever depended on the value of a constant, only on names). If the payload is present, the number of `Hole`s equals `n`, each `Value`'s type tag equals its `Hole`'s `vtype`, and `chash` is the hash above; otherwise **`stmt-consts-mismatch`** (new tag). A `Const` in a v3 shape, or a `Hole` in a v1 or v2 store, is `stmt-bad-encoding`.
+
+*What it gives.* The log's `stmts` hashes commit to the constants through a salted hash, so they test nothing; erasing a statement means destroying its payload, after which L2 with statements still proves that the recorded effects are what the shape infers. *What it does not give:* the shape itself is not secret (table and column names, operators), and the constants are no longer checked to be those the statement ran with once erased.
+
+*Slice.* E3b of m2g-erasure.md: this section made normative with vectors (`ir3_*`), the three verifiers, and the proxy writing the v3 form. Until then the statement store is not erasable, and `cancho_erase` is not served through the proxy.
+
 ## 7. Vectors
 
 IR vectors (v2 ones have a `CHODBST2` store) are L2 vectors (`token.md` §7) with a `NAME.stmts`, and an `args` line that adds `--stmts {dir}/NAME.stmts`.
