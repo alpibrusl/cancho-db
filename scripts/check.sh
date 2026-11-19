@@ -65,6 +65,8 @@ python3 tools/gen_l3a.py --check
 quiet 2 python3 tests/l3a_check.py "python3 tools/l3a.py"
 echo "== L3a verifier in cancho"; "$CANCHO" build --std proxy/l3averify.cho src/l3a.cho src/commit.cho src/build.cho src/state.cho -o build/l3averify
 quiet 2 python3 tests/l3a_check.py build/l3averify
+echo "== L3a, the third reading"; quiet 2 python3 tests/l3a_check.py "python3 tests/third/l3a_third.py"
+quiet 2 python3 tests/l3a_fuzz.py "python3 tests/third/l3a_third.py" build/l3averify 300 7
 quiet 2 python3 tests/l3a_fuzz.py "python3 tools/l3a.py" build/l3averify 500 1
 quiet 3 python3 tests/l3a_scale.py "python3 tools/l3a.py" build/l3averify 300
 echo "== L3a over a real session: the live tables compared, and the ways to cheat refused"

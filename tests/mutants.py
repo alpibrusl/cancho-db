@@ -1259,6 +1259,8 @@ L3A = [
     ('l3a: a fork from an older commit is accepted', 'if last.get(src) != parents[0]:', 'if False:'),
     ("l3a: the base is not the first branch's", 'maps[branch] = dict(base) if branch == first else {}', 'maps[branch] = {}'),
     ('l3a: every branch is in the first schema', 'return "public" if branch == first else "cdb_b_" + branch', 'return "public"'),
+    ('l3a: the last line may lack its newline', '    if data and not data.endswith("\\n"):', '    if False:'),
+    ('l3a: a key may be twice in the base', '        if k in base:', '        if False:'),
     ('l3a: the live tables are not compared', '        if seen[b] != m:', '        if False:'),
 ]
 
@@ -1305,11 +1307,13 @@ def run_l3a(cancho):
 # ---- the L3a verifier in cancho (src/l3a.cho), judged by the golden cases of tests/l3a
 L3A_CHO = [
     ("l3a-cho: the store's magic is not checked", "    if !bytes.starts_with(text, magic) {", "    if false {"),
-    ("l3a-cho: the first line may go on", "    if first != len(magic) {", "    if false {"),
+    ("l3a-cho: the first line may go on", "    if first != len(magic) || int_of(text[len(text) - 1]) != 10 {", "    if int_of(text[len(text) - 1]) != 10 {"),
     ("l3a-cho: a line may have more fields than it should", "    return count == n;", "    return count <= n;"),
     ("l3a-cho: a seq may not be digits", "                if int_of(text[k]) < '0' || int_of(text[k]) > '9' {", "                if false {"),
     ("l3a-cho: a seq may have a leading zero", "            if se - sa > 1 && int_of(text[sa]) == '0' {", "            if false {"),
     ("l3a-cho: a seq may repeat", "            if seen {\n                good = false;", "            if false {\n                good = false;"),
+    ("l3a-cho: the last line may lack its newline", "    if first != len(magic) || int_of(text[len(text) - 1]) != 10 {", "    if first != len(magic) {"),
+    ("l3a-cho: a key may be twice in the base", "            if twice {\n                rule = store_malformed();", "            if false {\n                rule = store_malformed();"),
     ("l3a-cho: hex may be in capitals", "c >= 'a' && c <= 'f';", "c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F';"),
     ("l3a-cho: hex may be of an odd length", "    if b <= a || (b - a) % 2 != 0 {", "    if b <= a {"),
     ("l3a-cho: a commit id may be of any length", "meta[b + 3] - meta[b + 2] != 64 || ", ""),

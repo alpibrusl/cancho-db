@@ -140,7 +140,8 @@ fn parse_lines[&t, &g, &m](text: &t [byte], magic: &g [byte], nf: int, stride: i
         return 0 - 1;
     }
     let first = line_end(text, 0);
-    if first != len(magic) {
+    // the first line is the magic, and every line ends with a newline: the last one too
+    if first != len(magic) || int_of(text[len(text) - 1]) != 10 {
         return 0 - 1;
     }
     var p = first + 1;
@@ -435,6 +436,7 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
     var brmap = map.empty(heap, 16, 0 - 1, 33);
     var maps = map.empty(heap, 256, 0 - 1, 35);
     var seen = map.empty(heap, 16, 0, 37);
+    var bseen = map.empty(heap, 16, 0, 41);
 
     region r {
         let out = alloc_slice[r](commit.out_len(), 0);
@@ -531,7 +533,23 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
         let digest = alloc_slice[r](32, byte_of(0));
         let want = alloc_slice[r](32, byte_of(0));
         let pst = alloc_slice[r](96, byte_of(0));
+        // a key twice in the base is malformed (section 3)
         var k = 0;
+        while rule == 0 && k < nbase {
+            let m = 6 * k;
+            let n = row_key(0, btext[bmeta[m]..bmeta[m + 1]], btext[bmeta[m + 2]..bmeta[m + 3]], keybuf);
+            var twice = false;
+            borrow bseen as &bs in {
+                twice = map.has(bs, keybuf[0..n]);
+            }
+            if twice {
+                rule = store_malformed();
+            } else {
+                bseen = map.put(heap, bseen, keybuf[0..n], k);
+            }
+            k = k + 1;
+        }
+        k = 0;
         while rule == 0 && k < nrows {
             let m = k * dstride();
             var side = 0;
@@ -923,6 +941,7 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
     map.drop(heap, brmap);
     map.drop(heap, maps);
     map.drop(heap, seen);
+    map.drop(heap, bseen);
     return 0;
 }
 

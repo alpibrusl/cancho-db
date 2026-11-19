@@ -95,7 +95,10 @@ def hexb(text, what, nbytes=None, allow_empty=False):
 
 def read_text_lines(path):
     """The lines of a text file as the spec splits them. The bytes are kept as they are (latin-1 maps each to one character): a schema name is compared as bytes, and nothing else in the files is not ASCII."""
-    return Path(path).read_bytes().decode("latin-1").split("\n")
+    data = Path(path).read_bytes().decode("latin-1")
+    if data and not data.endswith("\n"):
+        raise Reject("store-malformed")                      # every line, the last too, ends with a newline (l3a.md section 2)
+    return data.split("\n")
 
 
 def read_deltas(path):
@@ -134,7 +137,10 @@ def read_base(path):
         f = line.split("\t")
         if len(f) != 3:
             raise Reject("store-malformed")
-        base[(hexb(f[0], "table"), hexb(f[1], "key"))] = hash_image(hexb(f[2], "image"))
+        k = (hexb(f[0], "table"), hexb(f[1], "key"))
+        if k in base:
+            raise Reject("store-malformed")                  # a key twice (section 3)
+        base[k] = hash_image(hexb(f[2], "image"))
     return base
 
 

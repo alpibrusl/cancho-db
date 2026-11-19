@@ -224,6 +224,15 @@ case("bad_store_empty_schema", w, reject("store-malformed", -1), deltas=w.deltas
 case("bad_store_image_not_hex", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:8] + ["zz"] if r["seq"] == 1 else f))
 case("bad_store_empty_table", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:3] + [""] + f[4:] if r["seq"] == 1 else f))
 case("bad_store_empty_key", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:4] + [""] + f[5:] if r["seq"] == 1 else f))
+case("bad_store_no_final_newline", w, reject("store-malformed", -1), deltas=w.deltas_text().rstrip("\n"))
+case("bad_store_blank_line", w, reject("store-malformed", -1), deltas=w.deltas_text() + "\n")
+case("bad_store_header_without_newline", w, reject("store-malformed", -1), deltas="CHODBDL1")
+bline = "\t".join([A["t"].hex(), k1.hex(), img(id=1, v="a").hex()])
+case("bad_base_no_final_newline", w, reject("store-malformed", -1), base="CHODBBS1\n" + bline, args="--base")
+case("bad_base_key_twice", w, reject("store-malformed", -1), base="CHODBBS1\n" + bline + "\n" + bline + "\n", args="--base")
+case("bad_base_key_twice_other_image", w, reject("store-malformed", -1), base="CHODBBS1\n" + bline + "\n" + "\t".join([A["t"].hex(), k1.hex(), img(id=1, v="b").hex()]) + "\n", args="--base")
+case("bad_live_no_final_newline", w, reject("store-malformed", -1), live="CHODBLV1", args="--live-dump")
+case("store_schema_not_utf8", w, reject("store-foreign-row", 0), deltas=w.deltas_text(mutate=lambda r, f: f[:2] + ["publi\udcd2\udce9"] + f[3:] if r["seq"] == 1 else f))
 case("bad_base_magic", w, reject("store-malformed", -1), base="CHODBBS2\n", args="--base")
 
 # ------------------------------------------------------------------ rows that do not belong
@@ -328,6 +337,7 @@ case("live_key_twice", w, reject("replay-final", -1), live=w.live_text(twice=0),
 case("live_row_in_no_branchs_schema", w, reject("replay-final", -1), live=w.live_text(add=["\t".join(["cdb_b_ghost", A["t"].hex(), k4.hex(), img(id=4).hex()])]), args="--live-dump")
 case("live_row_in_the_other_branch", w, reject("replay-final", -1), live=w.live_text(rewrite=lambda r: ("cdb_b_side",) + r[1:] if r[0] == "public" and r[1] == A["t"] and r[2] == k1 else r), args="--live-dump")
 case("live_everything_missing", w, reject("replay-final", -1), live="CHODBLV1\n", args="--live-dump")
+case("live_schema_not_utf8", w, reject("replay-final", -1), live=w.live_text(rewrite=lambda r: ("publi\udcd2\udce9",) + r[1:] if r[2] == k1 else r), args="--live-dump")
 case("bad_live_magic", w, reject("store-malformed", -1), live="CHODBLV2\n", args="--live-dump")
 case("bad_live_three_fields", w, reject("store-malformed", -1), live="CHODBLV1\npublic\t00\t00\n", args="--live-dump")
 case("bad_live_empty_schema", w, reject("store-malformed", -1), live="CHODBLV1\n\t00\t00\t00\n", args="--live-dump")
@@ -344,11 +354,11 @@ def write():
     files = {}
     for name, (logb, deltas, base, expect, args, live) in sorted(CASES.items()):
         files[name + ".log"] = logb
-        files[name + ".deltas"] = deltas.encode()
+        files[name + ".deltas"] = deltas.encode("utf-8", "surrogateescape")
         if base is not None:
             files[name + ".base"] = base.encode()
         if live is not None:
-            files[name + ".live"] = live.encode()
+            files[name + ".live"] = live.encode("utf-8", "surrogateescape")
         files[name + ".expect"] = (expect + "\n").encode()
         files[name + ".args"] = (args + "\n").encode()
     return files
