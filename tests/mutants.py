@@ -1230,6 +1230,79 @@ def run_sql(cancho):
     return 1 if survivors else 0
 
 
+# ---- the L3a verifier (tools/l3a.py), judged by the golden cases of tests/l3a and, for the live comparison, tests/l3a_e2e.py
+L3A = [
+    ("l3a: the store's magic is not checked", 'if not lines or lines[0] != "CHODBDL1":', 'if False:'),
+    ('l3a: a line may have any number of fields', '        if len(f) != 9:', '        if False:'),
+    ('l3a: a seq may repeat', ' or int(f[0]) in seen:', ':'),
+    ('l3a: a seq may have a leading zero', '(len(f[0]) > 1 and f[0][0] == "0") or ', ''),
+    ('l3a: hex may be in capitals', 'any(c not in "0123456789abcdef" for c in text)', 'any(c not in "0123456789abcdefABCDEF" for c in text)'),
+    ('l3a: a hash may be any length', 'if nbytes is not None and len(b) != nbytes:', 'if False:'),
+    ('l3a: a row may have no hash at all', 'if row["old_hash"] is None and row["new_hash"] is None:', 'if False:'),
+    ("l3a: the base's magic is not checked", 'if not lines or lines[0] != "CHODBBS1":', 'if False:'),
+    ('l3a: a row of no commit of the log is let through', 'if r["commit"] not in ids:', 'if False:'),
+    ("l3a: a row in another branch's schema is let through", 'if any(r["schema"] != schema_of(branch, first) for r in mine):', 'if False:'),
+    ('l3a: rows on a commit that only read are let through', 'if mine and not any(k in (1, 2, 3) for k in kinds):', 'if False:'),
+    ('l3a: an image need not be its hash', 'or (h is not None and hash_image(im) != h):', ':'),
+    ('l3a: an image may lack its hash or a hash its image', 'if (h is None) != (im is None) or (h is not None', 'if (h is not None'),
+    ('l3a: changes are not compared', 'if verdict != "ok " + changes.hex():', 'if False:'),
+    ('l3a: netting takes the first new image', '            per[k][1] = r["new_hash"]', '            pass'),
+    ('l3a: netting does not order by seq', 'for r in sorted(rows, key=lambda r: r["seq"]):', 'for r in list(rows):'),
+    ('l3a: every fact is an update', '0 if o is None else 2 if n is None else 1', '1'),
+    ('l3a: facts that net to nothing are facts', '        if o == n:\n            continue\n', ''),
+    ('l3a: state is not compared', 'or ref.state([state_of[p] for p in parents], changes) != state:', 'or False:'),
+    ("l3a: a merge's parents are taken in the other order", 'ref.state([state_of[p] for p in parents], changes)', 'ref.state([state_of[p] for p in reversed(parents)], changes)'),
+    ('l3a: an insert of a key that is there is let through', '                if cur is not None:\n                    raise Reject("replay-precondition", i)', '                if False:\n                    raise Reject("replay-precondition", i)'),
+    ('l3a: an update from another image is let through', 'elif cur is None or cur != o:', 'elif cur is None:'),
+    ('l3a: a fork starts empty', 'maps[branch] = dict(maps[src])', 'maps[branch] = {}'),
+    ("l3a: a fork shares the source's rows", 'maps[branch] = dict(maps[src])', 'maps[branch] = maps[src]'),
+    ('l3a: a fork from an older commit is accepted', 'if last.get(src) != parents[0]:', 'if False:'),
+    ("l3a: the base is not the first branch's", 'maps[branch] = dict(base) if branch == first else {}', 'maps[branch] = {}'),
+    ('l3a: every branch is in the first schema', 'return "public" if branch == first else "cdb_b_" + branch', 'return "public"'),
+    ('l3a: the live tables are not compared', '        if seen[b] != m:', '        if False:'),
+]
+
+
+def run_l3a(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    survivors, count = [], 0
+    for label, old, new in L3A:
+        if only and only not in label:
+            continue
+        count += 1
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "tools", work / "tools", ignore=shutil.ignore_patterns("__pycache__"))
+            (work / "tests").mkdir()
+            shutil.copytree(ROOT / "tests" / "l3a", work / "tests" / "l3a")
+            shutil.copy(ROOT / "tests" / "l3a_check.py", work / "tests" / "l3a_check.py")
+            f = work / "tools" / "l3a.py"
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            verifier = "%s %s" % (sys.executable, f)
+            if label.startswith("l3a live:"):
+                cmd = [sys.executable, str(ROOT / "tests" / "l3a_e2e.py"), str(ROOT / "build" / "proxy"), verifier]
+            else:
+                cmd = [sys.executable, str(work / "tests" / "l3a_check.py"), verifier]
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                rc, out = r.returncode, r.stdout
+            except subprocess.TimeoutExpired:
+                rc, out = 1, "FAIL timed out"
+            if rc == 0:
+                print("SURVIVED %-46s every L3a check passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in out.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d case(s), e.g. %s" % (label, len(first), first[0][5:70] if first else "a crash"))
+    print("%d mutants, %d not killed" % (count, len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
     if kind == "guard":
         return run_guard(cancho)
@@ -1239,6 +1312,8 @@ def run(kind, cancho):
         return run_store(cancho)
     if kind == "sql":
         return run_sql(cancho)
+    if kind == "l3a":
+        return run_l3a(cancho)
     if kind == "state":
         return run_state(cancho)
     if kind == "lower":
