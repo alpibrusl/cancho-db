@@ -193,7 +193,7 @@ fn main(world: World) -> [] int {
                 status = 2;
             } else {
                 region x {
-                    let verdict = alloc_slice[x](6, 0);
+                    let verdict = alloc_slice[x](8, 0);
                     borrow log_text as &lt in {
                         borrow deltas_text as &dt in {
                             borrow base_text as &bt in {
@@ -211,6 +211,10 @@ fn main(world: World) -> [] int {
                             io.print_nat(o, verdict[3]);
                             io.write_all(o, " branches=");
                             io.print_nat(o, verdict[4]);
+                            if verdict[5] == 2 {
+                                io.write_all(o, " erased=");
+                                io.print_nat(o, verdict[6]);
+                            }
                             if have_live {
                                 io.write_all(o, " final");
                             }

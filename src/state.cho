@@ -124,6 +124,16 @@ pub fn row_hash[&i, &o](image: &i [byte], out: &!o [byte]) -> [] int {
     return hash3("cancho-db/row/v1", image, "", "", out);
 }
 
+// Version 2 of the delta store (l3a.md section 9): the hash of a row image with a 16-byte salt, SHA-256 of "cancho-db/row/v2", a NUL, the salt, the image; into the 32 bytes of `out`.
+pub fn row_hash2[&s, &i, &o](salt: &s [byte], image: &i [byte], out: &!o [byte]) -> [] int {
+    return hash3("cancho-db/row/v2", salt, image, "", out);
+}
+
+// The commitment to a key (l3a.md section 9): SHA-256 of "cancho-db/key/v1", a NUL, the 16-byte salt, the key; into the 32 bytes of `out`.
+pub fn key_commit[&s, &k, &o](salt: &s [byte], plain: &k [byte], out: &!o [byte]) -> [] int {
+    return hash3("cancho-db/key/v1", salt, plain, "", out);
+}
+
 // The leaf of an encoded fact (spec section 2), into the 32 bytes of `out`.
 pub fn leaf[&e, &o](enc: &e [byte], out: &!o [byte]) -> [] int {
     return hash3("cancho-db/fact/v1", enc, "", "", out);

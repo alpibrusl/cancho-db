@@ -103,3 +103,42 @@ A separate agent session wrote a verifier from this page and the vectors alone (
 * **The files are bytes.** A schema name is any bytes without a tab or a newline and is compared as bytes (a verifier that decodes the files as UTF-8 text refuses a store that the others read: the third reading did, and was amended).
 * **Branch names and schemas:** a branch is the first branch's schema `public` or `cdb_b_<name>`; the name is the bytes of the log's branch field compared with the bytes of the schema text. A branch named `public` that is not first has the schema `cdb_b_public`.
 * **Command line:** the log, `--deltas` (required), and optionally `--base`, `--live-dump`, `--first-branch`, each given once; anything else, or a file that cannot be read, is a usage error: exit `2`, a message on standard error and no verdict.
+
+## 9. Version 2: salted commitments and erased rows
+
+The delta store, the base and the live dump each come in a second version whose first line is `CHODBDL2`, `CHODBBS2` and `CHODBLV2`. **All the files given to one verification are of one version**; a store of one version with a base or a dump of the
+other is `store-malformed`. Version 1 is as above, unchanged. Version 2 exists so that a row can be **erased** (the design is [`../m2g-erasure.md`](../m2g-erasure.md)): its image, salt and key are destroyed and everything that was committed to
+still verifies. Nothing in `commit.md` or `state.md` changes.
+
+**Two new hashes.** A row image is hashed with a 16-byte salt: `rowhash = SHA-256("cancho-db/row/v2" || 0x00 || salt || image)`. A key is committed to with its own 16-byte salt: `key = SHA-256("cancho-db/key/v1" || 0x00 || key_salt || key_plain)`, where
+`key_plain` is the bytes of the key as in section 1. **The fact's `pk` (`state.md` section 2) is that 32-byte commitment**, so `(table, key)` in sections 4 and 5 is `(table, commitment)`, and the facts are ordered by the commitment.
+
+**The delta store, version 2.** Thirteen tab-separated fields, the nine of section 2 and four more, in this order:
+
+```
+seq commit schema table key old_hash new_hash old_image new_image | old_salt new_salt key_plain key_salt
+```
+
+`key` is the commitment: exactly 64 hex digits. `old_salt` and `new_salt` are 32 hex digits or absent; `key_salt` is 32 hex digits or absent; `key_plain` is hex, not empty, or absent. A field that is not so is `store-malformed`, as are the rules of section 2 for the other nine
+(the hashes, the images, `seq`, and a row with neither hash).
+
+**A row version is erased** when its hash is present and its image and salt are both absent; **a key is erased** when `key_plain` and `key_salt` are both absent. Step 2 for version 2 is two checks, in this order, the first failure being the verdict (with the commit's index):
+
+* **`facts-image`**, for each of the old and the new side: with the hash absent, the image and the salt must be absent; with the hash present, either the image and the salt are both absent (erased: nothing to check), or both present and the hash is the `rowhash` of the salt and the image. Anything else (an image without a salt,
+  a salt without an image, an image or a salt without a hash, a hash that is not that `rowhash`) is `facts-image`.
+* **`facts-key`** (new): `key_plain` and `key_salt` are both absent (erased), or both present and `key` is the commitment to them; anything else is `facts-key`.
+
+Everything after step 2 is as in section 5: `changes` is recomputed from the **stored** hashes and commitments (they are what the leaves hash), so an erased row verifies exactly as an intact one, and a hash or commitment that was changed after the fact is `changes-mismatch`;
+`state` and the replay work on hashes and commitments alone. **Erasing never makes a check fail; it makes the checks that need what is gone not run**, and the verdict says how many: the answer for a version 2 store is `ok commits=N facts=M branches=B erased=E` (then ` final` if step 7 ran),
+where `E` is the number of delta rows with an erased row version or an erased key.
+
+**The base, version 2** (`CHODBBS2`): five tab-separated hex fields, `table`, `key_plain`, `key_salt` (16 bytes), `image`, `salt` (16 bytes), none empty; the base map holds `(table, commitment)` and the version 2 `rowhash`. A key twice (the same table and commitment) is `store-malformed`.
+
+**The live dump, version 2** (`CHODBLV2`): six tab-separated fields, `schema` (as in section 2), `table`, `key_plain`, `key_salt`, `image`, `salt` (hex, none empty). The verifier computes the commitment and the version 2 `rowhash` and compares them as step 7 compares version 1's. (The salts of the rows a database holds are what the producer stores beside them; section 4 of the design says where.)
+
+**Settled by the third reading of this section** (it passed every vector, and listed what the text leaves to the reader): the checks of step 2 run over **all the rows of a commit** for `facts-image`, and only then over all of them for `facts-key` (`v2_images_are_judged_before_keys` has a bad key in an earlier row and a bad image in a later one); `erased=E` counts a delta row **once**, however many of its parts are erased,
+and an absent hash is not an erased row version; a salt (of a row version, of a key, in a delta row, a base line or a dump line) that is not 16 bytes of hex is `store-malformed`, not `facts-image`; the version of the whole verification is the delta store's, and a base or dump with the other magic is `store-malformed`; the live comparison (step 7) compares the map's hash with the dump's recomputed hash, so
+a key whose last version was erased is still compared; `key_plain` is never read as a key (a plain key that matches its commitment passes, whatever it says); and the only size limit that can apply to a fact in version 2 is the table's (the commitment is 32 bytes).
+
+**Vectors.** `tests/l3a/v2_*` are the cases of this version; `NAME.args` names the files as before.
+
