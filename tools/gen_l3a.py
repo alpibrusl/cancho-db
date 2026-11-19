@@ -23,17 +23,31 @@ W, D, C, R = 1, 2, 3, 0                        # effect kinds: write, ddl, call,
 def rowhash(image): return hashlib.sha256(b"cancho-db/row/v1\x00" + image).digest()
 
 
+def salt_of(image): return hashlib.sha256(b"gen-salt" + image).digest()[:16]            # version 2: a salt for each row image, fixed here so the vectors are reproducible (a producer uses random ones)
+
+
+def rowhash2(image): return hashlib.sha256(b"cancho-db/row/v2\x00" + salt_of(image) + image).digest()
+
+
+def ksalt(k): return hashlib.sha256(b"gen-ksalt" + k).digest()[:16]
+
+
+def kcommit(k): return hashlib.sha256(b"cancho-db/key/v1\x00" + ksalt(k) + k).digest()
+
+
 def img(**kw): return ("{" + ", ".join('"%s": %s' % (k, ('"%s"' % v) if isinstance(v, str) else v) for k, v in kw.items()) + "}").encode()
 
 
 def key(*vals): return ("[" + ", ".join(('"%s"' % v) if isinstance(v, str) else str(v) for v in vals) + "]").encode()
 
 
-def net(changes):
-    """The facts of a commit's raw changes [(table, key, old image, new image)] in the order they happened: netted by (table, key), ordered."""
+def net(changes, v2=False):
+    """The facts of a commit's raw changes [(table, key, old image, new image)] in the order they happened: netted by (table, key), ordered. In version 2 the hash has a salt and the key is its commitment."""
     per = {}
+    hsh = rowhash2 if v2 else rowhash
     for t, k, o, n in changes:
-        oh, nh = (rowhash(o) if o is not None else None), (rowhash(n) if n is not None else None)
+        oh, nh = (hsh(o) if o is not None else None), (hsh(n) if n is not None else None)
+        k = kcommit(k) if v2 else k
         if (t, k) not in per:
             per[(t, k)] = [oh, nh]
         else:
@@ -47,7 +61,8 @@ def net(changes):
 
 
 class World:
-    def __init__(self, first="main"):
+    def __init__(self, first="main", v2=False):
+        self.v2 = v2
         self.chain = g.Chain()
         self.first = first
         self.rows = []          # delta rows as dicts
@@ -61,7 +76,7 @@ class World:
 
     def commit(self, branch, changes=(), parents=None, effects=(W,), changes_override=None, state_override=None, row_schema=None, parent_ids_for_state=None, tamper_rows=None):
         """One commit; `changes` [(table, key, old image, new image)] become its delta rows, in that order. Returns its id."""
-        facts = net(changes)
+        facts = net(changes, self.v2)
         ch = ref.changes(facts)[1]
         if changes_override is not None:
             ch = changes_override
@@ -100,23 +115,29 @@ class World:
                 row = (self.schema(b), t, k, im)
                 if rewrite:
                     row = rewrite(row)
-                lines.append("\t".join([row[0], row[1].hex(), row[2].hex(), row[3].hex()]))
+                if self.v2:
+                    lines.append("\t".join([row[0], row[1].hex(), row[2].hex(), ksalt(row[2]).hex(), row[3].hex(), salt_of(row[3]).hex()]))
+                else:
+                    lines.append("\t".join([row[0], row[1].hex(), row[2].hex(), row[3].hex()]))
         if drop is not None:
             del lines[drop]
         if twice is not None:
             lines.append(lines[twice])
         lines += add or []
-        return "CHODBLV1\n" + "".join(l + "\n" for l in lines)
+        return ("CHODBLV2\n" if self.v2 else "CHODBLV1\n") + "".join(l + "\n" for l in lines)
 
     def deltas_text(self, order=None, mutate=None):
-        lines = ["CHODBDL1"]
+        lines = ["CHODBDL2" if self.v2 else "CHODBDL1"]
         rows = list(self.rows)
         if order == "reverse":
             rows.reverse()
         for r in rows:
-            f = [str(r["seq"]), r["commit"].hex(), r["schema"], r["table"].hex(), r["key"].hex(),
-                 rowhash(r["old_image"]).hex() if r["old_image"] is not None else "", rowhash(r["new_image"]).hex() if r["new_image"] is not None else "",
+            hsh = rowhash2 if self.v2 else rowhash
+            f = [str(r["seq"]), r["commit"].hex(), r["schema"], r["table"].hex(), (kcommit(r["key"]) if self.v2 else r["key"]).hex(),
+                 hsh(r["old_image"]).hex() if r["old_image"] is not None else "", hsh(r["new_image"]).hex() if r["new_image"] is not None else "",
                  r["old_image"].hex() if r["old_image"] is not None else "", r["new_image"].hex() if r["new_image"] is not None else ""]
+            if self.v2:
+                f += [salt_of(r["old_image"]).hex() if r["old_image"] is not None else "", salt_of(r["new_image"]).hex() if r["new_image"] is not None else "", r["key"].hex(), ksalt(r["key"]).hex()]
             if mutate:
                 f = mutate(r, f)
             lines.append("\t".join(f))
@@ -138,6 +159,7 @@ def reject(rule, rec): return "reject rule=%s record=%d" % (rule, rec)
 
 A = {"t": b"accounts", "u": b"users"}
 k1, k2, k3, k4 = key(1), key(2), key(3), key(4)
+k9 = key(9)
 
 # ------------------------------------------------------------------ valid
 w = World()
@@ -347,6 +369,97 @@ w = World()
 w.commit("main", [(A["t"], k1, None, img(id=1, v="a"))])
 w.commit("main", [(A["t"], k1, None, img(id=1, v="a2"))])
 case("replay_before_live", w, reject("replay-precondition", 1), live="CHODBLV1\n", args="--live-dump")
+
+
+# ------------------------------------------------------------------ version 2: salted hashes, key commitments, erased rows (l3a.md section 9)
+def erase_img(f): return f[:7] + ["", "", "", ""] + f[11:]          # the images and their salts go; the hashes stay
+def erase_key(f): return f[:11] + ["", ""]                            # the plain key and its salt go; the commitment stays
+def erase_all(f): return erase_key(erase_img(f))
+def erased(n): return " erased=%d" % n
+
+
+def v2_session():
+    w = World(v2=True)
+    w.commit("main", [(A["t"], k1, None, img(id=1, v="a")), (A["t"], k2, None, img(id=2, v="b"))])
+    w.commit("main", [(A["t"], k1, img(id=1, v="a"), img(id=1, v="a2")), (A["t"], k2, img(id=2, v="b"), None)])
+    w.commit("main", [(A["u"], k1, None, img(id=1, name="u"))])
+    return w
+
+
+w = v2_session()
+case("v2_ok_basic", w, ok(3, 5, 1) + erased(0))
+case("v2_ok_live", w, ok(3, 5, 1) + erased(0) + " final", live=w.live_text(), args="--live-dump")
+case("v2_ok_erased_images", w, ok(3, 5, 1) + erased(2), deltas=w.deltas_text(mutate=lambda r, f: erase_img(f) if r["seq"] in (1, 2) else f))
+case("v2_ok_erased_key", w, ok(3, 5, 1) + erased(1), deltas=w.deltas_text(mutate=lambda r, f: erase_key(f) if r["seq"] == 3 else f))
+case("v2_ok_erased_one_side_only", w, ok(3, 5, 1) + erased(1), deltas=w.deltas_text(mutate=lambda r, f: f[:8] + [""] + f[9:10] + [""] + f[11:] if r["seq"] == 3 else f))
+case("v2_ok_erased_everything_and_the_tables_still_match", w, ok(3, 5, 1) + erased(5) + " final", deltas=w.deltas_text(mutate=lambda r, f: erase_all(f)), live=w.live_text(), args="--live-dump")
+
+w = World(v2=True)
+f0 = w.commit("main", [(A["t"], k1, None, img(id=1, v="a")), (A["t"], k2, None, img(id=2, v="b"))])
+w.commit("side", [], parents=[f0], effects=(C,))
+w.commit("side", [(A["t"], k1, img(id=1, v="a"), img(id=1, v="s"))])
+w.commit("main", [(A["t"], k3, None, img(id=3, v="m"))])
+case("v2_ok_branches", w, ok(4, 4, 2) + erased(0) + " final", live=w.live_text(), args="--live-dump")
+case("v2_ok_branches_erased", w, ok(4, 4, 2) + erased(4) + " final", deltas=w.deltas_text(mutate=lambda r, f: erase_all(f)), live=w.live_text(), args="--live-dump")
+
+w = World(v2=True)
+w.commit("main", [(A["t"], k1, None, img(id=1, v="a")), (A["t"], k1, img(id=1, v="a"), img(id=1, v="b"))])
+case("v2_ok_netting", w, ok(1, 1, 1) + erased(0))
+
+# a hash that was changed in a row whose image is erased: the leaf changes, so `changes` does not match
+w = v2_session()
+case("v2_erased_row_with_another_hash", w, reject("changes-mismatch", 0), deltas=w.deltas_text(mutate=lambda r, f: erase_img(f[:6] + [hashlib.sha256(b"other").hexdigest()] + f[7:]) if r["seq"] == 1 else f))
+# the replay still runs over erased rows: an update that starts from another hash than the row has
+w = World(v2=True)
+w.commit("main", [(A["t"], k1, None, img(id=1, v="a"))])
+w.commit("main", [(A["t"], k1, img(id=1, v="x"), img(id=1, v="y"))])
+case("v2_erased_rows_are_still_replayed", w, reject("replay-precondition", 1), deltas=w.deltas_text(mutate=lambda r, f: erase_all(f)))
+
+w = v2_session()
+case("v2_bad_salt_is_not_the_images", w, reject("facts-image", 0), deltas=w.deltas_text(mutate=lambda r, f: f[:10] + [salt_of(b"other").hex()] + f[11:] if r["seq"] == 1 else f))
+case("v2_bad_image_without_salt", w, reject("facts-image", 0), deltas=w.deltas_text(mutate=lambda r, f: f[:10] + [""] + f[11:] if r["seq"] == 1 else f))
+case("v2_bad_salt_without_image", w, reject("facts-image", 0), deltas=w.deltas_text(mutate=lambda r, f: f[:8] + [""] + f[9:] if r["seq"] == 1 else f))
+case("v2_bad_salt_without_hash", w, reject("facts-image", 0), deltas=w.deltas_text(mutate=lambda r, f: f[:9] + [salt_of(b"x").hex()] + f[10:] if r["seq"] == 1 else f))
+case("v2_bad_image_is_not_the_hashes", w, reject("facts-image", 0), deltas=w.deltas_text(mutate=lambda r, f: f[:8] + [img(id=1, v="zz").hex()] + f[9:] if r["seq"] == 1 else f))
+case("v2_bad_key_is_not_the_commitment", w, reject("facts-key", 0), deltas=w.deltas_text(mutate=lambda r, f: f[:11] + [k9.hex()] + f[12:] if r["seq"] == 1 else f))
+case("v2_bad_key_plain_without_salt", w, reject("facts-key", 0), deltas=w.deltas_text(mutate=lambda r, f: f[:12] + [""] if r["seq"] == 1 else f))
+case("v2_bad_key_salt_without_plain", w, reject("facts-key", 0), deltas=w.deltas_text(mutate=lambda r, f: f[:11] + ["", f[12]] if r["seq"] == 1 else f))
+case("v2_images_are_judged_before_keys", w, reject("facts-image", 0),
+     deltas=w.deltas_text(mutate=lambda r, f: (f[:11] + [k9.hex()] + f[12:]) if r["seq"] == 1 else (f[:10] + [""] + f[11:]) if r["seq"] == 2 else f))
+case("v2_bad_short_salt", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:10] + [f[10][:-2]] + f[11:] if r["seq"] == 1 else f))
+case("v2_bad_store_magic_of_a_later_version", w, reject("store-malformed", -1), deltas=w.deltas_text().replace("CHODBDL2", "CHODBDL3", 1))
+case("v2_bad_short_old_salt", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:9] + [f[9][:-2]] + f[10:] if r["seq"] == 3 else f))
+case("v2_bad_short_key_salt", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:12] + [f[12][:-2]] if r["seq"] == 1 else f))
+case("v2_bad_long_key_salt", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:12] + [f[12] + "00"] if r["seq"] == 1 else f))
+case("v2_bad_odd_plain_key", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:11] + [f[11] + "0"] + f[12:] if r["seq"] == 1 else f))
+case("v2_bad_short_commitment", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:4] + [f[4][:-2]] + f[5:] if r["seq"] == 1 else f))
+case("v2_bad_twelve_fields", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:12] if r["seq"] == 1 else f))
+case("v2_bad_plain_key_not_hex", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:11] + ["zz"] + f[12:] if r["seq"] == 1 else f))
+case("v2_bad_nine_fields_in_a_v2_store", w, reject("store-malformed", -1), deltas=w.deltas_text(mutate=lambda r, f: f[:9]))
+w1 = World()
+w1.commit("main", [(A["t"], k1, None, img(id=1, v="a"))])
+case("v2_bad_v1_store_with_a_v2_dump", w1, reject("store-malformed", -1), live=w.live_text(), args="--live-dump")
+case("v2_bad_v2_store_with_a_v1_dump", w, reject("store-malformed", -1), live=w.live_text().replace("CHODBLV2", "CHODBLV1", 1), args="--live-dump")
+lt = w.live_text().split("\n")
+first = lt[1].split("\t")
+case("v2_live_row_with_another_salt", w, reject("replay-final", -1), live="\n".join([lt[0], "\t".join(first[:5] + [salt_of(b"other").hex()])] + lt[2:]), args="--live-dump")
+case("v2_live_key_with_another_salt", w, reject("replay-final", -1), live="\n".join([lt[0], "\t".join(first[:3] + [ksalt(b"other").hex()] + first[4:])] + lt[2:]), args="--live-dump")
+
+w = World(v2=True)
+w.commit("main", [(A["t"], k1, img(id=1, v="a"), img(id=1, v="b"))])
+bl = "\t".join([A["t"].hex(), k1.hex(), ksalt(k1).hex(), img(id=1, v="a").hex(), salt_of(img(id=1, v="a")).hex()])
+case("v2_ok_base", w, ok(1, 1, 1) + erased(0), base="CHODBBS2\n" + bl + "\n", args="--base")
+case("v2_bad_base_key_twice", w, reject("store-malformed", -1), base="CHODBBS2\n" + bl + "\n" + bl + "\n", args="--base")
+case("v2_bad_base_v1_header", w, reject("store-malformed", -1), base="CHODBBS1\n" + bl + "\n", args="--base")
+bp = bl.split("\t")
+case("v2_bad_base_short_key_salt", w, reject("store-malformed", -1), base="CHODBBS2\n" + "\t".join(bp[:2] + [bp[2][:-2]] + bp[3:]) + "\n", args="--base")
+case("v2_bad_base_short_row_salt", w, reject("store-malformed", -1), base="CHODBBS2\n" + "\t".join(bp[:4] + [bp[4][:-2]]) + "\n", args="--base")
+w2 = v2_session()
+dl = w2.live_text().split("\n")
+d1 = dl[1].split("\t")
+case("v2_bad_dump_short_key_salt", w2, reject("store-malformed", -1), live="\n".join([dl[0], "\t".join(d1[:3] + [d1[3][:-2]] + d1[4:])] + dl[2:]), args="--live-dump")
+case("v2_bad_dump_short_row_salt", w2, reject("store-malformed", -1), live="\n".join([dl[0], "\t".join(d1[:5] + [d1[5][:-2]])] + dl[2:]), args="--live-dump")
+case("v2_bad_base_four_fields", w, reject("store-malformed", -1), base="CHODBBS2\n" + "\t".join(bl.split("\t")[:4]) + "\n", args="--base")
 
 
 def write():

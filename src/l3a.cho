@@ -52,6 +52,10 @@ pub fn log_malformed() -> [] int {
     return 9;
 }
 
+pub fn facts_key() -> [] int {
+    return 10;
+}
+
 pub fn rule_name(code: int) -> [] &static [byte] {
     if code == 1 {
         return "store-malformed";
@@ -77,12 +81,15 @@ pub fn rule_name(code: int) -> [] &static [byte] {
     if code == 8 {
         return "replay-final";
     }
+    if code == 10 {
+        return "facts-key";
+    }
     return "log-malformed";
 }
 
-// Ints in a parsed delta row: nine fields as (start, end) pairs, then the index of the commit the row belongs to (-1 until known).
+// Ints in a parsed delta row: nine fields (thirteen in a version 2 store) as (start, end) pairs, then the index of the commit the row belongs to (-1 until known).
 fn dstride() -> [] int {
-    return 20;
+    return 28;
 }
 
 fn is_lower_hex(c: int) -> [] bool {
@@ -167,8 +174,15 @@ fn decode_into[&t, &o](text: &t [byte], a: int, b: int, out: &!o [byte], at: int
 }
 
 // The delta rows: how many, or -1 for `store-malformed`. A seq twice is malformed; so is a row with neither hash.
-pub fn read_deltas[&h, &t, &m](heap: &!h Heap, text: &t [byte], meta: &!m [int]) -> [heap] int {
-    let n = parse_lines(text, "CHODBDL1", 9, dstride(), meta);
+pub fn read_deltas[&h, &t, &m, &v](heap: &!h Heap, text: &t [byte], meta: &!m [int], ver: &!v [int]) -> [heap] int {
+    var n = 0 - 1;
+    ver[0] = 1;
+    if bytes.starts_with(text, "CHODBDL2") {
+        ver[0] = 2;
+        n = parse_lines(text, "CHODBDL2", 13, dstride(), meta);
+    } else {
+        n = parse_lines(text, "CHODBDL1", 9, dstride(), meta);
+    }
     var good = n >= 0;
     var seqs = map.empty(heap, 64, 0, 21);
     var i = 0;
@@ -236,7 +250,28 @@ pub fn read_deltas[&h, &t, &m](heap: &!h Heap, text: &t [byte], meta: &!m [int])
         if good && meta[b + 11] == meta[b + 10] && meta[b + 13] == meta[b + 12] {
             good = false;
         }
-        meta[b + 18] = 0 - 1;
+        if good && ver[0] == 2 {
+            // the key is a commitment: 64 hex; the salts: absent or 32 hex; the plain key: absent or hex
+            if meta[b + 9] - meta[b + 8] != 64 {
+                good = false;
+            }
+            f = 9;
+            while good && f < 11 {
+                let sa = meta[b + 2 * f];
+                let se = meta[b + 2 * f + 1];
+                if se != sa && (se - sa != 32 || !hex_text(text, sa, se)) {
+                    good = false;
+                }
+                f = f + 1;
+            }
+            if good && meta[b + 23] != meta[b + 22] && !hex_text(text, meta[b + 22], meta[b + 23]) {
+                good = false;
+            }
+            if good && meta[b + 25] != meta[b + 24] && (meta[b + 25] - meta[b + 24] != 32 || !hex_text(text, meta[b + 24], meta[b + 25])) {
+                good = false;
+            }
+        }
+        meta[b + 26] = 0 - 1;
         i = i + 1;
     }
     map.drop(heap, seqs);
@@ -250,8 +285,8 @@ pub fn read_deltas[&h, &t, &m](heap: &!h Heap, text: &t [byte], meta: &!m [int])
 fn row_less[&t, &m](text: &t [byte], meta: &m [int], x: int, y: int) -> [] bool {
     let a = x * dstride();
     let b = y * dstride();
-    if meta[a + 18] != meta[b + 18] {
-        return meta[a + 18] < meta[b + 18];
+    if meta[a + 26] != meta[b + 26] {
+        return meta[a + 26] < meta[b + 26];
     }
     var f = 3;
     while f <= 4 {
@@ -340,21 +375,23 @@ fn row_key[&a, &b, &o](bi: int, table: &a [byte], key: &b [byte], out: &!o [byte
 }
 
 // The base (section 3) or the live dump (section 3b): the rows, `nf` fields each; the number of rows, or -1. Fields are hex but for the schema.
-fn read_rows[&t, &m](text: &t [byte], magic: &static [byte], nf: int, meta: &!m [int]) -> [] int {
+// `schema_first`: the first field is a schema (any text that is not empty); `salt_a`, `salt_b`: the fields that are 16-byte salts (32 hex digits), or -1.
+fn read_rows[&t, &m](text: &t [byte], magic: &static [byte], nf: int, schema_first: bool, salt_a: int, salt_b: int, meta: &!m [int]) -> [] int {
     let n = parse_lines(text, magic, nf, 2 * nf, meta);
     var good = n >= 0;
     var i = 0;
     while good && i < n {
         var f = 0;
-        if nf == 4 {
-            // the schema is any text that is not empty
-            if meta[8 * i + 1] <= meta[8 * i] {
+        if schema_first {
+            if meta[2 * nf * i + 1] <= meta[2 * nf * i] {
                 good = false;
             }
             f = 1;
         }
         while good && f < nf {
-            if !hex_text(text, meta[2 * nf * i + 2 * f], meta[2 * nf * i + 2 * f + 1]) {
+            let fa = meta[2 * nf * i + 2 * f];
+            let fe = meta[2 * nf * i + 2 * f + 1];
+            if !hex_text(text, fa, fe) || (f == salt_a || f == salt_b) && fe - fa != 32 {
                 good = false;
             }
             f = f + 1;
@@ -377,6 +414,27 @@ fn put_text[&s, &o](out: &!o [byte], at: int, src: &s [byte], a: int, b: int) ->
         i = i + 1;
     }
     return p;
+}
+
+fn hex_digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+// The 32 bytes of `src` as 64 lower-case hex digits into `out` at `at`.
+fn hex_put[&s, &o](out: &!o [byte], at: int, src: &s [byte]) -> [] int {
+    var i = 0;
+    while i < 32 {
+        let v = int_of(src[i]);
+        let hi = v / 16;
+        let lo = v % 16;
+        out[at + 2 * i] = byte_of(hex_digit(hi));
+        out[at + 2 * i + 1] = byte_of(hex_digit(lo));
+        i = i + 1;
+    }
+    return 0;
 }
 
 // Whether the 32 bytes of `x` at `a` are those of `y` at `b`.
@@ -427,6 +485,7 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
     var bad_at = 0 - 1;
     var nfacts = 0;
     var nbranches = 0;
+    var erased = 0;
     let nc1 = ncommits + 1;
     let o_bf = 8 * nc1;
     let o_bl = o_bf + nc1;
@@ -503,20 +562,30 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
         var nrows = 0;
         var nbase = 0;
         var nlive = 0;
+        var vnum = 1;
         if rule == 0 {
-            nrows = read_deltas(heap, dtext, dmeta);
+            nrows = read_deltas(heap, dtext, dmeta, verdict[5..6]);
+            vnum = verdict[5];
             if nrows < 0 {
                 rule = store_malformed();
             }
         }
         if rule == 0 && has_base {
-            nbase = read_rows(btext, "CHODBBS1", 3, bmeta);
+            if vnum == 2 {
+                nbase = read_rows(btext, "CHODBBS2", 5, false, 2, 4, bmeta);
+            } else {
+                nbase = read_rows(btext, "CHODBBS1", 3, false, 0 - 1, 0 - 1, bmeta);
+            }
             if nbase < 0 {
                 rule = store_malformed();
             }
         }
         if rule == 0 && has_live {
-            nlive = read_rows(ltext, "CHODBLV1", 4, lmeta);
+            if vnum == 2 {
+                nlive = read_rows(ltext, "CHODBLV2", 6, true, 3, 5, lmeta);
+            } else {
+                nlive = read_rows(ltext, "CHODBLV1", 4, true, 0 - 1, 0 - 1, lmeta);
+            }
             if nlive < 0 {
                 rule = store_malformed();
             }
@@ -533,11 +602,43 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
         let digest = alloc_slice[r](32, byte_of(0));
         let want = alloc_slice[r](32, byte_of(0));
         let pst = alloc_slice[r](96, byte_of(0));
-        // a key twice in the base is malformed (section 3)
+        let salt16 = alloc_slice[r](16, byte_of(0));
+        let kb32 = alloc_slice[r](32, byte_of(0));
+        // the base rows' hashes (slot 2 * nrows + k) and, in version 2, the text of their key commitments (`lh`, 64 bytes a row)
+        var bst = 6;
+        if vnum == 2 {
+            bst = 10;
+        }
         var k = 0;
         while rule == 0 && k < nbase {
-            let m = 6 * k;
-            let n = row_key(0, btext[bmeta[m]..bmeta[m + 1]], btext[bmeta[m + 2]..bmeta[m + 3]], keybuf);
+            if vnum == 2 {
+                let m = 10 * k;
+                let n = state.hexdec(btext, bmeta[m + 2], bmeta[m + 3], big, 0);
+                state.hexdec(btext, bmeta[m + 4], bmeta[m + 5], salt16, 0);
+                state.key_commit(salt16, big[0..n], tmp32);
+                hex_put(lh, 64 * k, tmp32);
+                let n2 = state.hexdec(btext, bmeta[m + 6], bmeta[m + 7], big, 0);
+                state.hexdec(btext, bmeta[m + 8], bmeta[m + 9], salt16, 0);
+                state.row_hash2(salt16, big[0..n2], tmp32);
+                put_text(hs, 32 * (2 * nrows + k), tmp32, 0, 32);
+            } else {
+                let m = 6 * k;
+                let n = state.hexdec(btext, bmeta[m + 4], bmeta[m + 5], big, 0);
+                state.row_hash(big[0..n], tmp32);
+                put_text(hs, 32 * (2 * nrows + k), tmp32, 0, 32);
+            }
+            k = k + 1;
+        }
+        // a key twice in the base is malformed (section 3)
+        k = 0;
+        while rule == 0 && k < nbase {
+            let m = bst * k;
+            var n = 0;
+            if vnum == 2 {
+                n = row_key(0, btext[bmeta[m]..bmeta[m + 1]], lh[64 * k..64 * k + 64], keybuf);
+            } else {
+                n = row_key(0, btext[bmeta[m]..bmeta[m + 1]], btext[bmeta[m + 2]..bmeta[m + 3]], keybuf);
+            }
             var twice = false;
             borrow bseen as &bs in {
                 twice = map.has(bs, keybuf[0..n]);
@@ -570,15 +671,7 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
             if ci < 0 {
                 rule = store_foreign_row();
             }
-            dmeta[m + 18] = ci;
-            k = k + 1;
-        }
-        k = 0;
-        while rule == 0 && k < nbase {
-            let m = 6 * k;
-            let n = state.hexdec(btext, bmeta[m + 4], bmeta[m + 5], big, 0);
-            state.row_hash(big[0..n], tmp32);
-            put_text(hs, 32 * (2 * nrows + k), tmp32, 0, 32);
+            dmeta[m + 26] = ci;
             k = k + 1;
         }
 
@@ -604,8 +697,13 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
         if rule == 0 && first_bi >= 0 && has_base {
             k = 0;
             while k < nbase {
-                let m = 6 * k;
-                let n = row_key(first_bi, btext[bmeta[m]..bmeta[m + 1]], btext[bmeta[m + 2]..bmeta[m + 3]], keybuf);
+                let m = bst * k;
+                var n = 0;
+                if vnum == 2 {
+                    n = row_key(first_bi, btext[bmeta[m]..bmeta[m + 1]], lh[64 * k..64 * k + 64], keybuf);
+                } else {
+                    n = row_key(first_bi, btext[bmeta[m]..bmeta[m + 1]], btext[bmeta[m + 2]..bmeta[m + 3]], keybuf);
+                }
                 maps = map.put(heap, maps, keybuf[0..n], 2 * nrows + k);
                 k = k + 1;
             }
@@ -624,7 +722,7 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
             commit.decode(data[ci[8 * bn]..ci[8 * bn] + ci[8 * bn + 1]], out);
             let name = data[ci[8 * bn] + out[commit.f_branch_at()]..ci[8 * bn] + out[commit.f_branch_at()] + out[commit.f_branch_len()]];
             let lo = rp;
-            while rp < nrows && dmeta[ord[rp] * dstride() + 18] == i {
+            while rp < nrows && dmeta[ord[rp] * dstride() + 26] == i {
                 rp = rp + 1;
             }
             let hi = rp;
@@ -651,7 +749,25 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
                     let he = dmeta[m + 11 + 2 * side];
                     let ia = dmeta[m + 14 + 2 * side];
                     let ie = dmeta[m + 15 + 2 * side];
-                    if he > ha != ie > ia {
+                    if vnum == 2 {
+                        // version 2: a hash with no image and no salt is an erased row version; an image and a salt must make the hash
+                        let sa = dmeta[m + 18 + 2 * side];
+                        let se = dmeta[m + 19 + 2 * side];
+                        if he <= ha {
+                            if ie > ia || se > sa {
+                                rule = facts_image();
+                            }
+                        } else if ie > ia != se > sa {
+                            rule = facts_image();
+                        } else if ie > ia {
+                            let n = state.hexdec(dtext, ia, ie, big, 0);
+                            state.hexdec(dtext, sa, se, salt16, 0);
+                            state.row_hash2(salt16, big[0..n], tmp32);
+                            if !same32(tmp32, 0, hs, 32 * (2 * row + side)) {
+                                rule = facts_image();
+                            }
+                        }
+                    } else if he > ha != ie > ia {
                         rule = facts_image();
                     } else if he > ha {
                         let n = state.hexdec(dtext, ia, ie, big, 0);
@@ -661,6 +777,27 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
                         }
                     }
                     side = side + 1;
+                }
+                k = k + 1;
+            }
+            // 2b. version 2: the key is erased (no plain key, no salt) or is the commitment to them
+            k = lo;
+            while rule == 0 && vnum == 2 && k < hi {
+                let m = ord[k] * dstride();
+                let pa = dmeta[m + 22];
+                let pe = dmeta[m + 23];
+                let ka = dmeta[m + 24];
+                let ke = dmeta[m + 25];
+                if pe > pa != ke > ka {
+                    rule = facts_key();
+                } else if pe > pa {
+                    let n = state.hexdec(dtext, pa, pe, big, 0);
+                    state.hexdec(dtext, ka, ke, salt16, 0);
+                    state.key_commit(salt16, big[0..n], tmp32);
+                    state.hexdec(dtext, dmeta[m + 8], dmeta[m + 9], kb32, 0);
+                    if !same32(tmp32, 0, kb32, 0) {
+                        rule = facts_key();
+                    }
                 }
                 k = k + 1;
             }
@@ -876,9 +1013,13 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
 
         // ---- 7. the tables
         if rule == 0 && has_live {
+            var lst = 8;
+            if vnum == 2 {
+                lst = 12;
+            }
             k = 0;
             while rule == 0 && k < nlive {
-                let m = 8 * k;
+                let m = lst * k;
                 // which branch's schema
                 var bi = 0 - 1;
                 var c = 0;
@@ -897,7 +1038,23 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
                 if bi < 0 {
                     rule = replay_final();
                 } else {
-                    let kn = row_key(bi, ltext[lmeta[m + 2]..lmeta[m + 3]], ltext[lmeta[m + 4]..lmeta[m + 5]], keybuf);
+                    var kn = 0;
+                    var n = 0;
+                    if vnum == 2 {
+                        // the commitment to the key, as text, and the salted hash of the row
+                        let pn = state.hexdec(ltext, lmeta[m + 4], lmeta[m + 5], big, 0);
+                        state.hexdec(ltext, lmeta[m + 6], lmeta[m + 7], salt16, 0);
+                        state.key_commit(salt16, big[0..pn], tmp32);
+                        hex_put(lh, 64 * (nbase + k), tmp32);
+                        kn = row_key(bi, ltext[lmeta[m + 2]..lmeta[m + 3]], lh[64 * (nbase + k)..64 * (nbase + k) + 64], keybuf);
+                        n = state.hexdec(ltext, lmeta[m + 8], lmeta[m + 9], big, 0);
+                        state.hexdec(ltext, lmeta[m + 10], lmeta[m + 11], salt16, 0);
+                        state.row_hash2(salt16, big[0..n], tmp32);
+                    } else {
+                        kn = row_key(bi, ltext[lmeta[m + 2]..lmeta[m + 3]], ltext[lmeta[m + 4]..lmeta[m + 5]], keybuf);
+                        n = state.hexdec(ltext, lmeta[m + 6], lmeta[m + 7], big, 0);
+                        state.row_hash(big[0..n], tmp32);
+                    }
                     var twice = false;
                     borrow seen as &sm in {
                         twice = map.has(sm, keybuf[0..kn]);
@@ -906,8 +1063,6 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
                     borrow maps as &mm in {
                         cur = map.get(mm, keybuf[0..kn], 0 - 1);
                     }
-                    let n = state.hexdec(ltext, lmeta[m + 6], lmeta[m + 7], big, 0);
-                    state.row_hash(big[0..n], tmp32);
                     if twice || cur < 0 || !same32(tmp32, 0, hs, 32 * cur) {
                         rule = replay_final();
                     } else {
@@ -930,10 +1085,25 @@ fn body[&h, &d, &t, &b, &l, &f, &o, &c, &m1, &m2, &m3, &q, &g, &fm, &i1, &hh, &b
                 }
             }
         }
+
+        // version 2: how many delta rows have an erased row version or an erased key
+        if rule == 0 && vnum == 2 {
+            var e = 0;
+            while e < nrows {
+                let m = e * dstride();
+                let old_erased = dmeta[m + 11] > dmeta[m + 10] && dmeta[m + 15] <= dmeta[m + 14];
+                let new_erased = dmeta[m + 13] > dmeta[m + 12] && dmeta[m + 17] <= dmeta[m + 16];
+                if old_erased || new_erased || dmeta[m + 23] <= dmeta[m + 22] {
+                    erased = erased + 1;
+                }
+                e = e + 1;
+            }
+        }
     }
 
     verdict[0] = rule;
     verdict[1] = bad_at;
+    verdict[6] = erased;
     verdict[2] = ncommits;
     verdict[3] = nfacts;
     verdict[4] = nbranches;
@@ -953,6 +1123,8 @@ pub fn run[&h, &d, &t, &b, &l, &f, &o](heap: &!h Heap, data: &d [byte], dtext: &
     verdict[2] = 0;
     verdict[3] = 0;
     verdict[4] = 0;
+    verdict[5] = 1;
+    verdict[6] = 0;
     let nc = count_commits(data, verdict);
     if verdict[0] != 0 {
         return 0;
@@ -964,8 +1136,8 @@ pub fn run[&h, &d, &t, &b, &l, &f, &o](heap: &!h Heap, data: &d [byte], dtext: &
     let total = len(dtext) + 140 * nd + 8;
     var b_ci = box_slice(heap, 11 * (nc + 1), 0);
     var b_dm = box_slice(heap, dstride() * nd, 0);
-    var b_bm = box_slice(heap, 6 * nbm, 0);
-    var b_lm = box_slice(heap, 8 * nlm, 0);
+    var b_bm = box_slice(heap, 10 * nbm, 0);
+    var b_lm = box_slice(heap, 12 * nlm, 0);
     var b_or = box_slice(heap, 2 * nd + 2, 0);
     var b_gi = box_slice(heap, 5 * ents, 0);
     var b_fm = box_slice(heap, 9 * nd + 9, 0);
@@ -978,7 +1150,7 @@ pub fn run[&h, &d, &t, &b, &l, &f, &o](heap: &!h Heap, data: &d [byte], dtext: &
     var b_fe = box_slice(heap, total + 512, byte_of(0));
     var b_fl = box_slice(heap, 32 * nd + 32, byte_of(0));
     var b_ck = box_slice(heap, len(dtext) + len(btext) + 4 * ents + 8, byte_of(0));
-    var b_lh = box_slice(heap, 32 * nlm + 32, byte_of(0));
+    var b_lh = box_slice(heap, 64 * (nbm + nlm) + 64, byte_of(0));
     borrow mut b_ci as &!w1 in {
         borrow mut b_dm as &!w2 in {
             borrow mut b_bm as &!w3 in {

@@ -21,6 +21,8 @@ import state as ref  # noqa: E402
 
 DOMAIN = b"cancho-db/commit/v1\x00"
 ROWTAG = b"cancho-db/row/v1\x00"
+ROWTAG2 = b"cancho-db/row/v2\x00"      # version 2 of the delta store: the row hash has a salt (l3a.md section 9)
+KEYTAG = b"cancho-db/key/v1\x00"       # and the key is a commitment to the key and its salt
 
 
 class Reject(Exception):
@@ -29,8 +31,14 @@ class Reject(Exception):
         self.rule, self.record = rule, record
 
 
-def hash_image(image):
-    return hashlib.sha256(ROWTAG + image).digest()
+def hash_image(image, salt=None):
+    if salt is None:
+        return hashlib.sha256(ROWTAG + image).digest()
+    return hashlib.sha256(ROWTAG2 + salt + image).digest()
+
+
+def key_commit(plain, salt):
+    return hashlib.sha256(KEYTAG + salt + plain).digest()
 
 
 def read_log(path):
@@ -105,58 +113,70 @@ def read_deltas(path):
     lines = read_text_lines(path)
     if lines[-1] == "":
         lines.pop()
-    if not lines or lines[0] != "CHODBDL1":
+    if not lines or lines[0] not in ("CHODBDL1", "CHODBDL2"):
         raise Reject("store-malformed")
+    version = 1 if lines[0] == "CHODBDL1" else 2
     rows, seen = [], set()
     for line in lines[1:]:
         f = line.split("\t")
-        if len(f) != 9:
+        if len(f) != (9 if version == 1 else 13):
             raise Reject("store-malformed")
         if not (f[0].isascii() and f[0].isdigit()) or (len(f[0]) > 1 and f[0][0] == "0") or int(f[0]) in seen:
             raise Reject("store-malformed")
         seen.add(int(f[0]))
         if f[2] == "" or any(c in f[2] for c in "\t\n"):
             raise Reject("store-malformed")
-        row = dict(seq=int(f[0]), commit=hexb(f[1], "commit", 32), schema=f[2], table=hexb(f[3], "table"), key=hexb(f[4], "key"),
+        row = dict(seq=int(f[0]), commit=hexb(f[1], "commit", 32), schema=f[2], table=hexb(f[3], "table"), key=hexb(f[4], "key", 32 if version == 2 else None),
                    old_hash=hexb(f[5], "old_hash", 32, True), new_hash=hexb(f[6], "new_hash", 32, True),
                    old_image=hexb(f[7], "old_image", None, True), new_image=hexb(f[8], "new_image", None, True))
+        if version == 2:
+            row.update(old_salt=hexb(f[9], "salt", 16, True), new_salt=hexb(f[10], "salt", 16, True), key_plain=hexb(f[11], "key", None, True), key_salt=hexb(f[12], "salt", 16, True))
+        else:
+            row.update(old_salt=None, new_salt=None, key_plain=None, key_salt=None)
         if row["old_hash"] is None and row["new_hash"] is None:
             raise Reject("store-malformed")
         rows.append(row)
-    return rows
+    return version, rows
 
 
-def read_base(path):
+def read_base(path, version=1):
     lines = read_text_lines(path)
     if lines[-1] == "":
         lines.pop()
-    if not lines or lines[0] != "CHODBBS1":
+    if not lines or lines[0] != "CHODBBS%d" % version:
         raise Reject("store-malformed")
     base = {}
     for line in lines[1:]:
         f = line.split("\t")
-        if len(f) != 3:
+        if len(f) != (3 if version == 1 else 5):
             raise Reject("store-malformed")
-        k = (hexb(f[0], "table"), hexb(f[1], "key"))
+        if version == 1:
+            k, h = (hexb(f[0], "table"), hexb(f[1], "key")), hash_image(hexb(f[2], "image"))
+        else:
+            k = (hexb(f[0], "table"), key_commit(hexb(f[1], "key"), hexb(f[2], "salt", 16)))
+            h = hash_image(hexb(f[3], "image"), hexb(f[4], "salt", 16))
         if k in base:
             raise Reject("store-malformed")                  # a key twice (section 3)
-        base[k] = hash_image(hexb(f[2], "image"))
+        base[k] = h
     return base
 
 
-def read_live_dump(path):
+def read_live_dump(path, version=1):
     """Section 3b: {schema: {(table, key): hash}} with a key twice (or a line without four fields) refused as store-malformed... a key twice is replay-final, see compare."""
     lines = read_text_lines(path)
     if lines[-1] == "":
         lines.pop()
-    if not lines or lines[0] != "CHODBLV1":
+    if not lines or lines[0] != "CHODBLV%d" % version:
         raise Reject("store-malformed")
     rows = []
     for line in lines[1:]:
         f = line.split("\t")
-        if len(f) != 4 or f[0] == "":
+        if len(f) != (4 if version == 1 else 6) or f[0] == "":
             raise Reject("store-malformed")
-        rows.append((f[0], hexb(f[1], "table"), hexb(f[2], "key"), hash_image(hexb(f[3], "image"))))
+        if version == 1:
+            rows.append((f[0], hexb(f[1], "table"), hexb(f[2], "key"), hash_image(hexb(f[3], "image"))))
+        else:
+            rows.append((f[0], hexb(f[1], "table"), key_commit(hexb(f[2], "key"), hexb(f[3], "salt", 16)), hash_image(hexb(f[4], "image"), hexb(f[5], "salt", 16))))
     return rows
 
 
@@ -183,9 +203,11 @@ def net_facts(rows):
 
 def verify(log_path, deltas_path, base_path=None, first=None, live=None, live_dump=None):
     commits = read_log(log_path)
-    rows = read_deltas(deltas_path)
-    base = read_base(base_path) if base_path else {}
-    dump = read_live_dump(live_dump) if live_dump else None
+    version, rows = read_deltas(deltas_path)
+    base = read_base(base_path, version) if base_path else {}
+    dump = read_live_dump(live_dump, version) if live_dump else None
+    if live is not None and version == 2:
+        raise SystemExit("l3a: --live reads version 1 only; use --live-dump")
     if first is None:
         first = commits[0][1] if commits else "main"
     ids = {c[0]: i for i, c in enumerate(commits)}
@@ -203,12 +225,22 @@ def verify(log_path, deltas_path, base_path=None, first=None, live=None, live_du
             raise Reject("store-foreign-row", i)
         if mine and not any(k in (1, 2, 3) for k in kinds):
             raise Reject("store-foreign-row", i)
-        # 2. images
+        # 2. images (and, in version 2, keys)
         for r in mine:
             for side in ("old", "new"):
-                h, im = r[side + "_hash"], r[side + "_image"]
-                if (h is None) != (im is None) or (h is not None and hash_image(im) != h):
+                h, im, sa = r[side + "_hash"], r[side + "_image"], r[side + "_salt"]
+                if version == 1:
+                    if (h is None) != (im is None) or (h is not None and hash_image(im) != h):
+                        raise Reject("facts-image", i)
+                elif h is None:
+                    if im is not None or sa is not None:
+                        raise Reject("facts-image", i)
+                elif (im is None) != (sa is None) or (im is not None and hash_image(im, sa) != h):
                     raise Reject("facts-image", i)
+        if version == 2:
+            for r in mine:
+                if (r["key_plain"] is None) != (r["key_salt"] is None) or (r["key_plain"] is not None and key_commit(r["key_plain"], r["key_salt"]) != r["key"]):
+                    raise Reject("facts-key", i)
         # 3. changes
         facts = net_facts(mine)
         verdict = ref.run("C " + " ".join(ref.fact_text(*f) for f in facts))
@@ -244,6 +276,9 @@ def verify(log_path, deltas_path, base_path=None, first=None, live=None, live_du
     if dump is not None or live is not None:
         compare_live(maps, first, dump if dump is not None else live_rows_from_psql(maps, first, live))
         suffix = " final"
+    if version == 2:
+        erased = sum(1 for r in rows if (r["old_hash"] is not None and r["old_image"] is None) or (r["new_hash"] is not None and r["new_image"] is None) or r["key_plain"] is None)
+        suffix = " erased=%d%s" % (erased, suffix)
     return "ok commits=%d facts=%d branches=%d%s" % (len(commits), nfacts, len(maps), suffix)
 
 

@@ -37,13 +37,33 @@ def hexb(s):
     if not HEX.match(s): raise Out('store-malformed', -1)
     return bytes.fromhex(s)
 
-def parse_deltas(data):
+H32 = re.compile(r'^[0-9a-f]{32}$')
+
+def rowhash2(salt, img): return sha(b'cancho-db/row/v2\x00', salt, img)
+def keycommit(salt, plain): return sha(b'cancho-db/key/v1\x00', salt, plain)
+
+def opt_hex(s):
+    return None if s == '' else hexb(s)
+
+def opt_salt(s):
+    if s == '': return None
+    if not H32.match(s): raise Out('store-malformed', -1)
+    return bytes.fromhex(s)
+
+def parse_deltas(data, v=1):
     rows = []
     seen = set()
-    for ln in lines_of(data, 'CHODBDL1'):
+    for ln in lines_of(data, 'CHODBDL%d' % v):
         f = ln.split('\t')
-        if len(f) != 9: raise Out('store-malformed', -1)
-        seq, commit, schema, table, key, oh, nh, oi, ni = f
+        if len(f) != (9 if v == 1 else 13): raise Out('store-malformed', -1)
+        if v == 2:
+            osalt, nsalt, kplain, ksalt = f[9:]
+            osalt = opt_salt(osalt); nsalt = opt_salt(nsalt); ksalt = opt_salt(ksalt)
+            kplain = opt_hex(kplain)
+        else:
+            osalt = nsalt = kplain = ksalt = None
+        seq, commit, schema, table, key, oh, nh, oi, ni = f[:9]
+        if v == 2 and not H64.match(key): raise Out('store-malformed', -1)
         if not SEQ.match(seq): raise Out('store-malformed', -1)
         seq = int(seq)
         if seq in seen: raise Out('store-malformed', -1)
@@ -57,11 +77,21 @@ def parse_deltas(data):
         oi = None if oi == '' else hexb(oi)
         ni = None if ni == '' else hexb(ni)
         if oh is None and nh is None: raise Out('store-malformed', -1)
-        rows.append(dict(seq=seq, commit=commit, schema=schema, table=table, key=key, oh=oh, nh=nh, oi=oi, ni=ni))
+        rows.append(dict(seq=seq, commit=commit, schema=schema, table=table, key=key, oh=oh, nh=nh, oi=oi, ni=ni, os=osalt, ns=nsalt, kp=kplain, ks=ksalt))
     return rows
 
-def parse_base(data):
+def parse_base(data, v=1):
     m = {}
+    if v == 2:
+        for ln in lines_of(data, 'CHODBBS2'):
+            f = ln.split('\t')
+            if len(f) != 5: raise Out('store-malformed', -1)
+            t, kp, ks, i, sl = (hexb(x) for x in f)
+            if len(ks) != 16 or len(sl) != 16: raise Out('store-malformed', -1)
+            k = keycommit(ks, kp)
+            if (t, k) in m: raise Out('store-malformed', -1)
+            m[(t, k)] = rowhash2(sl, i)
+        return m
     for ln in lines_of(data, 'CHODBBS1'):
         f = ln.split('\t')
         if len(f) != 3: raise Out('store-malformed', -1)
@@ -70,8 +100,16 @@ def parse_base(data):
         m[(t, k)] = rowhash(i)
     return m
 
-def parse_live(data):
+def parse_live(data, v=1):
     out = []
+    if v == 2:
+        for ln in lines_of(data, 'CHODBLV2'):
+            f = ln.split('\t')
+            if len(f) != 6 or f[0] == '': raise Out('store-malformed', -1)
+            t, kp, ks, i, sl = (hexb(x) for x in f[1:])
+            if len(ks) != 16 or len(sl) != 16: raise Out('store-malformed', -1)
+            out.append((f[0], t, keycommit(ks, kp), rowhash2(sl, i)))
+        return out
     for ln in lines_of(data, 'CHODBLV1'):
         f = ln.split('\t')
         if len(f) != 4 or f[0] == '': raise Out('store-malformed', -1)
@@ -141,9 +179,17 @@ def facts_of(rows):
 
 def run(logp, deltap, basep, livep, first):
     commits = parse_log(readf(logp))
-    rows = parse_deltas(readf(deltap))
-    base = parse_base(readf(basep)) if basep else {}
-    live = parse_live(readf(livep)) if livep else None
+    ddata = readf(deltap)
+    ver = 2 if ddata.startswith(b'CHODBDL2') else 1
+    rows = parse_deltas(ddata, ver)
+    base = parse_base(readf(basep), ver) if basep else {}
+    live = parse_live(readf(livep), ver) if livep else None
+    erased = 0
+    for r in rows:
+        oe = r['oh'] is not None and r['oi'] is None and r['os'] is None
+        ne = r['nh'] is not None and r['ni'] is None and r['ns'] is None
+        ke = r['kp'] is None and r['ks'] is None
+        if oe or ne or ke: erased += 1
     ids = {c['id']: i for i, c in enumerate(commits)}
     for r in rows:
         if bytes.fromhex(r['commit']) not in ids: raise Out('store-foreign-row', -1)
@@ -158,7 +204,17 @@ def run(logp, deltap, basep, livep, first):
         mine = byc.get(c['id'], [])
         if any(r['schema'] != sc for r in mine): raise Out('store-foreign-row', i)
         if mine and not any(e in (1, 2, 3) for e in c['effects']): raise Out('store-foreign-row', i)
-        for r in mine:
+        if ver == 2:
+            for r in mine:
+                for h, im, sl in ((r['oh'], r['oi'], r['os']), (r['nh'], r['ni'], r['ns'])):
+                    if h is None:
+                        if im is not None or sl is not None: raise Out('facts-image', i)
+                    elif im is None and sl is None: pass
+                    elif im is None or sl is None or rowhash2(sl, im) != h: raise Out('facts-image', i)
+            for r in mine:
+                if r['kp'] is None and r['ks'] is None: continue
+                if r['kp'] is None or r['ks'] is None or keycommit(r['ks'], r['kp']) != r['key']: raise Out('facts-key', i)
+        for r in (mine if ver == 1 else []):
             if (r['oh'] is None) != (r['oi'] is None) or (r['nh'] is None) != (r['ni'] is None): raise Out('facts-image', i)
             if r['oi'] is not None and rowhash(r['oi']) != r['oh']: raise Out('facts-image', i)
             if r['ni'] is not None and rowhash(r['ni']) != r['nh']: raise Out('facts-image', i)
@@ -200,7 +256,7 @@ def run(logp, deltap, basep, livep, first):
             by[s][(t, k)] = h
         for b, m in maps.items():
             if by[schema_of(b)] != m: raise Out('replay-final', -1)
-    return 'ok commits=%d facts=%d branches=%d%s' % (len(commits), nfacts, len(maps), ' final' if live is not None else '')
+    return 'ok commits=%d facts=%d branches=%d%s%s' % (len(commits), nfacts, len(maps), (' erased=%d' % erased) if ver == 2 else '', ' final' if live is not None else '')
 
 def main():
     a = sys.argv[1:]; opts = {}; pos = []; i = 0
