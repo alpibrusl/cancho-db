@@ -28,6 +28,17 @@ create table if not exists cdb.delta (
     new_row jsonb
 );
 alter table cdb.delta add column if not exists sch text not null default 'public';
+alter table cdb.delta add column if not exists ord bigint;
+create index if not exists delta_ord on cdb.delta (sch, tbl, ord) where ord is not null;
+
+-- One row for each commit that wrote (a write, DDL or a call: the commits that are prepared), inserted in the same transaction as the stamp of its delta rows: the commit's id, the schema of its branch and
+-- its place in the log (`ord`, the index of the commit in the log, from 0). `AS OF` names a commit by its id and finds its place here (docs/m2-branches.md D30).
+create table if not exists cdb.mark (
+    commit_id bytea primary key,
+    sch text not null,
+    ord bigint not null
+);
+create index if not exists mark_sch on cdb.mark (sch, ord);
 create index if not exists delta_xid on cdb.delta (xid);
 create index if not exists delta_commit on cdb.delta (commit_id) where commit_id is not null;
 
@@ -150,6 +161,45 @@ begin
     end loop;
     perform set_config('cdb.forking', 'off', true);
     return n;
+end $$;
+
+-- `AS OF` (docs/m2-branches.md D30, D31). `cdb.ord('<64 hex digits>')` is the place in the log of that commit of the connection's branch (the schema first on the search path): 22023 `as-of-unknown-commit` if
+-- the branch has no such commit that wrote, 55000 `as-of-unavailable` if some delta rows of the branch were stamped before `ord` existed (their place is not known).
+create or replace function cdb.ord(h text) returns bigint language plpgsql stable as $$
+declare
+    sc text := current_schema();
+    o bigint;
+begin
+    select m.ord into o from cdb.mark m where m.commit_id = decode(h, 'hex') and m.sch = sc;
+    if o is null then
+        raise exception 'as-of-unknown-commit: the branch has no commit that wrote with that id' using errcode = '22023';
+    end if;
+    if exists (select 1 from cdb.delta d where d.sch = sc and d.commit_id is not null and d.ord is null) then
+        raise exception 'as-of-unavailable: some of the history of this branch was recorded before it could be ordered' using errcode = '55000';
+    end if;
+    return o;
+end $$;
+
+-- The table of type `t` (a table's row type: `null::t`) as it was after the commit at place `n`: the current rows whose key no later delta touched, and the old image of the earliest later delta of every key that
+-- one touched, unless that delta is an insert. The deltas of the transaction asking, not yet stamped, are later than every commit: its own writes are not in the past. Schema changes since are not reflected (the old image is the old row read into today's type); a table made since reads as empty.
+create or replace function cdb.asof(t anyelement, n bigint) returns setof anyelement language plpgsql stable as $$
+declare
+    rel oid;
+    sc text;
+    tb text;
+    pkexpr text;
+begin
+    select c.oid, s.nspname, c.relname into rel, sc, tb from pg_class c join pg_namespace s on s.oid = c.relnamespace where c.reltype = pg_typeof(t)::oid;
+    select string_agg(format('x.%I', a.attname), ', ' order by array_position(i.indkey::int2[], a.attnum)) into pkexpr
+      from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any (i.indkey) where i.indrelid = rel and i.indisprimary;
+    return query execute format($f$
+        select x.* from %1$s x
+         where not exists (select 1 from cdb.delta d where d.sch = %2$L and d.tbl = %3$L and (d.ord > %4$s or d.ord is null and d.xid = txid_current()) and d.pk = convert_to(jsonb_build_array(%5$s)::text, 'UTF8'))
+        union all
+        select (jsonb_populate_record(null::%1$s, e.old_row)).*
+          from (select distinct on (d.pk) d.old_row from cdb.delta d where d.sch = %2$L and d.tbl = %3$L and (d.ord > %4$s or d.ord is null and d.xid = txid_current()) order by d.pk, coalesce(d.ord, 9223372036854775807), d.seq) e
+         where e.old_row is not null
+    $f$, rel::regclass, sc, tb, n, pkexpr);
 end $$;
 
 create or replace function cdb.on_ddl() returns event_trigger language plpgsql as $$

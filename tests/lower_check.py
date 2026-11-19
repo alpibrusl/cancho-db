@@ -214,6 +214,28 @@ no("select random() from orders", "nondeterministic")
 no("select nextval('s') from orders", "nondeterministic")
 no("select clock_timestamp() from orders", "nondeterministic")
 no("select 1", "cannot-lower")
+
+# ---- AS OF (docs/m2-branches.md D27 to D29): the table's name in the IR is `t@<commit>`, in `from` and in every column that refers to it
+HX = "3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f"
+oh = "orders@" + HX
+ok("select id from orders as of '" + HX + "'", Select2([Col(oh, "id")], [From(oh)]), [rd(oh), rd(oh, "id")])
+ok("select o.total from orders as of '" + HX + "' o", Select2([Col(oh, "total")], [From(oh)]), [rd(oh), rd(oh, "total")])
+ok("select o.total from orders AS OF '" + HX + "' AS o", Select2([Col(oh, "total")], [From(oh)]), [rd(oh), rd(oh, "total")])
+ok("select * from orders as of '" + HX + "'", Select2([Col(oh, c) for c in ("id", "customer", "total")], [From(oh)]),
+   [rd(oh)] + [rd(oh, c) for c in ("id", "customer", "total")])
+ok("select o.id, c.name from orders as of '" + HX + "' o join customers c on o.customer = c.id",
+   Select2([Col(oh, "id"), Col("customers", "name")], [From(oh), From("customers", 1, Op(EQ, Col(oh, "customer"), Col("customers", "id")))]),
+   [rd(oh), rd(oh, "id"), rd(oh, "customer"), rd("customers"), rd("customers", "id"), rd("customers", "name")])
+ok("select a.id from orders as of '" + HX + "' a, orders b where a.id = b.id",
+   Select2([Col(oh, "id")], [From(oh), From("orders")], Op(EQ, Col(oh, "id"), Col("orders", "id"))),
+   [rd(oh), rd(oh, "id"), rd("orders"), rd("orders", "id")])
+ok("select of.id from orders as of", Select2([Col("orders", "id")], [From("orders")]), [rd("orders"), rd("orders", "id")])      # no literal: an alias named `of`
+no("update orders as of '" + HX + "' set total = 1", "as-of-write")
+no("delete from orders as of '" + HX + "'", "as-of-write")
+no("insert into orders as of '" + HX + "' (id) values (1)", "as-of-write")
+no("select id from orders as of 'zz'", "as-of-bad-commit")
+no("select id from customers as of '" + HX + "' where nope = 1", "unknown-column")
+no("select id from nowhere as of '" + HX + "'", "unknown-table")
 # a bare `select f(constants)` is the statement `Call` (ir.md section 2, tag 5): the one form a SELECT with no FROM may take (docs/m2-branches.md D23)
 def CallStmt(f, *a): return b"\x05" + b16(f) + u32(len(a)) + b"".join(a)
 ok("select cancho_fork('feat')", CallStmt("cancho_fork", Txt(b"feat")), [(C, "cancho_fork")])

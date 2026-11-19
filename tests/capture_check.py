@@ -271,6 +271,49 @@ psql("drop table cdb_b_x.nopk2", db=FDB)
 check("fork: untrackable() and track_all() see the branches' tables", psql("select cdb.untrackable()", db=FDB).stdout.strip() == "" and psql("select cdb.track_all()", db=FDB).stdout.strip() == "14", psql("select cdb.track_all()", db=FDB).stdout)
 psql("drop database if exists %s" % FDB, db="postgres")
 
+# ---- cdb.mark, cdb.ord and cdb.asof (docs/m2-branches.md D30, D31): a table as it was after a commit, from the deltas
+ADB = DB + "_asof"
+psql("drop database if exists %s" % ADB, db="postgres")
+psql("create database %s" % ADB, db="postgres")
+r = psql(None, db=ADB, file=str(ROOT / "sql/capture.sql"))
+check("asof: sql/capture.sql installs", r.returncode == 0, r.stderr)
+psql("create schema oracle; create table a1 (id int primary key, v text); create table a2 (x int, y text, w int, primary key (x, y))", db=ADB)
+
+
+def hexid(n): return "%064x" % n
+
+
+def commit(n, sql):
+    """One commit: the statements, then the stamp the proxy gives (a mark and the place in the log on the delta rows), then a copy of both tables as they are."""
+    r = psql("begin; %s; with m as (insert into cdb.mark(commit_id, sch, ord) values (decode('%s', 'hex'), 'public', %d)) update cdb.delta set commit_id = decode('%s', 'hex'), ord = %d where ord is null and commit_id is null; commit" % (sql, hexid(n), n, hexid(n), n), db=ADB)
+    psql("create table oracle.a1_%d as table a1; create table oracle.a2_%d as table a2" % (n, n), db=ADB)
+    return r
+
+
+r0 = commit(0, "insert into a1 select g, 'v' || g from generate_series(1, 30) g; insert into a2 select g % 4, 'k' || g, g from generate_series(1, 12) g")
+r1 = commit(1, "update a1 set v = 'u' where id <= 10; delete from a1 where id > 25; insert into a1 values (31, 'new'); update a2 set w = w + 100 where x = 1; delete from a2 where x = 2")
+r2 = commit(2, "update a1 set v = 'w' where id between 5 and 15; delete from a1 where id = 1; insert into a2 values (9, 'z', 9); update a2 set y = 'moved' where x = 3 and w = 3")
+r3 = commit(3, "insert into a1 values (1, 'again'); delete from a1 where id = 31; update a2 set w = 0")
+check("asof: four commits, each stamped and copied", all(x.returncode == 0 for x in (r0, r1, r2, r3)), [x.stderr for x in (r0, r1, r2, r3)])
+for n in range(4):
+    for t in ("a1", "a2"):
+        cols = "id" if t == "a1" else "x, y"
+        diff = psql("select count(*) from ((select * from cdb.asof(null::public.%s, %d) except select * from oracle.%s_%d) union all (select * from oracle.%s_%d except select * from cdb.asof(null::public.%s, %d))) z" % (t, n, t, n, t, n, t, n), db=ADB).stdout.strip()
+        cnt = psql("select (select count(*) from cdb.asof(null::public.%s, %d)) || '=' || (select count(*) from oracle.%s_%d)" % (t, n, t, n), db=ADB).stdout.strip()
+        check("asof: %s after commit %d is the copy made then (no row differs, counts %s)" % (t, n, cnt), diff == "0" and cnt.split("=")[0] == cnt.split("=")[1], (diff, cnt))
+r = psql("begin; update a1 set v = 'pending'; delete from a1 where id = 2; select count(*) from ((select * from cdb.asof(null::public.a1, 3) except select * from oracle.a1_3) union all (select * from oracle.a1_3 except select * from cdb.asof(null::public.a1, 3))) z; rollback", db=ADB)
+check("asof: the writes of the transaction asking are not in the past (the table as of commit 3 is still the copy)", r.stdout.strip() == "0", r.stdout + r.stderr)
+check("asof: cdb.ord finds the place of a commit", psql("select cdb.ord('%s')" % hexid(2), db=ADB).stdout.strip() == "2")
+r = psql("select cdb.ord('%s')" % hexid(77), db=ADB)
+check("asof: a commit that is not marked is 22023 as-of-unknown-commit", "as-of-unknown-commit" in r.stderr, r.stderr)
+psql("create schema other; set search_path = other", db=ADB)
+r = psql("create schema other2; set search_path = other2; select cdb.ord('%s')" % hexid(2), db=ADB)
+check("asof: a commit of another schema's branch is not found from this one", "as-of-unknown-commit" in r.stderr, r.stderr)
+psql("insert into cdb.delta(xid, commit_id, tbl, pk, new_hash) values (1, decode('%s', 'hex'), 'a1', '\\x00', '\\x01')" % hexid(2), db=ADB)
+r = psql("select cdb.ord('%s')" % hexid(2), db=ADB)
+check("asof: delta rows stamped before ord existed make the history unavailable: 55000 as-of-unavailable", "as-of-unavailable" in r.stderr, r.stderr)
+psql("drop database if exists %s" % ADB, db="postgres")
+
 psql("drop database if exists %s" % DB, db="postgres")
 print("\n%d checks failed" % len(FAILED) if FAILED else "\nall capture checks passed")
 sys.exit(1 if FAILED else 0)

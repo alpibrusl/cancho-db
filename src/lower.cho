@@ -20,7 +20,7 @@ import cdb.parse;
 // Scratch layout, in the ints slice `sc` (at least 128): [0] the output position, [1] the token a refusal is at, [2] the
 // number of tables in scope, [3] the number of flattened FROM entries, [4] "this was the last step" for the walker, [5]
 // the number of select items; the scope from 16 (three ints an entry: alias token or -1, table token, the table's line in the
-// snapshot), the flattened FROM from 48 (three ints: kind, table node, condition node or 0), the join walk from 96.
+// snapshot), the flattened FROM from 48 (three ints: kind, table node, condition node or 0), the join walk from 96, and from 120 one int an entry of the scope: the token of its `AS OF` commit id or -1 (at least 130 ints).
 
 pub fn e_unknown_table() -> [] int {
     return 20;
@@ -42,6 +42,10 @@ pub fn e_cannot_lower() -> [] int {
     return 24;
 }
 
+pub fn e_as_of_write() -> [] int {
+    return 25;
+}
+
 // The tag of a refusal: this module's, or the parser's.
 pub fn error_name(code: int) -> [] &static [byte] {
     if code == 20 {
@@ -58,6 +62,9 @@ pub fn error_name(code: int) -> [] &static [byte] {
     }
     if code == 24 {
         return "cannot-lower";
+    }
+    if code == 25 {
+        return "as-of-write";
     }
     return parse.error_name(code);
 }
@@ -174,6 +181,32 @@ fn wname_sch[&m, &o, &c](schema: &m [byte], at: int, length: int, out: &!o [byte
     var i = 0;
     while i < length && r >= 0 {
         r = w8(out, sc, int_of(schema[at + i]));
+        i = i + 1;
+    }
+    return r;
+}
+
+// The name of the scope's entry `e` as the IR holds it: the table's own name, and for a table read `AS OF` a commit, `@` and the 64 hex digits after it
+// (docs/spec/ir.md section 6.1, docs/m2-branches.md D29).
+fn wname_scope[&s, &t, &m, &o, &c](sql: &s [byte], toks: &t [int], schema: &m [byte], sc: &!c [int], e: int, out: &!o [byte]) -> [] int {
+    let line = sc[16 + 3 * e + 2];
+    let length = table_name_len(schema, line);
+    let tok = sc[120 + e];
+    if tok < 0 {
+        return wname_sch(schema, line, length, out, sc);
+    }
+    var r = wn(out, sc, length + 65, 2);
+    var i = 0;
+    while i < length && r >= 0 {
+        r = w8(out, sc, int_of(schema[line + i]));
+        i = i + 1;
+    }
+    if r >= 0 {
+        r = w8(out, sc, '@');
+    }
+    i = 0;
+    while i < 64 && r >= 0 {
+        r = w8(out, sc, int_of(sql[parse.tstart(toks, tok) + i]));
         i = i + 1;
     }
     return r;
@@ -369,6 +402,7 @@ fn scope_add[&s, &t, &n, &m, &c](sql: &s [byte], toks: &t [int], nodes: &n [int]
     sc[at] = alias;
     sc[at + 1] = table;
     sc[at + 2] = line;
+    sc[120 + sc[2]] = nodes[6 * node + 5];
     sc[2] = sc[2] + 1;
     return 0;
 }
@@ -452,8 +486,7 @@ fn emit_col[&s, &t, &m, &o, &c](sql: &s [byte], toks: &t [int], tab: int, col: i
     if r < 0 {
         return r;
     }
-    let line = sc[16 + 3 * entry + 2];
-    r = wname_sch(schema, line, table_name_len(schema, line), out, sc);
+    r = wname_scope(sql, toks, schema, sc, entry, out);
     if r < 0 {
         return r;
     }
@@ -1186,7 +1219,7 @@ fn lower_select[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], 
                 while at >= 0 {
                     r0 = w8(out, sc, 0);
                     if r0 >= 0 {
-                        r0 = wname_sch(schema, line, table_name_len(schema, line), out, sc);
+                        r0 = wname_scope(sql, toks, schema, sc, e, out);
                     }
                     if r0 >= 0 {
                         r0 = wname_sch(schema, at, sc[6], out, sc);
@@ -1215,8 +1248,7 @@ fn lower_select[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], 
     var f = 0;
     while f < sc[3] {
         let table = sc[48 + 3 * f + 1];
-        let line = sc[16 + 3 * f + 2];
-        r0 = wname_sch(schema, line, table_name_len(schema, line), out, sc);
+        r0 = wname_scope(sql, toks, schema, sc, f, out);
         if r0 >= 0 {
             r0 = w8(out, sc, sc[48 + 3 * f]);
         }
@@ -1310,6 +1342,9 @@ fn lower_insert[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], 
     let cols = clause_of(nodes, kids, root, parse.n_cols(), 1);
     let values = clause_of(nodes, kids, root, parse.n_values(), 1);
     let table = nodes[6 * target + 1];
+    if nodes[6 * target + 5] >= 0 {
+        return fail(sc, nodes[6 * target + 5], e_as_of_write());
+    }
     let line = find_table(sql, toks, table, schema);
     if line < 0 {
         return fail(sc, table, e_unknown_table());
@@ -1370,6 +1405,9 @@ fn lower_insert[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], 
 fn lower_write[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
     let target = kids[nodes[6 * root + 2]];
     let update = nodes[6 * root] == parse.n_update();
+    if nodes[6 * target + 5] >= 0 {
+        return fail(sc, nodes[6 * target + 5], e_as_of_write());
+    }
     var r0 = scope_add(sql, toks, nodes, target, schema, sc);
     if r0 < 0 {
         return r0;

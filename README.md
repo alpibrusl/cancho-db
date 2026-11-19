@@ -6,26 +6,33 @@ Working name. The design is [`docs/design.md`](docs/design.md).
 
 ## Status
 
-**M0 (spec and verifier).** Built:
+**M0 (spec and verifier): built.**
 
 - [`docs/spec/commit.md`](docs/spec/commit.md): the byte-level commit and log format and **L1 (integrity)**
   verification, written so a verifier needs only SHA-256 and Ed25519.
 - [`docs/spec/token.md`](docs/spec/token.md): capability tokens (a chain of signed blocks that can only narrow) and
   **L2 (authority)**: was each commit allowed by the token it presented?
-- [`docs/spec/ir.md`](docs/spec/ir.md): the **statement IR** (the bound form of a small SQL subset) and effect inference,
+- [`docs/spec/ir.md`](docs/spec/ir.md): the **statement IR** (the bound form of a SQL subset) and effect inference,
   so that L2 can check that a commit's recorded effects are *what its statements do*, not only what the server says.
-- [`vectors/`](vectors): 428 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
+- [`docs/spec/state.md`](docs/spec/state.md): the facts a commit changed, `changes` (a Merkle root over them) and `state` (a chain of changes).
+- [`vectors/`](vectors): 436 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
 - Three verifiers that must agree on every one: [`src/`](src) in cancho (no C, no foreign call),
   [`tools/verify.py`](tools/verify.py) in Python, and [`verifiers/go/`](verifiers/go) in Go, written from the specs alone
   by a separate agent session (see its README and [`docs/claims.md`](docs/claims.md) for what that does and does not show).
 
-**M1, the proxy in front of PostgreSQL, psql first** ([`docs/m1-proxy.md`](docs/m1-proxy.md)): designed, and **P0 built**
-(`proxy/proxy.cho`, `src/login.cho`): psql connects with a capability token as its password, the proxy checks it and logs in
-to PostgreSQL itself, and everything after is forwarded untouched. It understands no SQL yet: no effect check, no log, no
-commits (P1, P2). A refused login never reaches PostgreSQL; only loopback clients are served.
-**Not built:** L3 replay, SQL-to-IR lowering, and M2 onward (branches, the engine). Without `--stmts`, L2
+**M1 (the proxy in front of PostgreSQL): built** ([`docs/m1-proxy.md`](docs/m1-proxy.md), [`docs/m1-commit-path.md`](docs/m1-commit-path.md)).
+psql, psycopg 2 and 3, pg8000, asyncpg and node-postgres connect with a capability token as the password. Every statement is parsed,
+lowered to the IR and its effects checked against the token before PostgreSQL sees it; a refusal has a rule tag and never reaches the database. Every
+transaction is one signed, hash-chained commit, made durable before PostgreSQL commits (a two-phase commit, settled by recovery after a crash). Simple and extended protocol; only loopback clients are served.
+The SQL is a subset (no subqueries, CTEs, set operations or window functions; a closed set of DDL): [`docs/claims.md`](docs/claims.md) lists what is refused.
+
+**M2 (row changes, branches, `AS OF`, merge): in progress, merge to come** ([`docs/m2-branches.md`](docs/m2-branches.md)).
+Built: **row-delta capture** (triggers installed by the proxy; every commit carries the real `changes` and `state`), and **branches**:
+`select cancho_fork('name')` copies the data into a schema of its own and starts a new chain in the log; a connection chooses its branch by the database name.
+**`AS OF`**: `select ... from t as of '<commit id>'` reads a table as a commit left it (on any branch; the commit is named in the statement, so the log records which past was read, and a token must grant it).
+Not built: `cancho_merge`, the replay verifier (L3a), recording of bound values, snapshots and erasure. Without `--stmts`, L2
 checks only the commit's *recorded* effect set against its token; with it, the recorded set is shown to equal what the
-statements infer. That the store holds what was actually executed is L3's (see [`docs/claims.md`](docs/claims.md)). That file says what is claimed, what each claim rests on, and what is *not*
+statements infer. That the store holds what was actually executed is L3's (see [`docs/claims.md`](docs/claims.md)), which says what is claimed, what each claim rests on, and what is *not*
 claimed.
 
 ## Use
@@ -66,16 +73,20 @@ $ ./verify vectors/ir_gap_hidden_write_is_refused_with_statements.log --root $RO
 reject rule=effects-mismatch record=0
 ```
 
-## The proxy (P0)
+## The proxy
 
 ```console
-$ cancho build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho -o proxy
-$ proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres   # listen port, upstream, branch, root key, upstream role, database
+$ cancho build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho src/asof.cho -o proxy
+$ proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres ./log ./signing.key   # listen port, upstream host and port, first branch, root key, upstream role, database, log directory, signing key (32 bytes)
 $ PGPASSWORD=$(python3 tools/mint.py password) psql -h 127.0.0.1 -p 5440 -U agent -d main -c 'select 1'
+$ PGPASSWORD=... psql -h 127.0.0.1 -p 5440 -U agent -d main -c "select cancho_fork('feature')"
+$ PGPASSWORD=... psql -h 127.0.0.1 -p 5440 -U agent -d feature      # the database name is the branch
 ```
 
-The password is `base64url(token ‖ the last key's seed)`; `tools/mint.py` makes one for the test keys. The database name is the
-branch, and only the configured one is served. `tests/proxy_e2e.py` is the gate, against a real PostgreSQL and the stock psql.
+The password is `base64url(token ‖ the last key's seed)`; `tools/mint.py` makes one for the test keys. The upstream role must be allowed to create triggers and event
+triggers (the row-change capture is installed at start), and every table needs a primary key. The log directory holds the log, the tokens and the statements, which the verifiers read:
+`build/verify log --root $ROOT --tokens ./log/tokens --stmts ./log/stmts`. The gates are `tests/proxy_e2e.py`, `tests/ext_e2e.py`, `tests/drivers_e2e.py`, `tests/changes_e2e.py` and
+`tests/fork_e2e.py` and `tests/asof_e2e.py`, against a real PostgreSQL and the stock clients.
 
 ## Test
 
@@ -85,8 +96,8 @@ $ CANCHO=/path/to/cancho sh scripts/check.sh
 
 Runs what CI runs: formatting, vectors regenerate byte for byte, all three verifiers on every vector, the command lines,
 the authority report, the attenuation property over thousands of random tokens, 4,500 differentially fuzzed inputs (the
-verifiers agree and none crashes), and the mutants of both verifiers (every one must make a vector fail). Needs `python3` with `cryptography`, and the cancho
-compiler at the revision in [`cancho.toml`](cancho.toml), and `go`.
+verifiers agree and none crashes), the parser, lowering and row-capture differentials against PostgreSQL, the proxy and fork end to end, and about 700 mutants (every one must make a check fail; the proxy
+ones take about an hour). Needs `python3` with `cryptography`, the cancho compiler at the revision in [`cancho.toml`](cancho.toml), `go`, `strace`, `psql` and a PostgreSQL 16 server (the script starts a throwaway one).
 
 ## Licence
 

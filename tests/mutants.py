@@ -413,6 +413,10 @@ PROXY = [
     ("fork: a new client's token is taken for stored", "proxy/proxy.cho", "                                contents(core.acci)[8 * k + 4] = 0;", "                                contents(core.acci)[8 * k + 4] = contents(core.acci)[8 * k + 4];"),
     ("fork: the branch's snapshot is the first's", "src/catalog.cho", "                if bx == 0 {\n                    var qi = 0;", "                if true {\n                    var qi = 0;"),
     ("fork: the upstream connection has no search_path", "proxy/proxy.cho", "                    if st[p + 23] > 0 {\n                        // a branch other than the first lives", "                    if false {\n                        // a branch other than the first lives"),
+    # ---- AS OF (M2d-3), judged by tests/asof_e2e.py
+    ("asof: the delta rows are stamped without their place in the log", "src/commitpath.cho", "\"'::bytea, ord = \");", "\"'::bytea, ord = 0 * \");"),
+    ("asof: the mark has the wrong place in the log", "src/commitpath.cho", "at = build.put_bytes(q, at, \"', \");\n                at = dec_sql(q, at, chain[2]);", "at = build.put_bytes(q, at, \"', \");\n                at = dec_sql(q, at, chain[2] + 1);"),
+    ("asof: a fork's mark is in the first branch's schema", "src/commitpath.cho", "                if forking || bx > 0 {\n                    at = build.put_bytes(q, at, \"cdb_b_\");", "                if false {\n                    at = build.put_bytes(q, at, \"cdb_b_\");"),
     ("proxy: the chain does not advance", "src/commitpath.cho", "chain[4 + 3 * nb + 1] = chain[4 + 3 * nb + 1] + 1;", "chain[4 + 3 * nb + 1] = chain[4 + 3 * nb + 1];"),
     ("proxy: the tip is not remembered", "src/commitpath.cho", "                        ntip[j] = ident[j];", "                        ntip[j] = ntip[j];"),
     ("proxy: the token is never stored", "src/commitpath.cho", "            if ai[8 * k + 4] == 0 {\n                tl = build.store_record(tr, 0, tk);", "            if false {\n                tl = build.store_record(tr, 0, tk);"),
@@ -512,12 +516,12 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho", "capture_sql.cho", "state.cho", "fork.cho", "forkpath.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho", "capture_sql.cho", "state.cho", "fork.cho", "forkpath.cho", "asof.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
                 try:
-                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "fork_e2e.py" if label.startswith("fork:") else "proxy_e2e.py"
+                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "fork_e2e.py" if label.startswith("fork:") else "asof_e2e.py" if label.startswith("asof:") else "proxy_e2e.py"
                     r = subprocess.run([sys.executable, str(work / "tests" / judge), str(exe)], capture_output=True,
                                        text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
                     out, code = r.stdout + r.stderr, r.returncode
@@ -737,6 +741,13 @@ PARSE = [
 
 # ---- the SELECT parser (src/stmt.cho, and the statement half of the renderer in src/parse.cho; tests/stmt_test.cho)
 STMT = [
+    ("stmt: AS OF takes any string", "src/stmt.cho", "        if !is_commit_id(sql, toks, pos + 3) {", "        if false {"),
+    ("stmt: a commit id may be of another length", "src/stmt.cho", "    if parse.tlen(toks, i) != 64 {", "    if parse.tlen(toks, i) != 65 {"),
+    ("stmt: a commit id may use any lower-case letter", "src/stmt.cho", "c >= 'a' && c <= 'f')", "c >= 'a' && c <= 'z')"),
+    ("stmt: a commit id may be in capitals", "src/stmt.cho", "c >= 'a' && c <= 'f')", "c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F')"),
+    ("stmt: AS OF needs no word `of`", "src/stmt.cho", 'parse.kw(sql, toks, pos + 2, end, "of") && pos + 3 < end', "pos + 3 < end"),
+    ("stmt: the table node forgets its commit", "src/stmt.cho", "parse.n_table(), pos, tmp, 0, st[9], asof);", "parse.n_table(), pos, tmp, 0, st[9], 0 - 1);"),
+    ("stmt: a rendering drops the AS OF", "src/parse.cho", "        if nodes[6 * node + 5] >= 0 {\n            // `AS OF", "        if false {\n            // `AS OF"),
     ("stmt: DISTINCT is ignored", "src/stmt.cho", "        distinct = 1;\n", "        distinct = 0;\n"),
     ("stmt: a left join is an inner join", "src/stmt.cho", "                    kind = 1;\n                } else if", "                    kind = 0;\n                } else if"),
     ("stmt: a right join is accepted", "src/stmt.cho", '} else if parse.kw(sql, toks, pos, end, "right") ||', "} else if false ||"),
@@ -756,7 +767,7 @@ STMT = [
     ("stmt: HAVING is a WHERE", "src/stmt.cho", "parse.n_having(), 0, 0);", "parse.n_where(), 0, 0);"),
     ("stmt: LIMIT is an OFFSET", "src/stmt.cho", "parse.n_limit(), 0, 0);", "parse.n_offset(), 0, 0);"),
     ("stmt: a join's condition is not required", "src/stmt.cho", '                    if !parse.kw(sql, toks, pos, end, "on") {', '                    if false {'),
-    ("stmt: a table alias is dropped", "src/stmt.cho", "parse.n_table(), pos, tmp, 0, st[9], 0 - 1);", "parse.n_table(), pos, tmp, 0, 0 - 1, 0 - 1);"),
+    ("stmt: a table alias is dropped", "src/stmt.cho", "parse.n_table(), pos, tmp, 0, st[9], asof);", "parse.n_table(), pos, tmp, 0, 0 - 1, asof);"),
     ("stmt: a select alias is dropped", "src/stmt.cho", "parse.n_item(), st[9], tmp[mark..mark + 1]", "parse.n_item(), 0 - 1, tmp[mark..mark + 1]"),
     ("stmt: FROM may be empty", "src/stmt.cho", '        pos = pos + 1;\n        more = true;\n        while more {\n            var q = table_ref(', '        pos = pos + 1;\n        more = false;\n        while more {\n            var q = table_ref('),
     ("stmt: a trailing token is ignored", "src/stmt.cho", "    if pos < end {\n        if parse.kw(sql, toks, pos, end, \"union\")", "    if false {\n        if parse.kw(sql, toks, pos, end, \"union\")"),
@@ -827,6 +838,11 @@ STMT = [
 
 # ---- the lowering (src/lower.cho, tests/lower_check.py: IR bytes, effects through the verifier, refusals)
 LOWER = [
+    ("lower: a table read as of a commit is named without it", "src/lower.cho", "    let tok = sc[120 + e];\n    if tok < 0 {", "    let tok = sc[120 + e];\n    if true {"),
+    ("lower: the scope forgets the commit", "src/lower.cho", "    sc[120 + sc[2]] = nodes[6 * node + 5];", "    sc[120 + sc[2]] = 0 - 1;"),
+    ("lower: the commit's digits are one short", "src/lower.cho", "    while i < 64 && r >= 0 {\n        r = w8(out, sc, int_of(sql[parse.tstart(toks, tok) + i]));", "    while i < 63 && r >= 0 {\n        r = w8(out, sc, int_of(sql[parse.tstart(toks, tok) + i]));"),
+    ("lower: an UPDATE of a table as of a commit is let through", "src/lower.cho", "    let update = nodes[6 * root] == parse.n_update();\n    if nodes[6 * target + 5] >= 0 {", "    let update = nodes[6 * root] == parse.n_update();\n    if false {"),
+    ("lower: an INSERT into a table as of a commit is let through", "src/lower.cho", "    let table = nodes[6 * target + 1];\n    if nodes[6 * target + 5] >= 0 {", "    let table = nodes[6 * target + 1];\n    if false {"),
     ("lower: a parameter's index is zero-based", "src/lower.cho", "r = wn(out, sc, idx, 4);", "r = wn(out, sc, idx - 1, 4);"),
     ("lower: a parameter is written as a constant", "src/lower.cho", "        r = w8(out, sc, 2);\n        if r >= 0 {\n            r = wn(out, sc, idx, 4);", "        r = w8(out, sc, 1);\n        if r >= 0 {\n            r = wn(out, sc, idx, 4);"),
     ("lower: only the last digit of a parameter counts", "src/lower.cho", "idx = idx * 10 + int_of(sql[q]) - '0';", "idx = int_of(sql[q]) - '0';"),
@@ -861,6 +877,11 @@ LOWER = [
 
 # ---- the query guard (src/guard.cho, tests/guard_check.py)
 GUARD = [
+    ("guard: AS OF is not rewritten", "src/guard.cho", "        sent = asof.rewrite(heap, out, written);", "        sent = written;"),
+    ("guard: a string constant is scanned for the clause", "src/asof.cho", "            } else if c == '\\'' {\n                mode = 1;", "            } else if false {\n                mode = 1;"),
+    ("guard: the table's name is not the alias when none is given", "src/asof.cho", "                    if !is_at(out[0..n], i, \" as \\\"\") {", "                    if false {"),
+    ("guard: a given alias is followed by another", "src/asof.cho", "                    if !is_at(out[0..n], i, \" as \\\"\") {", "                    if true {"),
+    ("guard: the commit id is cut short", "src/asof.cho", "out[i + 8..i + 8 + 64]);", "out[i + 8..i + 8 + 63]);"),
     ("guard: a statement's id is not recorded", "src/guard.cho", "ir.id(contents(iw)[0..w], ids[32 * nst..32 * nst + 32]);", "nst = nst + 0;"),
     ("guard: a statement's IR is not recorded", "src/guard.cho", "irat = build.store_record(irs, irat, contents(iw)[0..w]);", "irat = irat + 0;"),
     ("guard: a statement's effects are not recorded", "src/guard.cho", "effat = emit_effects(sr, effs, effat);", "effat = effat + 0;"),
@@ -958,7 +979,7 @@ def run_guard(cancho):
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in GUARD if not only or only in m[0]]
     survivors = []
-    names = ("commit.cho", "token.cho", "lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "build.cho")
+    names = ("commit.cho", "token.cho", "lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "build.cho", "asof.cho")
     for label, rel, old, new in table:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
@@ -1133,6 +1154,13 @@ SQL = [
     ("sql fork: an identity counter skips a number", "sql/capture.sql", "0) + 1, false)', pg_get_serial_sequence", "0) + 1, true)', pg_get_serial_sequence"),
     ("sql fork: a generated column is inserted", "sql/capture.sql", " and a.attnum > 0 and not a.attisdropped and a.attgenerated = '';", " and a.attnum > 0 and not a.attisdropped;"),
     ("sql fork: the rows are not copied", "sql/capture.sql", "select %s from %I.%I', dst, r.relname, cols, cols, src, r.relname);", "select %s from %I.%I where false', dst, r.relname, cols, cols, src, r.relname);"),
+    ("sql asof: the later deltas do not exclude the current rows", "sql/capture.sql", "where d.sch = %2$L and d.tbl = %3$L and (d.ord > %4$s or d.ord is null and d.xid = txid_current()) and d.pk", "where d.sch = %2$L and d.tbl = %3$L and (d.ord > %4$s + 1000000000 or d.ord is null and d.xid = txid_current()) and d.pk"),
+    ("sql asof: the latest later delta is used, not the earliest", "sql/capture.sql", "order by d.pk, coalesce(d.ord, 9223372036854775807), d.seq) e", "order by d.pk, coalesce(d.ord, 9223372036854775807) desc, d.seq desc) e"),
+    ("sql asof: a later insert has an old image", "sql/capture.sql", "         where e.old_row is not null", "         where true"),
+    ("sql asof: the writes of the transaction asking are in the past", "sql/capture.sql", "(d.ord > %4$s or d.ord is null and d.xid = txid_current()) order by d.pk", "d.ord > %4$s order by d.pk"),
+    ("sql ord: a commit of any branch is found", "sql/capture.sql", "where m.commit_id = decode(h, 'hex') and m.sch = sc;", "where m.commit_id = decode(h, 'hex');"),
+    ("sql ord: history before ord is let through", "sql/capture.sql", "    if exists (select 1 from cdb.delta d where d.sch = sc and d.commit_id is not null and d.ord is null) then", "    if false and exists (select 1 from cdb.delta d where d.sch = sc and d.commit_id is not null and d.ord is null) then"),
+    ("sql ord: an unknown commit is not refused", "sql/capture.sql", "    if o is null then\n        raise exception 'as-of-unknown-commit", "    if false then\n        raise exception 'as-of-unknown-commit"),
     ("sql fork: the source's own schema is copied from, whatever was asked", "sql/capture.sql", "where s.nspname = src and c.relkind = 'r' order by c.relname loop", "where s.nspname = 'public' and c.relkind = 'r' order by c.relname loop"),
 ]
 
