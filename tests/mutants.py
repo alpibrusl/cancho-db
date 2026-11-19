@@ -1152,7 +1152,7 @@ SQL = [
     ("sql fork: the copy is not tracked afterwards", "sql/capture.sql", "        perform cdb.track(r.t);\n    end loop;\n    perform set_config('cdb.forking', 'off', true);", "        null;\n    end loop;\n    perform set_config('cdb.forking', 'off', true);"),
     ("sql fork: the foreign keys are not copied", "sql/capture.sql", "        execute stmt;", "        null;"),
     ("sql fork: an identity counter skips a number", "sql/capture.sql", "0) + 1, false)', pg_get_serial_sequence", "0) + 1, true)', pg_get_serial_sequence"),
-    ("sql fork: a generated column is inserted", "sql/capture.sql", " and a.attnum > 0 and not a.attisdropped and a.attgenerated = '';", " and a.attnum > 0 and not a.attisdropped;"),
+    ("sql fork: a generated column is inserted", "sql/capture.sql", "where a.attrelid = format('%I.%I', src, r.relname)::regclass and a.attnum > 0 and not a.attisdropped and a.attgenerated = '';", "where a.attrelid = format('%I.%I', src, r.relname)::regclass and a.attnum > 0 and not a.attisdropped;"),
     ("sql fork: the rows are not copied", "sql/capture.sql", "select %s from %I.%I', dst, r.relname, cols, cols, src, r.relname);", "select %s from %I.%I where false', dst, r.relname, cols, cols, src, r.relname);"),
     ("sql asof: the later deltas do not exclude the current rows", "sql/capture.sql", "where d.sch = %2$L and d.tbl = %3$L and (d.ord > %4$s or d.ord is null and d.xid = txid_current()) and d.pk", "where d.sch = %2$L and d.tbl = %3$L and (d.ord > %4$s + 1000000000 or d.ord is null and d.xid = txid_current()) and d.pk"),
     ("sql asof: the latest later delta is used, not the earliest", "sql/capture.sql", "order by d.pk, coalesce(d.ord, 9223372036854775807), d.seq) e", "order by d.pk, coalesce(d.ord, 9223372036854775807) desc, d.seq desc) e"),
@@ -1161,6 +1161,19 @@ SQL = [
     ("sql ord: a commit of any branch is found", "sql/capture.sql", "where m.commit_id = decode(h, 'hex') and m.sch = sc;", "where m.commit_id = decode(h, 'hex');"),
     ("sql ord: history before ord is let through", "sql/capture.sql", "    if exists (select 1 from cdb.delta d where d.sch = sc and d.commit_id is not null and d.ord is null) then", "    if false and exists (select 1 from cdb.delta d where d.sch = sc and d.commit_id is not null and d.ord is null) then"),
     ("sql ord: an unknown commit is not refused", "sql/capture.sql", "    if o is null then\n        raise exception 'as-of-unknown-commit", "    if false then\n        raise exception 'as-of-unknown-commit"),
+    ('sql merge: a conflict is not counted', "sql/capture.sql", '(select count(*) from m where tj is distinct from bj and sj is distinct from bj and tj is distinct from sj),', '(select count(*) from m where tj is distinct from bj and sj is distinct from bj and tj is distinct from sj and false),'),
+    ('sql merge: two equal changes are a conflict', "sql/capture.sql", '(select count(*) from m where tj is distinct from bj and sj is distinct from bj and tj is distinct from sj),', '(select count(*) from m where tj is distinct from bj and sj is distinct from bj),'),
+    ("sql merge: the source's inserts are not applied", "sql/capture.sql", "(select coalesce(jsonb_agg(sj), '[]') from m where tj is not distinct from bj and sj is distinct from bj and sj is not null and tj is null)", "(select '[]'::jsonb)"),
+    ("sql merge: the source's updates are not applied", "sql/capture.sql", "(select coalesce(jsonb_agg(sj), '[]') from m where tj is not distinct from bj and sj is distinct from bj and sj is not null and tj is not null),", "(select '[]'::jsonb),"),
+    ("sql merge: the source's deletes are not applied", "sql/capture.sql", "(select coalesce(jsonb_agg(k), '[]') from m where tj is not distinct from bj and sj is distinct from bj and sj is null),", "(select '[]'::jsonb),"),
+    ('sql merge: deletes are applied parents first', "sql/capture.sql", '        for i in reverse n .. 1 loop', '        for i in 1 .. n loop'),
+    ('sql merge: updates and inserts are applied children first', "sql/capture.sql", '        -- updates and inserts, parents first\n        for i in 1 .. n loop', '        -- updates and inserts, parents first\n        for i in reverse n .. 1 loop'),
+    ('sql merge: a constraint violation is not reported as one', "sql/capture.sql", '    exception when integrity_constraint_violation then', '    exception when no_data_found then'),
+    ('sql merge: tables with other columns are merged', "sql/capture.sql", '    foreach t in array tabs loop\n        if (select array_agg(a.attname', '    foreach t in array tabs loop\n        if false and (select array_agg(a.attname'),
+    ('sql merge: a table only one side has is merged', "sql/capture.sql", '    if tabs is distinct from (select', '    if false and tabs is distinct from (select'),
+    ("sql merge: the base is the target's state", "sql/capture.sql", 'from (select jsonb_build_array(%1$s) as k, to_jsonb(%7$I) as j from cdb.asof(null::%2$I.%3$I, %4$s) %7$I) b', 'from (select jsonb_build_array(%1$s) as k, to_jsonb(%7$I) as j from %5$I.%3$I %7$I) b'),
+    ("sql alias: a row alias may be a column's name", "sql/capture.sql", '    while exists (select 1 from pg_attribute where attrelid = rel and attname = a', '    while false and exists (select 1 from pg_attribute where attrelid = rel and attname = a'),
+    ("sql alias: the capture's aliases are fixed", "sql/capture.sql", "    ao := cdb.free_alias(tbl, 'cdb_o');", "    ao := 'cdb_o';"),
     ("sql fork: the source's own schema is copied from, whatever was asked", "sql/capture.sql", "where s.nspname = src and c.relkind = 'r' order by c.relname loop", "where s.nspname = 'public' and c.relkind = 'r' order by c.relname loop"),
 ]
 
@@ -1176,6 +1189,7 @@ def run_sql(cancho):
                 shutil.copytree(ROOT / d, work / d, ignore=shutil.ignore_patterns("__pycache__"))
             (work / "tests").mkdir()
             shutil.copy(ROOT / "tests" / "capture_check.py", work / "tests" / "capture_check.py")
+            shutil.copy(ROOT / "tests" / "merge_check.py", work / "tests" / "merge_check.py")
             f = work / rel
             text = f.read_text()
             if text.count(old) != 1:
@@ -1184,7 +1198,8 @@ def run_sql(cancho):
                 continue
             f.write_text(text.replace(old, new))
             try:
-                r = subprocess.run([sys.executable, str(work / "tests" / "capture_check.py")], capture_output=True, text=True, timeout=900)
+                judge = "merge_check.py" if label.startswith("sql merge:") else "capture_check.py"
+                r = subprocess.run([sys.executable, str(work / "tests" / judge)], capture_output=True, text=True, timeout=900, env=dict(os.environ, MERGE_TRIALS="40"))
                 rc, out = r.returncode, r.stdout + r.stderr
             except subprocess.TimeoutExpired:
                 rc, out = 1, "FAIL timed out"

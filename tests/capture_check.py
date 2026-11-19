@@ -89,21 +89,23 @@ setup = """
 create table acc(id int primary key, owner text, bal numeric, note jsonb);
 create table lin(a int, b text, v int, primary key (a, b));
 create table txt(k text primary key, v int);
+create table al(id int primary key, n int, o int, x int, cdb_o int);
 alter event trigger cdb_ddl disable;
 create table nopk(x int);
 alter event trigger cdb_ddl enable;
 insert into acc select g, 'o' || g, g * 1.5, jsonb_build_object('n', g) from generate_series(1, 20) g;
 insert into lin select g % 4, 'b' || g, g from generate_series(1, 12) g;
 insert into txt values ('alpha', 1), ('Beta', 2), ('é', 3), ('', 4);
+insert into al select g, g, g * 2, g * 3, g * 4 from generate_series(1, 5) g;
 """
 r = psql(setup)
 check("the test tables are made", r.returncode == 0, r.stderr)
 r = psql("select cdb.track('nopk')")
 check("cdb.track refuses a table without a primary key", r.returncode != 0 and "has no primary key" in r.stderr, r.stderr)
-r = psql("select cdb.track('acc'), cdb.track('lin'), cdb.track('txt')")
+r = psql("select cdb.track('acc'), cdb.track('lin'), cdb.track('txt'), cdb.track('al')")
 check("the three tables are tracked", r.returncode == 0, r.stderr)
 
-PK = {"acc": "jsonb_build_array(t.id)", "lin": "jsonb_build_array(t.a, t.b)", "txt": "jsonb_build_array(t.k)"}
+PK = {"acc": "jsonb_build_array(t.id)", "lin": "jsonb_build_array(t.a, t.b)", "txt": "jsonb_build_array(t.k)", "al": "jsonb_build_array(t.id)"}
 scen = [
     ("an insert", "acc", "insert into acc values (100, 'new', 1, '{}');"),
     ("an update", "acc", "update acc set bal = bal + 1 where id = 3;"),
@@ -122,6 +124,9 @@ scen = [
     ("a composite key change", "lin", "update lin set b = 'moved' where a = 3 and b = 'b3';"),
     ("a text key with a non-ASCII value and the empty string", "txt", "update txt set v = v + 1; insert into txt values ('ü', 9);"),
     ("nothing at all", "acc", "select 1;"),
+    # a table with columns called like the capture's own row aliases (n, o, and the longer ones): the image is the ROW, not that column
+    ("columns named n, o, x: insert, update, delete", "al", "insert into al values (50, 1, 2, 3, 4); update al set n = n + 1, o = o + 1, x = x + 1 where id = 1; delete from al where id = 2;"),
+    ("columns named n, o, x: a key change", "al", "update al set id = 70 where id = 3;"),
 ]
 for name, table, tx in scen:
     facts, want = run_tx(table, PK[table], tx)
