@@ -26,6 +26,19 @@ A row's hash is `SHA-256("cancho-db/row/v1" || 0x00 || image)`, with no salt (`s
 A nine-digit number (a phone, a national id) is 10^9 guesses: an hour on this core, seconds on a GPU. So **"erasure destroys the key; hashes stay" is false for any value a person could guess or a list could hold**: the hash
 that stays gives the data back. `design.md`'s row for erasure is corrected in place to say so (section 5). The same holds for the key: the `pk` in the delta store (an email address, a national id) is in clear and in every fact's leaf.
 
+## 2b. A second finding: the statement store holds constants, and the log holds their hashes
+
+Found while building `cancho_erase` (the call has to name the key it erases). The **statement IR** (`ir.md` section 2) holds `Const Value` for every literal in a statement, and `--stmts` L2 needs the statement store to check that a commit's recorded effects are what its statements do. So the **statement store** (`log/stmts`, one record per distinct statement) holds, in clear, every constant a client wrote as a literal: `insert into people values ('ana@example.org', 'Ana Quintero', '600111222')` is stored with all three values, and `where email = 'ana@example.org'` with the e-mail. (The project's own vectors show it: `vectors/ir2_*.stmts` contain the string `secret` in clear, and `ir_*` stores the table name `orders`.) Two consequences:
+
+* **The statement store is a payload store that erasure has not reached.** Erasing the delta rows leaves the statements that carried the same values. Erasing a statement record makes `--stmts` L2 refuse the commit that cites it (`stmt-missing`), unless the verifier is told which statements were erased (as L3a is told which rows).
+* **The statement id in the log is a test for a guess**, exactly as section 2's row hash was: a commit carries the SHA-256 of each statement's IR (`commit.md`, field `stmts`), unsalted, constants included. A guessable constant (a PIN, a name from a list) is recovered from the log alone by guessing and hashing the statement it was in, when the rest of the statement is known (the table, the other columns). Statements sent with bind parameters (the extended protocol, `$1`) hold `Param`, not the value, and do not leak; statements sent with literals do.
+
+And `cancho_erase('people', '["ana@example.org"]')` is itself a statement with the key as a literal: run as it is, **the erasure writes the key it erases into the statement store**.
+
+**D-E7 (proposed). Constants are payloads of their statement, and the statement id commits to them with a salt.** A statement record keeps its *shape* (the IR with each `Const` replaced by a placeholder that keeps its type) and, beside it, the constants and a random 16-byte salt; the id in the log is `SHA-256(shape || SHA-256(salt || constants))`. Effect inference, which sees names and not values, works on the shape (`Call` arguments never decide an effect), so L2 with statements is unchanged in what it proves; erasing a statement means destroying its constants and its salt. This is `ir.md` version 3 and a change to the three verifiers, and it is **a precondition of an erasure that leaves nothing**, so it comes before `cancho_erase` goes through the proxy.
+
+**Q14. Take D-E7?** *Recommended:* yes. *Alternative:* document that literals in a statement are not erasable and tell clients to use bind parameters for personal data (the extended protocol already keeps them out of the IR); cheaper, and a client that forgets leaks.
+
 ## 3. Decisions proposed
 
 * **D-E1. Salted commitments.** A row version carries a random 16-byte **salt**; its hash is `SHA-256("cancho-db/row/v2" || 0x00 || salt || image)`. The salt is stored beside the image in the delta store and is **never** in the log. Erasing
@@ -48,7 +61,9 @@ that stays gives the data back. `design.md`'s row for erasure is corrected in pl
 | **E1** (this page) | the finding, measured; `design.md` corrected; the decisions above, with the open questions | the measurement reproduces; the claim is corrected where it was made |
 | **E2** | `l3a.md` section 9 (delta store version 2: salted row hash, key commitment, erased rows), golden vectors, the Python and cancho verifiers and a fresh third reading (`state.md` and the L1/L2 vectors do not change) | v1 vectors unchanged; v2 vectors agree in three verifiers; a tampered salt, a wrong commitment, a changed hash in an erased row each refused with a tag |
 | **E3** | the capture SQL makes salts, the delta store has `salt` and the key commitment; the proxy's commits carry v2 `changes` | the Python root of the delta table equals the log's `changes`; write cost reported |
-| **E4** | `cancho_erase`: the `erase` effect and capability, the erase commit, the scrub of the delta store (and the rows, on every branch) | after an erase no stored byte equals the subject's value (a scan of the data directory and the log for the planted values: it must find none); the rest still verifies |
+| **E3a** (built) | `cdb.erase(sch, tbl, key)` in SQL: deletes the row by its plain key and destroys the images, salts and plain keys of every delta row of the key in that schema, and reports the schemas that still hold the key | `tests/erase_check.py`: a scan of every table the capture keeps for planted values, before and after; a composite key; a rolled-back erasure; a branch made before holds its copy and is named. It also shows that erasure is by key: another table's column that names the subject (`notes.owner`) is for the caller to erase |
+| **E3b** (D-E7, Q14) | `ir.md` version 3: statement records keep the shape and put the constants and a salt beside it; the statement id commits to both; the three verifiers | v2 vectors unchanged; v3 vectors agree; a statement with its constants erased still verifies at L2 |
+| **E4** | `cancho_erase` through the proxy: the `call cancho_erase` capability (a `call` effect, granted explicitly, never implied by `write`), the token's `write` on the table, the erase commit; the call's key is a constant that D-E7 makes erasable | after an erase no stored byte, the statement store and the log included, equals the subject's value; the rest still verifies |
 | **E5** | the L3a verifier over erased stores in both languages | the E2 vectors with erased rows; mutants |
 
 ## 5. Questions for the owner
@@ -71,4 +86,4 @@ Recommended answer first; none blocks E1.
 
 ## 7. Claims
 
-C135 (the unsalted hash leaks; measured) and C136 (an erased store still verifies), in [`claims.md`](claims.md).
+C135 (the unsalted hash leaks; measured), C136 (an erased store still verifies) and C137 (the statement store holds constants), in [`claims.md`](claims.md).
