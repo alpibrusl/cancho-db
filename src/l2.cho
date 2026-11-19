@@ -120,17 +120,23 @@ pub fn run[&h, &d, &k, &t, &v, &x, &o](heap: &!h Heap, data: &d [byte], root: &k
         }
 
         // statements: the store's magic selects the grammar (ir.md section 4)
-        var v2 = false;
+        var mv = 1;
         if rule == 0 && has_stmts {
             if len(stmts) < 8 {
                 rule = commit.stmts_truncated();
-            } else if !bytes.equal(stmts[0..8], "CHODBST1") && !bytes.equal(stmts[0..8], "CHODBST2") {
+            } else if !bytes.equal(stmts[0..8], "CHODBST1") && !bytes.equal(stmts[0..8], "CHODBST2") && !bytes.equal(stmts[0..8], "CHODBST3") {
                 rule = commit.stmts_bad_magic();
             }
             if len(stmts) >= 8 {
-                v2 = bytes.equal(stmts[0..8], "CHODBST2");
+                if bytes.equal(stmts[0..8], "CHODBST2") {
+                    mv = 2;
+                } else if bytes.equal(stmts[0..8], "CHODBST3") {
+                    mv = 3;
+                }
             }
             let sid = alloc_slice[r](32, byte_of(0));
+            // a version 3 record's verdict on its payload, and where its shape ends (ir.md section 8)
+            let sinfo = alloc_slice[r](2, 0);
             var sat = 8;
             var sidx = 0;
             while rule == 0 && sat < len(stmts) {
@@ -143,12 +149,18 @@ pub fn run[&h, &d, &k, &t, &v, &x, &o](heap: &!h Heap, data: &d [byte], root: &k
                     } else {
                         let body = stmts[sat + 4..sat + 4 + length];
                         let scratch = map.empty(heap, 16, 0, 3);
-                        let (spent, well_formed) = ir.infer(heap, scratch, body, v2);
+                        let (spent, well_formed) = ir.infer(heap, scratch, body, mv, sinfo);
                         map.drop(heap, spent);
                         if !well_formed {
                             rule = commit.stmt_bad_encoding();
+                        } else if mv == 3 && sinfo[0] == 2 {
+                            rule = commit.stmt_consts_mismatch();
                         } else {
-                            ir.id(body, sid);
+                            if mv == 3 {
+                                ir.id3(body, sinfo[1], sid);
+                            } else {
+                                ir.id(body, sid);
+                            }
                             sstore = map.put(heap, sstore, sid, sat + 4);
                             sat = sat + 4 + length;
                         }
@@ -218,7 +230,7 @@ pub fn run[&h, &d, &k, &t, &v, &x, &o](heap: &!h Heap, data: &d [byte], root: &k
                         var ircode = 0;
                         if has_stmts {
                             borrow sstore as &sm in {
-                                ircode = ir.check_commit(heap, sm, stmts, enc, out, v2);
+                                ircode = ir.check_commit(heap, sm, stmts, enc, out, mv);
                             }
                         }
                         if ircode == 1 {

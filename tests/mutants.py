@@ -185,6 +185,18 @@ PY = [
     ("IR: stmts truncated entry accepted", "tools/verify.py", 'if len(data) - at - 4 < length:\n            raise Reject("stmts-truncated", index)', 'if False:\n            raise Reject("stmts-truncated", index)'),
     ("IR: stmts record index off by one", "tools/verify.py", 'raise Reject(e.rule, index)\n        store[hashlib.sha256(STMT_DOMAIN', 'raise Reject(e.rule, index + 1)\n        store[hashlib.sha256(STMT_DOMAIN'),
     ("IR: statements are read before the revocations", "tools/verify.py", "    revoked = load_revoked(revoked_data, root) if revoked_data is not None else {}\n    ir = load_stmts(stmts_data) if stmts_data is not None else None", "    ir = load_stmts(stmts_data) if stmts_data is not None else None\n    revoked = load_revoked(revoked_data, root) if revoked_data is not None else {}"),
+    ("v3: a Const is allowed in a v3 shape", "tools/verify.py", "                if v3:\n                    bad()                              # a v3 shape holds no constant", "                if False:\n                    bad()                              # a v3 shape holds no constant"),
+    ("v3: a hole may have type 3", "tools/verify.py", "                if vt > 2:\n                    bad()\n                holes.append(vt)", "                if vt > 3:\n                    bad()\n                holes.append(vt)"),
+    ("v3: a hole is allowed in a v2 shape", "tools/verify.py", "            elif tag == 11 and v3:", "            elif tag == 11 and v2:"),
+    ("v3: a payload tag of 2 is accepted", "tools/verify.py", "    else:\n        raise Reject(\"stmt-bad-encoding\")\n    return hashlib.sha256(STMT3_DOMAIN", "    else:\n        pass\n    return hashlib.sha256(STMT3_DOMAIN"),
+    ("v3: an erased payload may be followed by bytes", "tools/verify.py", "    if tag == 0:\n        if payload:\n            raise Reject(\"stmt-bad-encoding\")", "    if tag == 0:\n        if False:\n            raise Reject(\"stmt-bad-encoding\")"),
+    ("v3: bytes may follow the constants", "tools/verify.py", "            if r.at != len(payload) - 20:\n                raise Reject(\"stmt-bad-encoding\")", "            if False:\n                raise Reject(\"stmt-bad-encoding\")"),
+    ("v3: the constants need not have the holes' types", "tools/verify.py", "if types != holes or hashlib.sha256(", "if hashlib.sha256("),
+    ("v3: the hash of the constants is not checked", "tools/verify.py", " + payload[20:]).digest() != chash:", " + payload[20:]).digest() != chash and False:"),
+    ("v3: the salt is not in the hash of the constants", "tools/verify.py", "CONSTS_DOMAIN + salt + struct.pack", "CONSTS_DOMAIN + struct.pack"),
+    ("v3: the id leaves out the hash of the constants", "tools/verify.py", "STMT3_DOMAIN + shape + chash", "STMT3_DOMAIN + shape"),
+    ("v3: a mismatch is a bad encoding", "tools/verify.py", "            raise Reject(\"stmt-consts-mismatch\")", "            raise Reject(\"stmt-bad-encoding\")"),
+    ("v3: a version 3 store has a bad magic", "tools/verify.py", "(b\"CHODBST1\", b\"CHODBST2\", b\"CHODBST3\")", "(b\"CHODBST1\", b\"CHODBST2\")"),
 ]
 
 CHO = [
@@ -220,6 +232,20 @@ CHO = [
     ("record index off by one", "src/l1.cho", "bad_at = index;", "bad_at = index + 1;"),
     ("commit not counted per branch", "src/l1.cho", "counts = map.put(heap, counts, branch, count_here + 1);", "counts = map.put(heap, counts, branch, commits + 1);"),
     ("tip not updated", "src/l1.cho", "tips = map.put(heap, tips, branch, commits);", "tips = tips;"),
+    ("v3: a Const is allowed in a v3 shape", "src/ir.cho", "} else if tag == 1 && mv < 3 {", "} else if tag == 1 {"),
+    ("v3: a hole may have type 3", "src/ir.cho", "|| int_of(data[cur[0]]) > 2 {", "|| int_of(data[cur[0]]) > 3 {"),
+    ("v3: a hole is allowed in a v2 shape", "src/ir.cho", "} else if tag == 11 && mv == 3 {", "} else if tag == 11 {"),
+    ("v3: a payload tag of 2 is accepted", "src/ir.cho", "    if tag != 1 || rest < 33 + 20 {", "    if rest < 33 + 20 {"),
+    ("v3: an erased payload may be followed by bytes", "src/ir.cho", "        return rest == 33;", "        return true;"),
+    ("v3: bytes may follow the constants", "src/ir.cho", "    if !good || p != len(data) {", "    if !good {"),
+    ("v3: the constants need not have the holes' types", "src/ir.cho", "if good && i < nm[2] && nm[3 + i] != vt {", "if false {"),
+    ("v3: the constants need not be as many as the holes", "src/ir.cho", "    var same = n == nm[2];", "    var same = true;"),
+    ("v3: the hash of the constants is not checked", "src/ir.cho", "    if !same || !matches {", "    if !same {"),
+    ("v3: the salt is not in the hash of the constants", "src/ir.cho", "        crypto.sha256_update(sha, data[pat..pat + 16]);", "        crypto.sha256_update(sha, data[pat..pat]);"),
+    ("v3: the count is not in the hash of the constants", "src/ir.cho", "        crypto.sha256_update(sha, cnt);", "        crypto.sha256_update(sha, nul);"),
+    ("v3: the id leaves out the hash of the constants", "src/ir.cho", "        crypto.sha256_update(sha, data[0..end + 32]);", "        crypto.sha256_update(sha, data[0..end]);"),
+    ("v3: a mismatch is a bad encoding", "src/l2.cho", "                            rule = commit.stmt_consts_mismatch();", "                            rule = commit.stmt_bad_encoding();"),
+    ("v3: a version 3 store has a bad magic", "src/l2.cho", " && !bytes.equal(stmts[0..8], \"CHODBST3\") {", " {"),
 ]
 
 CHO += [

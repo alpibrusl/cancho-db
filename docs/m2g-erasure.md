@@ -84,6 +84,13 @@ Recommended answer first; none blocks E1.
 * **Mutants:** 16 more on the Python verifier and 18 more on the cancho one (all killed); they found five checks no case reached (a salt of the wrong length in a base line, a dump line or a delta row, and a store magic of a later version), each with a case now.
 * **Not built:** the capture SQL that makes the salts and commitments (E3), `cancho_erase` (E4), the erased-row cases through a real session (E5).
 
+## 6b. E3b as built: the statement store, version 3
+
+* **`docs/spec/ir.md` section 8** is normative: store magic `CHODBST3`; a record is `shape chash payload`, the shape being the v2 statement with a `Hole` (tag 11, the type of the constant) wherever a `Const` was, `chash = SHA-256("cancho-db/consts/v1" || 0 || salt || u32(n) || the n values)`, the payload either erased (`0x00`) or the salt and the values; the statement's id is `SHA-256("cancho-db/stmt/v3" || 0 || shape || chash)`, so it does not change when the payload is erased. A new rule, `stmt-consts-mismatch`, for a payload that is not what the record committed to. (The draft of the previous slice put `Hole` at tag 6, which v2 uses for `Star`: corrected to 11 when it was made normative.)
+* **Three verifiers, 467 vectors** (`tools/gen_ir3.py`: 31 new `ir3_*`): `tools/verify.py`, `src/ir.cho` and `verifiers/go/ir.go` agree on every one of them and on 9,000 fuzzed inputs (the fuzz reaches `stmt-consts-mismatch`). L2 with statements over an **erased** store still proves that the recorded effects are what the shapes infer.
+* **Mutants:** 12 on the Python verifier and 14 on the cancho one (all killed); one survived until a vector put a whole payload under a bad tag (`ir3_bad_payload_tag_2_over_a_whole_payload`).
+* **Not built:** the proxy writing version 3 records (it still writes version 2, so its statement store is not erasable), and `cancho_erase` through the proxy (E4).
+
 ## 7. Claims
 
-C135 (the unsalted hash leaks; measured), C136 (an erased store still verifies) and C137 (the statement store holds constants), in [`claims.md`](claims.md).
+C135 (the unsalted hash leaks; measured), C136 (an erased store still verifies) and C137 (the statement store holds constants) and C138 (an erased statement store still verifies), in [`claims.md`](claims.md).

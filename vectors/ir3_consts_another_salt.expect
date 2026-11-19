@@ -1,0 +1,1 @@
+reject rule=stmt-consts-mismatch record=1

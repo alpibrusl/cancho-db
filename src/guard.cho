@@ -229,7 +229,7 @@ pub fn check[&h, &k, &m, &q, &o, &r, &d, &x, &f](heap: &!h Heap, tk: &k [byte], 
                                                                     mark(vd, 2, 0 - w, contents(scw)[1], i);
                                                                 } else {
                                                                     var set = map.empty(heap, 16, 0, 3);
-                                                                    let (grown, good) = ir.infer(heap, set, contents(iw)[0..w], true);
+                                                                    let (grown, good) = ir.infer(heap, set, contents(iw)[0..w], 2, vd[14..16]);
                                                                     set = grown;
                                                                     if !good {
                                                                         mark(vd, 2, lower.e_cannot_lower(), 0 - 1, i);

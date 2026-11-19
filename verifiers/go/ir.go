@@ -13,7 +13,8 @@ func loadStmts(d []byte) (map[string][]effect, *reject) {
 		return nil, &reject{"stmts-truncated", -1}
 	}
 	v2 := string(d[:8]) == "CHODBST2"
-	if !v2 && string(d[:8]) != "CHODBST1" {
+	v3 := string(d[:8]) == "CHODBST3"
+	if !v2 && !v3 && string(d[:8]) != "CHODBST1" {
 		return nil, &reject{"stmts-bad-magic", -1}
 	}
 	out := map[string][]effect{}
@@ -29,13 +30,68 @@ func loadStmts(d []byte) (map[string][]effect, *reject) {
 		}
 		enc := d[pos : pos+int(n)]
 		pos += int(n)
-		es, ok := decodeStmt(enc, v2)
+		if v3 {
+			id, es, rj := v3Record(enc, i)
+			if rj != nil {
+				return nil, rj
+			}
+			out[id] = es
+			continue
+		}
+		es, ok, _, _ := decodeStmt(enc, v2, false)
 		if !ok {
 			return nil, &reject{"stmt-bad-encoding", i}
 		}
 		out[string(sha([]byte("cancho-db/stmt/v1"), []byte{0}, enc))] = es
 	}
 	return out, nil
+}
+
+// One record of a version 3 store (ir.md section 8): `shape chash payload`. The statement's id, its inferred effects, or a rejection.
+func v3Record(enc []byte, index int) (string, []effect, *reject) {
+	bad := &reject{"stmt-bad-encoding", index}
+	es, ok, end, holes := decodeStmt(enc, true, true)
+	if !ok || len(enc)-end < 33 {
+		return "", nil, bad
+	}
+	chash, tag, payload := enc[end:end+32], enc[end+32], enc[end+33:]
+	switch tag {
+	case 0:
+		if len(payload) != 0 {
+			return "", nil, bad
+		}
+	case 1:
+		if len(payload) < 20 {
+			return "", nil, bad
+		}
+		salt, n := payload[:16], binary.BigEndian.Uint32(payload[16:20])
+		pr := &reader{b: payload[20:]}
+		var types []byte
+		for i := uint32(0); i < n && !pr.bad; i++ {
+			vt := pr.u8()
+			switch vt {
+			case 0:
+			case 1:
+				pr.take(8)
+			case 2:
+				pr.b32()
+			default:
+				pr.bad = true
+			}
+			types = append(types, vt)
+		}
+		if pr.bad || pr.left() != 0 {
+			return "", nil, bad
+		}
+		count := make([]byte, 4)
+		binary.BigEndian.PutUint32(count, n)
+		if !bytes.Equal(types, holes) || !bytes.Equal(sha([]byte("cancho-db/consts/v1"), []byte{0}, salt, count, payload[20:]), chash) {
+			return "", nil, &reject{"stmt-consts-mismatch", index}
+		}
+	default:
+		return "", nil, bad
+	}
+	return string(sha([]byte("cancho-db/stmt/v3"), []byte{0}, enc[:end+32])), es, nil
 }
 
 type effSet struct {
@@ -84,7 +140,21 @@ func (r *reader) expr(s *effSet, allowCol bool) {
 				return
 			}
 			s.add(0, joinTC(t, c))
+		case 11:
+			if !r.v3 {
+				r.bad = true
+				return
+			}
+			vt := r.u8()
+			if vt > 2 {
+				r.bad = true
+			}
+			r.holes = append(r.holes, vt)
 		case 1:
+			if r.v3 {
+				r.bad = true // a v3 shape holds no constant
+				return
+			}
 			switch r.u8() {
 			case 0:
 			case 1:
@@ -163,8 +233,9 @@ func (r *reader) opt(s *effSet) {
 	}
 }
 
-func decodeStmt(b []byte, v2 bool) ([]effect, bool) {
-	r := &reader{b: b, v2: v2}
+// One statement. With v3 (ir.md section 8) a Hole stands where a Const would, the statement may be followed by the rest of its record, and the answer also says where it ended and gives the types of its holes.
+func decodeStmt(b []byte, v2, v3 bool) ([]effect, bool, int, []byte) {
+	r := &reader{b: b, v2: v2 || v3, v3: v3}
 	s := &effSet{m: map[string]effect{}}
 	switch r.u8() {
 	case 0: // Select
@@ -293,10 +364,10 @@ func decodeStmt(b []byte, v2 bool) ([]effect, bool) {
 	default:
 		r.bad = true
 	}
-	if r.bad || r.left() != 0 {
-		return nil, false
+	if r.bad || (!v3 && r.left() != 0) {
+		return nil, false, 0, nil
 	}
-	return s.list(), true
+	return s.list(), true, r.pos, r.holes
 }
 
 func sortEffects(l []effect) {

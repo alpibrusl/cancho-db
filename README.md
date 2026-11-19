@@ -15,7 +15,7 @@ Working name. The design is [`docs/design.md`](docs/design.md).
 - [`docs/spec/ir.md`](docs/spec/ir.md): the **statement IR** (the bound form of a SQL subset) and effect inference,
   so that L2 can check that a commit's recorded effects are *what its statements do*, not only what the server says.
 - [`docs/spec/state.md`](docs/spec/state.md): the facts a commit changed, `changes` (a Merkle root over them) and `state` (a chain of changes).
-- [`vectors/`](vectors): 436 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
+- [`vectors/`](vectors): 467 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
 - Three verifiers that must agree on every one: [`src/`](src) in cancho (no C, no foreign call),
   [`tools/verify.py`](tools/verify.py) in Python, and [`verifiers/go/`](verifiers/go) in Go, written from the specs alone
   by a separate agent session (see its README and [`docs/claims.md`](docs/claims.md) for what that does and does not show).
