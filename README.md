@@ -26,11 +26,12 @@ lowered to the IR and its effects checked against the token before PostgreSQL se
 transaction is one signed, hash-chained commit, made durable before PostgreSQL commits (a two-phase commit, settled by recovery after a crash). Simple and extended protocol; only loopback clients are served.
 The SQL is a subset (no subqueries, CTEs, set operations or window functions; a closed set of DDL): [`docs/claims.md`](docs/claims.md) lists what is refused.
 
-**M2 (row changes, branches, `AS OF`, merge): in progress, merge to come** ([`docs/m2-branches.md`](docs/m2-branches.md)).
+**M2 (row changes, branches, `AS OF`, merge): built, but for the replay verifier** ([`docs/m2-branches.md`](docs/m2-branches.md)).
 Built: **row-delta capture** (triggers installed by the proxy; every commit carries the real `changes` and `state`), and **branches**:
 `select cancho_fork('name')` copies the data into a schema of its own and starts a new chain in the log; a connection chooses its branch by the database name.
 **`AS OF`**: `select ... from t as of '<commit id>'` reads a table as a commit left it (on any branch; the commit is named in the statement, so the log records which past was read, and a token must grant it).
-Not built: `cancho_merge`, the replay verifier (L3a), recording of bound values, snapshots and erasure. Without `--stmts`, L2
+**`cancho_merge`**: `select cancho_merge('<source>')` merges a branch into the connection's branch (a three-way merge by key against the common ancestor read `AS OF`): one commit with two parents, or nothing if there is a conflict.
+Not built: the replay verifier (L3a), recording of bound values, snapshots and erasure. Without `--stmts`, L2
 checks only the commit's *recorded* effect set against its token; with it, the recorded set is shown to equal what the
 statements infer. That the store holds what was actually executed is L3's (see [`docs/claims.md`](docs/claims.md)), which says what is claimed, what each claim rests on, and what is *not*
 claimed.
@@ -86,7 +87,7 @@ $ PGPASSWORD=... psql -h 127.0.0.1 -p 5440 -U agent -d feature      # the databa
 The password is `base64url(token ‖ the last key's seed)`; `tools/mint.py` makes one for the test keys. The upstream role must be allowed to create triggers and event
 triggers (the row-change capture is installed at start), and every table needs a primary key. The log directory holds the log, the tokens and the statements, which the verifiers read:
 `build/verify log --root $ROOT --tokens ./log/tokens --stmts ./log/stmts`. The gates are `tests/proxy_e2e.py`, `tests/ext_e2e.py`, `tests/drivers_e2e.py`, `tests/changes_e2e.py` and
-`tests/fork_e2e.py` and `tests/asof_e2e.py`, against a real PostgreSQL and the stock clients.
+`tests/fork_e2e.py`, `tests/asof_e2e.py` and `tests/merge_e2e.py`, against a real PostgreSQL and the stock clients.
 
 ## Test
 

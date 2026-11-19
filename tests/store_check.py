@@ -51,9 +51,10 @@ class Chain:
     def __init__(self):
         self.tip, self.n = {}, {}
 
-    def commit(self, branch=b"main"):
+    def commit(self, branch=b"main", parents=None):
         seq = self.n.get(branch, 0)
-        parents = [self.tip[branch]] if branch in self.tip else []
+        if parents is None:
+            parents = [self.tip[branch]] if branch in self.tip else []
         stt = rb(32)
         enc = b"".join([u16(1), lst(parents), u16(len(branch)) + branch, u64(seq), rb(32), lst([rb(32)]), lst([]), rb(32), rb(32),
                         lst([]), lst([]), rb(32), stt, lst([]), u64(1_700_000_000_000 + seq)])
@@ -69,11 +70,14 @@ def store_record(b): return u32(len(b)) + b
 
 LAST_ERR = [""]
 LAST_BRANCHES = [[]]
+LAST_GRAPH = [[]]
 
 
 def run(d, key, branch, mode, stdin="", timeout=60):
     r = subprocess.run([STORE, str(d), str(key), branch, mode], input=stdin, capture_output=True, text=True, timeout=timeout)
     lines = r.stderr.splitlines(keepends=True)
+    LAST_GRAPH[0] = [x.split() for x in lines if x.startswith("commit ")]
+    lines = [x for x in lines if not x.startswith("commit ")]
     LAST_ERR[0] = "".join(x for x in lines if not x.startswith("branch "))
     LAST_BRANCHES[0] = [x.split() for x in lines if x.startswith("branch ")]
     return r.stdout.strip(), r.returncode
@@ -158,8 +162,9 @@ check("dev's tip among two branches", out == "ok commits=5 next=3 torn=0 tip=%s"
 
 # the branch table (docs/m2-branches.md D20): the configured branch first, then the others as their first commit appears; each with next seq, tip
 out, rc = run(d2, key, "main", "open")
-check("table, configured main: main then dev", LAST_BRANCHES[0] == [["branch", "main", "next", "2", "has", "1", "tip", mixed[2]["id"].hex() + mixed[2]["state"].hex()],
-                                                                    ["branch", "dev", "next", "3", "has", "1", "tip", mixed[4]["id"].hex() + mixed[4]["state"].hex()]], LAST_BRANCHES[0])
+# (`idx` is the index of the branch's last commit in the log, plus one; 0 for none)
+check("table, configured main: main then dev", LAST_BRANCHES[0] == [["branch", "main", "next", "2", "has", "1", "idx", "3", "tip", mixed[2]["id"].hex() + mixed[2]["state"].hex()],
+                                                                    ["branch", "dev", "next", "3", "has", "1", "idx", "5", "tip", mixed[4]["id"].hex() + mixed[4]["state"].hex()]], LAST_BRANCHES[0])
 out, rc = run(d2, key, "dev", "open")
 check("table, configured dev: dev then main", [b[1] for b in LAST_BRANCHES[0]] == ["dev", "main"] and [b[3] for b in LAST_BRANCHES[0]] == ["3", "2"], LAST_BRANCHES[0])
 out, rc = run(d2, key, "fresh", "open")
@@ -167,7 +172,7 @@ check("table, configured fresh (no commits): fresh first with no tip, then main,
 dz = work / "z"
 dz.mkdir()
 out, rc = run(dz, key, "main", "open")
-check("table of an empty log: the configured branch alone, no tip", LAST_BRANCHES[0] == [["branch", "main", "next", "0", "has", "0", "tip", "0" * 128]], LAST_BRANCHES[0])
+check("table of an empty log: the configured branch alone, no tip", LAST_BRANCHES[0] == [["branch", "main", "next", "0", "has", "0", "idx", "0", "tip", "0" * 128]], LAST_BRANCHES[0])
 # 64 branches fit; a 65th is refused
 many = Chain()
 mc = [many.commit(("b%d" % i).encode()) for i in range(65)]
@@ -179,6 +184,29 @@ check("64 branches (63 and the configured) fit", out.startswith("ok commits=63")
 (dm / "log").write_bytes(HEAD + b"".join(log_record(c) for c in mc[:64]))
 out, rc = run(dm, key, "main", "open")
 check("a 65th branch is refused as too big", out.startswith("refused") and "too" in out, out)
+
+
+# the commit graph (docs/m2-branches.md D35): each commit's branch and its parents' indices, a fork's first commit having the source's tip and a merge two parents
+g = Chain()
+gc = [g.commit(b"main"), g.commit(b"main")]
+gc.append(g.commit(b"side", parents=[g.tip[b"main"]]))
+gc.append(g.commit(b"main"))
+gc.append(g.commit(b"side"))
+gc.append(g.commit(b"main", parents=[g.tip[b"main"], g.tip[b"side"]]))
+gc.append(g.commit(b"side"))
+gc.append(g.commit(b"main", parents=[g.tip[b"main"], g.tip[b"side"]]))
+# a parent that is no branch's tip (an older commit of side): found by looking through the ids
+gc.append(g.commit(b"main", parents=[g.tip[b"main"], gc[4]["id"]]))
+dg = work / "graph"
+dg.mkdir()
+run(dg, key, "main", "append", feed(gc))
+out, rc = run(dg, key, "main", "open")
+want = [("0", "0", "0"), ("0", "1", "0"), ("1", "2", "0"), ("0", "2", "0"), ("1", "3", "0"), ("0", "4", "5"), ("1", "5", "0"), ("0", "6", "7"), ("0", "8", "5")]
+# (branch, first parent + 1, second parent + 1): commit 5 is the merge of 3 (main) and 4 (side), commit 7 of 5 and 6
+got = [(x[3], x[5], x[6]) for x in LAST_GRAPH[0]]
+check("a log of forks and merges verifies", out.startswith("ok commits=9"), out)
+check("the commit graph: each commit's branch and its parents (a fork has the source's tip, a merge two)", got == want, got)
+verify_ok(dg / "log", 9)
 
 # a log of more commits than the table holds (64 here) is refused, not truncated
 big = Chain()

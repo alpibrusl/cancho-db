@@ -108,7 +108,7 @@ pub fn stride() -> [] int {
 
 // The most of one statement's CommandComplete messages the proxy holds back, and of one message it collects whole.
 pub fn fork_rec() -> [] int {
-    return 80;
+    return 128;
 }
 
 pub fn hold_max() -> [] int {
@@ -135,6 +135,10 @@ pub res struct Store {
     // the id of every commit the log holds, 32 bytes each in log order (`chain[2]` of them): recovery asks it which prepared
     // transactions have a commit (P2-D11)
     ids: Box[[byte]],
+    // the commit graph (docs/m2-branches.md D35): per commit, in log order, its branch's index (`cbr`) and its two parents' indices (`cg`, two ints each, -1 for none); per branch the index of its last commit (`tx`)
+    cg: Box[[int]],
+    cbr: Box[[byte]],
+    tx: Box[[int]],
 }
 
 // The most commits the recovery table holds: a log with more is refused at startup, and a proxy whose log reaches it refuses further commits.
@@ -222,8 +226,11 @@ pub res struct Core {
     fm: Box[[int]],
     fe: Box[[byte]],
     fl: Box[[byte]],
-    // per client, `fork_rec()` bytes: for a fork in flight, the source's tip id (32), whether it had one (1), the new branch's name length (1) and name (40)
+    // per client, `fork_rec()` bytes: for a fork in flight, the source's tip id (32), whether it had one (1), the new branch's name length (1) and name (40); for a merge in flight the same for the target's tip and the source branch's name,
+    // and from 80 the source's tip id (32), 112 whether it had one, 113 the source's index in the branch table
     fkn: Box[[byte]],
+    // scratch for the walk that finds a merge base: a byte for each commit of the log
+    mk: Box[[byte]],
 }
 
 // ------------------------------------------------------------------------------------------------ sending
@@ -429,12 +436,12 @@ pub fn consume[&c](core: &!c Core, k: int, n: int) -> [] int {
 
 // A `Core` for `slots` connections, around the poller and the configuration (`cfg` and `cfgi`: see `Core`).
 pub fn new_core[&h](heap: &!h Heap, poller: Poller, cfg: Box[[byte]], cfgi: Box[[int]], kept: Store, slots: int) -> [heap] Core {
-    return Core { store: kept, xstm: box_slice(heap, slots * x_stmts() * x_stmt_rec() + x_stmts() * x_stmt_rec(), byte_of(0)), xprt: box_slice(heap, slots * x_ports() * x_port_rec() + x_ports() * x_port_rec(), byte_of(0)), xi: box_slice(heap, 8 * slots + 8, 0), acc: box_slice(heap, slots * acc_stride() + acc_stride(), byte_of(0)), acci: box_slice(heap, 8 * slots + 8, 0), poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 8, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)), fw: box_slice(heap, facts_text_max() / 2 + 64, byte_of(0)), fm: box_slice(heap, 9 * facts_max() + 9, 0), fe: box_slice(heap, 140000, byte_of(0)), fl: box_slice(heap, 32 * facts_max() + 32, byte_of(0)), fkn: box_slice(heap, slots * fork_rec() + fork_rec(), byte_of(0)) };
+    return Core { store: kept, xstm: box_slice(heap, slots * x_stmts() * x_stmt_rec() + x_stmts() * x_stmt_rec(), byte_of(0)), xprt: box_slice(heap, slots * x_ports() * x_port_rec() + x_ports() * x_port_rec(), byte_of(0)), xi: box_slice(heap, 8 * slots + 8, 0), acc: box_slice(heap, slots * acc_stride() + acc_stride(), byte_of(0)), acci: box_slice(heap, 8 * slots + 8, 0), poller: poller, events: box_slice(heap, 128, 0), state: box_slice(heap, stride() * slots + 2 * stride(), 0), rbuf: box_slice(heap, chunk(), byte_of(0)), pends: box_slice(heap, slots * queue_size() + queue_size(), byte_of(0)), hbuf: box_slice(heap, slots * hello_size() + hello_size(), byte_of(0)), cfg: cfg, cfgi: cfgi, tokb: box_slice(heap, slots * token_max() + token_max(), byte_of(0)), mbuf: box_slice(heap, slots * msg_max() + msg_max(), byte_of(0)), snap: box_slice(heap, snap_max(), byte_of(0)), snapin: box_slice(heap, snapin_max(), byte_of(0)), rend: box_slice(heap, msg_max(), byte_of(0)), qout: box_slice(heap, msg_max() + 16, byte_of(0)), aux: box_slice(heap, 8, 0 - 1), hold: box_slice(heap, slots * hold_max() + hold_max(), byte_of(0)), sbuf: box_slice(heap, slots * sbuf_max() + sbuf_max(), byte_of(0)), fw: box_slice(heap, facts_text_max() / 2 + 64, byte_of(0)), fm: box_slice(heap, 9 * facts_max() + 9, 0), fe: box_slice(heap, 140000, byte_of(0)), fl: box_slice(heap, 32 * facts_max() + 32, byte_of(0)), fkn: box_slice(heap, slots * fork_rec() + fork_rec(), byte_of(0)), mk: box_slice(heap, ids_max(), byte_of(0)) };
 }
 
 // Release everything a `Core` holds.
 pub fn drop_core[&h](heap: &!h Heap, core: Core) -> [heap] int {
-    let Core { store, xstm, xprt, xi, acc, acci, poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf, fw, fm, fe, fl, fkn } = core;
+    let Core { store, xstm, xprt, xi, acc, acci, poller, events, state, rbuf, pends, hbuf, cfg, cfgi, tokb, mbuf, snap, snapin, rend, qout, aux, hold, sbuf, fw, fm, fe, fl, fkn, mk } = core;
     drop_store(heap, store);
     unbox_slice(heap, xstm);
     unbox_slice(heap, xprt);
@@ -463,6 +470,7 @@ pub fn drop_core[&h](heap: &!h Heap, core: Core) -> [heap] int {
     unbox_slice(heap, fe);
     unbox_slice(heap, fl);
     unbox_slice(heap, fkn);
+    unbox_slice(heap, mk);
     return 0;
 }
 
@@ -494,9 +502,34 @@ pub fn branch_taken[&c, &n](core: &c Core, name: &n [byte]) -> [] int {
     return 0;
 }
 
+// The index of branch `name` in the store's table, or -1.
+pub fn branch_index[&c, &n](core: &c Core, name: &n [byte]) -> [] int {
+    let chain = contents(core.store.chain);
+    let names = contents(core.store.names);
+    var i = 0;
+    while i < chain[0] {
+        let at = i * store.branch_name_max();
+        if chain[4 + 3 * i] == len(name) {
+            var same = true;
+            var j = 0;
+            while j < len(name) {
+                if names[at + j] != name[j] {
+                    same = false;
+                }
+                j = j + 1;
+            }
+            if same {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
 // A `Store` around three open files; `seed` (32 bytes), the branch table (`tips` 64 bytes each, `names`, `bi` three ints each, `branches` of them: what `store.open_log`
 // filled in) and the `count` ids of `ids` are copied.
-pub fn new_store[&h, &s, &t, &n, &j, &i](heap: &!h Heap, log: File, tokens: File, stmts: File, seed: &s [byte], tips: &t [byte], names: &n [byte], bi: &j [int], branches: int, ids: &i [byte], count: int) -> [heap] Store {
+pub fn new_store[&h, &s, &t, &n, &j, &i, &g, &r, &x](heap: &!h Heap, log: File, tokens: File, stmts: File, seed: &s [byte], tips: &t [byte], names: &n [byte], bi: &j [int], branches: int, ids: &i [byte], count: int, cg0: &g [int], cbr0: &r [byte], tx0: &x [int]) -> [heap] Store {
     var sb = box_slice(heap, 64, byte_of(0));
     var tb = box_slice(heap, 64 * store.branches_max(), byte_of(0));
     var nb = box_slice(heap, store.branch_name_max() * store.branches_max(), byte_of(0));
@@ -540,11 +573,35 @@ pub fn new_store[&h, &s, &t, &n, &j, &i](heap: &!h Heap, log: File, tokens: File
             i = i + 1;
         }
     }
-    return Store { log: log, tokens: tokens, stmts: stmts, seed: sb, tip: tb, names: nb, chain: cb, ids: ib };
+    var gb = box_slice(heap, 2 * ids_max(), 0 - 1);
+    var rb = box_slice(heap, ids_max(), byte_of(0));
+    var xb = box_slice(heap, store.branches_max(), 0 - 1);
+    borrow mut gb as &!gw in {
+        var i = 0;
+        while i < 2 * count {
+            contents(gw)[i] = cg0[i];
+            i = i + 1;
+        }
+    }
+    borrow mut rb as &!rw in {
+        var i = 0;
+        while i < count {
+            contents(rw)[i] = cbr0[i];
+            i = i + 1;
+        }
+    }
+    borrow mut xb as &!xw in {
+        var i = 0;
+        while i < store.branches_max() {
+            contents(xw)[i] = tx0[i];
+            i = i + 1;
+        }
+    }
+    return Store { log: log, tokens: tokens, stmts: stmts, seed: sb, tip: tb, names: nb, chain: cb, ids: ib, cg: gb, cbr: rb, tx: xb };
 }
 
 pub fn drop_store[&h](heap: &!h Heap, kept: Store) -> [heap] int {
-    let Store { log, tokens, stmts, seed, tip, names, chain, ids } = kept;
+    let Store { log, tokens, stmts, seed, tip, names, chain, ids, cg, cbr, tx } = kept;
     file_close(log);
     file_close(tokens);
     file_close(stmts);
@@ -553,6 +610,9 @@ pub fn drop_store[&h](heap: &!h Heap, kept: Store) -> [heap] int {
     unbox_slice(heap, names);
     unbox_slice(heap, chain);
     unbox_slice(heap, ids);
+    unbox_slice(heap, cg);
+    unbox_slice(heap, cbr);
+    unbox_slice(heap, tx);
     return 0;
 }
 

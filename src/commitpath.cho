@@ -344,6 +344,23 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
             parents = tip[0..32];
             np = 1;
         }
+        // a merge (docs/m2-branches.md D37): two parents, the target's tip and the source's, and the state over both of their states; `mp` holds the two ids and `ms` the two states
+        let merging = st[p + 24] == 2;
+        let mp = alloc_slice[z](64, byte_of(0));
+        let ms = alloc_slice[z](64, byte_of(0));
+        let src = int_of(fk[113]);
+        if merging {
+            var q4 = 0;
+            while q4 < 32 {
+                mp[q4] = contents(core.store.tip)[64 * bx + q4];
+                mp[32 + q4] = contents(core.store.tip)[64 * src + q4];
+                ms[q4] = contents(core.store.tip)[64 * bx + 32 + q4];
+                ms[32 + q4] = contents(core.store.tip)[64 * src + 32 + q4];
+                q4 = q4 + 1;
+            }
+            parents = mp[0..64];
+            np = 2;
+        }
         // `changes` (docs/m2-branches.md D16): a read has the empty one; a transaction that wrote asks the database, inside the transaction, for its NET facts and the
         // Merkle root of them is `changes`. 0 if all went well; 1 PostgreSQL refused or the text is not facts; 3 too many facts; -1 the upstream was lost.
         var fcode = 0;
@@ -363,6 +380,21 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
                 fcode = 5;
             }
             if fcode != 0 {
+                upstream_exec(tab, core, b, "ROLLBACK");
+            }
+        }
+        if merging {
+            // the merge was decided on the two tips that were noted: a commit on either branch since makes it a merge of something else
+            var moved = chain[4 + 3 * bx + 2] != int_of(fk[32]) || chain[4 + 3 * src + 2] != int_of(fk[112]);
+            var q5 = 0;
+            while q5 < 32 {
+                if mp[q5] != fk[q5] || mp[32 + q5] != fk[80 + q5] {
+                    moved = true;
+                }
+                q5 = q5 + 1;
+            }
+            if moved {
+                fcode = 6;
                 upstream_exec(tab, core, b, "ROLLBACK");
             }
         }
@@ -390,7 +422,11 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
             }
         }
         // `state`: the parent's, if there is one, and these changes
-        state.state(np, tip[32..32 + 32 * np], chg, stt);
+        if merging {
+            state.state(2, ms[0..64], chg, stt);
+        } else {
+            state.state(np, tip[32..32 + 32 * np], chg, stt);
+        }
         var elen = 0 - 1;
         if fcode == 0 {
             elen = build.encode(enc, parents, branch, seqno, f[0..32], acc[base..base + 32 * n], acc[base + 18432..base + 18432 + ai[8 * k + 2]], f[32..64], f[64..96], f[96..96], nds, nd[0..9 * nds], chg, stt, 0, f[96..96], contents(core.aux)[1]);
@@ -471,6 +507,21 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
                         j = j + 1;
                     }
                     build.put_bytes(contents(core.store.ids), 32 * chain[2], ident);
+                    // the commit graph: its branch, its parents' indices (a fork's is the source's tip, a merge's two tips), and the branch's last commit is this one
+                    let gi = chain[2];
+                    let txs = contents(core.store.tx);
+                    contents(core.store.cbr)[gi] = byte_of(nb);
+                    var gp0 = 0 - 1;
+                    if forking || chain[4 + 3 * bx + 2] == 1 {
+                        gp0 = txs[bx];
+                    }
+                    contents(core.store.cg)[2 * gi] = gp0;
+                    var gp1 = 0 - 1;
+                    if merging {
+                        gp1 = txs[src];
+                    }
+                    contents(core.store.cg)[2 * gi + 1] = gp1;
+                    txs[nb] = gi;
                     chain[2] = chain[2] + 1;
                     chain[4 + 3 * nb + 1] = chain[4 + 3 * nb + 1] + 1;
                     chain[4 + 3 * nb + 2] = 1;

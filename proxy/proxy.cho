@@ -593,6 +593,11 @@ fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int
         shared.answer_error(tab, core, client, 73, "40001", "fork-raced", "the branch changed while it was being copied, so the fork was rolled back; try again");
         return 0;
     }
+    if !failed && r == 6 {
+        st[cp + 18] = 0;
+        shared.answer_error(tab, core, client, 73, "40001", "merge-raced", "a branch of the merge changed while it was being merged, so the merge was rolled back; try again");
+        return 0;
+    }
     if !failed && r == 5 {
         st[cp + 18] = 0;
         shared.answer_error(tab, core, client, 73, "42710", "fork-branch-exists", "a branch of that name was made meanwhile, so the fork was rolled back");
@@ -1021,6 +1026,8 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core
                     var rl = vd[3];
                     if forkpath.is_fork(vd[7], effs[0..vd[9]]) {
                         rl = forkpath.start(tw, core, k, ts, sql);
+                    } else if forkpath.is_merge(vd[7], effs[0..vd[9]]) {
+                        rl = forkpath.start_merge(tw, core, k, ts, sql, contents(core.snap)[0..snap_len]);
                     }
                     if rl >= 0 {
                         if ts == 0 {
@@ -1030,6 +1037,8 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core
                         if added == 0 {
                             if forkpath.is_fork(vd[7], effs[0..vd[9]]) {
                                 st[p + 24] = 1;
+                            } else if forkpath.is_merge(vd[7], effs[0..vd[9]]) {
+                                st[p + 24] = 2;
                             }
                             run_query(tw, core, k, rl);
                         } else {
@@ -1313,6 +1322,9 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
     var tip = box_slice(heap, 64 * store.branches_max(), byte_of(0));
     var bnames = box_slice(heap, store.branch_name_max() * store.branches_max(), byte_of(0));
     var binfo = box_slice(heap, 3 * store.branches_max(), 0);
+    var cgb = box_slice(heap, 2 * shared.ids_max(), 0 - 1);
+    var cbrb = box_slice(heap, shared.ids_max(), byte_of(0));
+    var txb = box_slice(heap, store.branches_max(), 0 - 1);
     var info = box_slice(heap, 8, 0);
     var idtab = box_slice(heap, 32 * shared.ids_max(), byte_of(0));
     var keyed = false;
@@ -1364,8 +1376,11 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                             borrow mut idtab as &!xw in {
                                 borrow mut bnames as &!nw in {
                                 borrow mut binfo as &!bw in {
+                                borrow mut cgb as &!gw in {
+                                borrow mut cbrb as &!rw in {
+                                borrow mut txb as &!yw in {
                                 borrow mut tip as &!tw in {
-                                    match store.open_log(heap, dr, contents(pr), branch, contents(iw), contents(tw), contents(xw), contents(nw), contents(bw)) {
+                                    match store.open_log(heap, dr, contents(pr), branch, contents(iw), contents(tw), contents(xw), contents(nw), contents(bw), contents(gw), contents(rw), contents(yw)) {
                                         Opened::Failed(code) => {
                                             refuse_start(io, "log", code);
                                             if code == store.r_corrupt() {
@@ -1410,7 +1425,7 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                                             }
                                                             io.newline(io);
                                                             borrow seed as &sd2 in {
-                                                                let kept = shared.new_store(heap, logfile, tokens, stmts, contents(sd2), contents(tw), contents(nw), contents(bw), contents(iw)[6], contents(xw), contents(iw)[0]);
+                                                                let kept = shared.new_store(heap, logfile, tokens, stmts, contents(sd2), contents(tw), contents(nw), contents(bw), contents(iw)[6], contents(xw), contents(iw)[0], contents(gw), contents(rw), contents(yw));
                                                                 status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi, kept);
                                                             }
                                                         }
@@ -1419,6 +1434,9 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                             }
                                         }
                                     }
+                                }
+                                }
+                                }
                                 }
                                 }
                                 }
@@ -1435,6 +1453,9 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
     unbox_slice(heap, tip);
     unbox_slice(heap, bnames);
     unbox_slice(heap, binfo);
+    unbox_slice(heap, cgb);
+    unbox_slice(heap, cbrb);
+    unbox_slice(heap, txb);
     unbox_slice(heap, info);
     unbox_slice(heap, idtab);
     return status;

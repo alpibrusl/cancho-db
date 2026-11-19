@@ -208,6 +208,9 @@ fn serve[&h, &o, &d, &p, &b, &m](heap: &!h Heap, io: &!o Io, dir: &d Dir, pk: &p
     var tip = box_slice(heap, 64 * store.branches_max(), byte_of(0));
     var bnames = box_slice(heap, store.branch_name_max() * store.branches_max(), byte_of(0));
     var binfo = box_slice(heap, 3 * store.branches_max(), 0);
+    var cgb = box_slice(heap, 2 * 64, 0 - 1);
+    var cbrb = box_slice(heap, 64, byte_of(0));
+    var txb = box_slice(heap, store.branches_max(), 0 - 1);
     var ids = box_slice(heap, 32 * 64, byte_of(0));
     var st = 1;
     borrow mut info as &!iw in {
@@ -215,7 +218,10 @@ fn serve[&h, &o, &d, &p, &b, &m](heap: &!h Heap, io: &!o Io, dir: &d Dir, pk: &p
             borrow mut ids as &!dw in {
               borrow mut bnames as &!nw in {
                borrow mut binfo as &!bw in {
-                match store.open_log(heap, dir, pk, branch, contents(iw), contents(tw), contents(dw), contents(nw), contents(bw)) {
+                borrow mut cgb as &!gw in {
+                 borrow mut cbrb as &!rw in {
+                  borrow mut txb as &!yw in {
+                match store.open_log(heap, dir, pk, branch, contents(iw), contents(tw), contents(dw), contents(nw), contents(bw), contents(gw), contents(rw), contents(yw)) {
                     Opened::Failed(code) => {
                         io.write_all(io, "refused ");
                         if code >= 1000 {
@@ -234,6 +240,20 @@ fn serve[&h, &o, &d, &p, &b, &m](heap: &!h Heap, io: &!o Io, dir: &d Dir, pk: &p
                         var log = lf;
                         print_line(io, contents(iw), contents(tw));
                         err_hex(io, "ids ", contents(dw)[0..32 * contents(iw)[0]]);
+                        // the commit graph: one line `commit I br B p P0 P1` for each commit, the parents' indices plus one (0 for none)
+                        var ci = 0;
+                        while ci < contents(iw)[0] && 2 * ci + 1 < len(contents(gw)) {
+                            io.error_all(io, "commit ");
+                            err_nat(io, ci);
+                            io.error_all(io, " br ");
+                            err_nat(io, int_of(contents(rw)[ci]));
+                            io.error_all(io, " p ");
+                            err_nat(io, contents(gw)[2 * ci] + 1);
+                            io.error_all(io, " ");
+                            err_nat(io, contents(gw)[2 * ci + 1] + 1);
+                            io.error_all(io, "\n");
+                            ci = ci + 1;
+                        }
                         // the branch table: one line `branch NAME next HAS TIPHEX` for each, in table order
                         var bq = 0;
                         while bq < contents(iw)[6] {
@@ -243,6 +263,8 @@ fn serve[&h, &o, &d, &p, &b, &m](heap: &!h Heap, io: &!o Io, dir: &d Dir, pk: &p
                             err_nat(io, contents(bw)[3 * bq + 1]);
                             io.error_all(io, " has ");
                             err_nat(io, contents(bw)[3 * bq + 2]);
+                            io.error_all(io, " idx ");
+                            err_nat(io, contents(yw)[bq] + 1);
                             err_hex(io, " tip ", contents(tw)[64 * bq..64 * bq + 64]);
                             bq = bq + 1;
                         }
@@ -271,9 +293,15 @@ fn serve[&h, &o, &d, &p, &b, &m](heap: &!h Heap, io: &!o Io, dir: &d Dir, pk: &p
             }
                }
               }
+                  }
+                 }
+                }
         }
     }
     unbox_slice(heap, ids);
+    unbox_slice(heap, cgb);
+    unbox_slice(heap, cbrb);
+    unbox_slice(heap, txb);
     unbox_slice(heap, bnames);
     unbox_slice(heap, binfo);
     unbox_slice(heap, info);
