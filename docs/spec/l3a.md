@@ -66,6 +66,9 @@ names another. The commits are visited **in log order**; for each, in this order
    delete needs it present with a hash equal to the fact's `old_hash`. An insert and an update set the hash to `new_hash`; a delete removes the key.
 6. **`replay-unsupported`**: the commit starts a branch (no earlier commit is on it) and its first parent is not the last commit visited on another branch, so that the map it must copy is not known.
 
+**Order of 5 and 6.** Step 6 is judged *before* step 5 for the same commit (a commit that starts a branch is refused as `replay-unsupported` before its facts are tried against a map that does not exist); the numbers
+name the rules, not the order of the two.
+
 **Branches.** There is one map for each branch. The first branch's map starts as the base. **A branch's first commit** takes a **copy of the map of the branch its first parent is on**, as it is now (the first parent is that branch's last commit visited:
 step 6), and then applies its own facts, of which a fork has none; with no parent it starts from an empty map (the first branch's, from the base). **A merge commit applies the facts it recorded to its own branch's map**; L3a does not redo the merge, whose result is what the facts say and which steps 3 to 5 check.
 

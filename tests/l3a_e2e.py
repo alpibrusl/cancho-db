@@ -89,12 +89,19 @@ def reset():
 
 def run_all(log, deltas, base=None, live=False):
     outs = []
-    for v in VERIFIERS:
+    dump = Path(work) / "live.tsv"
+    if live:
+        # the rows as a file (section 3b): the first verifier (python3 tools/l3a.py) reads the database itself with --live, the others this file
+        schemas = ["public"] + direct("select nspname from pg_namespace where nspname like 'cdb\\_b\\_%' order by 1").stdout.split()
+        subprocess.run([sys.executable, str(ROOT_DIR / "tools" / "export_live.py"), str(dump)] + schemas + ["--"] + PSQL, check=True)
+    for n, v in enumerate(VERIFIERS):
         cmd = v.split() + [str(log), "--deltas", str(deltas)]
         if base:
             cmd += ["--base", str(base)]
-        if live:
+        if live and n == 0:
             cmd += ["--live", " ".join(PSQL)]
+        elif live:
+            cmd += ["--live-dump", str(dump)]
         outs.append(subprocess.run(cmd, capture_output=True, text=True).stdout.strip())
     return outs
 

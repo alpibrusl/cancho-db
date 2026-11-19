@@ -1,0 +1,241 @@
+// l3averify -- the L3a verifier of docs/spec/l3a.md, in cancho.
+//
+//     l3averify LOG --deltas FILE [--base FILE] [--live-dump FILE] [--first-branch NAME]
+//
+// Writes one line, `ok commits=N facts=M branches=B[ final]` or `reject rule=TAG record=I`, and exits 0 (ok), 1 (reject) or 2 (usage, or a file it cannot
+// read). tools/l3a.py is the other reading; tests/l3a/ holds them to the same answers. It reaches what the spec needs and nothing more: the files named on the
+// command line, the heap, and standard output and error (checked in tests/authority.sh).
+
+import std.buffer;
+import std.io;
+import std.bytes;
+import std.flags;
+import cdb.l3a;
+
+// One named file, read whole through a handle (`examples/seek`'s `read_file`). `-1` on a failure.
+fn read_file[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte], text: buffer.Buffer) -> [heap, fs_read(""), file_read] (buffer.Buffer, int) {
+    var out = text;
+    var total = 0;
+    var trouble = 0;
+
+    match open_read(fs, path) {
+        Opened::Failed(reason) => {
+            trouble = reason;
+            if trouble == 0 {
+                trouble = 1;
+            }
+        }
+        Opened::Ok(opened) => {
+            var file = opened;
+            var chunk = buffer.empty(heap, 65536);
+            borrow mut file as &!handle in {
+                var going = true;
+                while going {
+                    var got = 0;
+                    borrow mut chunk as &!c in {
+                        match file_read(handle, buffer.room(c)) {
+                            Read::Got(n) => {
+                                got = n;
+                                buffer.filled(c, n);
+                            }
+                            Read::End => {
+                                going = false;
+                            }
+                            Read::Failed(reason) => {
+                                going = false;
+                                trouble = reason;
+                                if trouble == 0 {
+                                    trouble = 1;
+                                }
+                            }
+                        }
+                    }
+                    if got > 0 {
+                        borrow chunk as &c in {
+                            out = buffer.append(heap, out, buffer.bytes(c));
+                        }
+                        total = total + got;
+                        borrow mut chunk as &!c in {
+                            buffer.clear(c);
+                        }
+                    }
+                }
+            }
+            file_close(file);
+            buffer.drop(heap, chunk);
+        }
+    }
+
+    if trouble != 0 {
+        return (out, 0 - 1);
+    }
+    return (out, total);
+}
+
+// The value of a hex digit, or -1.
+// One named file into a buffer, or a message on standard error and `false`. The buffer comes back either way.
+fn load[&h, &f, &i, &p](heap: &!h Heap, fs: &f Fs(""), io: &!i Io, path: &p [byte], text: buffer.Buffer) -> [heap, fs_read(""), file_read, err_write] (buffer.Buffer, bool) {
+    let (grown, got) = read_file(heap, fs, path, text);
+    if got < 0 {
+        io.error_all(io, "l3averify: cannot read: ");
+        io.error_all(io, path);
+        io.error_all(io, "\n");
+        return (grown, false);
+    }
+    return (grown, true);
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(ffi);
+
+    var path: &static [byte] = "";
+    var have_path = false;
+    var deltas_path: &static [byte] = "";
+    var have_deltas = false;
+    var base_path: &static [byte] = "";
+    var have_base = false;
+    var live_path: &static [byte] = "";
+    var have_live = false;
+    var first_name: &static [byte] = "";
+    var have_first = false;
+    var usage = false;
+    var status = 0;
+
+    borrow mut heap as &!h in {
+        borrow args as &g in {
+            var c = flags.start();
+            var going = true;
+            while going {
+                let (next, step) = flags.step(g, c);
+                c = next;
+                match step {
+                    flags.Arg::Short(letter) => {
+                        usage = true;
+                    }
+                    flags.Arg::Long(name) => {
+                        if flags.named(name, "deltas") && !have_deltas {
+                            let (after, given) = flags.value(g, c);
+                            c = after;
+                            deltas_path = given;
+                            have_deltas = true;
+                        } else if flags.named(name, "base") && !have_base {
+                            let (after, given) = flags.value(g, c);
+                            c = after;
+                            base_path = given;
+                            have_base = true;
+                        } else if flags.named(name, "live-dump") && !have_live {
+                            let (after, given) = flags.value(g, c);
+                            c = after;
+                            live_path = given;
+                            have_live = true;
+                        } else if flags.named(name, "first-branch") && !have_first {
+                            let (after, given) = flags.value(g, c);
+                            c = after;
+                            first_name = given;
+                            have_first = true;
+                        } else {
+                            usage = true;
+                        }
+                    }
+                    flags.Arg::Operand(text) => {
+                        if have_path {
+                            usage = true;
+                        } else {
+                            path = text;
+                            have_path = true;
+                        }
+                    }
+                    flags.Arg::Done => {
+                        going = false;
+                    }
+                }
+            }
+        }
+        if !have_path || !have_deltas {
+            usage = true;
+        }
+
+        if usage {
+            status = 2;
+            borrow mut io as &!e in {
+                io.error_all(e, "usage: l3averify LOG --deltas FILE [--base FILE] [--live-dump FILE] [--first-branch NAME]\n");
+            }
+        } else {
+            var log_text = buffer.empty(h, 65536);
+            var deltas_text = buffer.empty(h, 65536);
+            var base_text = buffer.empty(h, 16);
+            var live_text = buffer.empty(h, 16);
+            var good = true;
+            borrow fs as &f in {
+                borrow mut io as &!e in {
+                    let (a, ok_log) = load(h, f, e, path, log_text);
+                    log_text = a;
+                    good = ok_log;
+                    if good {
+                        let (b, ok_deltas) = load(h, f, e, deltas_path, deltas_text);
+                        deltas_text = b;
+                        good = ok_deltas;
+                    }
+                    if good && have_base {
+                        let (b, ok_base) = load(h, f, e, base_path, base_text);
+                        base_text = b;
+                        good = ok_base;
+                    }
+                    if good && have_live {
+                        let (b, ok_live) = load(h, f, e, live_path, live_text);
+                        live_text = b;
+                        good = ok_live;
+                    }
+                }
+            }
+            if !good {
+                status = 2;
+            } else {
+                region x {
+                    let verdict = alloc_slice[x](6, 0);
+                    borrow log_text as &lt in {
+                        borrow deltas_text as &dt in {
+                            borrow base_text as &bt in {
+                                borrow live_text as &vt in {
+                                    l3a.run(h, buffer.bytes(lt), buffer.bytes(dt), have_base, buffer.bytes(bt), have_live, buffer.bytes(vt), have_first, first_name, verdict);
+                                }
+                            }
+                        }
+                    }
+                    borrow mut io as &!o in {
+                        if verdict[0] == 0 {
+                            io.write_all(o, "ok commits=");
+                            io.print_nat(o, verdict[2]);
+                            io.write_all(o, " facts=");
+                            io.print_nat(o, verdict[3]);
+                            io.write_all(o, " branches=");
+                            io.print_nat(o, verdict[4]);
+                            if have_live {
+                                io.write_all(o, " final");
+                            }
+                            io.newline(o);
+                        } else {
+                            status = 1;
+                            io.write_all(o, "reject rule=");
+                            io.write_all(o, l3a.rule_name(verdict[0]));
+                            io.write_all(o, " record=");
+                            io.print_int(o, verdict[1]);
+                            io.newline(o);
+                        }
+                    }
+                }
+            }
+            buffer.drop(h, log_text);
+            buffer.drop(h, deltas_text);
+            buffer.drop(h, base_text);
+            buffer.drop(h, live_text);
+        }
+    }
+
+    release(args);
+    release(fs);
+    release(io);
+    release(heap);
+    return status;
+}

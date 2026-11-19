@@ -48,12 +48,16 @@ def read_log(path):
             at += 4 + n + 64
             o = 2
             (np_,) = struct.unpack(">I", enc[o:o + 4]); o += 4
+            if np_ > len(enc):
+                raise Reject("log-malformed", len(out))
             parents = [enc[o + 32 * i:o + 32 * i + 32] for i in range(np_)]; o += 32 * np_
             (bl,) = struct.unpack(">H", enc[o:o + 2]); o += 2
-            branch = enc[o:o + bl].decode(); o += bl
+            branch = enc[o:o + bl].decode("latin-1"); o += bl
             o += 8 + 32                                           # seq, schema
             (ns,) = struct.unpack(">I", enc[o:o + 4]); o += 4 + 32 * ns
             (ne,) = struct.unpack(">I", enc[o:o + 4]); o += 4
+            if ne > len(enc):
+                raise Reject("log-malformed", len(out))
             kinds = []
             for _ in range(ne):
                 kinds.append(enc[o])
@@ -61,6 +65,8 @@ def read_log(path):
             o += 32 + 32                                          # token, principal
             (nc,) = struct.unpack(">I", enc[o:o + 4]); o += 4 + 32 * nc
             (nn,) = struct.unpack(">I", enc[o:o + 4]); o += 4
+            if nn > len(enc):
+                raise Reject("log-malformed", len(out))
             for _ in range(nn):
                 tag = enc[o]; o += 1
                 if tag == 1:
@@ -71,7 +77,7 @@ def read_log(path):
             if len(state) != 32:
                 raise Reject("log-malformed", len(out))
             out.append((hashlib.sha256(DOMAIN + enc).digest(), branch, parents, kinds, changes, state))
-    except struct.error:
+    except (struct.error, UnicodeDecodeError, IndexError):
         raise Reject("log-malformed", len(out))
     return out
 
@@ -87,8 +93,13 @@ def hexb(text, what, nbytes=None, allow_empty=False):
     return b
 
 
+def read_text_lines(path):
+    """The lines of a text file as the spec splits them. The bytes are kept as they are (latin-1 maps each to one character): a schema name is compared as bytes, and nothing else in the files is not ASCII."""
+    return Path(path).read_bytes().decode("latin-1").split("\n")
+
+
 def read_deltas(path):
-    lines = Path(path).read_text(encoding="utf-8").split("\n")
+    lines = read_text_lines(path)
     if lines[-1] == "":
         lines.pop()
     if not lines or lines[0] != "CHODBDL1":
@@ -98,7 +109,7 @@ def read_deltas(path):
         f = line.split("\t")
         if len(f) != 9:
             raise Reject("store-malformed")
-        if not f[0].isdigit() or (len(f[0]) > 1 and f[0][0] == "0") or int(f[0]) in seen:
+        if not (f[0].isascii() and f[0].isdigit()) or (len(f[0]) > 1 and f[0][0] == "0") or int(f[0]) in seen:
             raise Reject("store-malformed")
         seen.add(int(f[0]))
         if f[2] == "" or any(c in f[2] for c in "\t\n"):
@@ -113,7 +124,7 @@ def read_deltas(path):
 
 
 def read_base(path):
-    lines = Path(path).read_text(encoding="utf-8").split("\n")
+    lines = read_text_lines(path)
     if lines[-1] == "":
         lines.pop()
     if not lines or lines[0] != "CHODBBS1":
@@ -129,7 +140,7 @@ def read_base(path):
 
 def read_live_dump(path):
     """Section 3b: {schema: {(table, key): hash}} with a key twice (or a line without four fields) refused as store-malformed... a key twice is replay-final, see compare."""
-    lines = Path(path).read_text(encoding="utf-8").split("\n")
+    lines = read_text_lines(path)
     if lines[-1] == "":
         lines.pop()
     if not lines or lines[0] != "CHODBLV1":
