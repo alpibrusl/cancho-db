@@ -91,6 +91,14 @@ Recommended answer first; none blocks E1.
 * **Mutants:** 12 on the Python verifier and 14 on the cancho one (all killed); one survived until a vector put a whole payload under a bad tag (`ir3_bad_payload_tag_2_over_a_whole_payload`).
 * **Not built:** the proxy writing version 3 records (it still writes version 2, so its statement store is not erasable), and `cancho_erase` through the proxy (E4).
 
+## 6c. E3c, the proxy writes version 3 (design; not built)
+
+* **Where.** `commitpath.add` already takes, for each statement the guard allowed, its id and its IR record and keeps them in the client's transaction until the commit. In E3c `add` turns each record into a version 3 record at that moment: `ir.lift` walks the statement (the same walk as inference, in a mode that records where each `Const` starts and ends), copies it with each constant replaced by a `Hole` of its type, and keeps the constants in order; the record is `shape || chash || payload` with a fresh 16-byte salt, and the statement's id becomes the version 3 id. The commit's `statements` field then names version 3 ids, and the statement store is opened with the magic `CHODBST3`.
+* **Entropy.** cancho's standard library has no random source and the proxy must not derive salts from its signing key (a salt that can be recomputed is not destroyed by erasing it). It takes them from the upstream database, as the capture does for its own salts: a 1 KiB buffer fetched with one query at start and refilled when it runs low (`select encode(string_agg(cdb.rnd(), ''::bytea), 'hex') from generate_series(1, 64)`), each salt using 16 bytes that are never used again. One round trip in about 64 statements with constants.
+* **One id for each occurrence.** Two executions of the same statement now have two ids (two salts), so the statement store grows with the statements run and no longer deduplicates them; that is the price of the salt, and it is measured when this is built.
+* **A log directory is one version.** The statement store's magic is fixed when the directory is made: a directory whose store is `CHODBST2` is refused by a proxy that writes version 3 (`r_bad_magic`), as a version 1 database is refused by the version 2 capture. Existing logs verify as they are.
+* **Tests to change:** `tests/build_check.py` (the builder's records and ids against an independent encoder), the `--stmts` checks of `proxy_e2e`, `ext_e2e`, `drivers_e2e` and `l3a_e2e` (the verifiers already read version 3), and a new check that no statement store byte equals a planted constant.
+
 ## 7. Claims
 
 C135 (the unsalted hash leaks; measured), C136 (an erased store still verifies) and C137 (the statement store holds constants) and C138 (an erased statement store still verifies), in [`claims.md`](claims.md).
