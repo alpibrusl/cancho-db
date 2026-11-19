@@ -74,6 +74,9 @@ ok(ALL, "select o.id from orders as of '" + HX + "' o where o.total > 1", 'selec
 ok(ALL, "select o.id from orders as of '" + HX + "' o, orders", 'select "o"."id" from ' + CALL + ' as "o", "orders"')
 ok(ALL, "select ' as of ''" + HX + "''' from orders", "select ' as of ''" + HX + "''' from \"orders\"")
 ok(ALL, "select '\"orders\" as of ''" + HX + "''' from orders", "select '\"orders\" as of ''" + HX + "''' from \"orders\"")
+# a double quote inside a constant must not shift the scan's idea of what is a quoted name: the clause after it is still rewritten
+ok(ALL, "select 'a\"b' from orders as of '" + HX + "'", "select 'a\"b' from " + CALL + ' as "orders"')
+ok(ALL, "select 'it''s' from orders as of '" + HX + "' o where o.id = 1", "select 'it''s' from " + CALL + ' as "o" where ("o"."id" = 1)')
 ok(ALL, "select id from orders where id = 1; select id from orders as of '" + HX + "'", 'select "id" from "orders" where ("id" = 1); select "id" from ' + CALL + ' as "orders"')
 no(READ_ORDERS, "select id from orders as of '" + HX + "'", 3, "effect-denied", "42501")
 no(RW_ORDERS, "select id from orders as of '" + HX + "'", 3, "effect-denied", "42501")
