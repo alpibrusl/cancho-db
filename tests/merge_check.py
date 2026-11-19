@@ -80,7 +80,7 @@ def fk_ok(par, kid):
 
 
 def setup(base_ord_rows=14):
-    psql("drop schema if exists public cascade; create schema public; drop schema if exists cdb_b_s cascade; drop schema if exists oracle cascade; create schema oracle; delete from cdb.delta; delete from cdb.mark")
+    psql("drop schema if exists public cascade; create schema public; drop schema if exists cdb_b_s cascade; drop schema if exists oracle cascade; create schema oracle; delete from cdb.delta; delete from cdb.mark; delete from cdb.cur")
     psql("create table m_par (id int primary key, name text); create table m_kid (id int primary key, par int references m_par(id), v text); create table m_c (x int, y text, w int, primary key (x, y))")
 
 
@@ -132,17 +132,35 @@ def _write(text):
     return str(p)
 
 
+def dump_full(schema, table, key):
+    """{commitment: (row jsonb text, row salt)}: the rows with the salts the capture gave them (cdb.cur); the hash and the commitment are worked out here (docs/spec/l3a.md section 9)."""
+    kx = "jsonb_build_array(%s)" % ", ".join("rr." + c.strip() for c in key.split(","))
+    r = psql("select (%s)::text || E'\\t' || to_jsonb(rr)::text || E'\\t' || encode(c.salt, 'hex') || E'\\t' || encode(c.key_salt, 'hex') from %s.%s rr join cdb.cur c on c.sch = '%s' and c.tbl = '%s' and c.pk = convert_to((%s)::text, 'UTF8')"
+             % (kx, schema, table, schema, table, kx))
+    out = {}
+    for line in r.stdout.splitlines():
+        if "\t" in line:
+            k, v, sa, ks = line.split("\t")
+            out[sh(b"cancho-db/key/v1\x00" + bytes.fromhex(ks) + k.encode())] = (v, bytes.fromhex(sa))
+    return out
+
+
+def full_of(schema):
+    return {t: dump_full(schema, t, key) for t, key in TABLES}
+
+
 def facts_of_diff(before, after):
+    """The facts of the merge from the rows and salts before and after it (a salt is the capture's, a hash is worked out here)."""
     out = []
     for tname, key in TABLES:
-        for k in set(before[tname]) | set(after[tname]):
-            o, n = before[tname].get(k), after[tname].get(k)
-            if o == n:
+        for kc in set(before[tname]) | set(after[tname]):
+            o, n = before[tname].get(kc), after[tname].get(kc)
+            oh = sh(b"cancho-db/row/v2\x00" + o[1] + o[0].encode()) if o is not None else None
+            nh = sh(b"cancho-db/row/v2\x00" + n[1] + n[0].encode()) if n is not None else None
+            if oh == nh:
                 continue
             kind = 0 if o is None else 2 if n is None else 1
-            oh = sh(b"cancho-db/row/v1\x00" + o.encode()).hex() if o is not None else "-"
-            nh = sh(b"cancho-db/row/v1\x00" + n.encode()).hex() if n is not None else "-"
-            out.append("%d:%s:%s:%s:%s" % (kind, tname.encode().hex(), k.encode().hex(), oh, nh))
+            out.append("%d:%s:%s:%s:%s" % (kind, tname.encode().hex(), kc.hex(), oh.hex() if oh else "-", nh.hex() if nh else "-"))
     return sorted(out, key=lambda f: (bytes.fromhex(f.split(":")[1]), bytes.fromhex(f.split(":")[2])))
 
 
@@ -176,6 +194,7 @@ def trial(n, t_ops, s_ops, expect=None):
     run_side(s_ops, "cdb_b_s")
     stamp("cdb_b_s", 3)
     t_state, s_state = state_of("public"), state_of("cdb_b_s")
+    t_full = full_of("public")
     conflicts, merged = [], {}
     for tname, _ in TABLES:
         c, m = reference(base[tname], t_state[tname], s_state[tname])
@@ -185,6 +204,7 @@ def trial(n, t_ops, s_ops, expect=None):
     before_delta = psql("select count(*) from cdb.delta").stdout.strip()
     r = psql("begin; select cdb.merge('public', 'cdb_b_s', 'public', 0); select 'FACTS[' || cdb.facts(txid_current()) || ']'; commit")
     after = state_of("public")
+    after_full = full_of("public")
     if conflicts:
         outcome = "conflict"
         ok = r.returncode != 0 and "merge-conflict" in r.stderr and after == t_state and psql("select count(*) from cdb.delta").stdout.strip() == before_delta and conflicts[0][0] + " " in r.stderr
@@ -193,7 +213,7 @@ def trial(n, t_ops, s_ops, expect=None):
         ok = r.returncode != 0 and "merge-constraint" in r.stderr and after == t_state and psql("select count(*) from cdb.delta").stdout.strip() == before_delta
     else:
         outcome = "merged"
-        want_facts = facts_of_diff(t_state, merged)
+        want_facts = facts_of_diff(t_full, after_full)
         got_facts = []
         for line in r.stdout.splitlines():
             if line.startswith("FACTS["):

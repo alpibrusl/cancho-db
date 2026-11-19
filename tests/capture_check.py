@@ -41,33 +41,40 @@ def psql(sql, db=DB, file=None):
 def sh(b): return hashlib.sha256(b).digest()
 
 
+def snap_sql(pkexpr, table):
+    """The rows of `table` as `plain key TAB row TAB row salt TAB key salt` (hex salts): the salts are random, so the oracle reads them from cdb.cur and works out every hash and commitment itself."""
+    return ("select (%s)::text || E'\\t' || to_jsonb(t)::text || E'\\t' || encode(c.salt, 'hex') || E'\\t' || encode(c.key_salt, 'hex') from %s t "
+            "join cdb.cur c on c.sch = 'public' and c.tbl = '%s' and c.pk = convert_to((%s)::text, 'UTF8') order by 1;") % (pkexpr, table, table, pkexpr)
+
+
 def snapshot(lines):
+    """{commitment: (plain key, row text, row salt)} from the lines of snap_sql."""
     out = {}
     for line in lines:
         if "\t" not in line:
             continue
-        pk, row = line.split("\t", 1)
-        out[pk] = row
+        pk, row, salt, ksalt = line.split("\t")
+        out[sh(b"cancho-db/key/v1\x00" + bytes.fromhex(ksalt) + pk.encode())] = (pk, row, bytes.fromhex(salt))
     return out
 
 
 def expected_facts(table, before, after):
     facts = []
-    for pk in set(before) | set(after):
-        o, n = before.get(pk), after.get(pk)
-        if o == n:
+    for kc in set(before) | set(after):
+        o, n = before.get(kc), after.get(kc)
+        oh = sh(b"cancho-db/row/v2\x00" + o[2] + o[1].encode()) if o is not None else None
+        nh = sh(b"cancho-db/row/v2\x00" + n[2] + n[1].encode()) if n is not None else None
+        if oh == nh:
             continue
-        oh = sh(b"cancho-db/row/v1\x00" + o.encode()) if o is not None else None
-        nh = sh(b"cancho-db/row/v1\x00" + n.encode()) if n is not None else None
         kind = 0 if o is None else 2 if n is None else 1
-        facts.append((table.encode(), pk.encode(), kind, oh, nh))
+        facts.append((table.encode(), kc, kind, oh, nh))
     facts.sort(key=lambda f: (f[0], f[1]))
     return " ".join("%d:%s:%s:%s:%s" % (k, t.hex(), p.hex(), "-" if o is None else o.hex(), "-" if n is None else n.hex()) for t, p, k, o, n in facts)
 
 
 def run_tx(table, pkexpr, tx_sql, commit=True):
     """Run tx_sql in one transaction on `table`; returns (facts text from the SQL, expected from the diff)."""
-    snap = "select (%s)::text || E'\\t' || to_jsonb(t)::text from %s t order by 1;" % (pkexpr, table)
+    snap = snap_sql(pkexpr, table)
     script = "\\echo @@BEFORE\n%s\nbegin;\n%s\n\\echo @@FACTS\nselect cdb.facts(txid_current());\n%s\n\\echo @@AFTER\n%s\n" % (snap, tx_sql, "commit;" if commit else "rollback;", snap)
     path = Path("/tmp/capture_check_%d.sql" % os.getpid())
     path.write_text(script)
@@ -114,7 +121,7 @@ scen = [
     ("an insert then a delete: no fact", "acc", "insert into acc values (102, 'x', 1, '{}'); delete from acc where id = 102;"),
     ("an update then its undoing: no fact", "acc", "update acc set bal = bal + 5 where id = 5; update acc set bal = bal - 5 where id = 5;"),
     ("an update then a delete: a delete of the first image", "acc", "update acc set owner = 'zz' where id = 6; delete from acc where id = 6;"),
-    ("a delete then an insert of the same key: an update", "acc", "delete from acc where id = 7; insert into acc values (7, 'back', 0, '{}');"),
+    ("a delete then an insert of the same key: a delete and an insert (the new row is a new key lifetime, with its own salt)", "acc", "delete from acc where id = 7; insert into acc values (7, 'back', 0, '{}');"),
     ("a key change: a delete and an insert", "acc", "update acc set id = 200 where id = 8;"),
     ("a swap of two keys (through a third): two updates", "acc", "update acc set id = 900 where id = 9; update acc set id = 9 where id = 10; update acc set id = 10 where id = 900;"),
     ("an update that changes nothing: no fact", "acc", "update acc set owner = owner where id = 11;"),
@@ -192,8 +199,8 @@ for n in range(300):
     ops = rtx()
     # the oracle diffs one table; a transaction over several tables is checked table by table with the same transaction
     tables = sorted({t for t, _ in ops})
-    snaps = "".join("\\echo @@BEFORE %s\nselect (%s)::text || E'\\t' || to_jsonb(t)::text from %s t order by 1;\n" % (t, PK[t], t) for t in tables)
-    after = "".join("\\echo @@AFTER %s\nselect (%s)::text || E'\\t' || to_jsonb(t)::text from %s t order by 1;\n" % (t, PK[t], t) for t in tables)
+    snaps = "".join("\\echo @@BEFORE %s\n%s\n" % (t, snap_sql(PK[t], t)) for t in tables)
+    after = "".join("\\echo @@AFTER %s\n%s\n" % (t, snap_sql(PK[t], t)) for t in tables)
     script = snaps + "begin;\n" + "\n".join(s for _, s in ops) + "\n\\echo @@FACTS\nselect cdb.facts(txid_current());\ncommit;\n" + after
     p = Path("/tmp/capture_check_r_%d.sql" % os.getpid())
     p.write_text(script)
@@ -240,6 +247,9 @@ check("fork: the fixture is made", r.returncode == 0, r.stderr)
 r = psql("begin; select cdb.fork('public', 'cdb_b_x'); select 'FACTS[' || cdb.facts(txid_current()) || ']'; commit;", db=FDB)
 check("fork: copies four tables and the transaction records no facts", r.returncode == 0 and r.stdout.split() == ["4", "FACTS[]"], (r.stdout, r.stderr))
 check("fork: the copy has no delta rows at all", psql("select count(*) from cdb.delta where sch <> 'public'", db=FDB).stdout.strip() == "0")
+check("fork: the copy keeps the salts of the rows it was copied from (so the branch starts from the source's hashes)",
+      psql("select count(*) from cdb.cur a join cdb.cur b on b.tbl = a.tbl and b.pk = a.pk and b.sch = 'cdb_b_x' where a.sch = 'public' and a.salt = b.salt and a.key_salt = b.key_salt and a.kc = b.kc", db=FDB).stdout.strip()
+      == psql("select count(*) from cdb.cur where sch = 'public'", db=FDB).stdout.strip() != "0")
 
 
 def dump(schema):

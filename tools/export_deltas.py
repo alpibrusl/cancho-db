@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export the delta store of docs/spec/l3a.md section 2 from a database the proxy has run against.
+"""Export the delta store of docs/spec/l3a.md section 9 (version 2) from a database the proxy has run against.
 
     python3 tools/export_deltas.py OUTPUT_FILE [psql arguments ...]
 
@@ -9,8 +9,9 @@ and so is gone, has none).
 import subprocess
 import sys
 
-SQL = ("select d.seq, encode(d.commit_id, 'hex'), d.sch, encode(convert_to(d.tbl, 'UTF8'), 'hex'), encode(d.pk, 'hex'), coalesce(encode(d.old_hash, 'hex'), ''), coalesce(encode(d.new_hash, 'hex'), ''), "
-       "coalesce(encode(convert_to(d.old_row::text, 'UTF8'), 'hex'), ''), coalesce(encode(convert_to(d.new_row::text, 'UTF8'), 'hex'), '') "
+SQL = ("select d.seq, encode(d.commit_id, 'hex'), d.sch, encode(convert_to(d.tbl, 'UTF8'), 'hex'), encode(d.kc, 'hex'), coalesce(encode(d.old_hash, 'hex'), ''), coalesce(encode(d.new_hash, 'hex'), ''), "
+       "coalesce(encode(convert_to(d.old_row::text, 'UTF8'), 'hex'), ''), coalesce(encode(convert_to(d.new_row::text, 'UTF8'), 'hex'), ''), "
+       "coalesce(encode(d.old_salt, 'hex'), ''), coalesce(encode(d.new_salt, 'hex'), ''), coalesce(encode(d.pk, 'hex'), ''), coalesce(encode(d.key_salt, 'hex'), '') "
        "from cdb.delta d where d.commit_id is not null order by d.seq")
 
 
@@ -23,7 +24,7 @@ def main(argv):
         print("export_deltas: psql failed: " + r.stderr.strip(), file=sys.stderr)
         return 2
     with open(argv[1], "w", encoding="utf-8") as f:
-        f.write("CHODBDL1\n" + r.stdout)
+        f.write("CHODBDL2\n" + r.stdout)
     return 0
 
 
