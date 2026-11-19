@@ -106,7 +106,7 @@ for i in range(120):
     check("case %d: public key" % i, out[3] == pk.hex())
     check("case %d: log" % i, out[4] == (b"CHODBLG1" + pk + u32(len(enc)) + enc + sk.sign(cid)).hex())
     check("case %d: token store" % i, out[5] == (b"CHODBTK1" + u32(32) + c["token"]).hex())
-    check("case %d: statement store" % i, out[6] == (b"CHODBST2" + u32(32 * len(c["statements"])) + b"".join(c["statements"])).hex())
+    check("case %d: statement store" % i, out[6] == (b"CHODBST3" + u32(32 * len(c["statements"])) + b"".join(c["statements"])).hex())
     if out[0] == enc.hex() and out[2] == sk.sign(cid).hex():
         records.append(u32(len(enc)) + enc + bytes.fromhex(out[2]))
         parents = [cid]

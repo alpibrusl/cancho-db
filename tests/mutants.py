@@ -232,7 +232,7 @@ CHO = [
     ("record index off by one", "src/l1.cho", "bad_at = index;", "bad_at = index + 1;"),
     ("commit not counted per branch", "src/l1.cho", "counts = map.put(heap, counts, branch, count_here + 1);", "counts = map.put(heap, counts, branch, commits + 1);"),
     ("tip not updated", "src/l1.cho", "tips = map.put(heap, tips, branch, commits);", "tips = tips;"),
-    ("v3: a Const is allowed in a v3 shape", "src/ir.cho", "} else if tag == 1 && mv < 3 {", "} else if tag == 1 {"),
+    ("v3: a Const is allowed in a v3 shape", "src/ir.cho", "} else if tag == 1 && mv != 3 {", "} else if tag == 1 {"),
     ("v3: a hole may have type 3", "src/ir.cho", "|| int_of(data[cur[0]]) > 2 {", "|| int_of(data[cur[0]]) > 3 {"),
     ("v3: a hole is allowed in a v2 shape", "src/ir.cho", "} else if tag == 11 && mv == 3 {", "} else if tag == 11 {"),
     ("v3: a payload tag of 2 is accepted", "src/ir.cho", "    if tag != 1 || rest < 33 + 20 {", "    if rest < 33 + 20 {"),

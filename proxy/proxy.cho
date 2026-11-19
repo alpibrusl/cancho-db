@@ -917,6 +917,14 @@ fn refuse_unrecordable[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: i
     }
     if why == 1 {
         shared.answer_error(tab, core, k, status, "54000", "transaction-too-large", "the transaction is larger than one commit can record");
+    } else if why == 2 || why == 4 {
+        shared.answer_error(tab, core, k, status, "08006", "salt-unavailable", "the database could not supply the random bytes that salt the statement record, so the statement was not run");
+    } else if why == 6 {
+        shared.answer_error(tab, core, k, status, "XX000", "statement-not-recordable", "the statement is not well formed IR (lift)");
+    } else if why == 7 {
+        shared.answer_error(tab, core, k, status, "XX000", "statement-not-recordable", "the statement record did not fit its scratch (lift)");
+    } else if why >= 3 {
+        shared.answer_error(tab, core, k, status, "XX000", "statement-not-recordable", "the statement could not be made into a statement record, so it was not run");
     } else {
         shared.answer_error(tab, core, k, status, "0A000", "nondeterministic", "now() and the like are not recorded in a commit yet, so the statement was not run");
     }
@@ -1033,7 +1041,14 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core
                         if ts == 0 {
                             commitpath.begin(core, k, contents(core.snap)[0..snap_len]);
                         }
-                        let added = commitpath.add(core, k, vd[7], ids, irs[0..vd[8]], effs[0..vd[9]]);
+                        // the salts of the statement records: 16 bytes for each statement that has constants (docs/m2g-erasure.md 6c)
+                        var added = 0;
+                        let rr = commitpath.ensure_rnd(tw, core, st[p + 1], 16 * vd[7]);
+                        if rr == 0 {
+                            added = commitpath.add(heap, core, k, vd[7], ids, irs[0..vd[8]], effs[0..vd[9]]);
+                        } else {
+                            added = 4;
+                        }
                         if added == 0 {
                             if forkpath.is_fork(vd[7], effs[0..vd[9]]) {
                                 st[p + 24] = 1;
@@ -1375,58 +1390,63 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                         borrow mut info as &!iw in {
                             borrow mut idtab as &!xw in {
                                 borrow mut bnames as &!nw in {
-                                borrow mut binfo as &!bw in {
-                                borrow mut cgb as &!gw in {
-                                borrow mut cbrb as &!rw in {
-                                borrow mut txb as &!yw in {
-                                borrow mut tip as &!tw in {
-                                    match store.open_log(heap, dr, contents(pr), branch, contents(iw), contents(tw), contents(xw), contents(nw), contents(bw), contents(gw), contents(rw), contents(yw)) {
-                                        Opened::Failed(code) => {
-                                            refuse_start(io, "log", code);
-                                            if code == store.r_corrupt() {
-                                                io.error_all(io, "proxy: the verifier's verdict: rule ");
-                                                io.error_all(io, commit.rule_name(contents(iw)[1]));
-                                                io.error_all(io, ", record ");
-                                                err_nat(io, contents(iw)[2]);
-                                                io.newline(io);
-                                            }
-                                            unbox_slice(heap, cfg);
-                                            unbox_slice(heap, cfgi);
-                                        }
-                                        Opened::Ok(lf) => {
-                                            var logfile = lf;
-                                            match store.open_store(heap, dr, "tokens", "CHODBTK1") {
-                                                Opened::Failed(code) => {
-                                                    refuse_start(io, "token store", code);
-                                                    unbox_slice(heap, cfg);
-                                                    unbox_slice(heap, cfgi);
-                                                    file_close(logfile);
-                                                }
-                                                Opened::Ok(tf) => {
-                                                    var tokens = tf;
-                                                    match store.open_store(heap, dr, "stmts", "CHODBST2") {
-                                                        Opened::Failed(code) => {
-                                                            refuse_start(io, "statement store", code);
-                                                            unbox_slice(heap, cfg);
-                                                            unbox_slice(heap, cfgi);
-                                                            file_close(tokens);
-                                                            file_close(logfile);
-                                                        }
-                                                        Opened::Ok(sf) => {
-                                                            var stmts = sf;
-                                                            io.error_all(io, "proxy: log has ");
-                                                            err_nat(io, contents(iw)[0]);
-                                                            io.error_all(io, " commits, next seq ");
-                                                            err_nat(io, contents(iw)[3]);
-                                                            if contents(iw)[4] > 0 {
-                                                                io.error_all(io, ", cut ");
-                                                                err_nat(io, contents(iw)[4]);
-                                                                io.error_all(io, " bytes of torn tail");
+                                    borrow mut binfo as &!bw in {
+                                        borrow mut cgb as &!gw in {
+                                            borrow mut cbrb as &!rw in {
+                                                borrow mut txb as &!yw in {
+                                                    borrow mut tip as &!tw in {
+                                                        match store.open_log(heap, dr, contents(pr), branch, contents(iw), contents(tw), contents(xw), contents(nw), contents(bw), contents(gw), contents(rw), contents(yw)) {
+                                                            Opened::Failed(code) => {
+                                                                refuse_start(io, "log", code);
+                                                                if code == store.r_corrupt() {
+                                                                    io.error_all(io, "proxy: the verifier's verdict: rule ");
+                                                                    io.error_all(io, commit.rule_name(contents(iw)[1]));
+                                                                    io.error_all(io, ", record ");
+                                                                    err_nat(io, contents(iw)[2]);
+                                                                    io.newline(io);
+                                                                }
+                                                                unbox_slice(heap, cfg);
+                                                                unbox_slice(heap, cfgi);
                                                             }
-                                                            io.newline(io);
-                                                            borrow seed as &sd2 in {
-                                                                let kept = shared.new_store(heap, logfile, tokens, stmts, contents(sd2), contents(tw), contents(nw), contents(bw), contents(iw)[6], contents(xw), contents(iw)[0], contents(gw), contents(rw), contents(yw));
-                                                                status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi, kept);
+                                                            Opened::Ok(lf) => {
+                                                                var logfile = lf;
+                                                                match store.open_store(heap, dr, "tokens", "CHODBTK1") {
+                                                                    Opened::Failed(code) => {
+                                                                        refuse_start(io, "token store", code);
+                                                                        unbox_slice(heap, cfg);
+                                                                        unbox_slice(heap, cfgi);
+                                                                        file_close(logfile);
+                                                                    }
+                                                                    Opened::Ok(tf) => {
+                                                                        var tokens = tf;
+                                                                        match store.open_store(heap, dr, "stmts", "CHODBST3") {
+                                                                            Opened::Failed(code) => {
+                                                                                refuse_start(io, "statement store", code);
+                                                                                unbox_slice(heap, cfg);
+                                                                                unbox_slice(heap, cfgi);
+                                                                                file_close(tokens);
+                                                                                file_close(logfile);
+                                                                            }
+                                                                            Opened::Ok(sf) => {
+                                                                                var stmts = sf;
+                                                                                io.error_all(io, "proxy: log has ");
+                                                                                err_nat(io, contents(iw)[0]);
+                                                                                io.error_all(io, " commits, next seq ");
+                                                                                err_nat(io, contents(iw)[3]);
+                                                                                if contents(iw)[4] > 0 {
+                                                                                    io.error_all(io, ", cut ");
+                                                                                    err_nat(io, contents(iw)[4]);
+                                                                                    io.error_all(io, " bytes of torn tail");
+                                                                                }
+                                                                                io.newline(io);
+                                                                                borrow seed as &sd2 in {
+                                                                                    let kept = shared.new_store(heap, logfile, tokens, stmts, contents(sd2), contents(tw), contents(nw), contents(bw), contents(iw)[6], contents(xw), contents(iw)[0], contents(gw), contents(rw), contents(yw));
+                                                                                    status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi, kept);
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1434,11 +1454,6 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                             }
                                         }
                                     }
-                                }
-                                }
-                                }
-                                }
-                                }
                                 }
                             }
                         }

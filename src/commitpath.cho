@@ -5,6 +5,7 @@ import std.conns;
 import std.crypto;
 import std.bytes;
 import cdb.commit;
+import cdb.ir;
 import cdb.build;
 import cdb.token;
 import cdb.shared;
@@ -111,15 +112,38 @@ pub fn reset[&c](core: &!c shared.Core, k: int) -> [] int {
 pub fn begin[&c, &s](core: &!c shared.Core, k: int, snapshot: &s [byte]) -> [] int {
     reset(core, k);
     let acc = contents(core.acc);
-    crypto.sha256(snapshot, acc[k * shared.acc_stride() + 22528..k * shared.acc_stride() + 22560]);
+    crypto.sha256(snapshot, acc[k * shared.acc_stride() + shared.acc_snap_at()..k * shared.acc_stride() + shared.acc_snap_at() + 32]);
     contents(core.acci)[8 * k + 5] = 1;
     return 0;
 }
 
-// Add what the guard allowed (`n` statements: their ids, IR records and effects) to client `k`'s transaction. 0 if it fits, 1 if the
-// transaction would hold more than a commit can name. A `nondet` effect (`now()`, the only one the lowering lets through) is noted: the commit
-// records the transaction's `now()` (P2-D9).
-pub fn add[&c, &i, &x, &f](core: &!c shared.Core, k: int, n: int, ids: &i [byte], irs: &x [byte], effs: &f [byte]) -> [] int {
+// Make sure the salt buffer holds `need` unused bytes (docs/spec/ir.md section 8, docs/m2g-erasure.md 6c): if it does not, a fresh `rnd_size()` bytes are fetched from the database over upstream
+// connection `b`. 0 if it does hold them, 1 if PostgreSQL refused the query, -1 if the connection failed or answered something else.
+pub fn ensure_rnd[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, b: int, need: int) -> [conn_read, conn_write, poll] int {
+    if contents(core.rndi)[0] >= need {
+        return 0;
+    }
+    let r = upstream_exec(tab, core, b, "select encode(string_agg(cdb.rnd(), ''::bytea), 'hex') from generate_series(1, 64)");
+    if r != 0 {
+        return r;
+    }
+    let si = contents(core.snapin);
+    let at = first_text_at(si);
+    if at < 4 || commit.be(si, at - 4, 4) != 2 * shared.rnd_size() || at + 2 * shared.rnd_size() > len(si) {
+        return 0 - 1;
+    }
+    if state.hexdec(si, at, at + 2 * shared.rnd_size(), contents(core.rnd), 0) != shared.rnd_size() {
+        return 0 - 1;
+    }
+    contents(core.rndi)[0] = shared.rnd_size();
+    return 0;
+}
+
+// Add what the guard allowed (`n` statements: their ids, IR records and effects) to client `k`'s transaction, the statements as records of version 3 of the statement store
+// (docs/spec/ir.md section 8: each constant lifted out, a salt from the buffer `ensure_rnd` fills, the id over the shape and the hash of the constants). `ids` is not used: the ids are made here.
+// 0 if it fits, 1 if the transaction would hold more than a commit can name, 2 if there are no salts left (the caller did not `ensure_rnd` for `n` statements), 3 if a record is not a statement. A `nondet`
+// effect (`now()`, the only one the lowering lets through) is noted: the commit records the transaction's `now()` (P2-D9).
+pub fn add[&h, &c, &i, &x, &f](heap: &!h Heap, core: &!c shared.Core, k: int, n: int, ids: &i [byte], irs: &x [byte], effs: &f [byte]) -> [heap] int {
     let ai = contents(core.acci);
     let acc = contents(core.acc);
     let base = k * shared.acc_stride();
@@ -137,14 +161,70 @@ pub fn add[&c, &i, &x, &f](core: &!c shared.Core, k: int, n: int, ids: &i [byte]
         }
         at = at + 3 + commit.be(effs, at + 1, 2);
     }
-    if ai[8 * k] + n > shared.acc_stmts() || ai[8 * k + 1] + len(irs) > shared.acc_irs() || ai[8 * k + 2] + len(effs) > shared.acc_effs() {
+    if ai[8 * k] + n > shared.acc_stmts() || ai[8 * k + 2] + len(effs) > shared.acc_effs() {
         return 1;
     }
-    build.put_bytes(acc[base..base + 2048], 32 * ai[8 * k], ids[0..32 * n]);
-    build.put_bytes(acc[base + 2048..base + 18432], ai[8 * k + 1], irs);
-    build.put_bytes(acc[base + 18432..base + 22528], ai[8 * k + 2], effs);
+    // each record: lift its constants, take a salt if there are any, write the version 3 record and its id
+    var pos = 0;
+    var irat = ai[8 * k + 1];
+    var status = 0;
+    var i = 0;
+    while i < n && status == 0 {
+        if pos + 4 > len(irs) {
+            status = 3;
+        } else {
+            let rl = commit.be(irs, pos, 4);
+            if pos + 4 + rl > len(irs) {
+                status = 3;
+            } else {
+                region r {
+                    let body = irs[pos + 4..pos + 4 + rl];
+                    let shape = alloc_slice[r](rl + 8, byte_of(0));
+                    let vals = alloc_slice[r](rl + 8, byte_of(0));
+                    let info = alloc_slice[r](4, 0);
+                    let salt = alloc_slice[r](16, byte_of(0));
+                    let id = alloc_slice[r](32, byte_of(0));
+                    let lifted = ir.lift(heap, body, shape, vals, info);
+                    if lifted < 0 {
+                        status = 5 - lifted;
+                    } else {
+                        if info[2] > 0 {
+                            let rn = contents(core.rndi);
+                            let rb = contents(core.rnd);
+                            if rn[0] < 16 {
+                                status = 2;
+                            } else {
+                                var j = 0;
+                                while j < 16 {
+                                    salt[j] = rb[rn[0] - 16 + j];
+                                    rb[rn[0] - 16 + j] = byte_of(0);
+                                    j = j + 1;
+                                }
+                                rn[0] = rn[0] - 16;
+                            }
+                        }
+                        if status == 0 {
+                            let np = build.stmt3(acc[base + shared.acc_irs_at()..base + shared.acc_effs_at()], irat, shape[0..info[0]], vals[0..info[1]], info[2], salt, id);
+                            if np < 0 {
+                                status = 1;
+                            } else {
+                                irat = np;
+                                build.put_bytes(acc[base..base + 2048], 32 * (ai[8 * k] + i), id);
+                            }
+                        }
+                    }
+                }
+                pos = pos + 4 + rl;
+            }
+        }
+        i = i + 1;
+    }
+    if status != 0 {
+        return status;
+    }
+    build.put_bytes(acc[base + shared.acc_effs_at()..base + shared.acc_snap_at()], ai[8 * k + 2], effs);
     ai[8 * k] = ai[8 * k] + n;
-    ai[8 * k + 1] = ai[8 * k + 1] + len(irs);
+    ai[8 * k + 1] = irat;
     ai[8 * k + 2] = ai[8 * k + 2] + len(effs);
     if wrote == 1 {
         ai[8 * k + 3] = 1;
@@ -321,7 +401,7 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
         let acc = contents(core.acc);
         let base = k * shared.acc_stride();
         // f: [0..32] the schema the transaction began with, [32..64] the token's id, [64..96] its principal, [96..128] zeros
-        build.put_bytes(f, 0, acc[base + 22528..base + 22560]);
+        build.put_bytes(f, 0, acc[base + shared.acc_snap_at()..base + shared.acc_snap_at() + 32]);
         token.prefix_id(tk, token.blocks(tk), f[32..64]);
         token.principal_of(tk, f[64..96]);
         // the connection's branch (state slot 23, set at login): its name, where its chain ends, and its tip
@@ -429,7 +509,7 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
         }
         var elen = 0 - 1;
         if fcode == 0 {
-            elen = build.encode(enc, parents, branch, seqno, f[0..32], acc[base..base + 32 * n], acc[base + 18432..base + 18432 + ai[8 * k + 2]], f[32..64], f[64..96], f[96..96], nds, nd[0..9 * nds], chg, stt, 0, f[96..96], contents(core.aux)[1]);
+            elen = build.encode(enc, parents, branch, seqno, f[0..32], acc[base..base + 32 * n], acc[base + shared.acc_effs_at()..base + shared.acc_effs_at() + ai[8 * k + 2]], f[32..64], f[64..96], f[96..96], nds, nd[0..9 * nds], chg, stt, 0, f[96..96], contents(core.aux)[1]);
         }
         if fcode != 0 {
             if fcode > 0 && fcode < 4 {
@@ -477,7 +557,7 @@ pub fn conclude[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int) -> 
             } else if step == 1 {
                 result = 1;
             } else {
-                let ar = shared.store_append(core.store, tr[0..tl], acc[base + 2048..base + 2048 + ai[8 * k + 1]], lr[0..ll]);
+                let ar = shared.store_append(core.store, tr[0..tl], acc[base + shared.acc_irs_at()..base + shared.acc_irs_at() + ai[8 * k + 1]], lr[0..ll]);
                 if ar != 0 {
                     if wrote {
                         upstream_exec(tab, core, b, q[0..gid_sql(q, "ROLLBACK PREPARED '", ident)]);

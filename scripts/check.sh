@@ -43,6 +43,8 @@ sh scripts/pg_throwaway.sh start 5593
 trap 'sh scripts/pg_throwaway.sh stop 5593' EXIT
 export PG_E2E_PORT=5593
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/proxy_e2e.py build/proxy
+echo "== the statement store of a real session is version 3, and erasing one subject's constants leaves a log that verifies"
+E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/stmts_v3_e2e.py build/proxy
 echo "== the extended protocol through the proxy (raw messages, a real PostgreSQL)"
 E2E_VERIFIERS="build/verify" quiet 3 python3 tests/ext_e2e.py build/proxy
 echo "== real drivers through the proxy (psycopg 3, psycopg2, pg8000, asyncpg, node-postgres)"
@@ -98,6 +100,9 @@ quiet 2 python3 tests/guard_check.py build/guardcheck
 echo "== the commit builder: bytes, ids and signatures against an independent encoder; the three verifiers accept its log"
 "$CANCHO" build --std proxy/buildcheck.cho src/build.cho src/commit.cho -o build/buildcheck
 quiet 2 python3 tests/build_check.py build/buildcheck build/verify build/verify-go
+echo "== lifting constants out of statements (ir.md section 8): ir.lift against the Python verifier"
+"$CANCHO" build --std proxy/liftcheck.cho src/lex.cho src/state.cho src/ir.cho src/build.cho src/commit.cho -o build/liftcheck
+quiet 2 python3 tests/lift_check.py build/liftcheck
 echo "== facts, changes and state (docs/spec/state.md): the cancho implementation against tools/state.py, the golden cases and values worked by hand"
 "$CANCHO" build --std proxy/statecheck.cho src/state.cho src/build.cho src/commit.cho -o build/statecheck
 quiet 2 python3 tests/state_check.py build/statecheck
