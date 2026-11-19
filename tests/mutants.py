@@ -737,6 +737,13 @@ PARSE = [
 
 # ---- the SELECT parser (src/stmt.cho, and the statement half of the renderer in src/parse.cho; tests/stmt_test.cho)
 STMT = [
+    ("stmt: AS OF takes any string", "src/stmt.cho", "        if !is_commit_id(sql, toks, pos + 3) {", "        if false {"),
+    ("stmt: a commit id may be of another length", "src/stmt.cho", "    if parse.tlen(toks, i) != 64 {", "    if parse.tlen(toks, i) != 65 {"),
+    ("stmt: a commit id may use any lower-case letter", "src/stmt.cho", "(c >= 'a' && c <= 'f')", "(c >= 'a' && c <= 'z')"),
+    ("stmt: a commit id may be in capitals", "src/stmt.cho", "(c >= 'a' && c <= 'f')", "((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))"),
+    ("stmt: AS OF needs no word `of`", "src/stmt.cho", 'parse.kw(sql, toks, pos + 2, end, "of") && pos + 3 < end', "pos + 3 < end"),
+    ("stmt: the table node forgets its commit", "src/stmt.cho", "parse.n_table(), pos, tmp, 0, st[9], asof);", "parse.n_table(), pos, tmp, 0, st[9], 0 - 1);"),
+    ("stmt: a rendering drops the AS OF", "src/parse.cho", "        if nodes[6 * node + 5] >= 0 {\n            // `AS OF", "        if false {\n            // `AS OF"),
     ("stmt: DISTINCT is ignored", "src/stmt.cho", "        distinct = 1;\n", "        distinct = 0;\n"),
     ("stmt: a left join is an inner join", "src/stmt.cho", "                    kind = 1;\n                } else if", "                    kind = 0;\n                } else if"),
     ("stmt: a right join is accepted", "src/stmt.cho", '} else if parse.kw(sql, toks, pos, end, "right") ||', "} else if false ||"),
@@ -827,6 +834,11 @@ STMT = [
 
 # ---- the lowering (src/lower.cho, tests/lower_check.py: IR bytes, effects through the verifier, refusals)
 LOWER = [
+    ("lower: a table read as of a commit is named without it", "src/lower.cho", "    let tok = sc[120 + e];\n    if tok < 0 {", "    let tok = sc[120 + e];\n    if true {"),
+    ("lower: the scope forgets the commit", "src/lower.cho", "    sc[120 + sc[2]] = nodes[6 * node + 5];", "    sc[120 + sc[2]] = 0 - 1;"),
+    ("lower: the commit's digits are one short", "src/lower.cho", "    while i < 64 && r >= 0 {\n        r = w8(out, sc, int_of(sql[parse.tstart(toks, tok) + i]));", "    while i < 63 && r >= 0 {\n        r = w8(out, sc, int_of(sql[parse.tstart(toks, tok) + i]));"),
+    ("lower: an UPDATE of a table as of a commit is let through", "src/lower.cho", "    let update = nodes[6 * root] == parse.n_update();\n    if nodes[6 * target + 5] >= 0 {", "    let update = nodes[6 * root] == parse.n_update();\n    if false {"),
+    ("lower: an INSERT into a table as of a commit is let through", "src/lower.cho", "    let table = nodes[6 * target + 1];\n    if nodes[6 * target + 5] >= 0 {", "    let table = nodes[6 * target + 1];\n    if false {"),
     ("lower: a parameter's index is zero-based", "src/lower.cho", "r = wn(out, sc, idx, 4);", "r = wn(out, sc, idx - 1, 4);"),
     ("lower: a parameter is written as a constant", "src/lower.cho", "        r = w8(out, sc, 2);\n        if r >= 0 {\n            r = wn(out, sc, idx, 4);", "        r = w8(out, sc, 1);\n        if r >= 0 {\n            r = wn(out, sc, idx, 4);"),
     ("lower: only the last digit of a parameter counts", "src/lower.cho", "idx = idx * 10 + int_of(sql[q]) - '0';", "idx = int_of(sql[q]) - '0';"),

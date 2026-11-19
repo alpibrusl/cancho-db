@@ -86,6 +86,23 @@ fn stage[&t, &x](tmp: &!t [int], st: &!x [int], id: int) -> [] int {
     return 0;
 }
 
+// Whether the string literal at token `i` is a commit id: 64 lower-case hexadecimal digits and nothing else.
+fn is_commit_id[&s, &t](sql: &s [byte], toks: &t [int], i: int) -> [] bool {
+    if parse.tlen(toks, i) != 64 {
+        return false;
+    }
+    let a = parse.tstart(toks, i);
+    var k = 0;
+    while k < 64 {
+        let c = int_of(sql[a + k]);
+        if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
 // A table reference `name [[AS] alias]`, as a TABLE leaf, staged. Answers the position after it.
 fn table_ref[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, allow_paren: bool, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
     if pos >= end {
@@ -110,11 +127,21 @@ fn table_ref[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], pos: int, e
     if allow_paren {
         amode = 2;
     }
-    let q = alias(sql, toks, pos + 1, end, amode, st);
+    // `AS OF '<64 hex digits>'` (docs/m2-branches.md D27): `AS`, the word `of` and a string literal; without the literal, `as of` is an alias named `of`, as before
+    var asof = 0 - 1;
+    var after = pos + 1;
+    if parse.kw(sql, toks, pos + 1, end, "as") && parse.kw(sql, toks, pos + 2, end, "of") && pos + 3 < end && parse.tkind(toks, pos + 3) == lex.t_string() {
+        if !is_commit_id(sql, toks, pos + 3) {
+            return parse.fail(st, pos + 3, parse.e_as_of_bad_commit());
+        }
+        asof = pos + 3;
+        after = pos + 4;
+    }
+    let q = alias(sql, toks, after, end, amode, st);
     if q < 0 {
         return q;
     }
-    let id = parse.mk(nodes, kids, st, parse.n_table(), pos, tmp, 0, st[9], 0 - 1);
+    let id = parse.mk(nodes, kids, st, parse.n_table(), pos, tmp, 0, st[9], asof);
     if id < 0 {
         return parse.fail(st, pos, 0 - id);
     }

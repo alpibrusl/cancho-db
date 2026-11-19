@@ -63,6 +63,18 @@ def ok(tok, sql, sent): CASES.append((tok, sql, "ok " + sent))
 def no(tok, sql, kind, tag, state, stmt=0): CASES.append((tok, sql, "refused %d %s %s %d" % (kind, tag, state, stmt)))
 
 
+
+# ---- AS OF (docs/m2-branches.md D27 to D29): a token of the current rows does not allow a read of the past; one that names it does; the statement is sent as it was written
+HX = "3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f"
+HIST_ORDERS = token("history orders", [(R, "orders@*")])
+ok(ALL, "select id from orders as of '" + HX + "'", 'select "id" from "orders" as of \'' + HX + '\'')
+ok(HIST_ORDERS, "select id from orders as of '" + HX + "'", 'select "id" from "orders" as of \'' + HX + '\'')
+no(READ_ORDERS, "select id from orders as of '" + HX + "'", 3, "effect-denied", "42501")
+no(RW_ORDERS, "select id from orders as of '" + HX + "'", 3, "effect-denied", "42501")
+no(HIST_ORDERS, "select id from orders", 3, "effect-denied", "42501")
+no(ALL, "update orders as of '" + HX + "' set total = 1", 2, "as-of-write", "0A000")
+no(ALL, "select id from orders as of 'zz'", 2, "as-of-bad-commit", "0A000")
+
 # ---- reads: every column a statement touches is a read, wherever it sits
 ok(READ_ORDERS, "select id, total from orders", 'select "id", "total" from "orders"')
 no(READ_ORDERS, "select customer from orders", 3, "effect-denied", "42501")

@@ -293,6 +293,10 @@ pub fn e_mixed_txn() -> [] int {
     return 15;
 }
 
+pub fn e_as_of_bad_commit() -> [] int {
+    return 16;
+}
+
 pub fn error_name(code: int) -> [] &static [byte] {
     if code == 1 {
         return "syntax";
@@ -335,6 +339,9 @@ pub fn error_name(code: int) -> [] &static [byte] {
     }
     if code == 15 {
         return "mixed-transaction-control";
+    }
+    if code == 16 {
+        return "as-of-bad-commit";
     }
     return "subquery";
 }
@@ -1647,6 +1654,16 @@ fn emit_open[&s, &t, &n, &o](out: &!o [byte], at: int, sql: &s [byte], toks: &t 
     }
     if kind == n_table() {
         p = put_name(out, p, sql, toks, data);
+        if nodes[6 * node + 5] >= 0 {
+            // `AS OF '<64 hex digits>'` (docs/m2-branches.md D27): the commit the table is read as of
+            p = put_lit(out, p, " as of '");
+            var h = 0;
+            while h < tlen(toks, nodes[6 * node + 5]) {
+                p = put_byte(out, p, int_of(sql[tstart(toks, nodes[6 * node + 5]) + h]));
+                h = h + 1;
+            }
+            p = put_byte(out, p, '\'');
+        }
         if nodes[6 * node + 4] >= 0 {
             p = put_lit(out, p, " as ");
             p = put_name(out, p, sql, toks, nodes[6 * node + 4]);
