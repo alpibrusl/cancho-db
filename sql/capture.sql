@@ -8,6 +8,7 @@
 --   cdb.untrackable()  the tables of `public` the capture cannot track (no primary key, or partitioned), as text: empty when there are none
 --   cdb.on_ddl()    an event trigger function: a table made or altered in `public` is tracked in the same transaction, so its first write is captured; a keyless
 --                   or partitioned one raises and the statement fails
+--   cdb.erase(sch, tbl, key)  delete a row by its plain key and destroy what is stored about the key in that schema (docs/m2g-erasure.md)
 --   cdb.on_drop()   an event trigger function: a dropped table's salts (cdb.cur) are dropped with it
 --   cdb.facts(x)    the NET facts of transaction x as the text `C` takes in tools/state.py: `kind:table:pk:old:new`, hex, `-` for none, in (table, pk) order
 --
@@ -443,6 +444,32 @@ end $$;
 
 drop event trigger if exists cdb_ddl;
 create event trigger cdb_ddl on ddl_command_end when tag in ('CREATE TABLE', 'CREATE TABLE AS', 'ALTER TABLE') execute function cdb.on_ddl();
+
+-- Erasure (docs/m2g-erasure.md D-E3, D-E6): the row of `p_tbl` in schema `p_sch` whose plain key is the jsonb array text `p_key` is deleted (a delete like any other: a fact, and a commit
+-- when the transaction ends), and everything stored about that key in this schema is destroyed: in every delta row of the key the plain key, the images and the salts become null.
+-- What stays is what the log commits to: the kind of change, the key's commitment and the hashes, which commit to nothing that can be tested (they are salted). Returns a line saying what was
+-- done and which other schemas (branches) still hold the key: an erasure reaches the schema it is run in, and a branch made before it holds its own copy.
+create or replace function cdb.erase(p_sch text, p_tbl text, p_key text) returns text language plpgsql as $$
+declare
+    cols text;
+    k bytea := convert_to(p_key::jsonb::text, 'UTF8');
+    n int;
+    m int;
+    others text;
+begin
+    select string_agg(format('t.%I', a.attname), ', ' order by array_position(i.indkey::int2[], a.attnum)) into cols
+      from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any (i.indkey)
+     where i.indrelid = format('%I.%I', p_sch, p_tbl)::regclass and i.indisprimary;
+    if cols is null then
+        raise exception 'cdb.erase: table %.% has no primary key', p_sch, p_tbl using errcode = '55000';
+    end if;
+    execute format('delete from %I.%I t where jsonb_build_array(%s)::text = %L', p_sch, p_tbl, cols, p_key::jsonb::text);
+    get diagnostics n = row_count;
+    update cdb.delta d set pk = null, old_row = null, new_row = null, old_salt = null, new_salt = null, key_salt = null where d.sch = p_sch and d.tbl = p_tbl and d.pk = k;
+    get diagnostics m = row_count;
+    select string_agg(c.sch, ', ' order by c.sch) into others from cdb.cur c where c.tbl = p_tbl and c.pk = k and c.sch <> p_sch;
+    return format('erased: %s row(s) deleted, %s delta row(s) scrubbed%s', n, m, coalesce('; still held in ' || others, ''));
+end $$;
 
 -- A dropped table (or schema, with its tables) takes its entries in cdb.cur with it: a table made again under the name must not inherit the salts of the one before.
 create or replace function cdb.on_drop() returns event_trigger language plpgsql as $$
