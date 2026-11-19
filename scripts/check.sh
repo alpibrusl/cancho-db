@@ -54,6 +54,8 @@ echo "== changes and state in the commits (M2b-2b): recomputed from the database
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/changes_e2e.py build/proxy
 echo "== cdb.merge (M2e-1): 60 random trials and the pinned scenarios against a reference of the three-way merge"
 quiet 3 python3 tests/merge_check.py
+echo "== cancho_merge (M2e-2): the two-parent commit, the base, refusals, the race, the crash windows"
+E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/merge_e2e.py build/proxy
 echo "== the fork (M2c-2): the schema per branch, the commit on the new branch, refusals, the race, the crash windows"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/fork_e2e.py build/proxy
 echo "== AS OF (M2d): every commit of a random session read back against a copy made then, on two branches"

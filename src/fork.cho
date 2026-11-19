@@ -47,15 +47,20 @@ fn word_at[&d, &w](sql: &d [byte], at: int, word: &w [byte]) -> [] bool {
 // Read `select cancho_fork('<name>')` from `sql`: the length of the name, written to `name`; -1 if the text is not that shape, -2 if it is but the name is not a name a branch
 // can have (1 to 40 of `a-z`, `0-9`, `_`).
 pub fn parse[&d, &n](sql: &d [byte], name: &!n [byte]) -> [] int {
+    return parse_call(sql, "cancho_fork", name);
+}
+
+// The same for `select <fname>('<name>')`: the fork's `cancho_fork` and the merge's `cancho_merge` (docs/m2-branches.md D37) have the one shape.
+pub fn parse_call[&d, &f, &n](sql: &d [byte], fname: &f [byte], name: &!n [byte]) -> [] int {
     var at = skip(sql, 0);
     if !word_at(sql, at, "select") {
         return 0 - 1;
     }
     at = skip(sql, at + 6);
-    if !word_at(sql, at, "cancho_fork") {
+    if !word_at(sql, at, fname) {
         return 0 - 1;
     }
-    at = skip(sql, at + 11);
+    at = skip(sql, at + len(fname));
     if at >= len(sql) || int_of(sql[at]) != '(' {
         return 0 - 1;
     }
@@ -116,5 +121,50 @@ pub fn render[&o, &s, &n](out: &!o [byte], src: &s [byte], src_is_first: bool, n
     at = put(out, at, "', 'cdb_b_");
     at = put(out, at, name);
     at = put(out, at, "') as cancho_fork");
+    return at;
+}
+
+fn put_dec[&o](out: &!o [byte], at: int, n: int) -> [] int {
+    var digits = 1;
+    var t = n;
+    while t >= 10 {
+        t = t / 10;
+        digits = digits + 1;
+    }
+    var i = digits;
+    var v = n;
+    while i > 0 {
+        out[at + i - 1] = byte_of('0' + v % 10);
+        v = v / 10;
+        i = i - 1;
+    }
+    return at + digits;
+}
+
+fn put_schema[&o, &b](out: &!o [byte], at: int, first: bool, branch: &b [byte]) -> [] int {
+    var p = at;
+    if first {
+        p = put(out, p, "public");
+    } else {
+        p = put(out, p, "cdb_b_");
+        p = put(out, p, branch);
+    }
+    return p;
+}
+
+// The query that does a merge upstream (D34 to D37): `select cdb.merge('<target schema>', '<source schema>', '<base schema>', <the base's place>) as cancho_merge`. The base is the commit at index `base_idx` of the log, on the branch
+// whose schema is given; its place is that of the nearest commit at or before it on that branch that wrote (`cdb.mark`). Into `out`: its length.
+pub fn render_merge[&o, &t, &s, &b](out: &!o [byte], tgt: &t [byte], tgt_first: bool, src: &s [byte], src_first: bool, base: &b [byte], base_first: bool, base_idx: int) -> [] int {
+    var at = put(out, 0, "select cdb.merge('");
+    at = put_schema(out, at, tgt_first, tgt);
+    at = put(out, at, "', '");
+    at = put_schema(out, at, src_first, src);
+    at = put(out, at, "', '");
+    at = put_schema(out, at, base_first, base);
+    at = put(out, at, "', (select coalesce(max(ord), -1) from cdb.mark where sch = '");
+    at = put_schema(out, at, base_first, base);
+    at = put(out, at, "' and ord <= ");
+    at = put_dec(out, at, base_idx);
+    at = put(out, at, ")) as cancho_merge");
     return at;
 }

@@ -404,7 +404,7 @@ PROXY = [
     ("fork: the new branch is not entered in the table", "src/commitpath.cho", "                        chain[0] = chain[0] + 1;", "                        chain[0] = chain[0] + 0;"),
     ("fork: the new branch's tip is the source's", "src/commitpath.cho", "let ntip = contents(core.store.tip)[64 * nb..64 * nb + 64];", "let ntip = contents(core.store.tip)[64 * bx..64 * bx + 64];"),
     ("fork: the token's branch pattern is not checked", "src/forkpath.cho", "    if token.branch_denied(", "    if false && token.branch_denied("),
-    ("fork: a fork inside a transaction is let through", "src/forkpath.cho", "    if ts != 0 {\n        return refuse(", "    if false {\n        return refuse("),
+    ("fork: a fork inside a transaction is let through", "src/forkpath.cho", "    if ts != 0 {\n        return refuse(tab, core, k, ts, \"25001\", \"fork-in-transaction\"", "    if false {\n        return refuse(tab, core, k, ts, \"25001\", \"fork-in-transaction\""),
     ("fork: a taken name is let through", "src/forkpath.cho", "    if tk == 1 {", "    if tk == 9 {"),
     ("fork: the name is not validated", "src/fork.cho", "    if !upstream.branch_name_ok(sql[start..start + nl]) {", "    if false {"),
     ("fork: a branch is always forked from the first", "src/fork.cho", "    if src_is_first {", "    if true {"),
@@ -417,6 +417,20 @@ PROXY = [
     ("asof: the delta rows are stamped without their place in the log", "src/commitpath.cho", "\"'::bytea, ord = \");", "\"'::bytea, ord = 0 * \");"),
     ("asof: the mark has the wrong place in the log", "src/commitpath.cho", "at = build.put_bytes(q, at, \"', \");\n                at = dec_sql(q, at, chain[2]);", "at = build.put_bytes(q, at, \"', \");\n                at = dec_sql(q, at, chain[2] + 1);"),
     ("asof: a fork's mark is in the first branch's schema", "src/commitpath.cho", "                if forking || bx > 0 {\n                    at = build.put_bytes(q, at, \"cdb_b_\");", "                if false {\n                    at = build.put_bytes(q, at, \"cdb_b_\");"),
+    ("merge: the second parent is the target's own tip", 'src/commitpath.cho', 'mp[32 + q4] = contents(core.store.tip)[64 * src + q4];', 'mp[32 + q4] = contents(core.store.tip)[64 * bx + q4];'),
+    ('merge: the state ignores the second parent', 'src/commitpath.cho', '            state.state(2, ms[0..64], chg, stt);', '            state.state(1, ms[0..32], chg, stt);'),
+    ('merge: a source that moved is not noticed', 'src/commitpath.cho', 'if mp[q5] != fk[q5] || mp[32 + q5] != fk[80 + q5] {', 'if mp[q5] != fk[q5] {'),
+    ('merge: a target that moved is not noticed', 'src/commitpath.cho', 'if mp[q5] != fk[q5] || mp[32 + q5] != fk[80 + q5] {', 'if mp[32 + q5] != fk[80 + q5] {'),
+    ("merge: the base is the target's tip", 'src/forkpath.cho', '    let base = merge_base(core, tx[bx], tx[src]);', '    let base = tx[bx];'),
+    ('merge: the walk stops at the first commit', 'src/forkpath.cho', '        if v == 3 {\n            return i;', '        if v == 3 {\n            return 0;'),
+    ('merge: any token may merge', 'src/forkpath.cho', '    if !may_write_all(snap,', '    if false && !may_write_all(snap,'),
+    ('merge: a branch may be merged into itself', 'src/forkpath.cho', '    if src == bx {', '    if false {'),
+    ('merge: the extended protocol runs a merge', 'src/extended.cho', '} else if vd[6] == 0 && forkpath.is_merge(vd[7], effs[0..vd[9]]) {', '} else if false {'),
+    ('merge: a merge is not recognised', 'src/forkpath.cho', '    return is_call(nstmts, effs, "cancho_merge");', '    return is_call(nstmts, effs, "cancho_merg");'),
+    ("merge: a merge commit's second parent is not in the graph", 'src/commitpath.cho', 'contents(core.store.cg)[2 * gi + 1] = gp1;', 'contents(core.store.cg)[2 * gi + 1] = 0 - 1;'),
+    ("merge: a commit's branch is not in the graph", 'src/commitpath.cho', 'contents(core.store.cbr)[gi] = byte_of(nb);', 'contents(core.store.cbr)[gi] = byte_of(0);'),
+    ("merge: a branch's last commit is not in the graph", 'src/commitpath.cho', '                    txs[nb] = gi;', '                    txs[nb] = txs[nb];'),
+    ("merge: the source's schema is the first branch's", 'src/forkpath.cho', 'contents(core.rend), tn, bx == 0, sn, src == 0, bn, bb == 0, base);', 'contents(core.rend), tn, bx == 0, sn, true, bn, bb == 0, base);'),
     ("proxy: the chain does not advance", "src/commitpath.cho", "chain[4 + 3 * nb + 1] = chain[4 + 3 * nb + 1] + 1;", "chain[4 + 3 * nb + 1] = chain[4 + 3 * nb + 1];"),
     ("proxy: the tip is not remembered", "src/commitpath.cho", "                        ntip[j] = ident[j];", "                        ntip[j] = ntip[j];"),
     ("proxy: the token is never stored", "src/commitpath.cho", "            if ai[8 * k + 4] == 0 {\n                tl = build.store_record(tr, 0, tk);", "            if false {\n                tl = build.store_record(tr, 0, tk);"),
@@ -521,7 +535,7 @@ def run_proxy(cancho):
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
                 try:
-                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "fork_e2e.py" if label.startswith("fork:") else "asof_e2e.py" if label.startswith("asof:") else "proxy_e2e.py"
+                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "fork_e2e.py" if label.startswith("fork:") else "asof_e2e.py" if label.startswith("asof:") else "merge_e2e.py" if label.startswith("merge:") else "proxy_e2e.py"
                     r = subprocess.run([sys.executable, str(work / "tests" / judge), str(exe)], capture_output=True,
                                        text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
                     out, code = r.stdout + r.stderr, r.returncode
@@ -622,6 +636,9 @@ STORE = [
     ("store: a branch's next seq is the log's last", "src/store.cho", "bi[3 * found + 1] = out[commit.f_seq_lo()] + 1;", "bi[1] = out[commit.f_seq_lo()] + 1;"),
     ("store: the configured branch is not first", "src/store.cho", "    bi[0] = len(branch);\n    info[6] = 1;", "    bi[0] = len(branch);\n    info[6] = 0;"),
     ("store: a 65th branch is taken", "src/store.cho", "if info[6] >= branches_max() || len(bname) > branch_name_max() {", "if len(bname) > branch_name_max() {"),
+    ("store: a commit's branch is not recorded", "src/store.cho", "cbr[index - 1] = byte_of(found);", "cbr[index - 1] = byte_of(0);"),
+    ("store: a branch's last commit is not remembered", "src/store.cho", "                                        tx[found] = index - 1;", "                                        tx[found] = tx[found];"),
+    ("store: a parent that is no tip is not looked for", "src/store.cho", "while q2 >= 0 && cg[2 * (index - 1) + pj] < 0 {", "while false && q2 >= 0 && cg[2 * (index - 1) + pj] < 0 {"),
     ("store: the log's lock is not taken", "src/store.cho", "if !locked {", "if false {"),
     ("store: a torn tail is not cut", "src/store.cho", "if code == 0 && (rewrite || good < len(all)) {", "if code == 0 && rewrite {"),
     ("store: the log is not verified", "src/store.cho", "if code == 0 && !rewrite {", "if false {"),

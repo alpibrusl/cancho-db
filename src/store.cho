@@ -314,6 +314,7 @@ pub fn open_store[&h, &d, &n, &m](heap: &!h Heap, dir: &d Dir, name: &n [byte], 
 // `branch` first whether or not it has a commit, then the others in the order their first commit appears; `bi` has three ints for each: the length
 // of its name, its next `seq` and 1 if it has a tip; `tip` has 64 bytes for each (id, then `state`); `info[6]` is how many there are (at most
 // `branches_max()`; more, or a name longer than `branch_name_max()`, is `r_too_big()`). `info[3]` and `info[5]` describe the configured branch.
+// The commit graph (docs/m2-branches.md D35): for each commit, in log order, `cbr` has its branch's index and `cg` has the indices of its first and second parent (-1 for none); `tx` has, for each branch, the index of its last commit.
 pub fn branches_max() -> [] int {
     return 64;
 }
@@ -322,7 +323,7 @@ pub fn branch_name_max() -> [] int {
     return 64;
 }
 
-pub fn open_log[&h, &d, &p, &b, &o, &t, &i, &n, &j](heap: &!h Heap, dir: &d Dir, pk: &p [byte], branch: &b [byte], info: &!o [int], tip: &!t [byte], ids: &!i [byte], names: &!n [byte], bi: &!j [int]) -> [heap, dir_read, dir_write, file_read, file_write] Opened {
+pub fn open_log[&h, &d, &p, &b, &o, &t, &i, &n, &j, &g, &r, &x](heap: &!h Heap, dir: &d Dir, pk: &p [byte], branch: &b [byte], info: &!o [int], tip: &!t [byte], ids: &!i [byte], names: &!n [byte], bi: &!j [int], cg: &!g [int], cbr: &!r [byte], tx: &!x [int]) -> [heap, dir_read, dir_write, file_read, file_write] Opened {
     var i = 0;
     while i < 8 {
         info[i] = 0;
@@ -477,6 +478,35 @@ pub fn open_log[&h, &d, &p, &b, &o, &t, &i, &n, &j](heap: &!h Heap, dir: &d Dir,
                                     }
                                 }
                                 if found >= 0 {
+                                    // the graph: this commit's branch and its parents' indices (a parent is almost always the tip of a branch; any other commit is looked for in the ids so far)
+                                    if 2 * index <= len(cg) && index <= len(cbr) {
+                                        cbr[index - 1] = byte_of(found);
+                                        var pj = 0;
+                                        while pj < 2 {
+                                            cg[2 * (index - 1) + pj] = 0 - 1;
+                                            if pj < out[commit.f_parents()] {
+                                                let pid = enc[out[commit.f_parents_at()] + 32 * pj..out[commit.f_parents_at()] + 32 * pj + 32];
+                                                var b2 = 0;
+                                                while b2 < info[6] {
+                                                    if bi[3 * b2 + 2] == 1 && l1.same(tip[64 * b2..64 * b2 + 32], pid) {
+                                                        cg[2 * (index - 1) + pj] = tx[b2];
+                                                    }
+                                                    b2 = b2 + 1;
+                                                }
+                                                if cg[2 * (index - 1) + pj] < 0 {
+                                                    var q2 = index - 2;
+                                                    while q2 >= 0 && cg[2 * (index - 1) + pj] < 0 {
+                                                        if l1.same(ids[32 * q2..32 * q2 + 32], pid) {
+                                                            cg[2 * (index - 1) + pj] = q2;
+                                                        }
+                                                        q2 = q2 - 1;
+                                                    }
+                                                }
+                                            }
+                                            pj = pj + 1;
+                                        }
+                                        tx[found] = index - 1;
+                                    }
                                     var j = 0;
                                     while j < 32 {
                                         tip[64 * found + j] = ident[j];

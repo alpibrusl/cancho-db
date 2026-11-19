@@ -12,9 +12,8 @@ import cdb.fork;
 import cdb.token;
 import cdb.store;
 
-// Whether the statements a message holds are exactly `call cancho_fork`: one statement, one effect, of kind 3 (call), whose target is that name.
-pub fn is_fork[&e](nstmts: int, effs: &e [byte]) -> [] bool {
-    let want = "cancho_fork";
+// Whether the statements a message holds are exactly `call <name>`: one statement, one effect, of kind 3 (call), whose target is that name.
+fn is_call[&e, &w](nstmts: int, effs: &e [byte], want: &w [byte]) -> [] bool {
     if nstmts != 1 || len(effs) != 3 + len(want) || int_of(effs[0]) != 3 || int_of(effs[1]) != 0 || int_of(effs[2]) != len(want) {
         return false;
     }
@@ -26,6 +25,14 @@ pub fn is_fork[&e](nstmts: int, effs: &e [byte]) -> [] bool {
         i = i + 1;
     }
     return true;
+}
+
+pub fn is_fork[&e](nstmts: int, effs: &e [byte]) -> [] bool {
+    return is_call(nstmts, effs, "cancho_fork");
+}
+
+pub fn is_merge[&e](nstmts: int, effs: &e [byte]) -> [] bool {
+    return is_call(nstmts, effs, "cancho_merge");
 }
 
 fn refuse[&t, &c, &a, &b, &d](tab: &!t conns.Table, core: &!c shared.Core, k: int, ts: int, sqlstate: &a [byte], tag: &b [byte], text: &d [byte]) -> [conn_read, conn_write, poll] int {
@@ -84,4 +91,143 @@ pub fn start[&t, &c, &s](tab: &!t conns.Table, core: &!c shared.Core, k: int, ts
     let names = contents(core.store.names);
     let sn = names[bx * store.branch_name_max()..bx * store.branch_name_max() + chain[4 + 3 * bx]];
     return fork.render(contents(core.rend), sn, bx == 0, name);
+}
+
+fn bor(a: int, b: int) -> [] int {
+    var r = 0;
+    if a % 2 == 1 || b % 2 == 1 {
+        r = 1;
+    }
+    if a / 2 == 1 || b / 2 == 1 {
+        r = r + 2;
+    }
+    return r;
+}
+
+// The merge base of the commits at indices `a` and `b` of the log (docs/m2-branches.md D35): the common ancestor, either commit counting as its own ancestor, of the highest index; -1 if there is none. A parent has a lower index
+// than its child, so one walk down the indices, carrying the two marks to the parents, finds it.
+pub fn merge_base[&c](core: &!c shared.Core, a: int, b: int) -> [] int {
+    let cg = contents(core.store.cg);
+    let mk = contents(core.mk);
+    var top = a;
+    if b > a {
+        top = b;
+    }
+    var i = 0;
+    while i <= top {
+        mk[i] = byte_of(0);
+        i = i + 1;
+    }
+    mk[a] = byte_of(bor(int_of(mk[a]), 1));
+    mk[b] = byte_of(bor(int_of(mk[b]), 2));
+    i = top;
+    while i >= 0 {
+        let v = int_of(mk[i]);
+        if v == 3 {
+            return i;
+        }
+        if v != 0 {
+            var pj = 0;
+            while pj < 2 {
+                let q = cg[2 * i + pj];
+                if q >= 0 {
+                    mk[q] = byte_of(bor(int_of(mk[q]), v));
+                }
+                pj = pj + 1;
+            }
+        }
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+// Whether the token allows `write` on every table the snapshot lists (docs/m2-branches.md D38): a snapshot line `name: column ...` is a table, `index ...` is not.
+fn may_write_all[&s, &k](snap: &s [byte], tk: &k [byte]) -> [] bool {
+    var at = 0;
+    while at < len(snap) {
+        var e = at;
+        while e < len(snap) && int_of(snap[e]) != '\n' {
+            e = e + 1;
+        }
+        var c = at;
+        while c < e && int_of(snap[c]) != ':' && int_of(snap[c]) != ' ' {
+            c = c + 1;
+        }
+        // a table line has its name followed by a colon
+        if c < e && int_of(snap[c]) == ':' && c > at {
+            var denied = false;
+            region r {
+                let enc = alloc_slice[r](3 + (c - at), byte_of(0));
+                enc[0] = byte_of(1);
+                enc[1] = byte_of((c - at) / 256);
+                enc[2] = byte_of((c - at) % 256);
+                var i = 0;
+                while i < c - at {
+                    enc[3 + i] = snap[at + i];
+                    i = i + 1;
+                }
+                denied = token.effect_denied(tk, enc, 0, 1);
+            }
+            if denied {
+                return false;
+            }
+        }
+        at = e + 1;
+    }
+    return true;
+}
+
+// Decide a merge statement of client `k` (D34 to D38), as `start` decides a fork: the length of the query now in `core.rend`, or -1 if the client has been told it is refused. `snap` is the schema snapshot of the client's branch.
+pub fn start_merge[&t, &c, &s, &z](tab: &!t conns.Table, core: &!c shared.Core, k: int, ts: int, sql: &s [byte], snap: &z [byte]) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    let rec = contents(core.fkn)[k * shared.fork_rec()..k * shared.fork_rec() + shared.fork_rec()];
+    if ts != 0 {
+        return refuse(tab, core, k, ts, "25001", "merge-in-transaction", "cancho_merge must be a statement of its own, outside a transaction block") - 1;
+    }
+    let nl = fork.parse_call(sql, "cancho_merge", rec[34..74]);
+    if nl == 0 - 1 {
+        return refuse(tab, core, k, ts, "0A000", "merge-malformed", "the merge statement is: select cancho_merge('<source branch>')") - 1;
+    }
+    if nl < 0 {
+        return refuse(tab, core, k, ts, "22023", "merge-bad-name", "a branch name is 1 to 40 characters of a-z, 0-9 and _") - 1;
+    }
+    let name = rec[34..34 + nl];
+    let src = shared.branch_index(core, name);
+    let bx = st[p + 23];
+    if src < 0 {
+        return refuse(tab, core, k, ts, "3D000", "merge-unknown-branch", "there is no branch of that name") - 1;
+    }
+    if src == bx {
+        return refuse(tab, core, k, ts, "22023", "merge-same-branch", "a branch is not merged into itself") - 1;
+    }
+    if !may_write_all(snap, contents(core.tokb)[k * shared.token_max()..k * shared.token_max() + st[p + 12]]) {
+        return refuse(tab, core, k, ts, "42501", "merge-denied", "the token does not allow writes to every table of the branch, which a merge may change") - 1;
+    }
+    let chain = contents(core.store.chain);
+    if chain[4 + 3 * bx + 2] != 1 || chain[4 + 3 * src + 2] != 1 {
+        return refuse(tab, core, k, ts, "55000", "merge-no-history", "both branches need a commit to be merged") - 1;
+    }
+    let tx = contents(core.store.tx);
+    let base = merge_base(core, tx[bx], tx[src]);
+    if base < 0 {
+        return refuse(tab, core, k, ts, "55000", "merge-no-base", "the two branches have no common ancestor") - 1;
+    }
+    // what the commit will check is still true: both tips are the ones the merge was decided on
+    var i = 0;
+    while i < 32 {
+        rec[i] = contents(core.store.tip)[64 * bx + i];
+        rec[80 + i] = contents(core.store.tip)[64 * src + i];
+        i = i + 1;
+    }
+    rec[32] = byte_of(1);
+    rec[33] = byte_of(nl);
+    rec[112] = byte_of(1);
+    rec[113] = byte_of(src);
+    let names = contents(core.store.names);
+    let tn = names[bx * store.branch_name_max()..bx * store.branch_name_max() + chain[4 + 3 * bx]];
+    let sn = names[src * store.branch_name_max()..src * store.branch_name_max() + chain[4 + 3 * src]];
+    let bb = int_of(contents(core.store.cbr)[base]);
+    let bn = names[bb * store.branch_name_max()..bb * store.branch_name_max() + chain[4 + 3 * bb]];
+    return fork.render_merge(contents(core.rend), tn, bx == 0, sn, src == 0, bn, bb == 0, base);
 }
