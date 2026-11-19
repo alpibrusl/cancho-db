@@ -246,11 +246,13 @@ check("the source is untouched", state_of("cdb_b_side") == s_state)
 base2_main, base2_side = state_of("public"), state_of("cdb_b_side")
 psql(port, "update m_par set name = 'side-again' where id = 4", db="side")
 psql(port, "update m_c set w = 5 where x = 3", db="main")
+# a row the side changed and the first merge brought over, changed again on main: with the right base (the side's tip at the first merge) it is main's alone, with the fork point as the base it would be a conflict
+psql(port, "update m_par set name = 'main-again' where id = 2", db="main")
 t2, s2 = state_of("public"), state_of("cdb_b_side")
 # the base is now the source's tip: the target has the source's earlier changes already
 c2, want2 = merged_state(base2_side, t2, s2)
 r = psql(port, "select cancho_merge('side')")
-check("a second merge of the same branch: its base is the source's last commit, found in the graph; the result is the reference's", r.returncode == 0 and not c2 and state_of("public") == want2, (r.stderr, c2))
+check("a second merge of the same branch: its base is the source's last commit, found in the graph (through the first merge's second parent); the result is the reference's", r.returncode == 0 and "ERROR" not in r.stderr and not c2 and state_of("public") == want2, (r.stderr, c2))
 n_after = len(commits(ldir))
 # the other direction: the source takes the target's changes
 base3 = state_of("public")
