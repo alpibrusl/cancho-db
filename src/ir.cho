@@ -109,7 +109,9 @@ fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur:
                     nm[2] = nm[2] + 1;
                     cur[0] = cur[0] + 1;
                 }
-            } else if tag == 1 && mv < 3 {
+            } else if tag == 1 && mv != 3 {
+                // in mode 4 (`lift`) the span of every constant is noted: `nm[2]` counts them, `nm[3 + 2 * i]` and `nm[4 + 2 * i]` are where the i-th starts (its tag byte) and ends
+                let span_at = cur[0] - 1;
                 if !commit.have(data, cur, 1) {
                     good = false;
                 } else {
@@ -128,6 +130,11 @@ fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur:
                     } else if vt != 0 {
                         good = false;
                     }
+                }
+                if good && mv == 4 {
+                    nm[3 + 2 * nm[2]] = span_at;
+                    nm[4 + 2 * nm[2]] = cur[0];
+                    nm[2] = nm[2] + 1;
                 }
             } else if tag == 2 {
                 good = commit.skip(data, cur, 4);
@@ -340,9 +347,9 @@ fn v3_tail[&d, &n, &i](data: &d [byte], end: int, nm: &n [int], info: &!i [int])
 pub fn infer[&h, &d, &i](heap: &!h Heap, set: map.Map[int], data: &d [byte], mv: int, info: &!i [int]) -> [heap] (map.Map[int], bool) {
     var m = set;
     var good = true;
-    if mv == 3 {
-        // the types of the holes are kept after the first three ints of `nm`: at most one hole in every two bytes
-        var hb = box_slice(heap, len(data) / 2 + 8, 0);
+    if mv >= 3 {
+        // the types of the holes (mode 3), or the spans of the constants (mode 4), are kept after the first three ints of `nm`: at most one in every two bytes, and two ints for a span
+        var hb = box_slice(heap, len(data) + 8, 0);
         borrow mut hb as &!hw in {
             let (grown, ok) = infer_in(heap, m, data, mv, info, contents(hw));
             m = grown;
@@ -358,6 +365,71 @@ pub fn infer[&h, &d, &i](heap: &!h Heap, set: map.Map[int], data: &d [byte], mv:
         }
     }
     return (m, good);
+}
+
+// A statement of the v2 grammar as a version 3 shape and its constants (spec section 8): `shape` gets the statement with each `Const` replaced by a `Hole` of its type, `vals` the constants' `Value`s in
+// order. `info[0]` is the length of the shape, `info[1]` of the values, `info[2]` how many constants there were. 0 if it is well formed, -1 if not, -2 if an output is too short.
+pub fn lift[&h, &d, &s, &v, &i](heap: &!h Heap, data: &d [byte], shape: &!s [byte], vals: &!v [byte], info: &!i [int]) -> [heap] int {
+    var verdict = 0;
+    var hb = box_slice(heap, len(data) + 8, 0);
+    var set = map.empty(heap, 16, 0, 3);
+    borrow mut hb as &!hw in {
+        let nm = contents(hw);
+        let (grown, ok) = infer_in(heap, set, data, 4, info, nm);
+        set = grown;
+        if !ok {
+            verdict = 0 - 1;
+        } else {
+            var sat = 0;
+            var vat = 0;
+            var from = 0;
+            var c = 0;
+            while c < nm[2] && verdict == 0 {
+                let a = nm[3 + 2 * c];
+                let b = nm[4 + 2 * c];
+                // the bytes before the constant, a Hole and the constant's value
+                if sat + (a - from) + 2 > len(shape) || vat + (b - a - 1) > len(vals) {
+                    verdict = 0 - 2;
+                } else {
+                    var j = from;
+                    while j < a {
+                        shape[sat] = data[j];
+                        sat = sat + 1;
+                        j = j + 1;
+                    }
+                    shape[sat] = byte_of(11);
+                    shape[sat + 1] = data[a + 1];
+                    sat = sat + 2;
+                    j = a + 1;
+                    while j < b {
+                        vals[vat] = data[j];
+                        vat = vat + 1;
+                        j = j + 1;
+                    }
+                    from = b;
+                }
+                c = c + 1;
+            }
+            if verdict == 0 {
+                if sat + (len(data) - from) > len(shape) {
+                    verdict = 0 - 2;
+                } else {
+                    var j = from;
+                    while j < len(data) {
+                        shape[sat] = data[j];
+                        sat = sat + 1;
+                        j = j + 1;
+                    }
+                    info[0] = sat;
+                    info[1] = vat;
+                    info[2] = nm[2];
+                }
+            }
+        }
+    }
+    unbox_slice(heap, hb);
+    map.drop(heap, set);
+    return verdict;
 }
 
 fn infer_in[&h, &d, &i, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], mv: int, info: &!i [int], nm: &!n [int]) -> [heap] (map.Map[int], bool) {

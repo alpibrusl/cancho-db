@@ -692,7 +692,10 @@ fn do_execute[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Cor
         if int_of(xp[prec + 2]) == 0 {
             let irl = int_of(xs[rec + 2]) * 256 + int_of(xs[rec + 3]);
             let efl = int_of(xs[rec + 4]) * 256 + int_of(xs[rec + 5]);
-            let added = commitpath.add(core, k, 1, xs[rec + 8..rec + 40], xs[rec + 104..rec + 104 + irl], xs[rec + 2152..rec + 2152 + efl]);
+            var added = 2;
+            if commitpath.ensure_rnd(tw, core, st[p + 1], 16) == 0 {
+                added = commitpath.add(heap, core, k, 1, xs[rec + 8..rec + 40], xs[rec + 104..rec + 104 + irl], xs[rec + 2152..rec + 2152 + efl]);
+            }
             if added != 0 {
                 fail(tw, core, k, "54000", "transaction-too-large", "the transaction is larger than one commit can record");
             } else {

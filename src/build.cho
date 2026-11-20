@@ -209,7 +209,42 @@ pub fn tokens_header[&o](out: &!o [byte], at: int) -> [] int {
 }
 
 pub fn stmts_header[&o](out: &!o [byte], at: int) -> [] int {
-    return put_bytes(out, at, "CHODBST2");
+    return put_bytes(out, at, "CHODBST3");
+}
+
+// A version 3 statement record (docs/spec/ir.md section 8) as a store entry: the shape of the statement, the hash of its constants (`vals`, `nvals` of them, with the 16-byte `salt`) and the
+// payload, written into `out` at `at`, and the statement's id into the 32 bytes of `id`. The new position, or -1 if the entry does not fit.
+pub fn stmt3[&o, &s, &v, &a, &i](out: &!o [byte], at: int, shape: &s [byte], vals: &v [byte], nvals: int, salt: &a [byte], id: &!i [byte]) -> [] int {
+    var pos = at;
+    region r {
+        let sha = alloc_slice[r](crypto.sha256_state_len(), 0);
+        let nul = alloc_slice[r](1, byte_of(0));
+        let one = alloc_slice[r](1, byte_of(1));
+        let cnt = alloc_slice[r](4, byte_of(0));
+        let chash = alloc_slice[r](32, byte_of(0));
+        put_be(cnt, 0, nvals, 4);
+        crypto.sha256_init(sha);
+        crypto.sha256_update(sha, "cancho-db/consts/v1");
+        crypto.sha256_update(sha, nul);
+        crypto.sha256_update(sha, salt);
+        crypto.sha256_update(sha, cnt);
+        crypto.sha256_update(sha, vals);
+        crypto.sha256_final(sha, chash);
+        crypto.sha256_init(sha);
+        crypto.sha256_update(sha, "cancho-db/stmt/v3");
+        crypto.sha256_update(sha, nul);
+        crypto.sha256_update(sha, shape);
+        crypto.sha256_update(sha, chash);
+        crypto.sha256_final(sha, id);
+        pos = put_be(out, pos, len(shape) + 32 + 1 + 16 + 4 + len(vals), 4);
+        pos = put_bytes(out, pos, shape);
+        pos = put_bytes(out, pos, chash);
+        pos = put_bytes(out, pos, one);
+        pos = put_bytes(out, pos, salt);
+        pos = put_bytes(out, pos, cnt);
+        pos = put_bytes(out, pos, vals);
+    }
+    return pos;
 }
 
 // One store entry: a `u32` length and the token's, or the statement's, bytes.

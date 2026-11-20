@@ -1,0 +1,116 @@
+import std.buffer;
+import std.io;
+import cdb.state;
+import cdb.ir;
+
+// `liftcheck`: reads one statement IR (hex) a line from standard input and writes one line each: `ok SHAPE VALS N` (hex) when `ir.lift` lifted its constants out (docs/spec/ir.md section 8), `error` when it is not a
+// well formed v2 statement. For tests/lift_check.py, which compares it with the same lift in Python.
+
+fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer) -> [heap, io_read] buffer.Buffer {
+    var out = text;
+    var c = getchar(io);
+    while c >= 0 {
+        out = buffer.push(heap, out, byte_of(c));
+        c = getchar(io);
+    }
+    return out;
+}
+
+fn digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+fn put_hex[&i, &s](io: &!i Io, bytes: &s [byte]) -> [io_write] int {
+    var j = 0;
+    while j < len(bytes) {
+        putchar(io, digit(int_of(bytes[j]) / 16));
+        putchar(io, digit(int_of(bytes[j]) % 16));
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn put_str[&i, &s](io: &!i Io, text: &s [byte]) -> [io_write] int {
+    var j = 0;
+    while j < len(text) {
+        putchar(io, int_of(text[j]));
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args } = split(world);
+    release(ffi);
+    release(fs);
+    release(args);
+    borrow mut heap as &!h in {
+        var text = buffer.empty(h, 4096);
+        borrow mut io as &!i in {
+            text = read_stdin(h, i, text);
+        }
+        borrow text as &t in {
+            let all = buffer.bytes(t);
+            var ls = 0;
+            while ls < len(all) {
+                var le = ls;
+                while le < len(all) && int_of(all[le]) != '\n' {
+                    le = le + 1;
+                }
+                var ir = box_slice(h, (le - ls) / 2 + 8, byte_of(0));
+                var shape = box_slice(h, (le - ls) / 2 + 8, byte_of(0));
+                var vals = box_slice(h, (le - ls) / 2 + 8, byte_of(0));
+                var info = box_slice(h, 4, 0);
+                var code = 0 - 9;
+                var n = 0;
+                borrow mut ir as &!iw in {
+                    n = state.hexdec(all, ls, le, contents(iw), 0);
+                }
+                if n >= 0 {
+                    borrow ir as &ir0 in {
+                        borrow mut shape as &!sw in {
+                            borrow mut vals as &!vw in {
+                                borrow mut info as &!nw in {
+                                    code = ir.lift(h, contents(ir0)[0..n], contents(sw), contents(vw), contents(nw));
+                                }
+                            }
+                        }
+                    }
+                }
+                borrow mut io as &!i in {
+                    if code == 0 {
+                        put_str(i, "ok ");
+                        borrow shape as &s0 in {
+                            borrow info as &n0 in {
+                                put_hex(i, contents(s0)[0..contents(n0)[0]]);
+                                put_str(i, " ");
+                                borrow vals as &v0 in {
+                                    put_hex(i, contents(v0)[0..contents(n0)[1]]);
+                                }
+                                put_str(i, " ");
+                                putchar(i, '0' + contents(n0)[2] / 10);
+                                putchar(i, '0' + contents(n0)[2] % 10);
+                            }
+                        }
+                    } else {
+                        put_str(i, "error ");
+                        putchar(i, '0' + (0 - code));
+                    }
+                    putchar(i, '\n');
+                }
+                unbox_slice(h, ir);
+                unbox_slice(h, shape);
+                unbox_slice(h, vals);
+                unbox_slice(h, info);
+                ls = le + 1;
+            }
+        }
+        buffer.drop(h, text);
+    }
+    release(io);
+    release(heap);
+    return 0;
+}
