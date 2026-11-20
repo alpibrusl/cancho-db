@@ -46,6 +46,10 @@ export PG_E2E_PORT=5593
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/proxy_e2e.py build/proxy
 echo "== cancho_erase through the proxy: the token checks, the erase commit, the erased record, a log that verifies"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/erase_e2e.py build/proxy
+echo "== the capture install at start retries a deadlock (a CI run died on one)"
+quiet 3 python3 tests/install_retry_e2e.py build/proxy
+echo "== cancho_erase on a branch, and the extended protocol's refusal"
+E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/erase_branch_e2e.py build/proxy
 echo "== the statement store of a real session is version 3, and erasing one subject's constants leaves a log that verifies"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/stmts_v3_e2e.py build/proxy
 echo "== the extended protocol through the proxy (raw messages, a real PostgreSQL)"
