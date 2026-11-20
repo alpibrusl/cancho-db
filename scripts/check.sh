@@ -75,6 +75,8 @@ quiet 2 python3 tests/l3a_fuzz.py "python3 tools/l3a.py" build/l3averify 500 1
 quiet 3 python3 tests/l3a_scale.py "python3 tools/l3a.py" build/l3averify 300
 echo "== L3a over a real session: the live tables compared, and the ways to cheat refused"
 quiet 3 python3 tests/l3a_e2e.py build/proxy "python3 tools/l3a.py" build/l3averify
+echo "== L3a over a session in which a subject is erased through the proxy (docs/m2g-erasure.md E5)"
+quiet 3 python3 tests/erase_l3a_e2e.py build/proxy "python3 tools/l3a.py" build/l3averify
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
 PG_PORT=5593 N=40 quiet 2 python3 scripts/measure_p2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"

@@ -118,6 +118,12 @@ What E1-E3c leave: `cdb.erase` destroys what the capture keeps for a key; the st
 * **Tests (E4 gate).** A real session writes rows for two subjects as literals, erases one through the proxy; then a scan of the whole log directory and of the upstream tables the capture keeps finds none of the subject's key bytes and all of the other's; all verifiers accept the log at L2 with statements and L3a over the delta store reports `erased=N`; a token with `write` and no `call cancho_erase` is refused; a rolled-back erasure changes no byte; a kill between the two steps leaves a log that verifies.
 * **Not in E4:** the other columns of the subject in earlier statements (named above), PostgreSQL's own storage until `VACUUM FULL`, other branches (the answer line names them), and E5's cases of erased rows through a real session.
 
+## 6e. E5, erased rows through a real session (built)
+
+`tests/erase_l3a_e2e.py`: a session inserts two subjects, updates one, erases her through the proxy, and inserts a third; the delta store is exported and the live tables dumped. Neither file holds her e-mail, name or phones (as text or as hex); both L3a verifiers (`tools/l3a.py`, `build/l3averify`) say `ok commits=5 facts=5 branches=1 erased=3 final`, with and without the live tables, so the replay, `changes`, `state` and the final comparison all hold over rows whose images and salts are gone; a hash of an erased row changed afterwards is `changes-mismatch`.
+
+**A third finding, found by this test's last check and fixed here.** `tools/export_live.py` joined the live rows to `cdb.cur` with an inner join, so a row put into a table *without the capture* (a `session_replication_role = replica` write, a restored dump) had no entry, was left out of the dump, and the final comparison passed over it: the verifier could not see a row the log never committed. The export is now a left join, and such a row is dumped with empty salts, which both verifiers refuse (`store-malformed`). The check that found it failed before the change and passes after (`ok ... final` became `reject rule=store-malformed`). What this does not change: a row the capture does see but no commit stamped is `replay-final`, as before (`tests/l3a_e2e.py`).
+
 ## 7. Claims
 
 C135 (the unsalted hash leaks; measured), C136 (an erased store still verifies) and C137 (the statement store holds constants) and C138 (an erased statement store still verifies), in [`claims.md`](claims.md).

@@ -28,9 +28,10 @@ def main(argv):
             if not cols:
                 continue
             key = "jsonb_build_array(%s)::text" % ", ".join('r."%s"' % c for c in cols)
-            # version 2: the plain key, its salt, the image and the row's salt (cdb.cur holds both salts of a row as it stands)
-            for k, ks, im, sa in q("select encode(convert_to(%s, 'UTF8'), 'hex'), encode(c.key_salt, 'hex'), encode(convert_to(to_jsonb(r)::text, 'UTF8'), 'hex'), encode(c.salt, 'hex') "
-                                   "from \"%s\".\"%s\" r join cdb.cur c on c.sch = '%s' and c.tbl = '%s' and c.pk = convert_to(%s, 'UTF8')" % (key, sch, t, sch, t.replace("'", "''"), key)):
+            # version 2: the plain key, its salt, the image and the row's salt (cdb.cur holds both salts of a row as it stands). A row with no entry in cdb.cur was put there without the capture
+            # (a replica-role write, a restored dump): it is exported with empty salts, so that the comparison sees a row the log never committed instead of not seeing it at all
+            for k, ks, im, sa in q("select encode(convert_to(%s, 'UTF8'), 'hex'), coalesce(encode(c.key_salt, 'hex'), ''), encode(convert_to(to_jsonb(r)::text, 'UTF8'), 'hex'), coalesce(encode(c.salt, 'hex'), '') "
+                                   "from \"%s\".\"%s\" r left join cdb.cur c on c.sch = '%s' and c.tbl = '%s' and c.pk = convert_to(%s, 'UTF8')" % (key, sch, t, sch, t.replace("'", "''"), key)):
                 lines.append("\t".join([sch, t.encode().hex(), k, ks, im, sa]))
     with open(out, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
