@@ -1156,6 +1156,18 @@ fn run[&h, &l, &n, &k, &o](heap: &!h Heap, io: &!o Io, listener: &!l Listener, n
                         } else {
                             io.error_all(io, "proxy: the row-delta capture could not be installed: PostgreSQL could not be asked or refused to track the tables\n");
                         }
+                        if ir != 1 {
+                            // PostgreSQL's own words, when it answered with an error (a lock conflict looks nothing like a missing privilege)
+                            region er {
+                                let eb = alloc_slice[er](512, byte_of(0));
+                                let en = commitpath.error_text(contents(cw.snapin), eb);
+                                if en > 0 {
+                                    io.error_all(io, "proxy: PostgreSQL said: ");
+                                    io.error_all(io, eb[0..en]);
+                                    io.error_all(io, "\n");
+                                }
+                            }
+                        }
                     }
                 } else if rs == 1 {
                     io.error_all(io, "proxy: PostgreSQL has max_prepared_transactions = 0, so a write cannot be made two-phase: set it above 0\n");
