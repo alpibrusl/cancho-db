@@ -4,8 +4,7 @@
     python3 tests/erase_store_check.py build/erasecheck
 
 For each version 3 store of `vectors/` that the Python verifier loads, and each text found in its payloads as a needle: the store the cancho rewrite leaves is byte for byte the one `tools/erase_stmts.py --containing`
-makes, `tools/verify.py` still loads it with the same ids, and the number of records erased is the Python tool's. Then the crash points of one store: stopped after `stmts.new` is written, the store is
-as it was and `store.open_store` removes the copy; stopped after the rename, the store is the new one; a store with a torn last record is `failed 2` (the open that follows cuts the tail, as at start); a missing store is `failed 1`.
+makes, `tools/verify.py` still loads it with the same ids, and the number of records erased is the Python tool's. Then the crash points of one store: a whole copy (`stmts.new` with its hash) beside the old, a half-written or the new store is finished by the next open; a half-written copy, one with a wrong hash or another magic is dropped and the store stays; a store with a torn last record is `failed 2` (the open that follows cuts the tail, as at start).
 """
 import re
 import shutil
@@ -76,32 +75,56 @@ for f in sorted((ROOT / "vectors").glob("ir3_*.stmts")):
             check("%s %r: no stale copy" % (f.name, needle), not (Path(d) / "stmts.new").exists())
 
 # crash points, on the store with the most to erase
+import hashlib
 best = max((f for f in (ROOT / "vectors").glob("ir3_*.stmts") if f.read_bytes()[:8] == b"CHODBST3"), key=lambda f: len(payload_texts(f.read_bytes())) if f.name.startswith("ir3_ok") else -1)
 data = best.read_bytes()
 needle = sorted(payload_texts(data))[0]
 want, n = erase_stmts.erase(data, needle)
+copy = want + hashlib.sha256(want).digest()
 check("the crash-point store has something to erase", n > 0 and want != data, best.name)
-with tempfile.TemporaryDirectory() as d:
-    (Path(d) / "stmts").write_bytes(data)
-    out = run(d, [needle], 1)
-    check("stopped after stmts.new: the store is as it was", (Path(d) / "stmts").read_bytes() == data, out)
-    check("... and open_store removed the copy", out[1] == "open ok" and not (Path(d) / "stmts.new").exists(), out)
-with tempfile.TemporaryDirectory() as d:
-    (Path(d) / "stmts").write_bytes(data)
-    (Path(d) / "stmts.new").write_bytes(b"half a store")
-    out = run(d, [needle], 2)
-    check("stopped after the rename: the store is the new one, and a stale copy did not matter", (Path(d) / "stmts").read_bytes() == want and not (Path(d) / "stmts.new").exists(), out)
-with tempfile.TemporaryDirectory() as d:
-    (Path(d) / "stmts").write_bytes(b"CHODBST2" + data[8:])
-    out = run(d, [needle], 0)
-    check("a store with another magic is not rewritten by the version 3 walk (failed 2 or an unchanged store)", out[0].startswith("failed") or (Path(d) / "stmts").read_bytes()[:8] == b"CHODBST2", out)
-with tempfile.TemporaryDirectory() as d:
-    (Path(d) / "stmts").write_bytes(data[:-3])
-    out = run(d, [needle], 0)
-    after = (Path(d) / "stmts").read_bytes()
-    check("a store with a torn last record is failed 2, and nothing is erased (the open that follows cuts the torn tail, as at start)", out[0] == "failed 2" and data.startswith(after) and len(after) < len(data), out)
-with tempfile.TemporaryDirectory() as d:
-    out = run(d, [needle], 0)
-    check("a directory with no store: failed 1", out[0] == "failed 1", out)
+
+
+def scene(stmts, new=None):
+    d = tempfile.mkdtemp()
+    (Path(d) / "stmts").write_bytes(stmts)
+    if new is not None:
+        (Path(d) / "stmts.new").write_bytes(new)
+    return d
+
+
+d = scene(data)
+out = run(d, [needle], 1)
+check("stopped at the commit point (the copy is whole, the store untouched): the open that follows finishes the erasure", out[0] == "erased %d" % n and (Path(d) / "stmts").read_bytes() == want and not (Path(d) / "stmts.new").exists(), out)
+d = scene(data, copy)
+out = run(d, [], 3)
+check("a restart finds a whole copy and the old store: the erasure is finished", (Path(d) / "stmts").read_bytes() == want and not (Path(d) / "stmts.new").exists() and out[1] == "open ok", out)
+d = scene(want[:len(want) // 2], copy)
+out = run(d, [], 3)
+check("a restart finds a whole copy and a half-written store: the erasure is finished", (Path(d) / "stmts").read_bytes() == want and not (Path(d) / "stmts.new").exists(), out)
+d = scene(want, copy)
+out = run(d, [], 3)
+check("a restart finds a whole copy and the new store (a crash before the copy was removed): the same, and the copy goes", (Path(d) / "stmts").read_bytes() == want and not (Path(d) / "stmts.new").exists(), out)
+d = scene(data, copy[:len(copy) // 2])
+out = run(d, [], 3)
+check("a restart finds a half-written copy: the old store stays and the copy goes", (Path(d) / "stmts").read_bytes() == data and not (Path(d) / "stmts.new").exists(), out)
+bad = bytearray(copy)
+bad[len(want) + 3] ^= 1
+d = scene(data, bytes(bad))
+out = run(d, [], 3)
+check("a restart finds a copy whose hash is not its content's: the old store stays and the copy goes", (Path(d) / "stmts").read_bytes() == data and not (Path(d) / "stmts.new").exists(), out)
+other = b"CHODBST2" + want[8:]
+d = scene(data, other + hashlib.sha256(other).digest())
+out = run(d, [], 3)
+check("a copy with another magic and a hash that matches it is dropped", (Path(d) / "stmts").read_bytes() == data and not (Path(d) / "stmts.new").exists(), out)
+d = scene(data)
+out = run(d, [needle], 2)
+check("stopped after the store was rewritten, before the copy was removed: the open that follows leaves the new store and removes the copy", out[0] == "erased %d" % n and (Path(d) / "stmts").read_bytes() == want and not (Path(d) / "stmts.new").exists(), out)
+d = scene(data[:-3])
+out = run(d, [needle], 0)
+after = (Path(d) / "stmts").read_bytes()
+check("a store with a torn last record is failed 2, and nothing is erased (the open that follows cuts the torn tail, as at start)", out[0] == "failed 2" and data.startswith(after) and len(after) < len(data), out)
+d = scene(b"")
+out = run(d, [needle], 0)
+check("an empty store is failed 2", out[0] == "failed 2", out)
 print("erase_store_check: %d stores, %d cases, %d failures" % (stores, cases, len(FAILED)))
 sys.exit(1 if FAILED else 0)

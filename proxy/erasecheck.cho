@@ -4,8 +4,8 @@ import std.io;
 import cdb.store;
 
 // `erasecheck DIR STOP`: the statement store rewrite of docs/m2g-erasure.md 6d (`store.rewrite_stmts`) on its own, for tests/erase_store_check.py. The needles are read from standard input as one line of
-// hex (the list `store.rewrite_stmts` takes: each a two-byte length and its bytes). `STOP` is 0 (all of it), 1 (stop after `stmts.new` is written) or 2 (stop after the rename). Prints the answer,
-// `erased N` or `failed C`, and then `open ok` or `open refused C` for `store.open_store` on `stmts` afterwards (which removes a stale `stmts.new`).
+// hex (the list `store.rewrite_stmts` takes: each a two-byte length and its bytes). `STOP` is 0 (all of it), 1 (stop after `stmts.new` is written), 2 (stop after the store is rewritten, before the copy is
+// removed) or 3 (do not rewrite at all, only open). Prints the answer, `erased N` or `failed C`, and then `open ok` or `open refused C` for `store.open_store` on `stmts` afterwards, which finishes or drops an erasure's copy.
 
 fn hexval(c: int) -> [] int {
     if c >= '0' && c <= '9' {
@@ -41,8 +41,21 @@ fn run[&h, &o, &d](heap: &!h Heap, io: &!o Io, dir: &d Dir, stop: int) -> [heap,
         n = read_hex(io, contents(nw));
     }
     var r = 0;
-    borrow needles as &nr in {
-        r = store.rewrite_stmts(heap, dir, contents(nr)[0..n], stop);
+    if stop < 3 {
+        match dir_open_append(dir, "stmts") {
+            Opened::Failed(e) => {
+                r = 0 - 1;
+            }
+            Opened::Ok(af) => {
+                var a = af;
+                borrow needles as &nr in {
+                    borrow mut a as &!aw in {
+                        r = store.rewrite_stmts(heap, dir, aw, contents(nr)[0..n], stop);
+                    }
+                }
+                file_close(a);
+            }
+        }
     }
     unbox_slice(heap, needles);
     if r >= 0 {

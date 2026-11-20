@@ -2,6 +2,7 @@ edition 9;
 module cdb.store;
 
 import std.buffer;
+import std.crypto;
 import std.map;
 import cdb.commit;
 import cdb.ir;
@@ -226,12 +227,10 @@ fn is_prefix[&a, &b](part: &a [byte], whole: &b [byte]) -> [] bool {
 // record a crash left half written) and answer the handle. Refused as `r_bad_magic()` if it starts with something else.
 pub fn open_store[&h, &d, &n, &m](heap: &!h Heap, dir: &d Dir, name: &n [byte], magic: &m [byte]) -> [heap, dir_read, dir_write, file_read, file_write] Opened {
     if is_prefix(name, "stmts") && len(name) == 5 {
-        // an erasure that did not reach its rename left a copy beside the store: the store is intact, the copy is not wanted
-        match dir_remove(dir, "stmts.new") {
-            Done::Ok(r) => {
-            }
-            Done::Failed(e) => {
-            }
+        // an erasure that was cut short (docs/m2g-erasure.md 6d): finish it from its copy, or drop the copy
+        let fc = finish_copy(heap, dir);
+        if fc != 0 {
+            return Opened::Failed(fc);
         }
     }
     let made = create_with(dir, name, magic);
@@ -633,10 +632,13 @@ fn push_be4[&h](heap: &!h Heap, b: buffer.Buffer, v: int) -> [heap] buffer.Buffe
 }
 
 // Rewrite the statement store with the constants of every record that holds one of `needles` (see `holds_any`) erased: the record keeps its shape and the hash of its constants and loses the salt and the
-// constants, so its id, and so every commit that cites it, is as before. The new store is written whole to `stmts.new`, synced, renamed over `stmts` (atomic), and the directory synced; a crash before the rename leaves the
-// old store and a stale `stmts.new`, removed by the next start (`open_store` for `stmts`). The caller reopens `stmts` afterwards: its handle names the replaced file. How many records were erased, or -1 if the
-// files could not be read or written, -2 if the store is not a well formed version 3 store. `stop` is for the tests: 1 stops after `stmts.new` is written, 2 after the rename, 0 does it all.
-pub fn rewrite_stmts[&h, &d, &n](heap: &!h Heap, dir: &d Dir, needles: &n [byte], stop: int) -> [heap, dir_read, dir_write, file_read, file_write] int {
+// constants, so its id, and so every commit that cites it, is as before. `stmts` is the live append handle of the store, which must stay the proxy's (a handle cannot be replaced inside the struct that holds it,
+// so the file is rewritten in place and not renamed over). The new store is first written whole, with a hash of it at the end, to `stmts.new` and synced: that is the commit point. Then, through `stmts`, the store is
+// truncated to nothing and written again (an append handle writes at the end, which is then the start) and synced, and `stmts.new` is removed. A crash before the commit point leaves the old store and a copy that
+// does not match its hash; a crash after it leaves a store that is old, half written or new, and a copy that does; `open_store` for `stmts` finishes the job from the copy or drops the copy. How many records
+// were erased, or -1 if the files could not be read or written, -2 if the store is not a well formed version 3 store. `stop` is for the tests: 1 stops after the copy is written, 2 after the store is rewritten
+// and before the copy is removed, 0 does it all.
+pub fn rewrite_stmts[&h, &d, &f, &n](heap: &!h Heap, dir: &d Dir, stmts: &!f File, needles: &n [byte], stop: int) -> [heap, dir_read, dir_write, file_read, file_write] int {
     match dir_remove(dir, "stmts.new") {
         Done::Ok(r) => {
         }
@@ -724,28 +726,47 @@ pub fn rewrite_stmts[&h, &d, &n](heap: &!h Heap, dir: &d Dir, needles: &n [byte]
             var f = nf;
             borrow out as &ob in {
                 borrow mut f as &!w in {
-                    ok = write_all(w, buffer.bytes(ob)) && synced(w);
+                    ok = write_copy(w, buffer.bytes(ob));
                 }
             }
             file_close(f);
         }
     }
+    if !ok {
+        buffer.drop(heap, out);
+        return 0 - 1;
+    }
+    match dir_sync(dir) {
+        Done::Ok(r) => {
+        }
+        Done::Failed(e) => {
+            ok = false;
+        }
+    }
+    if !ok {
+        buffer.drop(heap, out);
+        return 0 - 1;
+    }
+    if stop == 1 {
+        buffer.drop(heap, out);
+        return erased;
+    }
+    borrow out as &ob in {
+        ok = replace_in_place(stmts, buffer.bytes(ob));
+    }
     buffer.drop(heap, out);
     if !ok {
         return 0 - 1;
     }
-    if stop == 1 {
+    if stop == 2 {
         return erased;
     }
-    match dir_rename(dir, "stmts.new", "stmts") {
+    match dir_remove(dir, "stmts.new") {
         Done::Ok(r) => {
         }
         Done::Failed(e) => {
             return 0 - 1;
         }
-    }
-    if stop == 2 {
-        return erased;
     }
     match dir_sync(dir) {
         Done::Ok(r) => {
@@ -753,6 +774,111 @@ pub fn rewrite_stmts[&h, &d, &n](heap: &!h Heap, dir: &d Dir, needles: &n [byte]
         }
         Done::Failed(e) => {
             return 0 - 1;
+        }
+    }
+}
+
+// `stmts.new`: the whole new store and the SHA-256 of it. Synced.
+fn write_copy[&f, &c](file: &!f File, content: &c [byte]) -> [file_write] bool {
+    var ok = false;
+    region r {
+        let sum = alloc_slice[r](32, byte_of(0));
+        crypto.sha256(content, sum);
+        ok = write_all(file, content) && write_all(file, sum) && synced(file);
+    }
+    return ok;
+}
+
+// The store replaced by `content`, through its own append handle: truncated to nothing, written (at the end, which is the start) and synced.
+fn replace_in_place[&f, &c](stmts: &!f File, content: &c [byte]) -> [file_write] bool {
+    match file_truncate(stmts, 0) {
+        Done::Ok(n) => {
+        }
+        Done::Failed(e) => {
+            return false;
+        }
+    }
+    return write_all(stmts, content) && synced(stmts);
+}
+
+// At start: finish an erasure that was cut short, or drop its copy. `stmts.new` that holds a version 3 store and the SHA-256 of it is a rewrite that passed its commit point: `stmts` becomes that store (it may be the
+// old one, half of the new one or the new one). Anything else is a copy that was never finished, and the store is whole. Either way the copy goes. 0 if there was nothing or it is done, else the errno or `r_io()`.
+fn finish_copy[&h, &d](heap: &!h Heap, dir: &d Dir) -> [heap, dir_read, dir_write, file_read, file_write] int {
+    var data = buffer.empty(heap, 4096);
+    var got = 0 - 1;
+    match dir_open_read(dir, "stmts.new") {
+        Opened::Failed(e) => {
+            buffer.drop(heap, data);
+            return 0;
+        }
+        Opened::Ok(rf) => {
+            var r = rf;
+            borrow mut r as &!w in {
+                let (grown, n2) = read_whole(heap, w, data);
+                data = grown;
+                got = n2;
+            }
+            file_close(r);
+        }
+    }
+    var code = 0;
+    var valid = false;
+    var content_len = 0;
+    borrow data as &t in {
+        let all = buffer.bytes(t);
+        if got >= 40 {
+            content_len = len(all) - 32;
+            if is_prefix(all[0..8], "CHODBST3") {
+                region r {
+                    let sum = alloc_slice[r](32, byte_of(0));
+                    crypto.sha256(all[0..content_len], sum);
+                    valid = true;
+                    var i = 0;
+                    while i < 32 {
+                        if sum[i] != all[content_len + i] {
+                            valid = false;
+                        }
+                        i = i + 1;
+                    }
+                }
+            }
+        }
+        if valid {
+            match dir_open_append(dir, "stmts") {
+                Opened::Failed(e) => {
+                    code = r_io();
+                }
+                Opened::Ok(af) => {
+                    var a = af;
+                    var ok = false;
+                    borrow mut a as &!w in {
+                        ok = replace_in_place(w, all[0..content_len]);
+                    }
+                    file_close(a);
+                    if !ok {
+                        code = r_io();
+                    }
+                }
+            }
+        }
+    }
+    buffer.drop(heap, data);
+    if code != 0 {
+        return code;
+    }
+    match dir_remove(dir, "stmts.new") {
+        Done::Ok(r) => {
+        }
+        Done::Failed(e) => {
+            return r_io();
+        }
+    }
+    match dir_sync(dir) {
+        Done::Ok(r) => {
+            return 0;
+        }
+        Done::Failed(e) => {
+            return r_io();
         }
     }
 }
