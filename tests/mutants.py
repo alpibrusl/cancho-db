@@ -695,6 +695,14 @@ STORE = [
     ("store: the commit ids are not handed over", "src/store.cho", "build.put_bytes(ids, 32 * index, ident);", "index = index + 0;"),
     ("store: the id table's size is not checked", "src/store.cho", "if 32 * (index + 1) > len(ids) {", "if false {"),
     ("store: the log is written before the stores", "src/store.cho", "    if len(token_rec) > 0 {\n        if !write_all(tokens", "    if !write_all(log, log_rec) || !synced(log) {\n        return r_io();\n    }\n    if len(token_rec) > 0 {\n        if !write_all(tokens"),
+    ("erase-store: every record is erased, whatever the needle", "src/store.cho", "if contains(hay, list[at + 2..at + 2 + n]) {", "if true {"),
+    ("erase-store: the erased record keeps the payload tag of a whole one", "src/store.cho", "out = buffer.append(heap, out, body[0..end + 32]);\n                            out = buffer.push(heap, out, byte_of(0));", "out = buffer.append(heap, out, body[0..end + 32]);\n                            out = buffer.push(heap, out, byte_of(1));"),
+    ("erase-store: the erased record's length is one over", "src/store.cho", "out = push_be4(heap, out, end + 33);", "out = push_be4(heap, out, end + 34);"),
+    ("erase-store: the copy is not renamed over the store", "src/store.cho", "dir_rename(dir, \"stmts.new\", \"stmts\")", "dir_rename(dir, \"stmts.new\", \"stmts.bak\")"),
+    ("erase-store: a stale copy is not removed at open", "src/store.cho", "if is_prefix(name, \"stmts\") && len(name) == 5 {", "if false {"),
+    ("erase-store: a record running past the end is read", "src/store.cho", "if pos + 4 + n > len(all) {\n                        verdict = 0 - 2;", "if false {\n                        verdict = 0 - 2;"),
+    ("erase-store: the store's magic is not copied", "src/store.cho", "out = buffer.append(heap, out, all[0..8]);", "out = buffer.append(heap, out, \"CHODBST1\");"),
+    ("erase-store: a record is kept whole when the needle is the last bytes of its payload", "src/store.cho", "holds_any(body[end + 33..n], needles)", "holds_any(body[end + 33..n - 1], needles)"),
 ]
 
 
@@ -1173,14 +1181,19 @@ def run_store(cancho):
                 continue
             f.write_text(text.replace(old, new))
             exe = work / "storecheck"
-            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/storecheck.cho")] + [str(work / "src" / n) for n in ("store.cho", "build.cho", "commit.cho", "l1.cho")] + ["-o", str(exe)],
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/storecheck.cho")] + [str(work / "src" / n) for n in ("store.cho", "build.cho", "commit.cho", "l1.cho", "ir.cho")] + ["-o", str(exe)],
                                capture_output=True, text=True)
+            if b.returncode == 0 and label.startswith("erase-store:"):
+                exe = work / "erasecheck"
+                b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/erasecheck.cho")] + [str(work / "src" / n) for n in ("store.cho", "build.cho", "commit.cho", "l1.cho", "ir.cho")] + ["-o", str(exe)],
+                                   capture_output=True, text=True)
             if b.returncode != 0:
                 print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
                 survivors.append(label)
                 continue
             try:
-                r = subprocess.run([sys.executable, str(ROOT / "tests/store_check.py"), str(exe)], capture_output=True, text=True, timeout=300)
+                judge = "erase_store_check.py" if label.startswith("erase-store:") else "store_check.py"
+                r = subprocess.run([sys.executable, str(ROOT / "tests" / judge), str(exe)], capture_output=True, text=True, timeout=300)
                 rc, out = r.returncode, r.stdout
             except subprocess.TimeoutExpired:
                 rc, out = 1, "FAIL timed out"

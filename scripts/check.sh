@@ -111,8 +111,11 @@ echo "== facts, changes and state (docs/spec/state.md): the cancho implementatio
 "$CANCHO" build --std proxy/statecheck.cho src/state.cho src/build.cho src/commit.cho -o build/statecheck
 quiet 2 python3 tests/state_check.py build/statecheck
 echo "== the log directory: restart, torn tails at every byte, the lock, the order of durable writes (strace)"
-"$CANCHO" build --std proxy/storecheck.cho src/store.cho src/build.cho src/commit.cho src/l1.cho -o build/storecheck
+"$CANCHO" build --std proxy/storecheck.cho src/store.cho src/build.cho src/commit.cho src/l1.cho src/ir.cho -o build/storecheck
 quiet 2 python3 tests/store_check.py build/storecheck build/verify build/verify-go
+echo "== the statement store rewrite (docs/m2g-erasure.md 6d): the cancho code against tools/erase_stmts.py, and the crash points"
+"$CANCHO" build --std proxy/erasecheck.cho src/store.cho src/build.cho src/commit.cho src/l1.cho src/ir.cho -o build/erasecheck
+quiet 2 python3 tests/erase_store_check.py build/erasecheck
 echo "== command lines";             python3 tests/cli_test.py vectors build/verify
 echo "== attenuation property";       python3 tests/properties.py 4000 1
 echo "== fuzz (three verifiers, no crash)"; python3 tests/fuzz.py vectors build/verify 3000 1
