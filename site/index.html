@@ -66,7 +66,7 @@ $ psql -h 127.0.0.1 -p 5440 -U agent -d feature       # the database name is the
 <ul>
 <li><b>M0</b> spec and verifiers (L1, L2, statement IR): built.</li>
 <li><b>M1</b> the proxy in front of PostgreSQL: built.</li>
-<li><b>M2</b> row-change capture, branches, <code>AS OF</code>, merge: built. The replay verifier (L3a) is built in Python and cancho with a third independent reading; Erasure is built except one step: salted row hashes, statement constants kept as erasable payloads, and <code>cancho_erase</code> through the proxy, which still verifies afterwards; the proxy does not yet rewrite its own statement store (an offline tool does). <span class="tag">Recording bound values and snapshots are not built.</span></li>
+<li><b>M2</b> row-change capture, branches, <code>AS OF</code>, merge: built. The replay verifier (L3a) is built in Python and cancho with a third independent reading; Erasure is built: salted row hashes, statement constants kept as erasable payloads, and <code>cancho_erase</code> through the proxy, which rewrites its own statement store and still verifies afterwards (<a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/m2g-erasure.md">what it does not reach</a>). <span class="tag">Recording bound values and snapshots are not built.</span></li>
 </ul>
 
 <footer>

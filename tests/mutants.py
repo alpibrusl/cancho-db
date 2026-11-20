@@ -524,6 +524,10 @@ PROXY = [
     ("erase: the key need not start with a bracket", "src/erase.cho", " || int_of(key[0]) != '[' || ", " || "),
     ("erase: the key need not end with a bracket", "src/erase.cho", " || int_of(key[len(key) - 1]) != ']' {", " {"),
     ("erase: the call is run outside the erase path (the guard's rendering is sent)", "proxy/proxy.cho", "                    } else if forkpath.is_erase(vd[7], effs[0..vd[9]]) {\n                        rl = forkpath.start_erase(tw, core, k, ts, sql);\n", "                    } else if false {\n                        rl = forkpath.start_erase(tw, core, k, ts, sql);\n"),
+    ("erase: the statement store is not rewritten", "proxy/proxy.cho", "    let r = shared.store_erase(heap, core.store, contents(core.ern)[0..ei[0]]);", "    let r = shared.store_erase(heap, core.store, contents(core.ern)[0..0]);"),
+    ("erase: an erase that did not commit still rewrites the store", "proxy/proxy.cho", "erase_ok = !failed && r == 0 && contents(core.store.chain)[2] > contents(core.erni)[1];", "erase_ok = r == 0;"),
+    ("erase: the needles keep the opening quote", "src/erase.cho", "out[w + 2 + j] = key[i + 1 + j];", "out[w + 2 + j] = key[i + j];"),
+    ("erase: the needles leave out the text values", "src/erase.cho", "if e < len(key) && e > i + 1 && w + 2 + (e - i - 1) <= len(out) {", "if false {"),
     # ---- the extended protocol (P3b/P3c), judged by tests/ext_e2e.py
     ("ext: names starting cdb are not reserved", "src/extended.cho", "int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'b';", "int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'z';"),
     ("ext: a statement is not counted at Execute", "src/extended.cho", "            if added != 0 {\n                fail(tw, core, k, \"54000\"", "            if added != 0 || true {\n                fail(tw, core, k, \"54000\""),

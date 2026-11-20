@@ -5,9 +5,8 @@
 
 Checked: a token that has `write` but not `call cancho_erase` is refused 42501; a token that may call it but not write the table is refused 42501 (erase-write-denied); malformed statements, a bad table name and a bad key
 are refused with their tags; inside a transaction block it is refused; with a token that may do both, `select cancho_erase('people', '["ana@example.org"]')` deletes the row, scrubs the capture's delta rows (no image, salt or
-key of hers in any upstream table) and the rest of the table is as it was; the erase statement's own record in the statement store holds no constant (its payload is erased); the earlier statements that name her are still
-in the store until `tools/erase_stmts.py --containing` runs (stated: E4b, the proxy's own rewrite, is later), and after it no byte of the log directory is hers while another subject's are; every verifier accepts the log at L2
-with statements both before and after.
+key of hers in any upstream table) and the rest of the table is as it was; the erase statement's own record in the statement store holds no constant (its payload is erased); the proxy itself has erased the earlier statements that name her (E4b: no byte of the log directory
+is hers, her name and phone included, since they sit in the same statement as her e-mail, while another subject's are still there); every verifier accepts the log at L2 with statements.
 """
 import os
 import re
@@ -59,7 +58,7 @@ def free_port():
 
 
 def scan(directory, needle):
-    return sum(Path(directory, f).read_bytes().count(needle.encode()) for f in os.listdir(directory))
+    return sum(Path(directory, f).read_bytes().count(needle.encode()) for f in os.listdir(directory) if Path(directory, f).is_file())
 
 
 def verify(logdir, stmts):
@@ -118,8 +117,19 @@ for what, sql, state in (("malformed (one argument)", "select cancho_erase('peop
         r = psql(port, sql)
     check("refused (%s): %s" % (what, state), r.returncode != 0 and state in r.stderr, r.stderr)
 check("nothing of that has erased her", direct("select count(*) from people where email = 'ana@example.org'").stdout.strip() == "1")
+r = psql(port, "select cancho_erase('nosuch', '[\"ana@example.org\"]')")
+check("an erase that fails upstream (no such table) is an error and leaves the statement store alone: her e-mail is still in it", r.returncode != 0 and scan(logdir, "ana@example.org") >= 1, r.stdout + r.stderr)
+# the rewrite of the statement store made to fail (a directory is where its copy goes): the delete is committed, the client is told to run it again, and the erase statement's own record never held the key
+(logdir / "stmts.new").mkdir()
+before = scan(logdir, "ana@example.org")
 r = psql(port, E)
-check("with a token that may do both the erase runs", r.returncode == 0 and "erased: 1 row(s) deleted" in r.stdout, r.stdout + r.stderr)
+check("with the rewrite blocked the erase is an error that says to run it again (58000, erase-store-failed)", r.returncode != 0 and "58000" in r.stderr and "erase-store-failed" in r.stderr, r.stdout + r.stderr)
+time.sleep(0.3)
+check("... the delete is committed, her row is gone", direct("select count(*) from people where email = 'ana@example.org'").stdout.strip() == "0")
+check("... and her e-mail is in the store exactly where it was (the insert and the select), not in the erase statement's own record (%d occurrences)" % before, scan(logdir, "ana@example.org") == before, scan(logdir, "ana@example.org"))
+(logdir / "stmts.new").rmdir()
+r = psql(port, E)
+check("with a token that may do both, the same erase run again goes through (nothing left to delete)", r.returncode == 0 and "erased: 0 row(s) deleted" in r.stdout, r.stdout + r.stderr)
 time.sleep(0.3)
 check("her row is gone and his is there", direct("select string_agg(email, ',') from people").stdout.strip() == "luis@example.org")
 tables = direct("select format('%I.%I', schemaname, tablename) from pg_tables where schemaname in ('public', 'cdb') order by 1").stdout.split()
@@ -141,24 +151,12 @@ while at < len(data):
     recs.append(data[at + 4:at + 4 + n])
     at += 4 + n
 erase_recs = [r for r in recs if b"cancho_erase" in r]
-check("the erase statement has one record, and its payload is erased (tag 0, nothing after)", len(erase_recs) == 1 and erase_recs[0][-1:] == b"\x00" and b"ana@example" not in erase_recs[0] and b"people" not in erase_recs[0][-1:], len(erase_recs))
+check("the erase statements (the blocked attempt and the one that went through) have a record each, and every payload is erased (tag 0, nothing after, no key)", len(erase_recs) == 2 and all(r[-1:] == b"\x00" and b"ana@example" not in r for r in erase_recs), len(erase_recs))
 outs = verify(logdir, stmts)
 check("every verifier accepts the log with the statement store (L2 with statements)", all(re.fullmatch(r"ok commits=\d+ branches=1 level=2\+ir", o) for o in outs), outs)
-check("the earlier statements that name her are still in the store (E4b is the proxy's own rewrite)", scan(logdir, "ana@example.org") >= 1)
-erased = work / "stmts.erased"
-r = subprocess.run([sys.executable, str(ROOT_DIR / "tools/erase_stmts.py"), str(stmts), str(erased), "--containing", "ana@example.org"], capture_output=True, text=True)
-check("tools/erase_stmts.py erases them", r.returncode == 0 and r.stdout.startswith("erased "), r.stdout + r.stderr)
-after = work / "after"
-after.mkdir()
-for f in ("log", "tokens"):
-    (after / f).write_bytes((logdir / f).read_bytes())
-(after / "stmts").write_bytes(erased.read_bytes())
-r = subprocess.run([sys.executable, str(ROOT_DIR / "tools/erase_stmts.py"), str(after / "stmts"), str(after / "stmts2"), "--containing", "Quintero"], capture_output=True, text=True)
-(after / "stmts").write_bytes((after / "stmts2").read_bytes())
-(after / "stmts2").unlink()
-check("then no byte of the log directory is hers (e-mail, name, phone) and his are still there", all(scan(after, v) == 0 for v in ("ana@example.org", "Quintero", "600111222")) and scan(after, "luis@example.org") >= 1,
-      {v: scan(after, v) for v in ("ana@example.org", "Quintero", "600111222", "luis@example.org")})
-outs = verify(logdir, after / "stmts")
-check("every verifier still accepts the same log with the erased store", all(re.fullmatch(r"ok commits=\d+ branches=1 level=2\+ir", o) for o in outs), outs)
+check("the proxy has erased the earlier statements that name her by itself: no byte of the log directory is hers (e-mail, name, phone) and his are still there",
+      all(scan(logdir, v) == 0 for v in ("ana@example.org", "Quintero", "600111222")) and scan(logdir, "luis@example.org") >= 1 and scan(logdir, "Vega") >= 1,
+      {v: scan(logdir, v) for v in ("ana@example.org", "Quintero", "600111222", "luis@example.org", "Vega")})
+check("no copy of the rewrite is left beside the store", not (logdir / "stmts.new").exists())
 print("\n%d checks failed" % len(FAILED) if FAILED else "\nall erase checks passed")
 sys.exit(1 if FAILED else 0)
