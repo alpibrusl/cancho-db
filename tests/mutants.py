@@ -530,6 +530,10 @@ PROXY = [
     ("erase: the needles leave out the text values", "src/erase.cho", "if e < len(key) && e > i + 1 && w + 2 + (e - i - 1) <= len(out) {", "if false {"),
     ("erase-branch: an erase on a branch runs in the first branch's schema", "src/erase.cho", "    var at = put(out, 0, \"select cdb.erase('\");\n    if first {", "    var at = put(out, 0, \"select cdb.erase('\");\n    if true {"),
     ("erase-branch: the extended protocol runs the erase", "src/extended.cho", "} else if vd[6] == 0 && forkpath.is_erase(vd[7], effs[0..vd[9]]) {", "} else if false {"),
+    ("install: a deadlock is not retried", "src/catalog.cho", "attempt < 5 && retriable(core)", "attempt < 0 && retriable(core)"),
+    ("install: the retries are not bounded by five", "src/catalog.cho", "attempt < 5 && retriable(core)", "attempt < 50 && retriable(core)"),
+    ("install: every error is retried", "src/catalog.cho", "attempt < 5 && retriable(core)", "attempt < 5"),
+    ("install: a serialization failure is not retried", "src/catalog.cho", "(int_of(eb[2]) == 'P' || int_of(eb[2]) == '0')", "int_of(eb[2]) == 'P'"),
     # ---- the extended protocol (P3b/P3c), judged by tests/ext_e2e.py
     ("ext: names starting cdb are not reserved", "src/extended.cho", "int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'b';", "int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'z';"),
     ("ext: a statement is not counted at Execute", "src/extended.cho", "            if added != 0 {\n                fail(tw, core, k, \"54000\"", "            if added != 0 || true {\n                fail(tw, core, k, \"54000\""),
@@ -576,7 +580,7 @@ def run_proxy(cancho):
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
                 try:
-                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "fork_e2e.py" if label.startswith("fork:") else "asof_e2e.py" if label.startswith("asof:") else "merge_e2e.py" if label.startswith("merge:") else "erase_e2e.py" if label.startswith("erase:") else "erase_branch_e2e.py" if label.startswith("erase-branch:") else "proxy_e2e.py"
+                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "fork_e2e.py" if label.startswith("fork:") else "asof_e2e.py" if label.startswith("asof:") else "merge_e2e.py" if label.startswith("merge:") else "erase_e2e.py" if label.startswith("erase:") else "erase_branch_e2e.py" if label.startswith("erase-branch:") else "install_retry_e2e.py" if label.startswith("install:") else "proxy_e2e.py"
                     r = subprocess.run([sys.executable, str(work / "tests" / judge), str(exe)], capture_output=True,
                                        text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
                     out, code = r.stdout + r.stderr, r.returncode

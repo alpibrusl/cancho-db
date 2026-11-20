@@ -296,6 +296,30 @@ pub fn recover[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Co
 // `core.snapin`: `first_text_at`); 10 + i if statement i failed (a role that is not a superuser fails at the event trigger); 3 if tracking the tables failed; -1 if PostgreSQL
 // could not be asked.
 pub fn install_capture[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, slot: int) -> [conn_read, conn_write, poll] int {
+    var attempt = 0;
+    var r = install_once(tab, core, slot);
+    // PostgreSQL's own advice for a deadlock victim (SQLSTATE 40P01) and a serialization failure (40001) is to run the work again: an earlier proxy that was killed leaves its backend finishing the
+    // same statements for a moment, and the two can wait on each other. Every statement of the install can be run again; it is retried a few times, after a short pause upstream.
+    while r != 0 && r != 1 && r != 0 - 1 && attempt < 5 && retriable(core) {
+        commitpath.upstream_exec(tab, core, slot, "select pg_sleep(0.2)");
+        attempt = attempt + 1;
+        r = install_once(tab, core, slot);
+    }
+    return r;
+}
+
+// Whether the last answer from PostgreSQL held an error that is worth running the work again for: a deadlock (40P01) or a serialization failure (40001).
+fn retriable[&c](core: &c shared.Core) -> [] bool {
+    var yes = false;
+    region r {
+        let eb = alloc_slice[r](64, byte_of(0));
+        let n = commitpath.error_text(contents(core.snapin), eb);
+        yes = n >= 5 && int_of(eb[0]) == '4' && int_of(eb[1]) == '0' && (int_of(eb[2]) == 'P' || int_of(eb[2]) == '0') && int_of(eb[3]) == '0' && int_of(eb[4]) == '1';
+    }
+    return yes;
+}
+
+fn install_once[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, slot: int) -> [conn_read, conn_write, poll] int {
     var i = 0;
     while i < capture_sql.count() {
         let r = commitpath.upstream_exec(tab, core, slot, capture_sql.stmt(i));
