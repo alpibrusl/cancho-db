@@ -935,7 +935,7 @@ GUARD = [
     ("guard: a denied effect is allowed to pass", "src/guard.cho", "                denied = token.effect_denied(tk, enc, 0, 1);", "                denied = false;"),
     ("guard: the effect's length is off", "src/guard.cho", "                enc[2] = byte_of((len(key) - 1) % 256);", "                enc[2] = byte_of((len(key) - 2) % 256);"),
     ("guard: statements are not separated", "src/guard.cho", "                                                                if i > 0 {", "                                                                if i > 1 {"),
-    ("guard: the effects are inferred as v1", "src/guard.cho", "ir.infer(heap, set, contents(iw)[0..w], true)", "ir.infer(heap, set, contents(iw)[0..w], false)"),
+    ("guard: the effects are inferred as v1", "src/guard.cho", "ir.infer(heap, set, contents(iw)[0..w], 2, vd[14..16])", "ir.infer(heap, set, contents(iw)[0..w], 1, vd[14..16])"),
     ("guard: a lexer refusal is a parser refusal", "src/guard.cho", "mark(vd, 1, 0 - n, 0 - 1, 0);", "mark(vd, 2, 0 - n, 0 - 1, 0);"),
     ("guard: the refused statement is not counted", "src/guard.cho", "mark(vd, 2, 0 - pq, contents(sw)[3], i);", "mark(vd, 2, 0 - pq, contents(sw)[3], 0);"),
     ("guard: a denied effect is 0A000", "src/guard.cho", "    if vd[0] == 3 {\n        return \"42501\";", "    if vd[0] == 3 {\n        return \"0A000\";"),
