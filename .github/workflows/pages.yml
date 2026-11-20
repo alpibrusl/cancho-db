@@ -1,6 +1,7 @@
 name: pages
 
-# The landing page: site/index.html, served by GitHub Pages. The repository's Settings > Pages > Source must be "GitHub Actions".
+# The landing page: site/index.html, served by GitHub Pages. The repository's Settings > Pages > Source must be "GitHub Actions" for this workflow to be what serves it. With the source set to "Deploy from a branch",
+# branch main, folder /docs, GitHub serves docs/ instead and needs docs/index.html: that file is a copy of site/index.html, and scripts/check.sh fails if they differ.
 on:
   push:
     branches: [main]
