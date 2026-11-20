@@ -32,7 +32,8 @@ Built: **row-delta capture** (triggers installed by the proxy; every commit carr
 **`AS OF`**: `select ... from t as of '<commit id>'` reads a table as a commit left it (on any branch; the commit is named in the statement, so the log records which past was read, and a token must grant it).
 **`cancho_merge`**: `select cancho_merge('<source>')` merges a branch into the connection's branch (a three-way merge by key against the common ancestor read `AS OF`): one commit with two parents, or nothing if there is a conflict.
 **L3a (delta replay)** ([`docs/spec/l3a.md`](docs/spec/l3a.md)): given the delta store the database keeps, a verifier checks that each commit's `changes` and `state` are what the stored row changes give, that the changes fit together, and (given a dump of the tables) that the tables hold exactly what they say; in cancho (`proxy/l3averify.cho`), in Python (`tools/l3a.py`) and as a third reading by a separate agent session (`tests/third/`), on 72 golden cases.
-Not built: recording of bound values (L3b), snapshots and erasure. Without `--stmts`, L2
+**Erasure** (`select cancho_erase('<table>', '<key>')`, [`docs/m2g-erasure.md`](docs/m2g-erasure.md)): salted row hashes and key commitments, statement constants kept as erasable payloads, the proxy rewriting its own statement store, and L3a over erased rows; what it does not reach is in the claims (C128 to C143).
+Not built: recording of bound values (L3b) and snapshots. Without `--stmts`, L2
 checks only the commit's *recorded* effect set against its token; with it, the recorded set is shown to equal what the
 statements infer. That the store holds what was actually executed is L3's (see [`docs/claims.md`](docs/claims.md)), which says what is claimed, what each claim rests on, and what is *not*
 claimed.
@@ -103,7 +104,8 @@ ones take about an hour). Needs `python3` with `cryptography`, the cancho compil
 
 ## Landing page
 
-`site/index.html`, published by `.github/workflows/pages.yml` on a push to `main` (Settings > Pages > Source must be "GitHub Actions").
+`docs/index.html`, one self-contained page in the style of the other cancho projects (`cancho-stats`, `cancho-ml`, `cancho-table`). GitHub Pages serves it with Settings > Pages > Source set to "Deploy from a branch", branch `main`, folder `/docs`.
+The counts in it (vectors, mutants, claims) are written by `python3 scripts/site.py` and checked by `scripts/check.sh`; the replayed session is a recording of real runs, not generated.
 
 ## Licence
 
