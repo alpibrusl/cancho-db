@@ -303,13 +303,13 @@ CHO += [
 
 CHO += [
     # ---- IR v2 (ir.md section 6)
-    ("v2: Select2 accepted in a v1 store", "src/ir.cho", "} else if tag == 6 && v2 {\n                // Select2", "} else if tag == 6 {\n                // Select2"),
-    ("v2: Star accepted in a v1 store", "src/ir.cho", "} else if tag == 6 && v2 {\n                // Star", "} else if tag == 6 {\n                // Star"),
-    ("v2: Unary accepted in a v1 store", "src/ir.cho", "} else if tag == 7 && v2 {", "} else if tag == 7 {"),
-    ("v2: In accepted in a v1 store", "src/ir.cho", "} else if tag == 8 && v2 {", "} else if tag == 8 {"),
-    ("v2: Case accepted in a v1 store", "src/ir.cho", "} else if tag == 9 && v2 {", "} else if tag == 9 {"),
-    ("v2: Cast accepted in a v1 store", "src/ir.cho", "} else if tag == 10 && v2 {", "} else if tag == 10 {"),
-    ("v2: v2 operators accepted in a v1 store", "src/ir.cho", "    if v2 {\n        return 17;\n    }\n    return 11;", "    return 17;"),
+    ("v2: Select2 accepted in a v1 store", "src/ir.cho", "} else if tag == 6 && mv >= 2 {\n                // Select2", "} else if tag == 6 {\n                // Select2"),
+    ("v2: Star accepted in a v1 store", "src/ir.cho", "} else if tag == 6 && mv >= 2 {\n                // Star", "} else if tag == 6 {\n                // Star"),
+    ("v2: Unary accepted in a v1 store", "src/ir.cho", "} else if tag == 7 && mv >= 2 {", "} else if tag == 7 {"),
+    ("v2: In accepted in a v1 store", "src/ir.cho", "} else if tag == 8 && mv >= 2 {", "} else if tag == 8 {"),
+    ("v2: Case accepted in a v1 store", "src/ir.cho", "} else if tag == 9 && mv >= 2 {", "} else if tag == 9 {"),
+    ("v2: Cast accepted in a v1 store", "src/ir.cho", "} else if tag == 10 && mv >= 2 {", "} else if tag == 10 {"),
+    ("v2: v2 operators accepted in a v1 store", "src/ir.cho", "    if mv >= 2 {\n        return 17;\n    }\n    return 11;", "    return 17;"),
     ("v2: operator 18 accepted", "src/ir.cho", "        return 17;", "        return 18;"),
     ("v2: unary operator 4 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 3 {", "if int_of(data[cur[0]]) > 4 {"),
     ("v2: In with no members accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 || n < 1 {", "if int_of(data[cur[0]]) > 1 {"),
@@ -329,7 +329,7 @@ CHO += [
     ("v2: order direction 2 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 || int_of(data[cur[0] + 1]) > 2 {", "if int_of(data[cur[0]]) > 2 || int_of(data[cur[0] + 1]) > 2 {"),
     ("v2: order nulls 3 accepted", "src/ir.cho", "if int_of(data[cur[0]]) > 1 || int_of(data[cur[0] + 1]) > 2 {", "if int_of(data[cur[0]]) > 1 || int_of(data[cur[0] + 1]) > 3 {"),
     ("v2: the from table is not a read", "src/ir.cho", "                        } else {\n                            m = add(heap, m, 0, data, nm[0], nm[1], false, 0, 0);\n                            if !commit.have(data, cur, 2) {", "                        } else {\n                            if !commit.have(data, cur, 2) {"),
-    ("v2: a join condition is not parsed", "src/ir.cho", "                                } else if flag == 1 {\n                                    let (grown, ok) = expr(heap, m, data, cur, nm, true, v2);\n                                    m = grown;\n                                    good = ok;\n                                }", "                                } else if flag == 1 {\n                                    good = false;\n                                }"),
+    ("v2: a join condition is not parsed", "src/ir.cho", "                                } else if flag == 1 {\n                                    let (grown, ok) = expr(heap, m, data, cur, nm, true, mv);\n                                    m = grown;\n                                    good = ok;\n                                }", "                                } else if flag == 1 {\n                                    good = false;\n                                }"),
     # ---- statement IR (ir.md)
     ("IR: select forgets the table read", "src/ir.cho", "                        } else {\n                            m = add(heap, m, 0, data, nm[0], nm[1], false, 0, 0);\n                        }\n                        i = i + 1;", "                        } else {\n                            m = m;\n                        }\n                        i = i + 1;"),
     ("IR: column read forgets the column", "src/ir.cho", "m = add(heap, m, 0, data, t_at, t_len, true, nm[0], nm[1]);", "m = add(heap, m, 0, data, t_at, t_len, false, 0, 0);"),
