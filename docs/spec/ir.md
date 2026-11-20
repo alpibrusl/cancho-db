@@ -95,10 +95,10 @@ statements has the empty set.
 ## 4. The store and the check
 
 ```
-stmts = ( "CHODBST1" | "CHODBST2" ) ( u32 length  Statement )*
+stmts = ( "CHODBST1" | "CHODBST2" ) ( u32 length  Statement )*      |      "CHODBST3" ( u32 length  record )*     (section 8)
 ```
 
-The magic selects the grammar: `CHODBST1` is v1 (§2), `CHODBST2` is v2 (§6, a strict superset). Any other magic is
+The magic selects the grammar: `CHODBST1` is v1 (§2), `CHODBST2` is v2 (§6, a strict superset), `CHODBST3` is v3 (§8: the records of a store whose constants are payloads). Any other magic is
 `stmts-bad-magic`.
 
 A statement listed twice is the same statement (its id is the same, and the `record` of a malformed entry counts entries,
@@ -204,17 +204,17 @@ construct: nothing in this specification, and no verifier, treats such a `Name` 
 
 Whether the commit exists, belongs to the branch, and is what the data was read as of, is the producer's business and not checked by L1 or L2. Vectors: `ir2_history_*` (`tools/gen_ir2.py`): accepted by all three verifiers, the suffix dropped, another commit recorded, a token of the plain table denied, a history token and a prefix token allowed, a history token denied the current table, and a history read joined to the current table.
 
-## 8. Version 3 (DRAFT, not built): constants are payloads
+## 8. Version 3: constants are payloads
 
-**Status: a design for [`../m2g-erasure.md`](../m2g-erasure.md) D-E7 and Q14, not built; no verifier reads it yet.** Versions 1 and 2 are unchanged and keep their stores.
+**Status: specified, with vectors and three verifiers; the proxy does not write it yet.** The design is [`../m2g-erasure.md`](../m2g-erasure.md) D-E7 (Q14). Versions 1 and 2 are unchanged and keep their stores.
 
 *Why.* A `Const` holds a value in clear in the statement store, and the statement id in the log hashes it unsalted, so a literal that a person could guess is recoverable from the log alone, and a statement cannot be erased without making L2 refuse the commit that cites it (m2g-erasure.md section 2b).
 
 *What changes.* A store that starts `CHODBST3` holds **records** of a new form, and a v3 statement is a v2 statement whose constants have been **lifted out**:
 
 ```
-Expr  += 6 Hole  vtype:u8                  // in place of a `Const`: only the type tag of its `Value` (commit.md §2) stays
-record = u32 length  0x03  shape:Statement  chash:Hash  payload
+Expr  += 11 Hole  vtype:u8                 // in place of a `Const`: only the type tag of its `Value` (commit.md §2) stays: 0 null, 1 int, 2 bytes (any other is `stmt-bad-encoding`)
+record = u32 length  shape:Statement  chash:Hash  payload     // `length` covers all three; the shape is v2 grammar with `Hole` for `Const` (so v2's tags 6 to 10 are there, and `Select` is tag 6 of a statement)
 payload = 0x00                              // erased: the constants and the salt are gone
         | 0x01  salt:bytes16(16 bytes)  n:u32  n Values     // the constants, in the order of their `Hole`s (prefix order), and the salt
 chash   = SHA-256( "cancho-db/consts/v1" || 0x00 || salt || u32(n) || the n Values as written )
@@ -225,7 +225,11 @@ id      = SHA-256( "cancho-db/stmt/v3" || 0x00 || encoding(shape) || chash )
 
 *What it gives.* The log's `stmts` hashes commit to the constants through a salted hash, so they test nothing; erasing a statement means destroying its payload, after which L2 with statements still proves that the recorded effects are what the shape infers. *What it does not give:* the shape itself is not secret (table and column names, operators), and the constants are no longer checked to be those the statement ran with once erased.
 
-*Slice.* E3b of m2g-erasure.md: this section made normative with vectors (`ir3_*`), the three verifiers, and the proxy writing the v3 form. Until then the statement store is not erasable, and `cancho_erase` is not served through the proxy.
+*Malformations*, all `stmt-bad-encoding` and at the record's index: a `Const` in a shape; a `Hole` in a v1 or v2 store; a `vtype` over 2; a record that ends before `chash` and the payload tag; a payload tag other than 0 and 1; an erased payload (tag 0) followed by anything; a salt that is not 16 bytes (a payload shorter than its salt and count); a value with a tag over 2 or cut short; bytes after the last value. The order of checking in a record is: the shape and the record's structure (`stmt-bad-encoding`), then the payload against the shape and the hash (`stmt-consts-mismatch`). In a v3 store a commit's statement is found by the id of section 8, so a record whose `chash` is not the one the log was made with is a statement the store does not have (`stmt-missing`).
+
+*Vectors:* `ir3_*` (`tools/gen_ir3.py`): accepted with the constants and erased (one id for both), with a `Param`, with null, int and empty or binary bytes holes; each malformation above; each way a payload fails to be what the record committed to (a flipped hash, a changed value, too few or too many values, a value of another type than its hole, another salt); and the commit and the store disagreeing.
+
+*Slice.* E3b of m2g-erasure.md: this section, the vectors and the three verifiers (this); the proxy writing the v3 form is the next, and until then the statement store is not erasable and `cancho_erase` is not served through the proxy.
 
 ## 7. Vectors
 

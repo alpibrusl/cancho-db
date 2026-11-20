@@ -19,10 +19,12 @@ type reject struct {
 
 // reader is a bounds-checked cursor; any overrun sets bad.
 type reader struct {
-	b   []byte
-	pos int
-	bad bool
-	v2  bool
+	b     []byte
+	pos   int
+	bad   bool
+	v2    bool
+	v3    bool   // a version 3 shape: a Hole in place of every Const (ir.md section 8); it implies the v2 grammar
+	holes []byte // the types of the holes met, in order
 }
 
 func (r *reader) left() int { return len(r.b) - r.pos }

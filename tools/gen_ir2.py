@@ -196,7 +196,7 @@ def add(g):
     v1store_refuses("ir2_v1_store_refuses_concat", Select([Op(CAT, a(b"a"), Const(ONE))], [b"t"]))
     v1store_refuses("ir2_v1_store_refuses_modulo", Select([Op(MOD, a(b"a"), Const(ONE))], [b"t"]))
     ir("ir2_a_store_with_another_magic_is_refused", commits(([v1], [(R, b"t"), (R, b"t.a")])),
-       stmts_store(v1, magic=b"CHODBST3"), no("stmts-bad-magic", -1))
+       stmts_store(v1, magic=b"CHODBST4"), no("stmts-bad-magic", -1))
 
     # ------------------------------------------------------- malformed v2 statements
     malformed("ir2_bad_distinct_2", b"\x06\x02" + lst([a(b"a")]) + lst([From(b"t")]) + opt() + lst([]) + opt() + lst([]) + opt() + opt())

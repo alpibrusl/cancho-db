@@ -68,16 +68,16 @@ fn name[&d, &c, &n](data: &d [byte], cur: &!c [int], nm: &!n [int], ident: bool)
     return true;
 }
 
-// The largest operator code: 11 in v1, 17 in v2 (spec section 6).
-fn op_max(v2: bool) -> [] int {
-    if v2 {
+// The largest operator code: 11 in v1, 17 in v2 and v3 (spec sections 6 and 8). `mv` is the version of the store: 1, 2 or 3.
+fn op_max(mv: int) -> [] int {
+    if mv >= 2 {
         return 17;
     }
     return 11;
 }
 
 // One expression in prefix order (spec section 2). `allow_col` is false inside `VALUES`.
-fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur: &!c [int], nm: &!n [int], allow_col: bool, v2: bool) -> [heap] (map.Map[int], bool) {
+fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur: &!c [int], nm: &!n [int], allow_col: bool, mv: int) -> [heap] (map.Map[int], bool) {
     var m = set;
     var good = true;
     var pending = 1;
@@ -100,7 +100,16 @@ fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur:
                         m = add(heap, m, 0, data, t_at, t_len, true, nm[0], nm[1]);
                     }
                 }
-            } else if tag == 1 {
+            } else if tag == 11 && mv == 3 {
+                // Hole (spec section 8): the type of a constant that was lifted out; `nm[2]` counts them and `nm[3 + i]` is the type of the i-th
+                if !commit.have(data, cur, 1) || int_of(data[cur[0]]) > 2 {
+                    good = false;
+                } else {
+                    nm[3 + nm[2]] = int_of(data[cur[0]]);
+                    nm[2] = nm[2] + 1;
+                    cur[0] = cur[0] + 1;
+                }
+            } else if tag == 1 && mv < 3 {
                 if !commit.have(data, cur, 1) {
                     good = false;
                 } else {
@@ -144,16 +153,16 @@ fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur:
                 if !commit.have(data, cur, 1) {
                     good = false;
                 } else {
-                    if int_of(data[cur[0]]) > op_max(v2) {
+                    if int_of(data[cur[0]]) > op_max(mv) {
                         good = false;
                     }
                     cur[0] = cur[0] + 1;
                     pending = pending + 2;
                 }
-            } else if tag == 6 && v2 {
+            } else if tag == 6 && mv >= 2 {
                 // Star: no operand, no effect
                 good = good;
-            } else if tag == 7 && v2 {
+            } else if tag == 7 && mv >= 2 {
                 // Unary
                 if !commit.have(data, cur, 1) {
                     good = false;
@@ -164,7 +173,7 @@ fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur:
                     cur[0] = cur[0] + 1;
                     pending = pending + 1;
                 }
-            } else if tag == 8 && v2 {
+            } else if tag == 8 && mv >= 2 {
                 // In: negated, the member count, then the tested expression and the members
                 if !commit.have(data, cur, 5) {
                     good = false;
@@ -176,7 +185,7 @@ fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur:
                     cur[0] = cur[0] + 5;
                     pending = pending + 1 + n;
                 }
-            } else if tag == 9 && v2 {
+            } else if tag == 9 && mv >= 2 {
                 // Case: the pair count, has_else, then the pairs and the else
                 if !commit.have(data, cur, 5) {
                     good = false;
@@ -189,7 +198,7 @@ fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur:
                     cur[0] = cur[0] + 5;
                     pending = pending + 2 * n + has_else;
                 }
-            } else if tag == 10 && v2 {
+            } else if tag == 10 && mv >= 2 {
                 // Cast: a type name (free: no effect), then the operand
                 if !name(data, cur, nm, false) {
                     good = false;
@@ -209,25 +218,25 @@ fn expr[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur:
 }
 
 // An optional expression: a flag byte, 0 or 1, then an expression if 1.
-fn opt[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur: &!c [int], nm: &!n [int], v2: bool) -> [heap] (map.Map[int], bool) {
+fn opt[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur: &!c [int], nm: &!n [int], mv: int) -> [heap] (map.Map[int], bool) {
     if !commit.have(data, cur, 1) {
         return (set, false);
     }
     let flag = int_of(data[cur[0]]);
     cur[0] = cur[0] + 1;
     if flag == 1 {
-        return expr(heap, set, data, cur, nm, true, v2);
+        return expr(heap, set, data, cur, nm, true, mv);
     }
     return (set, flag == 0);
 }
 
 // `n` expressions.
-fn exprs[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur: &!c [int], nm: &!n [int], count: int, allow_col: bool, v2: bool) -> [heap] (map.Map[int], bool) {
+fn exprs[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur: &!c [int], nm: &!n [int], count: int, allow_col: bool, mv: int) -> [heap] (map.Map[int], bool) {
     var m = set;
     var good = true;
     var i = 0;
     while i < count && good {
-        let (grown, ok) = expr(heap, m, data, cur, nm, allow_col, v2);
+        let (grown, ok) = expr(heap, m, data, cur, nm, allow_col, mv);
         m = grown;
         good = ok;
         i = i + 1;
@@ -235,13 +244,127 @@ fn exprs[&h, &d, &c, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], cur
     return (m, good);
 }
 
-// One statement: adds its effects to `set` and answers whether it is well formed (spec sections 2 and 3).
-pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: bool) -> [heap] (map.Map[int], bool) {
+// The tail of a version 3 record (spec section 8) after its shape, which ended at `end`: the hash of the constants, then the payload. True if it is well formed; `info[0]` is 2 if it is
+// not what the record committed to, and `info[1]` is `end`. `nm[2]` holes were found in the shape, their types in `nm[3..]`.
+fn v3_tail[&d, &n, &i](data: &d [byte], end: int, nm: &n [int], info: &!i [int]) -> [] bool {
+    info[0] = 0;
+    info[1] = end;
+    let rest = len(data) - end;
+    if rest < 33 {
+        return false;
+    }
+    let tag = int_of(data[end + 32]);
+    if tag == 0 {
+        return rest == 33;
+    }
+    if tag != 1 || rest < 33 + 20 {
+        return false;
+    }
+    let pat = end + 33;
+    let n = commit.be(data, pat + 16, 4);
+    var p = pat + 20;
+    var i = 0;
+    var same = n == nm[2];
+    var good = true;
+    while good && i < n {
+        if p >= len(data) {
+            good = false;
+        } else {
+            let vt = int_of(data[p]);
+            p = p + 1;
+            if vt == 1 {
+                if len(data) - p < 8 {
+                    good = false;
+                } else {
+                    p = p + 8;
+                }
+            } else if vt == 2 {
+                if len(data) - p < 4 {
+                    good = false;
+                } else {
+                    let vl = commit.be(data, p, 4);
+                    p = p + 4;
+                    if len(data) - p < vl {
+                        good = false;
+                    } else {
+                        p = p + vl;
+                    }
+                }
+            } else if vt != 0 {
+                good = false;
+            }
+            if good && i < nm[2] && nm[3 + i] != vt {
+                same = false;
+            }
+        }
+        i = i + 1;
+    }
+    if !good || p != len(data) {
+        return false;
+    }
+    var matches = false;
+    region r {
+        let sha = alloc_slice[r](crypto.sha256_state_len(), 0);
+        let nul = alloc_slice[r](1, byte_of(0));
+        let cnt = alloc_slice[r](4, byte_of(0));
+        let digest = alloc_slice[r](32, byte_of(0));
+        cnt[0] = data[pat + 16];
+        cnt[1] = data[pat + 17];
+        cnt[2] = data[pat + 18];
+        cnt[3] = data[pat + 19];
+        crypto.sha256_init(sha);
+        crypto.sha256_update(sha, "cancho-db/consts/v1");
+        crypto.sha256_update(sha, nul);
+        crypto.sha256_update(sha, data[pat..pat + 16]);
+        crypto.sha256_update(sha, cnt);
+        crypto.sha256_update(sha, data[pat + 20..p]);
+        crypto.sha256_final(sha, digest);
+        var k = 0;
+        matches = true;
+        while k < 32 {
+            if int_of(digest[k]) != int_of(data[end + k]) {
+                matches = false;
+            }
+            k = k + 1;
+        }
+    }
+    if !same || !matches {
+        info[0] = 2;
+    }
+    return true;
+}
+
+// One statement: adds its effects to `set` and answers whether it is well formed (spec sections 2 and 3). `mv` is the version of the store, 1, 2 or 3. In a version 3 store `data` is a whole
+// record (spec section 8): the shape, the hash of its constants and the payload; `info[0]` is then 0, or 2 if the payload is not what the record committed to (`stmt-consts-mismatch`), and
+// `info[1]` is where the shape ends. Otherwise `info` is not touched.
+pub fn infer[&h, &d, &i](heap: &!h Heap, set: map.Map[int], data: &d [byte], mv: int, info: &!i [int]) -> [heap] (map.Map[int], bool) {
+    var m = set;
+    var good = true;
+    if mv == 3 {
+        // the types of the holes are kept after the first three ints of `nm`: at most one hole in every two bytes
+        var hb = box_slice(heap, len(data) / 2 + 8, 0);
+        borrow mut hb as &!hw in {
+            let (grown, ok) = infer_in(heap, m, data, mv, info, contents(hw));
+            m = grown;
+            good = ok;
+        }
+        unbox_slice(heap, hb);
+    } else {
+        region r {
+            let nm = alloc_slice[r](4, 0);
+            let (grown, ok) = infer_in(heap, m, data, mv, info, nm);
+            m = grown;
+            good = ok;
+        }
+    }
+    return (m, good);
+}
+
+fn infer_in[&h, &d, &i, &n](heap: &!h Heap, set: map.Map[int], data: &d [byte], mv: int, info: &!i [int], nm: &!n [int]) -> [heap] (map.Map[int], bool) {
     var m = set;
     var good = true;
     region r {
         let cur = alloc_slice[r](1, 0);
-        let nm = alloc_slice[r](2, 0);
         if len(data) < 1 {
             good = false;
         } else {
@@ -253,7 +376,7 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                 if ni < 0 {
                     good = false;
                 } else {
-                    let (grown, ok) = exprs(heap, m, data, cur, nm, ni, true, v2);
+                    let (grown, ok) = exprs(heap, m, data, cur, nm, ni, true, mv);
                     m = grown;
                     good = ok;
                 }
@@ -273,7 +396,7 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                     }
                 }
                 if good {
-                    let (grown, ok) = opt(heap, m, data, cur, nm, v2);
+                    let (grown, ok) = opt(heap, m, data, cur, nm, mv);
                     m = grown;
                     good = ok;
                 }
@@ -305,7 +428,7 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                         if rc != ncols {
                             good = false;
                         } else {
-                            let (grown, ok) = exprs(heap, m, data, cur, nm, rc, false, v2);
+                            let (grown, ok) = exprs(heap, m, data, cur, nm, rc, false, mv);
                             m = grown;
                             good = ok;
                         }
@@ -327,14 +450,14 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                         if !name(data, cur, nm, true) {
                             good = false;
                         } else {
-                            let (grown, ok) = expr(heap, m, data, cur, nm, true, v2);
+                            let (grown, ok) = expr(heap, m, data, cur, nm, true, mv);
                             m = grown;
                             good = ok;
                         }
                         i = i + 1;
                     }
                     if good {
-                        let (grown, ok) = opt(heap, m, data, cur, nm, v2);
+                        let (grown, ok) = opt(heap, m, data, cur, nm, mv);
                         m = grown;
                         good = ok;
                     }
@@ -345,7 +468,7 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                     good = false;
                 } else {
                     m = add(heap, m, 1, data, nm[0], nm[1], false, 0, 0);
-                    let (grown, ok) = opt(heap, m, data, cur, nm, v2);
+                    let (grown, ok) = opt(heap, m, data, cur, nm, mv);
                     m = grown;
                     good = ok;
                 }
@@ -374,12 +497,12 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                     if na < 0 {
                         good = false;
                     } else {
-                        let (grown, ok) = exprs(heap, m, data, cur, nm, na, true, v2);
+                        let (grown, ok) = exprs(heap, m, data, cur, nm, na, true, mv);
                         m = grown;
                         good = ok;
                     }
                 }
-            } else if tag == 6 && v2 {
+            } else if tag == 6 && mv >= 2 {
                 // Select2 (spec section 6): distinct, items, from, where, group, having, order, limit, offset
                 if !commit.have(data, cur, 1) {
                     good = false;
@@ -394,7 +517,7 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                     if ni < 0 {
                         good = false;
                     } else {
-                        let (grown, ok) = exprs(heap, m, data, cur, nm, ni, true, v2);
+                        let (grown, ok) = exprs(heap, m, data, cur, nm, ni, true, mv);
                         m = grown;
                         good = ok;
                     }
@@ -423,7 +546,7 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                                 if kind > 2 || fi == 0 && kind != 0 || flag > 1 || flag != joined {
                                     good = false;
                                 } else if flag == 1 {
-                                    let (grown, ok) = expr(heap, m, data, cur, nm, true, v2);
+                                    let (grown, ok) = expr(heap, m, data, cur, nm, true, mv);
                                     m = grown;
                                     good = ok;
                                 }
@@ -433,7 +556,7 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                     }
                 }
                 if good {
-                    let (grown, ok) = opt(heap, m, data, cur, nm, v2);
+                    let (grown, ok) = opt(heap, m, data, cur, nm, mv);
                     m = grown;
                     good = ok;
                 }
@@ -442,13 +565,13 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                     if ng < 0 {
                         good = false;
                     } else {
-                        let (grown, ok) = exprs(heap, m, data, cur, nm, ng, true, v2);
+                        let (grown, ok) = exprs(heap, m, data, cur, nm, ng, true, mv);
                         m = grown;
                         good = ok;
                     }
                 }
                 if good {
-                    let (grown, ok) = opt(heap, m, data, cur, nm, v2);
+                    let (grown, ok) = opt(heap, m, data, cur, nm, mv);
                     m = grown;
                     good = ok;
                 }
@@ -459,7 +582,7 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                     }
                     var oi = 0;
                     while oi < no && good {
-                        let (grown, ok) = expr(heap, m, data, cur, nm, true, v2);
+                        let (grown, ok) = expr(heap, m, data, cur, nm, true, mv);
                         m = grown;
                         good = ok;
                         if good {
@@ -476,24 +599,40 @@ pub fn infer[&h, &d](heap: &!h Heap, set: map.Map[int], data: &d [byte], v2: boo
                     }
                 }
                 if good {
-                    let (grown, ok) = opt(heap, m, data, cur, nm, v2);
+                    let (grown, ok) = opt(heap, m, data, cur, nm, mv);
                     m = grown;
                     good = ok;
                 }
                 if good {
-                    let (grown, ok) = opt(heap, m, data, cur, nm, v2);
+                    let (grown, ok) = opt(heap, m, data, cur, nm, mv);
                     m = grown;
                     good = ok;
                 }
             } else {
                 good = false;
             }
-            if good && cur[0] != len(data) {
+            if good && mv == 3 {
+                good = v3_tail(data, cur[0], nm, info);
+            } else if good && cur[0] != len(data) {
                 good = false;
             }
         }
     }
     return (m, good);
+}
+
+// The id of a record of a version 3 store (spec section 8): SHA-256 of "cancho-db/stmt/v3", 0, the shape and the hash of its constants, which are `data[0..end + 32]`. Into `out[0..32]`.
+pub fn id3[&d, &o](data: &d [byte], end: int, out: &!o [byte]) -> [] int {
+    region r {
+        let sha = alloc_slice[r](crypto.sha256_state_len(), 0);
+        let nul = alloc_slice[r](1, byte_of(0));
+        crypto.sha256_init(sha);
+        crypto.sha256_update(sha, "cancho-db/stmt/v3");
+        crypto.sha256_update(sha, nul);
+        crypto.sha256_update(sha, data[0..end + 32]);
+        crypto.sha256_final(sha, out);
+    }
+    return 0;
 }
 
 // The id of a statement: SHA-256 of "cancho-db/stmt/v1", 0 and its bytes (spec section 2). Into `out[0..32]`.
@@ -515,7 +654,7 @@ pub fn id[&d, &o](data: &d [byte], out: &!o [byte]) -> [] int {
 //
 // `store` maps a statement id to where that statement's bytes start in `stmts` (its length is the u32 before it). `enc` is
 // the commit and `out` what `commit.decode` found in it.
-pub fn check_commit[&h, &m, &s, &e, &o](heap: &!h Heap, store: &m map.Map[int], stmts: &s [byte], enc: &e [byte], out: &!o [int], v2: bool) -> [heap] int {
+pub fn check_commit[&h, &m, &s, &e, &o](heap: &!h Heap, store: &m map.Map[int], stmts: &s [byte], enc: &e [byte], out: &!o [int], mv: int) -> [heap] int {
     var verdict = 0;
     var set = map.empty(heap, 16, 0, 3);
     let n = out[commit.f_stmts_n()];
@@ -527,8 +666,11 @@ pub fn check_commit[&h, &m, &s, &e, &o](heap: &!h Heap, store: &m map.Map[int], 
         if off < 0 {
             verdict = 1;
         } else {
-            let (grown, ok) = infer(heap, set, stmts[off..off + commit.be(stmts, off - 4, 4)], v2);
-            set = grown;
+            region r {
+                let info = alloc_slice[r](2, 0);
+                let (grown, ok) = infer(heap, set, stmts[off..off + commit.be(stmts, off - 4, 4)], mv, info);
+                set = grown;
+            }
         }
         i = i + 1;
     }

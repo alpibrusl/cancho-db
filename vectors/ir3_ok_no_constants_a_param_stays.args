@@ -1,0 +1,1 @@
+--root 6d64139a74f69cb633026c359707c289aeb2c1bfb34b93210b6d1e0e2f743fd0 --tokens {dir}/ir3_ok_no_constants_a_param_stays.tokens --stmts {dir}/ir3_ok_no_constants_a_param_stays.stmts

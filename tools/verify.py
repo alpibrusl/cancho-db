@@ -305,12 +305,17 @@ def load_revoked(data, root):
 
 # ------------------------------------------------------------ statement IR (docs/spec/ir.md)
 STMT_DOMAIN = b"cancho-db/stmt/v1\x00"
+STMT3_DOMAIN = b"cancho-db/stmt/v3\x00"
+CONSTS_DOMAIN = b"cancho-db/consts/v1\x00"
 
 
-def infer_effects(enc, v2=False):
-    """The inferred effect set of one statement (ir.md §3, and §6 when v2). Raises Reject("stmt-bad-encoding")."""
+def infer_effects(enc, v2=False, v3=False):
+    """The inferred effect set of one statement (ir.md §3, and §6 when v2). Raises Reject("stmt-bad-encoding").
+    With v3 (ir.md §8) a `Const` is refused and a `Hole` is read in its place, and the answer is (effects, where the statement ends, the types of its holes in order): the record goes on after it."""
     r = Reader(enc)
     out = set()
+    holes = []
+    v2 = v2 or v3
 
     def bad():
         raise Reject("stmt-bad-encoding")
@@ -332,6 +337,8 @@ def infer_effects(enc, v2=False):
                     bad()
                 out.add((0, t + b"." + c))
             elif tag == 1:
+                if v3:
+                    bad()                              # a v3 shape holds no constant
                 vt = r.u8()
                 if vt == 1:
                     r.take(8)
@@ -339,6 +346,11 @@ def infer_effects(enc, v2=False):
                     r.take(r.u32())
                 elif vt != 0:
                     bad()
+            elif tag == 11 and v3:                     # Hole: the type of a constant that was lifted out
+                vt = r.u8()
+                if vt > 2:
+                    bad()
+                holes.append(vt)
             elif tag == 2:
                 r.take(4)
             elif tag == 3:
@@ -461,6 +473,8 @@ def infer_effects(enc, v2=False):
             opt()                                      # offset
         else:
             bad()
+        if v3:
+            return frozenset(out), r.at, holes
         if r.at != len(enc):
             bad()
     except Reject as e:
@@ -468,12 +482,54 @@ def infer_effects(enc, v2=False):
     return frozenset(out)
 
 
+def v3_record(body):
+    """One record of a version 3 store (ir.md §8): (statement id, inferred effects). Raises stmt-bad-encoding or stmt-consts-mismatch."""
+    try:
+        effects, end, holes = infer_effects(body, v3=True)
+    except Reject:
+        raise Reject("stmt-bad-encoding")
+    shape, rest = body[:end], body[end:]
+    if len(rest) < 33:
+        raise Reject("stmt-bad-encoding")
+    chash, tag = rest[:32], rest[32]
+    payload = rest[33:]
+    if tag == 0:
+        if payload:
+            raise Reject("stmt-bad-encoding")
+    elif tag == 1:
+        if len(payload) < 20:
+            raise Reject("stmt-bad-encoding")
+        salt, (n,) = payload[:16], struct.unpack(">I", payload[16:20])
+        r = Reader(payload[20:])
+        types, raw_at = [], 20
+        try:
+            for _ in range(n):
+                vt = r.u8()
+                if vt == 1:
+                    r.take(8)
+                elif vt == 2:
+                    r.take(r.u32())
+                elif vt != 0:
+                    raise Reject("stmt-bad-encoding")
+                types.append(vt)
+            if r.at != len(payload) - 20:
+                raise Reject("stmt-bad-encoding")
+        except Reject:
+            raise Reject("stmt-bad-encoding")
+        if types != holes or hashlib.sha256(CONSTS_DOMAIN + salt + struct.pack(">I", n) + payload[20:]).digest() != chash:
+            raise Reject("stmt-consts-mismatch")
+    else:
+        raise Reject("stmt-bad-encoding")
+    return hashlib.sha256(STMT3_DOMAIN + shape + chash).digest(), effects
+
+
 def load_stmts(data):
     """-> {statement id: inferred effects}. Raises Reject for a bad store (ir.md §4)."""
     if len(data) < 8:
         raise Reject("stmts-truncated")
-    if data[:8] not in (b"CHODBST1", b"CHODBST2"):
+    if data[:8] not in (b"CHODBST1", b"CHODBST2", b"CHODBST3"):
         raise Reject("stmts-bad-magic")
+    v3 = data[:8] == b"CHODBST3"
     v2 = data[:8] == b"CHODBST2"
     at, index, store = 8, 0, {}
     while at < len(data):
@@ -485,10 +541,14 @@ def load_stmts(data):
         enc = data[at + 4:at + 4 + length]
         at += 4 + length
         try:
-            effects = infer_effects(enc, v2)
+            if v3:
+                ident, effects = v3_record(enc)
+            else:
+                effects = infer_effects(enc, v2)
+                ident = hashlib.sha256(STMT_DOMAIN + enc).digest()
         except Reject as e:
             raise Reject(e.rule, index)
-        store[hashlib.sha256(STMT_DOMAIN + enc).digest()] = effects
+        store[ident] = effects
         index += 1
     return store
 

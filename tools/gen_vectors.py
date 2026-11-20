@@ -391,9 +391,11 @@ def write(out):
 if __name__ == "__main__":
     import gen_ir
     import gen_ir2
+    import gen_ir3
     import gen_l2
     gen_l2.add(sys.modules[__name__])
     gen_ir.add(sys.modules[__name__])
     gen_ir2.add(sys.modules[__name__])
+    gen_ir3.add(sys.modules[__name__])
     target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "vectors"
     print("wrote %d vectors to %s" % (write(target), target))

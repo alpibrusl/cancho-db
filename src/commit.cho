@@ -140,6 +140,10 @@ pub fn stmt_bad_encoding() -> [] int {
     return 32;
 }
 
+pub fn stmt_consts_mismatch() -> [] int {
+    return 33;
+}
+
 // The spec's tag for a rule code.
 pub fn rule_name(code: int) -> [] &static [byte] {
     if code == 1 {
@@ -234,6 +238,9 @@ pub fn rule_name(code: int) -> [] &static [byte] {
     }
     if code == 31 {
         return "stmts-truncated";
+    }
+    if code == 33 {
+        return "stmt-consts-mismatch";
     }
     return "stmt-bad-encoding";
 }
