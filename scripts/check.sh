@@ -37,12 +37,14 @@ echo "== authority";                 sh tests/authority.sh
 echo "== vectors, python verifier";  python3 tests/run_vectors.py vectors -- python3 tools/verify.py
 echo "== vectors, cancho verifier";  python3 tests/run_vectors.py vectors -- build/verify
 echo "== vectors, go verifier";      python3 tests/run_vectors.py vectors -- build/verify-go
-echo "== the proxy builds";          "$CANCHO" build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho src/asof.cho -o build/proxy
+echo "== the proxy builds";          "$CANCHO" build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho src/erase.cho src/asof.cho -o build/proxy
 echo "== the proxy end to end (psql, a real PostgreSQL)"
 sh scripts/pg_throwaway.sh start 5593
 trap 'sh scripts/pg_throwaway.sh stop 5593' EXIT
 export PG_E2E_PORT=5593
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/proxy_e2e.py build/proxy
+echo "== cancho_erase through the proxy: the token checks, the erase commit, the erased record, a log that verifies"
+E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/erase_e2e.py build/proxy
 echo "== the statement store of a real session is version 3, and erasing one subject's constants leaves a log that verifies"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/stmts_v3_e2e.py build/proxy
 echo "== the extended protocol through the proxy (raw messages, a real PostgreSQL)"
@@ -73,6 +75,8 @@ quiet 2 python3 tests/l3a_fuzz.py "python3 tools/l3a.py" build/l3averify 500 1
 quiet 3 python3 tests/l3a_scale.py "python3 tools/l3a.py" build/l3averify 300
 echo "== L3a over a real session: the live tables compared, and the ways to cheat refused"
 quiet 3 python3 tests/l3a_e2e.py build/proxy "python3 tools/l3a.py" build/l3averify
+echo "== L3a over a session in which a subject is erased through the proxy (docs/m2g-erasure.md E5)"
+quiet 3 python3 tests/erase_l3a_e2e.py build/proxy "python3 tools/l3a.py" build/l3averify
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
 PG_PORT=5593 N=40 quiet 2 python3 scripts/measure_p2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"

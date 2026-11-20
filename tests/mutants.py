@@ -515,6 +515,15 @@ PROXY = [
     ("proxy: queries are served while a statement is in flight", "proxy/proxy.cho", " && st[shared.stride() * k + 17] == 0 {", " {"),
     ("proxy: BEGIN inside a transaction is forgiven", "proxy/proxy.cho", "        } else if ts == 1 {\n            shared.answer_error(tab, core, k, 'T', \"25001\"", "        } else if ts == 3 {\n            shared.answer_error(tab, core, k, 'T', \"25001\""),
     ("proxy: a refusal does not say ReadyForQuery", "src/shared.cho", "        n = n + login.ready_for_query(buf[n..640], status);", "        n = n + 0;"),
+    # ---- cancho_erase (E4a), judged by tests/erase_e2e.py
+    ("erase: the table the token may write is not checked", "src/forkpath.cho", "            if token.effect_denied(contents(core.tokb)[k * shared.token_max()..k * shared.token_max() + st[p + 12]], enc, 0, 1) {", "            if false {"),
+    ("erase: the statement record keeps the key", "proxy/proxy.cho", "effs[0..vd[9]], forkpath.is_erase(vd[7], effs[0..vd[9]]));", "effs[0..vd[9]], false);"),
+    ("erase: allowed inside a transaction block", "src/forkpath.cho", "    if ts != 0 {\n        return refuse(tab, core, k, ts, \"25001\", \"erase-in-transaction\"", "    if false {\n        return refuse(tab, core, k, ts, \"25001\", \"erase-in-transaction\""),
+    ("erase: a backslash is allowed in the key", "src/erase.cho", "if c == '\\'' || c == '\\\\' || c < 32 {", "if c == '\\'' || c < 32 {"),
+    ("erase: a table may start with a digit", "src/erase.cho", "digit && i > 0", "digit"),
+    ("erase: the key need not start with a bracket", "src/erase.cho", " || int_of(key[0]) != '[' || ", " || "),
+    ("erase: the key need not end with a bracket", "src/erase.cho", " || int_of(key[len(key) - 1]) != ']' {", " {"),
+    ("erase: the call is run outside the erase path (the guard's rendering is sent)", "proxy/proxy.cho", "                    } else if forkpath.is_erase(vd[7], effs[0..vd[9]]) {\n                        rl = forkpath.start_erase(tw, core, k, ts, sql);\n", "                    } else if false {\n                        rl = forkpath.start_erase(tw, core, k, ts, sql);\n"),
     # ---- the extended protocol (P3b/P3c), judged by tests/ext_e2e.py
     ("ext: names starting cdb are not reserved", "src/extended.cho", "int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'b';", "int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'z';"),
     ("ext: a statement is not counted at Execute", "src/extended.cho", "            if added != 0 {\n                fail(tw, core, k, \"54000\"", "            if added != 0 || true {\n                fail(tw, core, k, \"54000\""),
@@ -556,12 +565,12 @@ def run_proxy(cancho):
                 exe = work / "proxy_mutant"
                 b = subprocess.run([cancho, "build", "--std", str(work / "proxy/proxy.cho"), str(work / "src/commit.cho"),
                                     str(work / "src/token.cho"), str(work / "src/login.cho")]
-                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho", "capture_sql.cho", "state.cho", "fork.cho", "forkpath.cho", "asof.cho")]
+                                   + [str(work / "src" / n) for n in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "ir.cho", "guard.cho", "snapshot.cho", "build.cho", "store.cho", "l1.cho", "upstream.cho", "shared.cho", "commitpath.cho", "catalog.cho", "extended.cho", "capture_sql.cho", "state.cho", "fork.cho", "forkpath.cho", "erase.cho", "asof.cho")]
                                    + ["-o", str(exe)], capture_output=True, text=True)
                 if b.returncode != 0:
                     return label, "BROKEN %-52s does not build: %s" % (label, b.stderr.strip()[:160]), False
                 try:
-                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "fork_e2e.py" if label.startswith("fork:") else "asof_e2e.py" if label.startswith("asof:") else "merge_e2e.py" if label.startswith("merge:") else "proxy_e2e.py"
+                    judge = "ext_e2e.py" if label.startswith("ext:") else "changes_e2e.py" if label.startswith("chg:") else "fork_e2e.py" if label.startswith("fork:") else "asof_e2e.py" if label.startswith("asof:") else "merge_e2e.py" if label.startswith("merge:") else "erase_e2e.py" if label.startswith("erase:") else "proxy_e2e.py"
                     r = subprocess.run([sys.executable, str(work / "tests" / judge), str(exe)], capture_output=True,
                                        text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
                     out, code = r.stdout + r.stderr, r.returncode

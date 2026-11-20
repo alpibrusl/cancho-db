@@ -9,6 +9,7 @@ import std.conns;
 import cdb.shared;
 import cdb.commitpath;
 import cdb.fork;
+import cdb.erase;
 import cdb.token;
 import cdb.store;
 
@@ -33,6 +34,10 @@ pub fn is_fork[&e](nstmts: int, effs: &e [byte]) -> [] bool {
 
 pub fn is_merge[&e](nstmts: int, effs: &e [byte]) -> [] bool {
     return is_call(nstmts, effs, "cancho_merge");
+}
+
+pub fn is_erase[&e](nstmts: int, effs: &e [byte]) -> [] bool {
+    return is_call(nstmts, effs, "cancho_erase");
 }
 
 fn refuse[&t, &c, &a, &b, &d](tab: &!t conns.Table, core: &!c shared.Core, k: int, ts: int, sqlstate: &a [byte], tag: &b [byte], text: &d [byte]) -> [conn_read, conn_write, poll] int {
@@ -91,6 +96,64 @@ pub fn start[&t, &c, &s](tab: &!t conns.Table, core: &!c shared.Core, k: int, ts
     let names = contents(core.store.names);
     let sn = names[bx * store.branch_name_max()..bx * store.branch_name_max() + chain[4 + 3 * bx]];
     return fork.render(contents(core.rend), sn, bx == 0, name);
+}
+
+// Decide an erase statement of client `k` (docs/m2g-erasure.md 6d): the guard has accepted the call, so the token may `call cancho_erase`; the table named must also be one the token may
+// `write`. The length of the query now in `core.rend` (the caller sends that instead of the guard's rendering), or -1 if the client has been told it is refused. The statement's record is
+// written already erased (the caller passes `erased` to `commitpath.add`), so the key is in no store.
+pub fn start_erase[&t, &c, &s](tab: &!t conns.Table, core: &!c shared.Core, k: int, ts: int, sql: &s [byte]) -> [conn_read, conn_write, poll] int {
+    let st = contents(core.state);
+    let p = shared.stride() * k;
+    if ts != 0 {
+        return refuse(tab, core, k, ts, "25001", "erase-in-transaction", "cancho_erase must be a statement of its own, outside a transaction block") - 1;
+    }
+    var rl = 0 - 1;
+    var why = 0;
+    region r {
+        let tbl = alloc_slice[r](64, byte_of(0));
+        let key = alloc_slice[r](erase.max_key(), byte_of(0));
+        let lens = alloc_slice[r](8, 0);
+        let pr = erase.parse(sql, tbl, key, lens);
+        if pr == 0 - 1 {
+            why = 1;
+        } else if pr == 0 - 2 {
+            why = 2;
+        } else if pr < 0 {
+            why = 3;
+        } else {
+            let enc = alloc_slice[r](3 + lens[0], byte_of(0));
+            enc[0] = byte_of(1);
+            enc[1] = byte_of(lens[0] / 256);
+            enc[2] = byte_of(lens[0] % 256);
+            var i = 0;
+            while i < lens[0] {
+                enc[3 + i] = tbl[i];
+                i = i + 1;
+            }
+            if token.effect_denied(contents(core.tokb)[k * shared.token_max()..k * shared.token_max() + st[p + 12]], enc, 0, 1) {
+                why = 4;
+            } else {
+                let bx = st[p + 23];
+                let chain = contents(core.store.chain);
+                let names = contents(core.store.names);
+                let bn = names[bx * store.branch_name_max()..bx * store.branch_name_max() + chain[4 + 3 * bx]];
+                rl = erase.render(contents(core.rend), bn, bx == 0, tbl[0..lens[0]], key[0..lens[1]]);
+            }
+        }
+    }
+    if why == 1 {
+        return refuse(tab, core, k, ts, "0A000", "erase-malformed", "the erase statement is: select cancho_erase('<table>', '<key as a JSON array>')") - 1;
+    }
+    if why == 2 {
+        return refuse(tab, core, k, ts, "22023", "erase-bad-table", "a table name is 1 to 63 characters of a-z, 0-9 and _, not starting with a digit") - 1;
+    }
+    if why == 3 {
+        return refuse(tab, core, k, ts, "22023", "erase-bad-key", "the key is a JSON array of at most 256 bytes with no quote or backslash in it") - 1;
+    }
+    if why == 4 {
+        return refuse(tab, core, k, ts, "42501", "erase-write-denied", "the token does not allow writing the table") - 1;
+    }
+    return rl;
 }
 
 fn bor(a: int, b: int) -> [] int {

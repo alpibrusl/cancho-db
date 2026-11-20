@@ -213,8 +213,9 @@ pub fn stmts_header[&o](out: &!o [byte], at: int) -> [] int {
 }
 
 // A version 3 statement record (docs/spec/ir.md section 8) as a store entry: the shape of the statement, the hash of its constants (`vals`, `nvals` of them, with the 16-byte `salt`) and the
-// payload, written into `out` at `at`, and the statement's id into the 32 bytes of `id`. The new position, or -1 if the entry does not fit.
-pub fn stmt3[&o, &s, &v, &a, &i](out: &!o [byte], at: int, shape: &s [byte], vals: &v [byte], nvals: int, salt: &a [byte], id: &!i [byte]) -> [] int {
+// payload, written into `out` at `at`, and the statement's id into the 32 bytes of `id`. With `erased` the payload is written already erased (tag 0, no salt and no constants): the id is the same.
+// The new position, or -1 if the entry does not fit.
+pub fn stmt3[&o, &s, &v, &a, &i](out: &!o [byte], at: int, shape: &s [byte], vals: &v [byte], nvals: int, salt: &a [byte], id: &!i [byte], erased: bool) -> [] int {
     var pos = at;
     region r {
         let sha = alloc_slice[r](crypto.sha256_state_len(), 0);
@@ -236,13 +237,20 @@ pub fn stmt3[&o, &s, &v, &a, &i](out: &!o [byte], at: int, shape: &s [byte], val
         crypto.sha256_update(sha, shape);
         crypto.sha256_update(sha, chash);
         crypto.sha256_final(sha, id);
-        pos = put_be(out, pos, len(shape) + 32 + 1 + 16 + 4 + len(vals), 4);
-        pos = put_bytes(out, pos, shape);
-        pos = put_bytes(out, pos, chash);
-        pos = put_bytes(out, pos, one);
-        pos = put_bytes(out, pos, salt);
-        pos = put_bytes(out, pos, cnt);
-        pos = put_bytes(out, pos, vals);
+        if erased {
+            pos = put_be(out, pos, len(shape) + 32 + 1, 4);
+            pos = put_bytes(out, pos, shape);
+            pos = put_bytes(out, pos, chash);
+            pos = put_bytes(out, pos, nul);
+        } else {
+            pos = put_be(out, pos, len(shape) + 32 + 1 + 16 + 4 + len(vals), 4);
+            pos = put_bytes(out, pos, shape);
+            pos = put_bytes(out, pos, chash);
+            pos = put_bytes(out, pos, one);
+            pos = put_bytes(out, pos, salt);
+            pos = put_bytes(out, pos, cnt);
+            pos = put_bytes(out, pos, vals);
+        }
     }
     return pos;
 }

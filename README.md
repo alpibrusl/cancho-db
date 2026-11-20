@@ -78,7 +78,7 @@ reject rule=effects-mismatch record=0
 ## The proxy
 
 ```console
-$ cancho build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho src/asof.cho -o proxy
+$ cancho build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho src/erase.cho src/asof.cho -o proxy
 $ proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres ./log ./signing.key   # listen port, upstream host and port, first branch, root key, upstream role, database, log directory, signing key (32 bytes)
 $ PGPASSWORD=$(python3 tools/mint.py password) psql -h 127.0.0.1 -p 5440 -U agent -d main -c 'select 1'
 $ PGPASSWORD=... psql -h 127.0.0.1 -p 5440 -U agent -d main -c "select cancho_fork('feature')"
