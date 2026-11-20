@@ -708,7 +708,13 @@ _d = Path(_scratch, "p2d")
 _d.mkdir()
 cp, cport = start_logged(_d, Path(_scratch, "key"))
 t_before = int(time.time() * 1000)
-cw = Wire(cport, good)
+try:
+    cw = Wire(cport, good)
+except OSError as e:
+    # seen once in CI (a reset on the first connection to a fresh proxy, not reproduced locally in 400 attempts under load): say what the proxy was doing
+    time.sleep(0.3)
+    print("FAIL P2d: the first connection to a fresh proxy failed: %r; the proxy %s" % (e, "is running" if cp.poll() is None else "exited with %s: %s" % (cp.poll(), cp.stderr.read()[:600])))
+    raise
 cw.query("insert into p2d values (1, 'a')")
 cw.query("begin")
 cw.query("insert into p2d values (2, 'b')")
