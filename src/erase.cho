@@ -181,3 +181,32 @@ pub fn render[&o, &b, &t, &k](out: &!o [byte], branch: &b [byte], first: bool, t
     at = put(out, at, "') as cancho_erase");
     return at;
 }
+
+// The text values of a key (`key_ok` has seen it: no quote or backslash but the delimiters) as the list `store.rewrite_stmts` takes, into `out`: each a two-byte length and the bytes between a pair of
+// quotes, an empty one left out. The length of the list. Numbers in the key are not text and are not matched (the payload holds them as eight bytes, and matching them would erase unrelated records).
+pub fn needles[&k, &o](key: &k [byte], out: &!o [byte]) -> [] int {
+    var w = 0;
+    var i = 0;
+    while i < len(key) {
+        if int_of(key[i]) == '"' {
+            var e = i + 1;
+            while e < len(key) && int_of(key[e]) != '"' {
+                e = e + 1;
+            }
+            if e < len(key) && e > i + 1 && w + 2 + (e - i - 1) <= len(out) {
+                out[w] = byte_of((e - i - 1) / 256);
+                out[w + 1] = byte_of((e - i - 1) % 256);
+                var j = 0;
+                while j < e - i - 1 {
+                    out[w + 2 + j] = key[i + 1 + j];
+                    j = j + 1;
+                }
+                w = w + 2 + (e - i - 1);
+            }
+            i = e + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return w;
+}

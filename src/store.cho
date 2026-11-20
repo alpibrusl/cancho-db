@@ -2,7 +2,10 @@ edition 9;
 module cdb.store;
 
 import std.buffer;
+import std.crypto;
+import std.map;
 import cdb.commit;
+import cdb.ir;
 import cdb.build;
 import cdb.l1;
 
@@ -223,6 +226,13 @@ fn is_prefix[&a, &b](part: &a [byte], whole: &b [byte]) -> [] bool {
 // Open one of the two stores (`tokens`, `stmts`) for appending: create it with its `magic` if it is missing, cut a torn tail (a
 // record a crash left half written) and answer the handle. Refused as `r_bad_magic()` if it starts with something else.
 pub fn open_store[&h, &d, &n, &m](heap: &!h Heap, dir: &d Dir, name: &n [byte], magic: &m [byte]) -> [heap, dir_read, dir_write, file_read, file_write] Opened {
+    if is_prefix(name, "stmts") && len(name) == 5 {
+        // an erasure that was cut short (docs/m2g-erasure.md 6d): finish it from its copy, or drop the copy
+        let fc = finish_copy(heap, dir);
+        if fc != 0 {
+            return Opened::Failed(fc);
+        }
+    }
     let made = create_with(dir, name, magic);
     if made != 0 {
         return Opened::Failed(made);
@@ -574,4 +584,301 @@ pub fn append[&a, &b, &c, &x, &y, &z](log: &!a File, tokens: &!b File, stmts: &!
         return r_io();
     }
     return 0;
+}
+
+// ---- the erasure of statement constants (docs/m2g-erasure.md 6d, E4b)
+
+fn contains[&a, &b](hay: &a [byte], needle: &b [byte]) -> [] bool {
+    if len(needle) == 0 {
+        return false;
+    }
+    var i = 0;
+    while i + len(needle) <= len(hay) {
+        var j = 0;
+        while j < len(needle) && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == len(needle) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// Whether any of the needles in `list` (each a `u16` length and its bytes, one after another) occurs in `hay`.
+fn holds_any[&a, &b](hay: &a [byte], list: &b [byte]) -> [] bool {
+    var at = 0;
+    while at + 2 <= len(list) {
+        let n = int_of(list[at]) * 256 + int_of(list[at + 1]);
+        if at + 2 + n > len(list) {
+            return false;
+        }
+        if contains(hay, list[at + 2..at + 2 + n]) {
+            return true;
+        }
+        at = at + 2 + n;
+    }
+    return false;
+}
+
+fn push_be4[&h](heap: &!h Heap, b: buffer.Buffer, v: int) -> [heap] buffer.Buffer {
+    var out = b;
+    out = buffer.push(heap, out, byte_of(v / 16777216 % 256));
+    out = buffer.push(heap, out, byte_of(v / 65536 % 256));
+    out = buffer.push(heap, out, byte_of(v / 256 % 256));
+    out = buffer.push(heap, out, byte_of(v % 256));
+    return out;
+}
+
+// Rewrite the statement store with the constants of every record that holds one of `needles` (see `holds_any`) erased: the record keeps its shape and the hash of its constants and loses the salt and the
+// constants, so its id, and so every commit that cites it, is as before. `stmts` is the live append handle of the store, which must stay the proxy's (a handle cannot be replaced inside the struct that holds it,
+// so the file is rewritten in place and not renamed over). The new store is first written whole, with a hash of it at the end, to `stmts.new` and synced: that is the commit point. Then, through `stmts`, the store is
+// truncated to nothing and written again (an append handle writes at the end, which is then the start) and synced, and `stmts.new` is removed. A crash before the commit point leaves the old store and a copy that
+// does not match its hash; a crash after it leaves a store that is old, half written or new, and a copy that does; `open_store` for `stmts` finishes the job from the copy or drops the copy. How many records
+// were erased, or -1 if the files could not be read or written, -2 if the store is not a well formed version 3 store. `stop` is for the tests: 1 stops after the copy is written, 2 after the store is rewritten
+// and before the copy is removed, 0 does it all.
+pub fn rewrite_stmts[&h, &d, &f, &n](heap: &!h Heap, dir: &d Dir, stmts: &!f File, needles: &n [byte], stop: int) -> [heap, dir_read, dir_write, file_read, file_write] int {
+    match dir_remove(dir, "stmts.new") {
+        Done::Ok(r) => {
+        }
+        Done::Failed(e) => {
+        }
+    }
+    var data = buffer.empty(heap, 4096);
+    var got = 0 - 1;
+    match dir_open_read(dir, "stmts") {
+        Opened::Failed(e) => {
+            buffer.drop(heap, data);
+            return 0 - 1;
+        }
+        Opened::Ok(rf) => {
+            var r = rf;
+            borrow mut r as &!w in {
+                let (grown, n2) = read_whole(heap, w, data);
+                data = grown;
+                got = n2;
+            }
+            file_close(r);
+        }
+    }
+    if got < 0 {
+        buffer.drop(heap, data);
+        return 0 - 1;
+    }
+    var out = buffer.empty(heap, got + 64);
+    var erased = 0;
+    var verdict = 0;
+    borrow data as &t in {
+        let all = buffer.bytes(t);
+        if len(all) < 8 {
+            verdict = 0 - 2;
+        } else {
+            out = buffer.append(heap, out, all[0..8]);
+            var pos = 8;
+            while pos < len(all) && verdict == 0 {
+                if pos + 4 > len(all) {
+                    verdict = 0 - 2;
+                } else {
+                    let n = commit.be(all, pos, 4);
+                    if pos + 4 + n > len(all) {
+                        verdict = 0 - 2;
+                    } else {
+                        let body = all[pos + 4..pos + 4 + n];
+                        var end = 0;
+                        var ok = false;
+                        var set = map.empty(heap, 16, 0, 3);
+                        region r {
+                            let info = alloc_slice[r](2, 0);
+                            let (grown, good) = ir.infer(heap, set, body, 3, info);
+                            set = grown;
+                            ok = good && info[0] == 0;
+                            end = info[1];
+                        }
+                        map.drop(heap, set);
+                        if !ok || end + 33 > n {
+                            verdict = 0 - 2;
+                        } else if int_of(body[end + 32]) == 1 && holds_any(body[end + 33..n], needles) {
+                            out = push_be4(heap, out, end + 33);
+                            out = buffer.append(heap, out, body[0..end + 32]);
+                            out = buffer.push(heap, out, byte_of(0));
+                            erased = erased + 1;
+                        } else {
+                            out = push_be4(heap, out, n);
+                            out = buffer.append(heap, out, body);
+                        }
+                        pos = pos + 4 + n;
+                    }
+                }
+            }
+        }
+    }
+    buffer.drop(heap, data);
+    if verdict != 0 {
+        buffer.drop(heap, out);
+        return verdict;
+    }
+    var ok = false;
+    match dir_open_new(dir, "stmts.new") {
+        Opened::Failed(e) => {
+        }
+        Opened::Ok(nf) => {
+            var f = nf;
+            borrow out as &ob in {
+                borrow mut f as &!w in {
+                    ok = write_copy(w, buffer.bytes(ob));
+                }
+            }
+            file_close(f);
+        }
+    }
+    if !ok {
+        buffer.drop(heap, out);
+        return 0 - 1;
+    }
+    match dir_sync(dir) {
+        Done::Ok(r) => {
+        }
+        Done::Failed(e) => {
+            ok = false;
+        }
+    }
+    if !ok {
+        buffer.drop(heap, out);
+        return 0 - 1;
+    }
+    if stop == 1 {
+        buffer.drop(heap, out);
+        return erased;
+    }
+    borrow out as &ob in {
+        ok = replace_in_place(stmts, buffer.bytes(ob));
+    }
+    buffer.drop(heap, out);
+    if !ok {
+        return 0 - 1;
+    }
+    if stop == 2 {
+        return erased;
+    }
+    match dir_remove(dir, "stmts.new") {
+        Done::Ok(r) => {
+        }
+        Done::Failed(e) => {
+            return 0 - 1;
+        }
+    }
+    match dir_sync(dir) {
+        Done::Ok(r) => {
+            return erased;
+        }
+        Done::Failed(e) => {
+            return 0 - 1;
+        }
+    }
+}
+
+// `stmts.new`: the whole new store and the SHA-256 of it. Synced.
+fn write_copy[&f, &c](file: &!f File, content: &c [byte]) -> [file_write] bool {
+    var ok = false;
+    region r {
+        let sum = alloc_slice[r](32, byte_of(0));
+        crypto.sha256(content, sum);
+        ok = write_all(file, content) && write_all(file, sum) && synced(file);
+    }
+    return ok;
+}
+
+// The store replaced by `content`, through its own append handle: truncated to nothing, written (at the end, which is the start) and synced.
+fn replace_in_place[&f, &c](stmts: &!f File, content: &c [byte]) -> [file_write] bool {
+    match file_truncate(stmts, 0) {
+        Done::Ok(n) => {
+        }
+        Done::Failed(e) => {
+            return false;
+        }
+    }
+    return write_all(stmts, content) && synced(stmts);
+}
+
+// At start: finish an erasure that was cut short, or drop its copy. `stmts.new` that holds a version 3 store and the SHA-256 of it is a rewrite that passed its commit point: `stmts` becomes that store (it may be the
+// old one, half of the new one or the new one). Anything else is a copy that was never finished, and the store is whole. Either way the copy goes. 0 if there was nothing or it is done, else the errno or `r_io()`.
+fn finish_copy[&h, &d](heap: &!h Heap, dir: &d Dir) -> [heap, dir_read, dir_write, file_read, file_write] int {
+    var data = buffer.empty(heap, 4096);
+    var got = 0 - 1;
+    match dir_open_read(dir, "stmts.new") {
+        Opened::Failed(e) => {
+            buffer.drop(heap, data);
+            return 0;
+        }
+        Opened::Ok(rf) => {
+            var r = rf;
+            borrow mut r as &!w in {
+                let (grown, n2) = read_whole(heap, w, data);
+                data = grown;
+                got = n2;
+            }
+            file_close(r);
+        }
+    }
+    var code = 0;
+    var valid = false;
+    var content_len = 0;
+    borrow data as &t in {
+        let all = buffer.bytes(t);
+        if got >= 40 {
+            content_len = len(all) - 32;
+            if is_prefix(all[0..8], "CHODBST3") {
+                region r {
+                    let sum = alloc_slice[r](32, byte_of(0));
+                    crypto.sha256(all[0..content_len], sum);
+                    valid = true;
+                    var i = 0;
+                    while i < 32 {
+                        if sum[i] != all[content_len + i] {
+                            valid = false;
+                        }
+                        i = i + 1;
+                    }
+                }
+            }
+        }
+        if valid {
+            match dir_open_append(dir, "stmts") {
+                Opened::Failed(e) => {
+                    code = r_io();
+                }
+                Opened::Ok(af) => {
+                    var a = af;
+                    var ok = false;
+                    borrow mut a as &!w in {
+                        ok = replace_in_place(w, all[0..content_len]);
+                    }
+                    file_close(a);
+                    if !ok {
+                        code = r_io();
+                    }
+                }
+            }
+        }
+    }
+    buffer.drop(heap, data);
+    if code != 0 {
+        return code;
+    }
+    match dir_remove(dir, "stmts.new") {
+        Done::Ok(r) => {
+        }
+        Done::Failed(e) => {
+            return r_io();
+        }
+    }
+    match dir_sync(dir) {
+        Done::Ok(r) => {
+            return 0;
+        }
+        Done::Failed(e) => {
+            return r_io();
+        }
+    }
 }

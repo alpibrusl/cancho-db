@@ -573,6 +573,14 @@ fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int
     } else {
         r = commitpath.conclude(tab, core, client);
     }
+    // an erase (docs/m2g-erasure.md 6d) that committed keeps its client's answer until the statement store is rewritten (`finish_erase`); anything else forgets the key at once
+    var erase_ok = false;
+    if contents(core.erni)[0] > 0 {
+        erase_ok = !failed && r == 0 && contents(core.store.chain)[2] > contents(core.erni)[1];
+        if !erase_ok {
+            wipe_erase(core);
+        }
+    }
     if r < 0 {
         contents(core.aux)[2] = 1;
         shared.finish(tab, core, k);
@@ -608,7 +616,34 @@ fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int
         shared.answer_error(tab, core, client, 73, "54000", "transaction-too-large", "the statement changed more rows than one commit can record, so it was rolled back");
         return 0;
     }
-    if !failed && st[cp + 18] > 0 {
+    if erase_ok {
+        contents(core.erni)[2] = client + 1;
+        return 0;
+    }
+    return release_held(tab, core, client, !failed);
+}
+
+// Forget the key of an erase: its needles are zeroed and nothing is pending.
+fn wipe_erase[&c](core: &!c shared.Core) -> [] int {
+    let en = contents(core.ern);
+    var i = 0;
+    while i < len(en) {
+        en[i] = byte_of(0);
+        i = i + 1;
+    }
+    let ei = contents(core.erni);
+    ei[0] = 0;
+    ei[1] = 0;
+    ei[2] = 0;
+    return 0;
+}
+
+// The end of an autocommit statement for client `client`: the held `CommandComplete` (if the statement committed) and a `ReadyForQuery`.
+fn release_held[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, client: int, ok: bool) -> [conn_write, poll] int {
+    let st = contents(core.state);
+    let hd = contents(core.hold);
+    let cp = shared.stride() * client;
+    if ok && st[cp + 18] > 0 {
         shared.send(tab, core, client, hd[client * shared.hold_max()..client * shared.hold_max() + st[cp + 18]]);
     }
     st[cp + 18] = 0;
@@ -618,6 +653,24 @@ fn finish_autocommit[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, k: int
         shared.send(tab, core, client, rq[0..n]);
     }
     return 0;
+}
+
+// An erase has committed and its client's answer is held (docs/m2g-erasure.md 6d): rewrite the statement store with the key's text values erased, forget the key, and then answer: the held
+// `CommandComplete` if the store is rewritten, an error that says to run the erase again if it is not (the delete is committed either way; the second run finds nothing to delete and rewrites again).
+fn finish_erase[&h, &t, &c](heap: &!h Heap, tab: &!t conns.Table, core: &!c shared.Core) -> [heap, conn_write, poll, dir_read, dir_write, file_read, file_write] int {
+    let ei = contents(core.erni);
+    if ei[2] == 0 {
+        return 0;
+    }
+    let client = ei[2] - 1;
+    let r = shared.store_erase(heap, core.store, contents(core.ern)[0..ei[0]]);
+    wipe_erase(core);
+    if r < 0 {
+        contents(core.state)[shared.stride() * client + 18] = 0;
+        shared.answer_error(tab, core, client, 73, "58000", "erase-store-failed", "the erasure was committed but the statement store could not be rewritten; run the same erase again");
+        return 0;
+    }
+    return release_held(tab, core, client, true);
 }
 
 // The upstream side `k` of a pair has sent `got` bytes (in `rbuf`). Messages are relayed to the client as they come, in pieces if
@@ -1110,7 +1163,7 @@ fn sweep[&t, &c, &k](tab: &!t conns.Table, core: &!c shared.Core, clk: &k Clock)
     return 0;
 }
 
-fn run[&h, &l, &n, &k, &o](heap: &!h Heap, io: &!o Io, listener: &!l Listener, net: &n Net(""), clk: &k Clock, host: &n [byte], port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, err_write, conn_accept, conn_read, conn_write, net_out(""), poll, clock, file_write] int {
+fn run[&h, &l, &n, &k, &o](heap: &!h Heap, io: &!o Io, listener: &!l Listener, net: &n Net(""), clk: &k Clock, host: &n [byte], port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, err_write, conn_accept, conn_read, conn_write, net_out(""), poll, clock, dir_read, dir_write, file_read, file_write] int {
     match poller_new() {
         Polling::Ok(p) => {
             var poller = p;
@@ -1215,6 +1268,9 @@ fn run[&h, &l, &n, &k, &o](heap: &!h Heap, io: &!o Io, listener: &!l Listener, n
                     j = j + 1;
                 }
                 borrow mut core as &!cw in {
+                    borrow mut tab as &!tw in {
+                        finish_erase(heap, tw, cw);
+                    }
                     tab = pair_all(heap, tab, cw, net, host, port);
                     tab = serve_all(heap, tab, cw, net, host, port);
                     borrow mut tab as &!tw in {
@@ -1287,7 +1343,7 @@ fn copy_in[&d, &s](dst: &!d [byte], at: int, text: &s [byte]) -> [] int {
 }
 
 // Listen on `listen_port` and serve until the loop ends.
-fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock: &k Clock, host: &n [byte], listen_port: int, server_port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, io_write, err_write, conn_accept, conn_read, conn_write, net_out(""), net_in(""), poll, clock, file_write] int {
+fn serve_port[&h, &n, &k, &o](heap: &!h Heap, io: &!o Io, net: &n Net(""), clock: &k Clock, host: &n [byte], listen_port: int, server_port: int, cfg: Box[[byte]], cfgi: Box[[int]], kept: shared.Store) -> [heap, io_write, err_write, conn_accept, conn_read, conn_write, net_out(""), net_in(""), poll, clock, dir_read, dir_write, file_read, file_write] int {
     var status = 3;
     match tcp_listen(net, listen_port, 1024, 0) {
         Listening::Ok(l) => {
@@ -1453,9 +1509,22 @@ fn with_log[&h, &n, &k, &o, &f, &d, &b](heap: &!h Heap, io: &!o Io, fs: &f Fs(""
                                                                                     io.error_all(io, " bytes of torn tail");
                                                                                 }
                                                                                 io.newline(io);
-                                                                                borrow seed as &sd2 in {
-                                                                                    let kept = shared.new_store(heap, logfile, tokens, stmts, contents(sd2), contents(tw), contents(nw), contents(bw), contents(iw)[6], contents(xw), contents(iw)[0], contents(gw), contents(rw), contents(yw));
-                                                                                    status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi, kept);
+                                                                                // the directory once more, for the store to keep while it runs (the rewrite of the statement store, docs/m2g-erasure.md 6d)
+                                                                                match open_dir(fs, logdir) {
+                                                                                    DirOpened::Failed(e) => {
+                                                                                        refuse_start(io, "log directory", e);
+                                                                                        unbox_slice(heap, cfg);
+                                                                                        unbox_slice(heap, cfgi);
+                                                                                        file_close(stmts);
+                                                                                        file_close(tokens);
+                                                                                        file_close(logfile);
+                                                                                    }
+                                                                                    DirOpened::Ok(d2) => {
+                                                                                        borrow seed as &sd2 in {
+                                                                                            let kept = shared.new_store(heap, logfile, tokens, stmts, d2, contents(sd2), contents(tw), contents(nw), contents(bw), contents(iw)[6], contents(xw), contents(iw)[0], contents(gw), contents(rw), contents(yw));
+                                                                                            status = serve_port(heap, io, net, clock, host, listen_port, server_port, cfg, cfgi, kept);
+                                                                                        }
+                                                                                    }
                                                                                 }
                                                                             }
                                                                         }

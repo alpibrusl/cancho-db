@@ -1,0 +1,122 @@
+edition 9;
+
+import std.io;
+import cdb.store;
+
+// `erasecheck DIR STOP`: the statement store rewrite of docs/m2g-erasure.md 6d (`store.rewrite_stmts`) on its own, for tests/erase_store_check.py. The needles are read from standard input as one line of
+// hex (the list `store.rewrite_stmts` takes: each a two-byte length and its bytes). `STOP` is 0 (all of it), 1 (stop after `stmts.new` is written), 2 (stop after the store is rewritten, before the copy is
+// removed) or 3 (do not rewrite at all, only open). Prints the answer, `erased N` or `failed C`, and then `open ok` or `open refused C` for `store.open_store` on `stmts` afterwards, which finishes or drops an erasure's copy.
+
+fn hexval(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0;
+}
+
+fn read_hex[&i, &b](io: &!i Io, buf: &!b [byte]) -> [io_read] int {
+    var c = getchar(io);
+    var n = 0;
+    var half = 0 - 1;
+    while c >= 0 && c != '\n' {
+        if half < 0 {
+            half = hexval(c);
+        } else {
+            buf[n] = byte_of(half * 16 + hexval(c));
+            n = n + 1;
+            half = 0 - 1;
+        }
+        c = getchar(io);
+    }
+    return n;
+}
+
+fn run[&h, &o, &d](heap: &!h Heap, io: &!o Io, dir: &d Dir, stop: int) -> [heap, io_read, io_write, dir_read, dir_write, file_read, file_write] int {
+    var needles = box_slice(heap, 4096, byte_of(0));
+    var n = 0;
+    borrow mut needles as &!nw in {
+        n = read_hex(io, contents(nw));
+    }
+    var r = 0;
+    if stop < 3 {
+        match dir_open_append(dir, "stmts") {
+            Opened::Failed(e) => {
+                r = 0 - 1;
+            }
+            Opened::Ok(af) => {
+                var a = af;
+                borrow needles as &nr in {
+                    borrow mut a as &!aw in {
+                        r = store.rewrite_stmts(heap, dir, aw, contents(nr)[0..n], stop);
+                    }
+                }
+                file_close(a);
+            }
+        }
+    }
+    unbox_slice(heap, needles);
+    if r >= 0 {
+        io.write_all(io, "erased ");
+        io.print_nat(io, r);
+    } else {
+        io.write_all(io, "failed ");
+        io.print_nat(io, 0 - r);
+    }
+    io.newline(io);
+    match store.open_store(heap, dir, "stmts", "CHODBST3") {
+        Opened::Failed(code) => {
+            io.write_all(io, "open refused ");
+            io.print_nat(io, code);
+            io.newline(io);
+        }
+        Opened::Ok(f) => {
+            file_close(f);
+            io.write_all(io, "open ok");
+            io.newline(io);
+        }
+    }
+    return 0;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(tty);
+    release(ffi);
+    release(net);
+    release(clock);
+    release(signals);
+    release(exec);
+    var status = 2;
+    borrow fs as &fsr in {
+        borrow args as &g in {
+            if arg_count(g) == 3 {
+                status = 3;
+                var stop = int_of(arg(g, 2)[0]) - '0';
+                match open_dir(fsr, arg(g, 1)) {
+                    DirOpened::Failed(e) => {
+                        status = 4;
+                    }
+                    DirOpened::Ok(dh) => {
+                        var dir = dh;
+                        borrow dir as &dr in {
+                            borrow mut heap as &!h in {
+                                borrow mut io as &!o in {
+                                    status = run(h, o, dr, stop);
+                                }
+                            }
+                        }
+                        dir_close(dir);
+                    }
+                }
+            }
+        }
+    }
+    release(fs);
+    release(args);
+    release(io);
+    release(heap);
+    return status;
+}

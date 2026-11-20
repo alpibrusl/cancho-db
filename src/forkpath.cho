@@ -107,6 +107,9 @@ pub fn start_erase[&t, &c, &s](tab: &!t conns.Table, core: &!c shared.Core, k: i
     if ts != 0 {
         return refuse(tab, core, k, ts, "25001", "erase-in-transaction", "cancho_erase must be a statement of its own, outside a transaction block") - 1;
     }
+    if contents(core.erni)[0] > 0 {
+        return refuse(tab, core, k, ts, "55006", "erase-busy", "another erasure is being finished; try again") - 1;
+    }
     var rl = 0 - 1;
     var why = 0;
     region r {
@@ -138,6 +141,11 @@ pub fn start_erase[&t, &c, &s](tab: &!t conns.Table, core: &!c shared.Core, k: i
                 let names = contents(core.store.names);
                 let bn = names[bx * store.branch_name_max()..bx * store.branch_name_max() + chain[4 + 3 * bx]];
                 rl = erase.render(contents(core.rend), bn, bx == 0, tbl[0..lens[0]], key[0..lens[1]]);
+                // what the statement store is to lose once the erase has committed (docs/m2g-erasure.md 6d): the key's text values, kept only until then
+                let nn = erase.needles(key[0..lens[1]], contents(core.ern));
+                contents(core.erni)[0] = nn;
+                contents(core.erni)[1] = chain[2];
+                contents(core.erni)[2] = 0;
             }
         }
     }

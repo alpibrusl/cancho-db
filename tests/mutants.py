@@ -524,6 +524,10 @@ PROXY = [
     ("erase: the key need not start with a bracket", "src/erase.cho", " || int_of(key[0]) != '[' || ", " || "),
     ("erase: the key need not end with a bracket", "src/erase.cho", " || int_of(key[len(key) - 1]) != ']' {", " {"),
     ("erase: the call is run outside the erase path (the guard's rendering is sent)", "proxy/proxy.cho", "                    } else if forkpath.is_erase(vd[7], effs[0..vd[9]]) {\n                        rl = forkpath.start_erase(tw, core, k, ts, sql);\n", "                    } else if false {\n                        rl = forkpath.start_erase(tw, core, k, ts, sql);\n"),
+    ("erase: the statement store is not rewritten", "proxy/proxy.cho", "    let r = shared.store_erase(heap, core.store, contents(core.ern)[0..ei[0]]);", "    let r = shared.store_erase(heap, core.store, contents(core.ern)[0..0]);"),
+    ("erase: an erase that did not commit still rewrites the store", "proxy/proxy.cho", "erase_ok = !failed && r == 0 && contents(core.store.chain)[2] > contents(core.erni)[1];", "erase_ok = r == 0;"),
+    ("erase: the needles keep the opening quote", "src/erase.cho", "out[w + 2 + j] = key[i + 1 + j];", "out[w + 2 + j] = key[i + j];"),
+    ("erase: the needles leave out the text values", "src/erase.cho", "if e < len(key) && e > i + 1 && w + 2 + (e - i - 1) <= len(out) {", "if false {"),
     # ---- the extended protocol (P3b/P3c), judged by tests/ext_e2e.py
     ("ext: names starting cdb are not reserved", "src/extended.cho", "int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'b';", "int_of(name[0]) == 'c' && int_of(name[1]) == 'd' && int_of(name[2]) == 'z';"),
     ("ext: a statement is not counted at Execute", "src/extended.cho", "            if added != 0 {\n                fail(tw, core, k, \"54000\"", "            if added != 0 || true {\n                fail(tw, core, k, \"54000\""),
@@ -695,6 +699,17 @@ STORE = [
     ("store: the commit ids are not handed over", "src/store.cho", "build.put_bytes(ids, 32 * index, ident);", "index = index + 0;"),
     ("store: the id table's size is not checked", "src/store.cho", "if 32 * (index + 1) > len(ids) {", "if false {"),
     ("store: the log is written before the stores", "src/store.cho", "    if len(token_rec) > 0 {\n        if !write_all(tokens", "    if !write_all(log, log_rec) || !synced(log) {\n        return r_io();\n    }\n    if len(token_rec) > 0 {\n        if !write_all(tokens"),
+    ("erase-store: every record is erased, whatever the needle", "src/store.cho", "if contains(hay, list[at + 2..at + 2 + n]) {", "if true {"),
+    ("erase-store: the erased record keeps the payload tag of a whole one", "src/store.cho", "out = buffer.append(heap, out, body[0..end + 32]);\n                            out = buffer.push(heap, out, byte_of(0));", "out = buffer.append(heap, out, body[0..end + 32]);\n                            out = buffer.push(heap, out, byte_of(1));"),
+    ("erase-store: the erased record's length is one over", "src/store.cho", "out = push_be4(heap, out, end + 33);", "out = push_be4(heap, out, end + 34);"),
+    ("erase-store: a whole copy is not applied at start", "src/store.cho", "        if valid {\n            match dir_open_append(dir, \"stmts\") {", "        if false {\n            match dir_open_append(dir, \"stmts\") {"),
+    ("erase-store: the copy's hash is not checked", "src/store.cho", "if sum[i] != all[content_len + i] {", "if false {"),
+    ("erase-store: the copy's magic is not checked", "src/store.cho", "if is_prefix(all[0..8], \"CHODBST3\") {", "if true {"),
+    ("erase-store: the store is not emptied before it is rewritten", "src/store.cho", "match file_truncate(stmts, 0) {", "match file_truncate(stmts, 8) {"),
+    ("erase-store: a stale copy is not removed at open", "src/store.cho", "if is_prefix(name, \"stmts\") && len(name) == 5 {", "if false {"),
+    ("erase-store: a record running past the end is read", "src/store.cho", "if pos + 4 + n > len(all) {\n                        verdict = 0 - 2;", "if false {\n                        verdict = 0 - 2;"),
+    ("erase-store: the store's magic is not copied", "src/store.cho", "out = buffer.append(heap, out, all[0..8]);", "out = buffer.append(heap, out, \"CHODBST1\");"),
+    ("erase-store: a record is kept whole when the needle is the last bytes of its payload", "src/store.cho", "holds_any(body[end + 33..n], needles)", "holds_any(body[end + 33..n - 1], needles)"),
 ]
 
 
@@ -1173,14 +1188,19 @@ def run_store(cancho):
                 continue
             f.write_text(text.replace(old, new))
             exe = work / "storecheck"
-            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/storecheck.cho")] + [str(work / "src" / n) for n in ("store.cho", "build.cho", "commit.cho", "l1.cho")] + ["-o", str(exe)],
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/storecheck.cho")] + [str(work / "src" / n) for n in ("store.cho", "build.cho", "commit.cho", "l1.cho", "ir.cho")] + ["-o", str(exe)],
                                capture_output=True, text=True)
+            if b.returncode == 0 and label.startswith("erase-store:"):
+                exe = work / "erasecheck"
+                b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/erasecheck.cho")] + [str(work / "src" / n) for n in ("store.cho", "build.cho", "commit.cho", "l1.cho", "ir.cho")] + ["-o", str(exe)],
+                                   capture_output=True, text=True)
             if b.returncode != 0:
                 print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
                 survivors.append(label)
                 continue
             try:
-                r = subprocess.run([sys.executable, str(ROOT / "tests/store_check.py"), str(exe)], capture_output=True, text=True, timeout=300)
+                judge = "erase_store_check.py" if label.startswith("erase-store:") else "store_check.py"
+                r = subprocess.run([sys.executable, str(ROOT / "tests" / judge), str(exe)], capture_output=True, text=True, timeout=300)
                 rc, out = r.returncode, r.stdout
             except subprocess.TimeoutExpired:
                 rc, out = 1, "FAIL timed out"
