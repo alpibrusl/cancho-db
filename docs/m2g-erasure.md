@@ -101,7 +101,9 @@ Built as designed: `ir.lift`, `build.stmt3`, salts from `cdb.rnd()` through the 
 * **A log directory is one version.** The statement store's magic is fixed when the directory is made: a directory whose store is `CHODBST2` is refused by a proxy that writes version 3 (`r_bad_magic`), as a version 1 database is refused by the version 2 capture. Existing logs verify as they are.
 * **Tests to change:** `tests/build_check.py` (the builder's records and ids against an independent encoder), the `--stmts` checks of `proxy_e2e`, `ext_e2e`, `drivers_e2e` and `l3a_e2e` (the verifiers already read version 3), and a new check that no statement store byte equals a planted constant.
 
-## 6d. E4, `cancho_erase` through the proxy (design; not built)
+## 6d. E4, `cancho_erase` through the proxy (E4a built; E4b not built)
+
+**E4a is built** (`src/erase.cho`, `forkpath.start_erase`, `build.stmt3`'s `erased`, `proxy/proxy.cho`; `tests/erase_e2e.py`; eight mutants): the statement is `select cancho_erase('<table>', '<key as a JSON array>')`, the shape is read exactly (no escapes, no other forms), the token must `call cancho_erase` (the guard) and `write` the table (the proxy; refused 42501 `erase-write-denied`), it must be a statement of its own outside a transaction block (25001), and the extended protocol refuses it (0A000, like fork and merge). The proxy sends `cdb.erase` for the branch's schema in its place; the commit's statement record is written already erased; the earlier statement records are not rewritten (E4b). Not covered by a test yet: an erase on a branch other than the first (E5), the extended-protocol refusal, and the answer line's count of earlier records (not built; the answer is `cdb.erase`'s own line).
 
 What E1-E3c leave: `cdb.erase` destroys what the capture keeps for a key; the statement store holds constants as erasable payloads. E4 joins them behind one call a client can make, and answers three things the earlier slices left open.
 

@@ -1036,6 +1036,8 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core
                         rl = forkpath.start(tw, core, k, ts, sql);
                     } else if forkpath.is_merge(vd[7], effs[0..vd[9]]) {
                         rl = forkpath.start_merge(tw, core, k, ts, sql, contents(core.snap)[0..snap_len]);
+                    } else if forkpath.is_erase(vd[7], effs[0..vd[9]]) {
+                        rl = forkpath.start_erase(tw, core, k, ts, sql);
                     }
                     if rl >= 0 {
                         if ts == 0 {
@@ -1045,7 +1047,7 @@ fn serve_one[&h, &c, &n](heap: &!h Heap, tab: conns.Table, core: &!c shared.Core
                         var added = 0;
                         let rr = commitpath.ensure_rnd(tw, core, st[p + 1], 16 * vd[7]);
                         if rr == 0 {
-                            added = commitpath.add(heap, core, k, vd[7], ids, irs[0..vd[8]], effs[0..vd[9]]);
+                            added = commitpath.add(heap, core, k, vd[7], ids, irs[0..vd[8]], effs[0..vd[9]], forkpath.is_erase(vd[7], effs[0..vd[9]]));
                         } else {
                             added = 4;
                         }

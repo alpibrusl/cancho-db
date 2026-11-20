@@ -1,0 +1,183 @@
+edition 9;
+module cdb.erase;
+
+// The erase statement (docs/m2g-erasure.md 6d): `select cancho_erase('<table>', '<key>')`, read from the text of one statement, and the query the proxy sends upstream in its place.
+//
+// As for `cancho_fork` (cdb.fork), the guard has already lowered the statement to the IR `Call` and checked the token for `call cancho_erase`; what is left is the two arguments, which
+// the IR holds as expressions and the proxy needs as a table name and a key. The shape accepted is exactly `select cancho_erase('<table>', '<key>')`, with spaces between the tokens,
+// an optional `;` and nothing else. The table is a lower-case name (`a-z`, `0-9`, `_`, 1 to 63 bytes, not starting with a digit); the key is a JSON array in one string literal
+// (`'["ana@example.org"]'`, at most 256 bytes) with no quote or backslash in it, so that nothing the proxy did not read reaches the database.
+
+fn lower_of(c: int) -> [] int {
+    if c >= 'A' && c <= 'Z' {
+        return c + 32;
+    }
+    return c;
+}
+
+fn is_space(c: int) -> [] bool {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+fn skip[&d](sql: &d [byte], at: int) -> [] int {
+    var i = at;
+    while i < len(sql) && is_space(int_of(sql[i])) {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn word_at[&d, &w](sql: &d [byte], at: int, word: &w [byte]) -> [] bool {
+    if at + len(word) > len(sql) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if lower_of(int_of(sql[at + i])) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub fn max_key() -> [] int {
+    return 256;
+}
+
+fn table_ok[&d](name: &d [byte]) -> [] bool {
+    if len(name) == 0 || len(name) > 63 {
+        return false;
+    }
+    var i = 0;
+    while i < len(name) {
+        let c = int_of(name[i]);
+        let digit = c >= '0' && c <= '9';
+        if !(c >= 'a' && c <= 'z' || c == '_' || digit && i > 0) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn key_ok[&d](key: &d [byte]) -> [] bool {
+    if len(key) < 2 || len(key) > max_key() || int_of(key[0]) != '[' || int_of(key[len(key) - 1]) != ']' {
+        return false;
+    }
+    var i = 0;
+    while i < len(key) {
+        let c = int_of(key[i]);
+        if c == '\'' || c == '\\' || c < 32 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Read the string literal that starts at `at` (a quote): where its text starts and ends, and the position after the closing quote; `ends[off]`, `ends[off + 1]`, `ends[off + 2]`. -1 if there is none.
+fn literal[&d, &e](sql: &d [byte], at: int, ends: &!e [int], off: int) -> [] int {
+    if at >= len(sql) || int_of(sql[at]) != '\'' {
+        return 0 - 1;
+    }
+    var i = at + 1;
+    while i < len(sql) && int_of(sql[i]) != '\'' {
+        i = i + 1;
+    }
+    if i >= len(sql) {
+        return 0 - 1;
+    }
+    ends[off] = at + 1;
+    ends[off + 1] = i;
+    ends[off + 2] = i + 1;
+    return 0;
+}
+
+// Read `select cancho_erase('<table>', '<key>')` from `sql`: the table into `tbl`, the key into `key`, their lengths into `lens[0]` and `lens[1]`; `lens` holds at least 8 ints (the rest is scratch). 0 if it is that shape; -1 if it is not,
+// -2 if the table is not a name the proxy takes, -3 if the key is not a JSON array it takes.
+pub fn parse[&d, &t, &k, &l](sql: &d [byte], tbl: &!t [byte], key: &!k [byte], lens: &!l [int]) -> [] int {
+    var at = skip(sql, 0);
+    if !word_at(sql, at, "select") {
+        return 0 - 1;
+    }
+    at = skip(sql, at + 6);
+    if !word_at(sql, at, "cancho_erase") {
+        return 0 - 1;
+    }
+    at = skip(sql, at + 12);
+    if at >= len(sql) || int_of(sql[at]) != '(' {
+        return 0 - 1;
+    }
+    at = skip(sql, at + 1);
+    let l1 = literal(sql, at, lens, 2);
+    if l1 < 0 {
+        return 0 - 1;
+    }
+    at = skip(sql, lens[4]);
+    if at >= len(sql) || int_of(sql[at]) != ',' {
+        return 0 - 1;
+    }
+    at = skip(sql, at + 1);
+    let l2 = literal(sql, at, lens, 5);
+    if l2 < 0 {
+        return 0 - 1;
+    }
+    at = skip(sql, lens[7]);
+    if at >= len(sql) || int_of(sql[at]) != ')' {
+        return 0 - 1;
+    }
+    at = skip(sql, at + 1);
+    if at < len(sql) && int_of(sql[at]) == ';' {
+        at = skip(sql, at + 1);
+    }
+    if at != len(sql) {
+        return 0 - 1;
+    }
+    if !table_ok(sql[lens[2]..lens[3]]) {
+        return 0 - 2;
+    }
+    if !key_ok(sql[lens[5]..lens[6]]) {
+        return 0 - 3;
+    }
+    var i = 0;
+    while i < lens[3] - lens[2] {
+        tbl[i] = sql[lens[2] + i];
+        i = i + 1;
+    }
+    i = 0;
+    while i < lens[6] - lens[5] {
+        key[i] = sql[lens[5] + i];
+        i = i + 1;
+    }
+    lens[0] = lens[3] - lens[2];
+    lens[1] = lens[6] - lens[5];
+    return 0;
+}
+
+fn put[&o, &t](out: &!o [byte], at: int, text: &t [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        out[at + i] = text[i];
+        i = i + 1;
+    }
+    return at + len(text);
+}
+
+// The query that does the erasure upstream: `select cdb.erase('<schema>', '<table>', '<key>') as cancho_erase`, into `out`: its length. The schema is that of the connection's branch:
+// `public` for the first, `cdb_b_<name>` for another.
+pub fn render[&o, &b, &t, &k](out: &!o [byte], branch: &b [byte], first: bool, tbl: &t [byte], key: &k [byte]) -> [] int {
+    var at = put(out, 0, "select cdb.erase('");
+    if first {
+        at = put(out, at, "public");
+    } else {
+        at = put(out, at, "cdb_b_");
+        at = put(out, at, branch);
+    }
+    at = put(out, at, "', '");
+    at = put(out, at, tbl);
+    at = put(out, at, "', '");
+    at = put(out, at, key);
+    at = put(out, at, "') as cancho_erase");
+    return at;
+}

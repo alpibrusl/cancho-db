@@ -142,8 +142,9 @@ pub fn ensure_rnd[&t, &c](tab: &!t conns.Table, core: &!c shared.Core, b: int, n
 // Add what the guard allowed (`n` statements: their ids, IR records and effects) to client `k`'s transaction, the statements as records of version 3 of the statement store
 // (docs/spec/ir.md section 8: each constant lifted out, a salt from the buffer `ensure_rnd` fills, the id over the shape and the hash of the constants). `ids` is not used: the ids are made here.
 // 0 if it fits, 1 if the transaction would hold more than a commit can name, 2 if there are no salts left (the caller did not `ensure_rnd` for `n` statements), 3 if a record is not a statement. A `nondet`
-// effect (`now()`, the only one the lowering lets through) is noted: the commit records the transaction's `now()` (P2-D9).
-pub fn add[&h, &c, &i, &x, &f](heap: &!h Heap, core: &!c shared.Core, k: int, n: int, ids: &i [byte], irs: &x [byte], effs: &f [byte]) -> [heap] int {
+// effect (`now()`, the only one the lowering lets through) is noted: the commit records the transaction's `now()` (P2-D9). `erased` writes the records already erased (the erase call of docs/m2g-erasure.md 6d:
+// its key is never stored).
+pub fn add[&h, &c, &i, &x, &f](heap: &!h Heap, core: &!c shared.Core, k: int, n: int, ids: &i [byte], irs: &x [byte], effs: &f [byte], erased: bool) -> [heap] int {
     let ai = contents(core.acci);
     let acc = contents(core.acc);
     let base = k * shared.acc_stride();
@@ -204,7 +205,7 @@ pub fn add[&h, &c, &i, &x, &f](heap: &!h Heap, core: &!c shared.Core, k: int, n:
                             }
                         }
                         if status == 0 {
-                            let np = build.stmt3(acc[base + shared.acc_irs_at()..base + shared.acc_effs_at()], irat, shape[0..info[0]], vals[0..info[1]], info[2], salt, id);
+                            let np = build.stmt3(acc[base + shared.acc_irs_at()..base + shared.acc_effs_at()], irat, shape[0..info[0]], vals[0..info[1]], info[2], salt, id, erased);
                             if np < 0 {
                                 status = 1;
                             } else {
