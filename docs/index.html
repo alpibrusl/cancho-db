@@ -3,75 +3,288 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>cancho-db</title>
-<meta name="description" content="A Postgres-compatible database whose commit path is verifiable: every write is a signed, hash-chained commit.">
+<title>cancho-db: every write signed, every commit checkable</title>
+<meta name="description" content="A Postgres-compatible proxy whose commit path is verifiable: every transaction is a signed, hash-chained commit that records who wrote, under which capability and which statements, and independent verifiers re-check the log.">
+<link rel="canonical" href="https://alpibrusl.github.io/cancho-db/">
+<meta name="robots" content="index, follow">
+<meta property="og:site_name" content="cancho-db">
+<meta property="og:type" content="website">
+<meta property="og:title" content="cancho-db: every write signed, every commit checkable">
+<meta property="og:description" content="The database you can let agents write to: a signed, hash-chained commit for every transaction, checked by three independent verifiers.">
+<meta property="og:url" content="https://alpibrusl.github.io/cancho-db/">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "cancho-db",
+  "url": "https://alpibrusl.github.io/cancho-db/",
+  "description": "A proxy in front of PostgreSQL that turns every transaction into a signed, hash-chained commit, checks each statement against a capability token before the database sees it, and has verifiers that re-check the log, the authority and the row changes.",
+  "applicationCategory": "DeveloperApplication",
+  "programmingLanguage": "cancho",
+  "license": "https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12",
+  "sameAs": ["https://github.com/alpibrusl/cancho-db"]
+}
+</script>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236a3f9e'/%3E%3Cpath d='M8 11q8-4 16 0v10q-8 4-16 0z' fill='none' stroke='%23fff' stroke-width='2'/%3E%3Cpath d='M8 16q8 4 16 0' fill='none' stroke='%23fff' stroke-width='2'/%3E%3C/svg%3E">
 <style>
-:root{--bg:#fbfaf7;--fg:#1d1f21;--mute:#5d646b;--line:#dcd9d2;--accent:#a4471f;--code:#f1eee8;--card:#fff}
-@media (prefers-color-scheme:dark){:root{--bg:#16181a;--fg:#e8e6e1;--mute:#9aa1a8;--line:#2d3135;--accent:#e08a5f;--code:#1f2326;--card:#1b1e20}}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.6 ui-serif,Georgia,"Iowan Old Style",serif}
-main{max-width:46rem;margin:0 auto;padding:3rem 1rem 4rem}
-h1{font-size:2.4rem;margin:0 0 .25rem;letter-spacing:-.02em}
-h2{font-size:1.25rem;margin:2.5rem 0 .75rem;border-top:1px solid var(--line);padding-top:1.5rem}
-.lead{font-size:1.2rem;color:var(--mute);margin:.25rem 0 1.5rem}
-a{color:var(--accent)}
-code,pre{font:.88rem/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);border-radius:4px}
-code{padding:.1rem .3rem}
-pre{padding:1rem;overflow-x:auto;border:1px solid var(--line)}
-pre code{padding:0;background:none}
-ul{padding-left:1.2rem}li{margin:.4rem 0}
-.grid{display:grid;gap:.75rem;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));margin:1rem 0}
-.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:.9rem 1rem}
-.card b{display:block;margin-bottom:.2rem}
-.card span{color:var(--mute);font-size:.95rem}
-.tag{font:.75rem ui-monospace,monospace;color:var(--mute)}
-footer{margin-top:3rem;color:var(--mute);font-size:.9rem;border-top:1px solid var(--line);padding-top:1rem}
+:root {
+  --bg: #fbfcfd; --fg: #14181a; --muted: #55606a; --line: #dfe5e7; --surface: #ffffff; --soft: #f3f0f7;
+  --accent: #6a3f9e; --accent-fg: #ffffff; --good: #0f7b5f; --bad: #b42d27; --warn: #92400e;
+  --term-bg: #0f1519; --term-fg: #d6e2e6; --term-dim: #7d8f96; --term-good: #5fd3a6; --term-bad: #ff8a80; --term-acc: #c9b0f2;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0b0f14; --fg: #e7ebec; --muted: #9aa8ae; --line: #212a2d; --surface: #131a1c; --soft: #1a1722;
+    --accent: #c4a8f0; --accent-fg: #1b0f2e; --good: #4fd1a5; --bad: #ff7b73; --warn: #f3c77a; --term-bg: #0a1013; }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; scroll-padding-top: 4rem; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 1rem/1.6 var(--font); }
+a { color: var(--accent); text-underline-offset: .15em; }
+a:focus-visible, button:focus-visible, pre:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.wrap { width: 100%; max-width: 64rem; margin: 0 auto; padding: 0 16px; }
+.skip { position: absolute; left: 16px; top: -4rem; background: var(--accent); color: var(--accent-fg); padding: .5rem .8rem; border-radius: 6px; z-index: 9; }
+.skip:focus { top: 8px; }
+header.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+header.top .wrap { display: flex; align-items: center; gap: 1.5rem; height: 3.4rem; }
+.brand { font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; }
+nav { display: flex; gap: 1.2rem; margin-left: auto; }
+nav a { color: var(--muted); text-decoration: none; font-size: .93rem; white-space: nowrap; }
+nav a:hover { color: var(--fg); }
+@media (max-width: 40rem) { nav a.opt { display: none; } nav { gap: .9rem; } }
+.hero { padding: 3.5rem 0 2rem; text-align: center; }
+.hero h1 { font-size: clamp(2rem, 6vw, 3.4rem); line-height: 1.1; margin: 0 auto 1rem; letter-spacing: -.03em; max-width: 18ch; overflow-wrap: break-word; }
+.hero .sub { font-size: 1.2rem; color: var(--muted); max-width: 38rem; margin: 0 auto 1.6rem; }
+.cta { display: flex; gap: .8rem; justify-content: center; flex-wrap: wrap; }
+.btn { display: inline-block; padding: .65rem 1.2rem; border-radius: 8px; font-weight: 600; text-decoration: none; border: 1px solid var(--line); color: var(--fg); background: var(--surface); }
+.btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+section { margin: 0; padding: 3rem 0; }
+section.alt { background: var(--soft); }
+h2 { font-size: clamp(1.4rem, 3vw, 1.9rem); margin: 0 0 .6rem; letter-spacing: -.02em; text-align: center; }
+.lead { text-align: center; color: var(--muted); max-width: 38rem; margin: 0 auto 2rem; }
+.term { background: var(--term-bg); color: var(--term-fg); border-radius: 12px; border: 1px solid var(--line); max-width: 52rem; margin: 0 auto; box-shadow: 0 10px 30px rgba(0,0,0,.18); overflow: hidden; }
+.term .bar { display: flex; align-items: center; gap: .4rem; padding: .55rem .8rem; border-bottom: 1px solid #1f2a30; font: .78rem var(--mono); color: var(--term-dim); }
+.term .bar i { width: .7rem; height: .7rem; border-radius: 50%; background: #2c3a41; display: inline-block; }
+.term .bar button { margin-left: auto; font: .78rem var(--mono); color: var(--term-fg); background: #1b262c; border: 1px solid #2c3a41; border-radius: 6px; padding: .2rem .6rem; cursor: pointer; }
+.term pre { margin: 0; padding: 1rem 1.1rem; overflow-x: auto; font: .82rem/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.term .g { color: var(--term-good); } .term .b { color: var(--term-bad); } .term .d { color: var(--term-dim); } .term .a { color: var(--term-acc); }
+.caption { text-align: center; color: var(--muted); font-size: .88rem; max-width: 52rem; margin: .8rem auto 0; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1.2rem; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.05rem; }
+.card p { margin: 0; color: var(--muted); font-size: .95rem; }
+.card .ic { font-size: 1.5rem; margin-bottom: .4rem; }
+.diagram { max-width: 52rem; margin: 0 auto; }
+.diagram svg { width: 100%; height: auto; display: block; }
+.diagram .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+.diagram .boxa { fill: var(--surface); stroke: var(--accent); stroke-width: 2; }
+.diagram .ok { fill: var(--surface); stroke: var(--good); stroke-width: 2; }
+.diagram .no { fill: var(--surface); stroke: var(--bad); stroke-width: 2; }
+.diagram text { fill: var(--fg); font: 600 15px var(--font); }
+.diagram .sm { font: 13px var(--font); fill: var(--muted); font-weight: 400; }
+.diagram .smb { font: 13px var(--font); fill: var(--bad); font-weight: 400; }
+.diagram .smg { font: 13px var(--font); fill: var(--good); font-weight: 400; }
+.diagram .arrow { stroke: var(--muted); stroke-width: 1.8; fill: none; marker-end: url(#ah); }
+.diagram .arrow.bad { stroke: var(--bad); stroke-dasharray: 5 4; marker-end: url(#ahb); }
+.diagram .arrow.good { stroke: var(--good); stroke-dasharray: 5 4; marker-end: url(#ahg); }
+.nums { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 1rem; text-align: center; }
+.num b { display: block; font-size: 2.3rem; letter-spacing: -.03em; color: var(--accent); }
+.num > span { color: var(--muted); font-size: .92rem; }
+.fine { max-width: 46rem; margin: 1.5rem auto 0; color: var(--muted); font-size: .88rem; text-align: center; }
+.small { max-width: 46rem; margin: 0 auto; padding-left: 1.2rem; color: var(--muted); }
+.small li { margin: .5rem 0; }
+.small strong { color: var(--fg); }
+pre.code { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: .9rem 1rem; overflow-x: auto; font: .85rem/1.5 var(--mono); max-width: 46rem; margin: 0 auto 1rem; }
+code { font: .9em var(--mono); }
+footer { border-top: 1px solid var(--line); padding: 1.5rem 0 2rem; color: var(--muted); font-size: .9rem; text-align: center; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; justify-content: center; }
+.tg { display: flex; flex-wrap: wrap; gap: .45rem; justify-content: center; align-items: center; }
+.tg a { text-decoration: none; border: 1px solid var(--line); border-radius: 99px; padding: .2rem .8rem; background: var(--surface); font-size: .88rem; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 </style>
 </head>
 <body>
-<main>
-<h1>cancho-db</h1>
-<p class="lead">The database you can let agents write to.</p>
-<p>A Postgres-compatible proxy whose commit path is verifiable. Every write becomes a signed, hash-chained commit that records <em>who</em> wrote, under <em>which capability</em>, and <em>running which code</em>. Written in <a href="https://github.com/alpibrusl/cancho">cancho</a>, no C and no foreign call; working name.</p>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="wrap">
+  <a class="brand" href=".">cancho-db</a>
+  <nav aria-label="Site">
+    <a href="#watch">A real run</a><a class="opt" href="#how">How it works</a><a class="opt" href="#why">What it gives you</a><a class="opt" href="#results">Measured</a><a href="#try">Try it</a>
+    <a class="opt" href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">Claims</a><a href="https://github.com/alpibrusl/cancho-db">GitHub</a>
+  </nav>
+</div></header>
 
-<div class="grid">
-<div class="card"><b>Capability tokens</b><span>A chain of signed blocks that can only narrow. The token is the password; a statement outside it never reaches PostgreSQL.</span></div>
-<div class="card"><b>Effect-checked</b><span>Every statement is parsed, lowered to an IR and its effects checked against the token first. A refusal carries a rule tag.</span></div>
-<div class="card"><b>Signed log</b><span>One Ed25519-signed, hash-chained commit per transaction, durable before PostgreSQL commits.</span></div>
-<div class="card"><b>Branches, <code>AS OF</code>, merge</b><span>Fork a branch, read a table as any past commit left it, merge three-way by key.</span></div>
+<main id="main">
+<div class="wrap hero">
+  <h1>Every write signed. Every commit checkable.</h1>
+  <p class="sub">cancho-db sits in front of PostgreSQL and turns every transaction into a signed, hash-chained commit that records who wrote, under which capability, and what the statements did. Independent verifiers re-check the log, what each token allowed, and the row changes.</p>
+  <div class="cta"><a class="btn primary" href="#try">Try it</a><a class="btn" href="#how">See how it works</a></div>
 </div>
 
-<h2>Check it yourself</h2>
-<p>Three levels of verification, each by a verifier that needs nothing but SHA-256 and Ed25519 (and the specs):</p>
-<ul>
-<li><b>L1, integrity:</b> is the log intact, in order, and not cut short? <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/commit.md">commit.md</a></li>
-<li><b>L2, authority:</b> was each commit allowed by the token it presented, and do its recorded effects equal what its statements do? <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/token.md">token.md</a>, <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/ir.md">ir.md</a></li>
-<li><b>L3a, delta replay:</b> is the data the history of the facts the log commits to, and do the tables hold exactly what the row changes say? <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/l3a.md">l3a.md</a></li>
-</ul>
-<pre><code>$ ./verify vectors/ok_chain3.log
+<div class="wrap" id="watch" style="padding-bottom:2.5rem">
+  <div class="term" role="group" aria-label="A recorded session: writes through the proxy, a refused statement, an erasure, and the log verified">
+    <div class="bar"><i></i><i></i><i></i> a real run, replayed <button id="replay" type="button" hidden>&#8635; replay</button></div>
+    <pre id="screen" tabindex="0"><span class="d"># a write goes through the proxy; each transaction is one signed commit</span>
+<span class="a">$ PGPASSWORD=$ADMIN psql -h 127.0.0.1 -p 5440 -U agent -d main -c "insert into people values ('ana@example.org', 'Ana Quintero')"</span>
+<span>INSERT 0 1</span>
+<span class="a">$ PGPASSWORD=$ADMIN psql -h 127.0.0.1 -p 5440 -U agent -d main -c "insert into people values ('luis@example.org', 'Luis Vega')"</span>
+<span>INSERT 0 1</span>
+<span class="d"># a token that can only read: the proxy refuses the statement, and PostgreSQL never sees it</span>
+<span class="a">$ PGPASSWORD=$READER psql -h 127.0.0.1 -p 5440 -U agent -d main -c "delete from people"</span>
+<span class="b">ERROR:  effect-denied: the statement was not run</span>
+<span class="a">$ psql -h 127.0.0.1 -p 5532 -U postgres -d site_demo -At -c "select count(*) from people"   # straight to PostgreSQL: nothing was deleted</span>
+<span>2</span>
+<span class="d"># erase a person: the row, the capture's copies of it, and every statement that names her</span>
+<span class="a">$ PGPASSWORD=$ADMIN psql -h 127.0.0.1 -p 5440 -U agent -d main -c "select cancho_erase('people', '[\"ana@example.org\"]')"</span>
+<span>erased: 1 row(s) deleted, 2 delta row(s) scrubbed</span>
+<span class="a">$ grep -c ana@example.org log/log log/tokens log/stmts</span>
+<span>log/log:0</span>
+<span>log/tokens:0</span>
+<span>log/stmts:0</span>
+<span class="a">$ grep -c luis@example.org log/stmts   # another subject's statement is still there</span>
+<span>1</span>
+<span class="d"># then anyone can check the log, with nothing but the log directory and the root key</span>
+<span class="a">$ verify log/log --root $ROOT --tokens log/tokens --stmts log/stmts</span>
+<span class="g">ok commits=3 branches=1 level=2+ir</span></pre>
+  </div>
+  <p class="caption">Recorded from real runs of the proxy, <code>psql</code> and the verifier on one machine, trimmed to what fits here (the file names are shortened; the proxy ran on port 5440 in front of PostgreSQL on 5532). It is not a live session. <code>$ADMIN</code> and <code>$READER</code> are capability tokens made with <code>tools/mint.py</code>: the first may read, write and call <code>cancho_erase</code>, the second may only read.</p>
+</div>
+
+<section class="alt" id="why"><div class="wrap">
+  <h2>What it gives you</h2>
+  <p class="lead">Not a promise that the database behaved: a log that a stranger can check, and a list of what that check does not cover.</p>
+  <div class="cards">
+    <div class="card"><div class="ic">&#128279;</div><h3>Signed, chained commits</h3><p>Every transaction is one commit in an append-only log, signed with Ed25519 and chained by SHA-256. A verifier needs only those two functions to say whether the log is intact, in order and not cut short (L1).</p></div>
+    <div class="card"><div class="ic">&#128273;</div><h3>Authority, checked twice</h3><p>A capability token can only narrow. The proxy checks each statement against it before PostgreSQL sees it, and a verifier re-derives what the recorded statements do and compares it with what the commit says (L2).</p></div>
+    <div class="card"><div class="ic">&#9202;</div><h3>Replayable data</h3><p>Triggers capture every row change. A verifier replays them and checks that the tables hold exactly what the log says they should (L3a).</p></div>
+    <div class="card"><div class="ic">&#127807;</div><h3>Branches, <code>AS OF</code> and merge</h3><p><code>cancho_fork</code> gives an agent its own branch; <code>AS OF</code> reads a table as a commit left it; <code>cancho_merge</code> is a checked three-way merge, or nothing if there is a conflict.</p></div>
+    <div class="card"><div class="ic">&#128683;</div><h3>Erasure that still verifies</h3><p><code>cancho_erase</code> deletes a person's rows and what the capture kept of them, and rewrites the statements that name them. Hashes and commitments stay, so the log still verifies.</p></div>
+    <div class="card"><div class="ic">&#128209;</div><h3>Honest about its limits</h3><p>Every claim has a row saying what it rests on and what it does <em>not</em> show. A refusal always carries a rule tag.</p></div>
+  </div>
+</div></section>
+
+<section id="how"><div class="wrap">
+  <h2>How it works</h2>
+  <p class="lead">A proxy in front of an ordinary PostgreSQL. Agents connect with a token as the password; whatever the proxy writes, the verifiers check.</p>
+  <div class="diagram">
+  <svg viewBox="0 0 760 340" role="img" aria-label="Flow: a client sends a statement to the guard, which lowers it to an intermediate form and checks it against the token; a statement that is not allowed is refused with a rule tag and never reaches PostgreSQL; an allowed one runs in PostgreSQL, where triggers capture the row changes; the proxy writes a signed commit to the log directory; verifiers read the log directory and compare the tables.">
+    <defs>
+      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker>
+      <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker>
+      <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker>
+    </defs>
+    <rect class="box" x="10" y="30" width="130" height="64" rx="10"/><text x="75" y="58" text-anchor="middle">A client</text><text class="sm" x="75" y="78" text-anchor="middle">psql, a driver</text>
+    <rect class="boxa" x="190" y="30" width="170" height="64" rx="10"/><text x="275" y="58" text-anchor="middle">The guard</text><text class="sm" x="275" y="78" text-anchor="middle">lower to IR, check token</text>
+    <rect class="box" x="410" y="30" width="150" height="64" rx="10"/><text x="485" y="58" text-anchor="middle">PostgreSQL</text><text class="sm" x="485" y="78" text-anchor="middle">tables and triggers</text>
+    <path class="arrow" d="M140 62H188"/><path class="arrow" d="M360 62H408"/>
+    <rect class="boxa" x="250" y="150" width="170" height="64" rx="10"/><text x="335" y="178" text-anchor="middle">Log directory</text><text class="sm" x="335" y="198" text-anchor="middle">log, tokens, statements</text>
+    <path class="arrow" d="M330 94V148"/>
+    <text class="sm" x="340" y="126">a signed commit</text>
+    <rect class="ok" x="470" y="150" width="190" height="64" rx="10"/><text x="565" y="178" text-anchor="middle">Verifiers (three)</text><text class="sm" x="565" y="198" text-anchor="middle">L1 · L2 · L3a</text>
+    <path class="arrow" d="M420 182H468"/>
+    <path class="arrow good" d="M520 150V98"/>
+    <text class="smg" x="530" y="126">compare the tables</text>
+    <path class="arrow bad" d="M215 94V262"/>
+    <text class="smb" x="132" y="140">not allowed</text>
+    <rect class="no" x="40" y="264" width="320" height="58" rx="10"/><text x="200" y="288" text-anchor="middle">Refused, with a rule tag</text><text class="sm" x="200" y="308" text-anchor="middle">PostgreSQL never sees the statement</text>
+  </svg>
+  </div>
+  <p class="fine">The three verifiers are one in cancho, one in Python and one in Go that a separate agent session wrote from the specs alone; they must agree on every golden vector. What that does and does not show is in <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">claims.md</a>.</p>
+</div></section>
+
+<section class="alt" id="results"><div class="wrap">
+  <h2>Measured, not promised</h2>
+  <div class="nums">
+    <div class="num"><b><span data-n="vectors">467</span></b><span>golden vectors, one tampered or refused case for each rule</span></div>
+    <div class="num"><b>3</b><span>verifiers that agree on every one</span></div>
+    <div class="num"><b><span data-n="mutants">827</span></b><span>deliberate faults, each of which must make a check fail</span></div>
+    <div class="num"><b><span data-n="claims">143</span></b><span>claims, each with what it rests on and what it does not show</span></div>
+  </div>
+  <p class="fine">These counts are written into this page by <code>scripts/site.py</code> from the repository, and <code>scripts/check.sh</code> fails if they are stale. A count says how much is checked, not that nothing is missing; the next section says what is.</p>
+</div></section>
+
+<section id="print"><div class="wrap">
+  <h2>What it is not, yet</h2>
+  <ul class="small">
+    <li><strong>A proxy, not a database.</strong> It runs in front of PostgreSQL, which still stores the data; its own storage engine (M3) is not started. The upstream role must be allowed to create triggers and event triggers, and every table needs a primary key.</li>
+    <li><strong>A SQL subset.</strong> No subqueries, CTEs, set operations or window functions, and a closed set of DDL. A statement outside it is refused with a rule tag, never run.</li>
+    <li><strong>Values bound by a client are not recorded</strong> (L3b is not built), and snapshots are not built.</li>
+    <li><strong>Erasure has edges.</strong> It is by table and key; a subject who appears in other statements only in other forms, or by a number, is found by an offline tool, not by the key. PostgreSQL's own storage and any copy made outside the system are not wiped.</li>
+    <li><strong>One commit at a time, loopback clients only,</strong> and every commit costs a signature: the proxy is much slower per statement than PostgreSQL alone. The measurements are in <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/m1-commit-path.md">m1-commit-path.md</a>.</li>
+    <li><strong>A working name.</strong> The claims page lists every claim and what each one leaves out.</li>
+  </ul>
+</div></section>
+
+<section class="alt" id="try"><div class="wrap">
+  <h2>Try it</h2>
+  <p class="lead">Check a log first: you need the <a href="https://github.com/alpibrusl/cancho">cancho</a> compiler, or just Python, and nothing else.</p>
+<pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho-db &amp;&amp; cd cancho-db
+cancho build --std src/commit.cho src/verify.cho -o verify    # or: python3 tools/verify.py, the same arguments
+./verify vectors/ok_chain3.log
 ok commits=3 branches=1
-$ ./verify vectors/seq_skips.log
-reject rule=seq-gap record=1
-$ ./l3averify log --deltas deltas.tsv --live-dump live.tsv
-ok commits=15 facts=19 branches=2 final</code></pre>
-<p>Each verifier exists more than once, written from the spec alone, and they must agree on every golden vector: cancho, Python, Go (L1 and L2) and a separate agent's reading (L3a). Mutation tests make sure a check that is removed is noticed.</p>
+./verify vectors/seq_skips.log
+reject rule=seq-gap record=1</code></pre>
+  <p class="lead">Then put the proxy in front of a PostgreSQL you can throw away:</p>
+<pre class="code" tabindex="0"><code>proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres ./log ./signing.key
+PGPASSWORD=$(python3 tools/mint.py password) psql -h 127.0.0.1 -p 5440 -U agent -d main -c 'select 1'
+build/verify log/log --root $ROOT --tokens log/tokens --stmts log/stmts</code></pre>
+  <p class="fine">The README has the build line for the proxy, the arguments, and what <code>tools/mint.py</code> mints. The gates are run by <code>sh scripts/check.sh</code>, against a real PostgreSQL.</p>
+</div></section>
 
-<h2>Use it</h2>
-<pre><code>$ proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres ./log ./signing.key
-$ psql -h 127.0.0.1 -p 5440 -U agent -d main -c "select cancho_fork('feature')"
-$ psql -h 127.0.0.1 -p 5440 -U agent -d feature       # the database name is the branch</code></pre>
-<p>psql, psycopg 2 and 3, pg8000, asyncpg and node-postgres connect with a capability token as the password. The SQL is a subset (no subqueries, CTEs, set operations or window functions); <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">claims.md</a> lists what is claimed, what each claim rests on, and what is <em>not</em> claimed.</p>
-
-<h2>Status</h2>
-<ul>
-<li><b>M0</b> spec and verifiers (L1, L2, statement IR): built.</li>
-<li><b>M1</b> the proxy in front of PostgreSQL: built.</li>
-<li><b>M2</b> row-change capture, branches, <code>AS OF</code>, merge: built. The replay verifier (L3a) is built in Python and cancho with a third independent reading; Erasure is built: salted row hashes, statement constants kept as erasable payloads, and <code>cancho_erase</code> through the proxy, which rewrites its own statement store and still verifies afterwards (<a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/m2g-erasure.md">what it does not reach</a>). <span class="tag">Recording bound values and snapshots are not built.</span></li>
-</ul>
-
-<footer>
-<a href="https://github.com/alpibrusl/cancho-db">Source</a> · <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/design.md">Design</a> · <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">Claims</a> · EUPL-1.2 · Alpibru S.L.
-</footer>
+<section id="docs"><div class="wrap">
+  <h2>Go deeper</h2>
+  <div class="tg">
+    <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/design.md">Design</a>
+    <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">Claims</a>
+    <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/commit.md">Commit format (L1)</a>
+    <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/token.md">Tokens (L2)</a>
+    <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/ir.md">Statement IR</a>
+    <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/l3a.md">Delta replay (L3a)</a>
+    <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/m2-branches.md">Branches and merge</a>
+    <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/m2g-erasure.md">Erasure</a>
+    <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/m1-proxy.md">The proxy</a>
+  </div>
+</div></section>
 </main>
+
+<footer><div class="wrap">
+  <span><strong>cancho-db</strong></span><span>EUPL-1.2</span><span>written in <a href="https://github.com/alpibrusl/cancho">cancho</a></span>
+  <a href="https://github.com/alpibrusl/cancho-db">Repository</a><a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">Claims</a><a href="https://github.com/alpibrusl/cancho-db/blob/main/NOTICE">Notice</a><span>&copy; Alpibru S.L.</span>
+</div></footer>
+
+<script>
+(function () {
+  var pre = document.getElementById("screen"), btn = document.getElementById("replay");
+  if (!pre || !btn) { return; }
+  var lines = Array.prototype.map.call(pre.children, function (s) { return [s.className, s.textContent]; });
+  var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+  function span(c, t) { return "<span" + (c ? ' class="' + c + '"' : "") + ">" + esc(t) + "</span>"; }
+  var timer = null;
+  function full() { pre.innerHTML = lines.map(function (l) { return span(l[0], l[1]); }).join("\n"); pre.removeAttribute("aria-busy"); }
+  function play() {
+    clearTimeout(timer);
+    full(); pre.style.minHeight = pre.offsetHeight + "px";
+    pre.innerHTML = ""; pre.setAttribute("aria-busy", "true");
+    var n = 0, j = 0, html = "";
+    (function tick() {
+      if (n >= lines.length) { pre.removeAttribute("aria-busy"); return; }
+      var l = lines[n];
+      j += l[0] === "a" ? 3 : 16;
+      pre.innerHTML = html + span(l[0], l[1].slice(0, j));
+      if (j >= l[1].length) { html += span(l[0], l[1]) + "\n"; n++; j = 0; timer = setTimeout(tick, l[0] === "d" ? 300 : 420); }
+      else { timer = setTimeout(tick, 12); }
+    })();
+  }
+  btn.hidden = false;
+  btn.addEventListener("click", function () { if (reduce) { full(); } else { play(); } });
+  if (!reduce && "IntersectionObserver" in window) {
+    var seen = false;
+    new IntersectionObserver(function (es, o) { if (!seen && es[0].isIntersecting) { seen = true; o.disconnect(); play(); } }, { threshold: 0.4 }).observe(pre);
+  }
+})();
+</script>
 </body>
 </html>

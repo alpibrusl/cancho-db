@@ -21,7 +21,7 @@ quiet() {
 
 echo "== formatting";                "$CANCHO" fmt --check src
 echo "== vectors are reproducible";  rm -rf build/vectors && python3 tools/gen_vectors.py build/vectors >/dev/null && diff -r vectors build/vectors
-echo "== the landing page served from docs/ (Settings > Pages: branch main, folder /docs) is the one in site/ (Actions)"; cmp site/index.html docs/index.html
+echo "== the landing page (docs/index.html, served by Pages from branch main, folder /docs): its counts are current"; python3 scripts/site.py --check
 echo "== the capture SQL module is reproducible"; python3 tools/gen_capture.py --check
 echo "== login cases are reproducible"; python3 tools/gen_login.py --check
 echo "== login tests (the proxy's front door, from bytes)"; quiet 2 "$CANCHO" test tests/login_test.cho tests/login_cases.cho src/commit.cho src/token.cho src/login.cho --std
