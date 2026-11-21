@@ -105,7 +105,7 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 | **M3d** (built, 6f to 6h; the delta tree is not) | the executor for `insert`, `update`, `delete` and `select ... where <key> = <constant>`, and the engine's `changes` | gate 4 for these; `changes` equals the capture's |
 | **M3e** (built, 6h) | predicates on any column, range scans on the key, `order by`, `limit`, `offset`, `distinct`, `in`, `case`, `cast`, `like` | gate 4 |
 | **M3f** (built, 6i and 6j: `count`, `sum`, `min`, `max`) | aggregates and `group by`, `having` | gate 4 |
-| **M3g** | joins (nested loop first) | gate 4 |
+| **M3g** (built, 6k and 6l: nested loop; inner and left) | joins (nested loop first) | gate 4 |
 | **M3h** | `alter table`, `create index` (an index is a second tree) | gate 4 on the catalog after each |
 | **M3i** | native `cancho_fork`, `AS OF`, `cancho_merge`, `cancho_erase` on the engine | the existing fork, as-of, merge and erase end-to-end suites pass on it |
 | **M3j** | the shadow run, then a database option to serve from the engine | gate 5, then the full gate on the engine for one database |
@@ -319,6 +319,47 @@ answers only where the versions it is tested on agree**, which is two, not every
 
 **Limits of this slice.** A grouped query with a `group by` keeps a record for every row the `where` lets through and sorts them (262,144 rows or 16 MiB, refused beyond); without `group by` the rows are
 only counted through. `sum` over `bigint`, `avg`, and every function that is not one of the four aggregates are refused. The overflow of a `sum` is not tested (it needs more rows than the test makes).
+
+## 6k. M3g: joins (design, written before the code)
+
+**What is answered.** `from a, b`, `a join b on ...` and `a left join b on ...`, any number of tables up to eight, each table once (a table joined to itself is refused: the IR names a column by its
+table's real name, so two uses of one table cannot be told apart by the engine). Everything a one-table select has (items, `where`, `order by`, `distinct`, `limit`, aggregates, `group by`, `having`) works
+over the joined rows.
+
+**How.** A nested loop in the order the tables are written: the first table is read from the tree as before, the others are read once into memory, and each `on` is computed as soon as its table is bound; a
+`left join` whose `on` is true for no row of its table binds that table to a row of nulls once. This is the simplest thing that is right; a join of two tables of *n* rows computes *n²* conditions, which
+is the cost of having no hash join, and is said here rather than found by a user.
+
+**Errors, and why conditions must be quiet.** PostgreSQL pushes a condition down to the table it speaks of, picks the join order and the join method, and so may compute a condition for a row that joins
+with nothing, or never compute it for one that does. Whether a condition that *can* raise an error *does* is therefore the planner's business more than ever. So in a statement with a join **every
+condition of the `where` and of every `on` must be one that cannot raise an error** (columns, constants, comparisons, `AND`, `OR`, `NOT`, `IS NULL`, `IN`: the rule of the lookup by key, 6h); any other is
+refused (`engine-unsupported`) before a row is read. With quiet conditions the set of joined rows is the same for every plan, and the items are computed for exactly those rows, so their errors are found as
+for one table.
+
+**Not in this slice:** `right` and `full` joins, a table joined to itself, `using` and `natural`, the lookup by key under a join, and any join method but the nested loop.
+
+## 6l. M3g, built: what PostgreSQL showed about joins
+
+`rows_next` and `join_load` in `src/execs.cho`, `bind_join` in `src/exec.cho`. The random history now writes selects over two and three tables (commas, `join`, `left join`, conditions between
+columns of different tables, grouped and not). **30 seeds of 2,000 statements, with everything since 6h in them: no disagreement; of the 39,686 statements PostgreSQL answers the engine refuses 912
+(2.3 %).** 109 fixed statements must be answered; 10 depend on PostgreSQL's order and 16 are refused on purpose, each pinned with PostgreSQL 16's outcome. 120 mutants of the engine, 13 of them of the join.
+
+**The rule of quiet conditions is not caution, it is needed.** With `fw` holding the rows (1, 5) and (9, 0) and `fz` the keys 1 to 3:
+* `select fz.k from fz, fw where fz.k = fw.wk and 10 / fw.m > 0` is a **division by zero** in PostgreSQL, and so is the same written with `join ... on ... where`: the condition on `fw` alone is pushed down
+  to `fw`, and computed for (9, 0), a row that joins with nothing. A nested loop that asked the `where` of joined rows would have answered `1`;
+* `select fz.k from fz join fw on fz.k = fw.wk and 10 / fw.m > fz.k` answers `1`: that condition speaks of both tables, so it is computed for rows that join only.
+The engine refuses all three (`engine-unsupported`): which conditions PostgreSQL pushes where is its planner's, and the engine does not model it.
+
+**What the differential found:**
+* **An `on` sees only the tables of its own join.** `a join b on c.x = ... join c on ...` and `a, b join c on a.x = ...` are errors in PostgreSQL (`42P01`: the table is joined later, or stands before the
+  comma, which binds looser than `join`). The lowering resolved the name against every table of the statement, and the engine joined on a row that was not bound yet. Fixed in `src/lower.cho`: while an
+  `on` is lowered the scope is its own join's tables (4 hand-written cases, 3 mutants).
+* **Minus signs fold into a constant as PostgreSQL reads it**, so `order by - - 1` is the first item and `group by - - 9` a place that does not exist. A constant under any number of minus signs is now
+  refused in both.
+* Grouping by the key of a joined table frees that table's columns (the rule of 6i, now for any column in a join: refused rather than decided).
+
+**Cost, said plainly.** A join of tables of *n* and *m* rows computes *n × m* conditions; the tables after the first are held in memory (16 MiB, 262,144 rows, refused beyond); there is no hash join
+and no lookup by key under a join. Not built: `right` and `full` joins, a table joined to itself, `using`, `natural`.
 
 ## 7. Taking over, safely
 

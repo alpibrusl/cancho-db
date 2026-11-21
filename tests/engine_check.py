@@ -434,6 +434,86 @@ def gselect(g):
     return sql, how
 
 
+def jselect(g, tables):
+    """A SELECT over two or three tables: (sql, how to compare, the first table's name)"""
+    names = sorted(tables)
+    g.r.shuffle(names)
+    names = names[:g.pick([2, 2, 2, 3])]
+    ts = [tables[n] for n in names]
+
+    def col(kind=None):
+        t = g.pick(ts)
+        cs = [c for c in t.cols if kind is None or (c[1] in INTS if kind == "int" else c[1] == kind)]
+        if not cs:
+            return None
+        return "%s.%s" % (t.name, g.pick(cs)[0])
+
+    def cond(quiet):
+        r = g.r.random()
+        a, b = col(), col()
+        if r < 0.45:
+            return "%s %s %s" % (a, g.pick(["=", "=", "=", "<", ">=", "<>"]), b)
+        if r < 0.65:
+            c = col("int")
+            return "%s %s %s" % (c or a, g.pick(["=", "<", ">"]), g.pick(SMALL))
+        if r < 0.75:
+            return "%s is %snull" % (a, g.pick(["", "not "]))
+        if r < 0.85:
+            return "(%s = %s or %s is null)" % (a, b, col())
+        if quiet or r < 0.93:
+            c = col("text")
+            return "%s <> %s" % (c or a, q(g.pick(TEXTS)))
+        c = col("int")
+        return "(10 / %s) > 0" % (c or "1")
+
+    sql_from = names[0]
+    wheres = []
+    for n in names[1:]:
+        r = g.r.random()
+        if r < 0.25:
+            sql_from += ", " + n
+            wheres.append(cond(True))
+        else:
+            sql_from += " %s %s on %s" % (g.pick(["join", "join", "left join"]), n, " and ".join(cond(g.r.random() < 0.95) for _ in range(g.pick([1, 1, 2]))))
+    if g.r.random() < 0.4:
+        wheres.append(cond(g.r.random() < 0.9))
+    grouped = g.r.random() < 0.25
+    items = []
+    by = []
+    if grouped:
+        for _ in range(g.pick([0, 1, 1, 2])):
+            c = col()
+            by.append(c)
+            items.append(c)
+        for _ in range(g.pick([1, 2])):
+            c = col("int") if g.r.random() < 0.7 else col()
+            items.append(g.pick(["count(*)", "count(%s)" % c, "sum(%s)" % c, "min(%s)" % c, "max(%s)" % c]))
+    else:
+        for _ in range(g.r.randrange(1, 5)):
+            r = g.r.random()
+            a, b = col("int"), col("int")
+            if r < 0.7 or not a or not b:
+                items.append(col())
+            elif r < 0.9:
+                items.append("(%s %s %s)" % (a, g.pick(["+", "-", "*"]), b))
+            else:
+                items.append("(%s / %s)" % (a, b))
+    sql = "select %s%s from %s" % ("distinct " if g.r.random() < 0.08 else "", ", ".join(items), sql_from)
+    if wheres:
+        sql += " where " + " and ".join(wheres)
+    if by:
+        sql += " group by " + ", ".join(by)
+    how = "set"
+    if g.r.random() < 0.6:
+        keys = ["%d%s" % (i + 1, g.pick(["", " desc"])) for i in range(len(items))]
+        g.r.shuffle(keys)
+        sql += " order by " + ", ".join(keys)
+        how = "order"
+        if g.r.random() < 0.25:
+            sql += " limit " + g.pick(["1", "3", "10"])
+    return sql, how, names[0]
+
+
 def run_engine(path, lines):
     r = subprocess.run([EXE, path], input="\n".join(lines) + "\n", capture_output=True, text=True)
     if r.returncode != 0:
@@ -652,13 +732,35 @@ FIXED = [
     ("insert into fy (k, j) values ('p', 1)", "write"),
     ("update fy set k = k || 'q'", "write"),
     ("select * from fy order by k", "order"),
+    ("select fx.k, fy.k from fx, fy order by 1, 2", "order"),
+    ("select fx.k, fy.j, fy.k from fx left join fy on fy.a = fx.a order by 1, 3", "order"),
+    ("select fx.k, fy.k from fy left join fx on fy.a = fx.a order by 1, 2", "order"),
+    ("select fx.b, fy.k from fx join fy on fx.b = fy.k or fy.k = 'q' order by 1, 2", "order"),
+    ("select count(*), max(fy.k), count(fy.k), sum(fx.a) from fx left join fy on fx.k = fy.a", "set"),
+    ("select fx.c, count(*), min(fy.s) from fx join fy on fy.s > fx.a group by fx.c order by 1", "order"),
+    ("select fx.k / (fx.k - 102), fy.k from fx join fy on fy.s > fx.a", "set"),
+    ("select fx.k from fx join fy on fx.k = fy.k", "set"),
+    ("select fx.k from fx join fy on fx.k", "set"),
+    ("select fx.k, fy.k from fx, fy where fx.k > 104 and fy.k <> '' and (fx.c is null or fy.j is null) order by 1, 2", "order"),
+    ("select distinct fy.b from fx, fy", "set"),
+    ("select fx.k from fx left join fy on fy.k = 'none' where fy.k is null order by 1 limit 2", "order"),
+    ("create table fq (k integer primary key, v integer)", "ddl"),
+    ("insert into fq values (1, 1), (2, 2), (105, 3)", "write"),
+    ("select count(*) from fx, fy, fq", "set"),
+    ("select fx.k, fy.k, fq.k from fx, fy, fq where fq.v > 1 order by 1, 2, 3", "order"),
+    ("select fx.k, fy.k, fq.v from fx left join fy on fy.a = fx.a left join fq on fq.k = fx.k order by 1, 2, 3", "order"),
+    ("select fx.k, fy.k, fq.v from fx join fq on fq.k < fx.k join fy on fy.j is null order by 1, 2, 3", "order"),
+    ("select fx.k from fx, fq where fq.k = 1 order by 1", "order"),
+    ("select fx.k, fq.k from fx, fq where fq.k >= 2 and fx.k > 0 order by 1, 2", "order"),
+    ("drop table fq", "ddl"),
     ("drop table fx", "ddl"),
     ("drop table fy", "ddl"),
 ]
 
 
 # Statements whose outcome in PostgreSQL depends on the order it works in (6g), which the engine REFUSES as `engine-order-dependent`, and what PostgreSQL 16 does with each here. The rows were stored 3, 2, 1.
-DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)"]
+DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
+             "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)"]
 DEP = [
     # the cheaper condition is computed first, wherever it is written: the row with k = 2 never reaches the division
     ("select k from fz where k > 2 and 10 / (k - 2) > 0", None),
@@ -693,7 +795,16 @@ UNSUP = [
     ("select k from fz where count(*) > 0", "42803"),
     ("select upper('a') from fz", None),
     ("select k from fz order by - 1", "42P10"),
+    ("select k from fz order by - - 1", None),                           # the minus signs fold into the constant: the first item
+    ("select count(*) from fz group by - - 9", "42P10"),
     ("select k from fz order by 'a'", "42601"),
+    # joins (6k): a condition that can raise is refused, because PostgreSQL computes this one for the row (9, 0) of fw, which joins with nothing
+    ("select fz.k from fz, fw where fz.k = fw.wk and 10 / fw.m > 0", "22012"),
+    ("select fz.k from fz join fw on fz.k = fw.wk where 10 / fw.m > 0", "22012"),
+    # and this one only for rows that join, so it answers
+    ("select fz.k from fz join fw on fz.k = fw.wk and 10 / fw.m > fz.k", None),
+    ("select a1.k from fz a1 join fz a2 on a1.k = a2.k", None),          # a table joined to itself
+    ("select fw.m, count(*) from fz join fw on fz.k = fw.wk group by fw.wk", None),   # m depends on fw's key
 ]
 
 
@@ -732,6 +843,7 @@ def order_dependent(pg):
                 raise SystemExit("engine_check: %s: PostgreSQL says %s, expected %s" % (sql, err, want))
             notes.append("%s: %s, where PostgreSQL 16 says %s" % (sql, err, want))
     pg.query("drop table fz")
+    pg.query("drop table fw")
     return notes
 
 
@@ -804,9 +916,11 @@ def main():
         elif r < 0.64:
             pk = g.t.cols[g.t.pk][0]
             stmts.append(("select * from %s order by %s" % (g.t.name, pk), "order", g.t.name))
-        elif r < 0.78:
+        elif r < 0.74:
             sql, how = gselect(g)
             stmts.append((sql, how, g.t.name))
+        elif r < 0.82:
+            stmts.append(jselect(g, tables))
         else:
             sql, how = g.select()
             stmts.append((sql, how, g.t.name))
@@ -818,7 +932,7 @@ def main():
     counts, fails, refused_answered, answered = compare(pg, stmts, eng, False)
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), [f[0] for f in FIXED])
-    fstmts = [(sql, how, "fy" if " fy" in sql else "fx") for sql, how in FIXED]
+    fstmts = [(sql, how, "fq" if " fq " in sql and how == "write" else ("fy" if " fy" in sql else "fx")) for sql, how in FIXED]
     fcounts, ffails, _, _ = compare(pg, fstmts, feng, True)
     print("engine_check: %d fixed statements, none refused: %s" % (len(FIXED), ", ".join("%s=%d" % kv for kv in sorted(fcounts.items()))))
     fails += ffails

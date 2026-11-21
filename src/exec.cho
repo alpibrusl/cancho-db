@@ -177,6 +177,8 @@ pub res struct Work {
     idx: Box[[int]],
     idx2: Box[[int]],
     gix: Box[[int]],
+    jbuf: Box[[byte]],
+    jix: Box[[int]],
     chg: Box[[byte]],
     lit: Box[[byte]],
     lsc: Box[[int]],
@@ -203,6 +205,7 @@ pub res struct Work {
     lon: int,
     hin: int,
     fresh: bool,
+    ntab: int,
 }
 
 pub fn rows_size() -> [] int {
@@ -214,11 +217,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 2048, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -236,6 +239,8 @@ pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
     unbox_slice(heap, idx);
     unbox_slice(heap, idx2);
     unbox_slice(heap, gix);
+    unbox_slice(heap, jbuf);
+    unbox_slice(heap, jix);
     unbox_slice(heap, chg);
     unbox_slice(heap, lit);
     unbox_slice(heap, lsc);
@@ -394,6 +399,7 @@ pub fn start[&q](w: &!q Work, root: int) -> [] int {
     w.cfill = 0;
     w.lon = 0 - 1;
     w.hin = 0 - 1;
+    w.ntab = 1;
     contents(w.cx)[eval.slots_at()] = 0;
     return 0;
 }
@@ -428,10 +434,14 @@ pub fn stat[&q](w: &!q Work, r: int) -> [] int {
     return unsupported();
 }
 
-// Evaluate the expression at `at` of `e` over the bound row (`ntab` 1) or over nothing (0): the evaluator's answer, the value in `ws` from `eval.max_nodes()`.
+// Evaluate the expression at `at` of `e` over the bound rows (`ntab` 1: the rows of every table of the statement) or over nothing (0): the evaluator's answer, the value in `ws` from `eval.max_nodes()`.
 pub fn ev[&q, &x, &k](w: &!q Work, e: &x [byte], at: int, kinds: &k [int], ntab: int) -> [] int {
     contents(w.info)[0] = 0;
-    return eval.eval(e, at, kinds, contents(w.ctx), contents(w.cx), ntab, contents(w.ws), contents(w.ar), contents(w.info));
+    var n = 0;
+    if ntab == 1 {
+        n = w.ntab;
+    }
+    return eval.eval(e, at, kinds, contents(w.ctx), contents(w.cx), n, contents(w.ws), contents(w.ar), contents(w.info));
 }
 
 pub fn copy[&s, &d](src: &s [byte], sa: int, n: int, dst: &!d [byte], da: int) -> [] int {
@@ -608,6 +618,91 @@ pub fn bind_table[&q, &z, &x](p: &!z pager.Pager, w: &!q Work, root: int, e: &x 
     return 0;
 }
 
+// No row is bound: every column of every table reads as null (what the types of a statement's expressions are learnt with).
+pub fn no_rows[&q](w: &!q Work) -> [] int {
+    var j = 0;
+    while j < w.ntab {
+        contents(w.cx)[6 * j + 5] = 0 - 1;
+        j = j + 1;
+    }
+    return 0;
+}
+
+// The tables of a join after the first, eight ints each from `pos[p_tab() + 8 * j]`: the table's number, where its rows start in `jix` and how many there are, the next one to try, how it is joined (0 a
+// comma, 1 `join`, 2 `left join`), where its ON is (0: none), whether a row of it was joined with the rows bound before it, and the length of its definition.
+pub fn p_tab() -> [] int {
+    return 3100;
+}
+
+pub fn max_tables() -> [] int {
+    return 8;
+}
+
+// Bind table `j` (1 or more) of a join: the `Name` at `at` of `e`. Its name, definition and row are in `ctx` from 2048 * j as the first table's are from 0. 0, an error, or a refusal (a table that is
+// already in the statement).
+pub fn bind_join[&q, &z, &x](p: &!z pager.Pager, w: &!q Work, root: int, e: &x [byte], at: int, j: int, kind: int, onpos: int) -> [file_read] int {
+    if j < 1 || j >= max_tables() || at + 2 > len(e) {
+        return unsupported();
+    }
+    let nl = commit.be(e, at, 2);
+    if nl < 1 || at + 2 + nl > len(e) {
+        return malformed();
+    }
+    if nl > tables.max_name() {
+        return unsupported();
+    }
+    var i = 0;
+    while i < nl {
+        if int_of(e[at + 2 + i]) == '@' {
+            return unsupported();
+        }
+        i = i + 1;
+    }
+    // `lit` is scratch here: the first table's entry stays in `ent`
+    let n = tables.find(p, contents(w.sc), root, e[at + 2..at + 2 + nl], contents(w.key), contents(w.lit));
+    if n == btree.not_found() {
+        return e_no_table();
+    }
+    if n < 0 {
+        return tree_err(n);
+    }
+    let dl = tables.def_len(contents(w.lit));
+    if dl > 800 {
+        return damaged();
+    }
+    let tid = tables.id_of(contents(w.lit));
+    let t = p_tab() + 8 * j;
+    if tid == w.tid {
+        return unsupported();
+    }
+    i = 1;
+    while i < j {
+        if contents(w.pos)[p_tab() + 8 * i] == tid {
+            return unsupported();
+        }
+        i = i + 1;
+    }
+    copy(e, at + 2, nl, contents(w.ctx), 2048 * j);
+    copy(contents(w.lit), 6, dl, contents(w.ctx), 2048 * j + 64);
+    let x = contents(w.cx);
+    x[6 * j] = 2048 * j;
+    x[6 * j + 1] = nl;
+    x[6 * j + 2] = 2048 * j + 64;
+    x[6 * j + 3] = dl;
+    x[6 * j + 4] = 2048 * j + 1024;
+    x[6 * j + 5] = 0 - 1;
+    contents(w.pos)[t] = tid;
+    contents(w.pos)[t + 1] = 0;
+    contents(w.pos)[t + 2] = 0;
+    contents(w.pos)[t + 3] = 0;
+    contents(w.pos)[t + 4] = kind;
+    contents(w.pos)[t + 5] = onpos;
+    contents(w.pos)[t + 6] = 0;
+    contents(w.pos)[t + 7] = dl;
+    w.ntab = j + 1;
+    return 0;
+}
+
 // Begin reading the rows of the bound table.
 pub fn scan_start[&q](w: &!q Work) -> [] int {
     build.put_be(contents(w.key), 0, w.tid, 4);
@@ -688,6 +783,10 @@ fn is_col[&q, &x](w: &!q Work, e: &x [byte], at: int, c: int) -> [] bool {
 fn bounds[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int]) -> [] int {
     let dl = w.dlen;
     let b = eval.max_nodes();
+    if w.ntab != 1 {
+        // under a join a column of that name may be another table's
+        return 0;
+    }
     if row.key_columns(contents(w.ctx)[64..64 + dl]) != 1 {
         return 0;
     }
@@ -787,7 +886,7 @@ pub fn where_static[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int], wpos
     if wpos == 0 {
         return 0;
     }
-    contents(w.cx)[5] = 0 - 1;
+    no_rows(w);
     let r = ev(w, e, wpos, kinds, 1);
     if r < 0 {
         let s = stat(w, r);

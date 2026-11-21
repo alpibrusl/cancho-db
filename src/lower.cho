@@ -409,7 +409,7 @@ fn scope_add[&s, &t, &n, &m, &c](sql: &s [byte], toks: &t [int], nodes: &n [int]
 
 // The scope entry a table or alias name refers to, or -1.
 fn scope_find[&s, &t, &m, &c](sql: &s [byte], toks: &t [int], tok: int, schema: &m [byte], sc: &!c [int]) -> [] int {
-    var i = 0;
+    var i = sc[5];
     while i < sc[2] {
         let at = 16 + 3 * i;
         var by = sc[at + 1];
@@ -467,7 +467,7 @@ fn emit_col[&s, &t, &m, &o, &c](sql: &s [byte], toks: &t [int], tab: int, col: i
         }
     } else {
         var found = 0;
-        var i = 0;
+        var i = sc[5];
         while i < sc[2] {
             if has_column(sql, toks, col, schema, sc[16 + 3 * i + 2], sc) {
                 found = found + 1;
@@ -977,6 +977,7 @@ pub fn literal[&s, &t, &n, &k, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes
     sc[2] = 0;
     sc[3] = 0;
     sc[4] = 0;
+    sc[5] = 0;
     if len(sc) > 8 {
         sc[8] = 0;
     }
@@ -1412,7 +1413,17 @@ fn lower_select[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], 
             } else {
                 r0 = w8(out, sc, 1);
                 if r0 >= 0 {
+                    // an ON sees the tables of its own join and no other: those from the last comma before it up to its own (PostgreSQL: 42P01 for a table joined later or standing before the comma)
+                    var first = f;
+                    while first > 0 && sc[48 + 3 * first] != 0 {
+                        first = first - 1;
+                    }
+                    let all = sc[2];
+                    sc[5] = first;
+                    sc[2] = f + 1;
                     r0 = emit_expr(sql, toks, nodes, kids, sc[48 + 3 * f + 2], schema, rs, out, sc);
+                    sc[5] = 0;
+                    sc[2] = all;
                 }
             }
         }
@@ -1662,6 +1673,7 @@ pub fn lower[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nod
     sc[2] = 0;
     sc[3] = 0;
     sc[4] = 0;
+    sc[5] = 0;
     if len(sc) > 8 {
         sc[8] = 0;
     }

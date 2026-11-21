@@ -5,6 +5,7 @@ import cdb.commit;
 import cdb.row;
 import cdb.eval;
 import cdb.pager;
+import cdb.btree;
 import cdb.exec;
 
 // SELECT of the engine (docs/m3-engine.md 6g to 6i) over one table: the rows the WHERE lets through, their items, ORDER BY, DISTINCT, LIMIT and OFFSET; and, grouped, aggregates, GROUP BY and HAVING.
@@ -163,6 +164,17 @@ fn sort_rows[&q](w: &!q exec.Work, n: int, mode: int) -> [] int {
     return 0;
 }
 
+// Whether the expression at `at` is a constant under one or more minus signs.
+fn minus_constant[&x](e: &x [byte], at: int) -> [] bool {
+    var p = at;
+    var n = 0;
+    while p + 2 < len(e) && int_of(e[p]) == 7 && int_of(e[p + 1]) == 1 {
+        p = p + 2;
+        n = n + 1;
+    }
+    return n > 0 && int_of(e[p]) == 1;
+}
+
 // Whether a note of the lowering (a literal that is not a string or an integer) is on a `Const` between `from` and `to`.
 fn noted_in[&k](kinds: &k [int], from: int, to: int) -> [] bool {
     if len(kinds) < 142 {
@@ -252,6 +264,176 @@ fn finish[&q](w: &!q exec.Work, n0: int, distinct: bool, limit: int, offset: int
     w.first = first;
     w.count = count;
     return 0;
+}
+
+// ---- joins (docs/m3-engine.md 6k)
+
+// Whether the expression from `from` to `to` cannot raise an error whatever the rows: columns, constants, comparisons, AND, OR, NOT, IS NULL and IN.
+fn quiet[&x](e: &x [byte], from: int, to: int) -> [] bool {
+    var at = from;
+    while at < to {
+        let tag = int_of(e[at]);
+        let ok = tag == 0 || tag == 1 || tag == 8 || tag == 5 && int_of(e[at + 1]) <= 7 || tag == 7 && int_of(e[at + 1]) != 1;
+        let n = eval.node_size(e, at);
+        if !ok || n < 1 {
+            return false;
+        }
+        at = at + n;
+    }
+    return true;
+}
+
+// Before the rows of a join are read: every condition must be quiet (6k), each ON a boolean; then the rows of every table after the first are read into `jbuf`. 0 or a refusal.
+fn join_load[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int], wpos: int) -> [file_read] int {
+    let b = eval.max_nodes();
+    if wpos != 0 {
+        let (cnt, end) = eval.scan(e, wpos, contents(w.ws));
+        if cnt < 0 {
+            return exec.malformed();
+        }
+        if !quiet(e, wpos, end) {
+            return exec.unsupported();
+        }
+    }
+    exec.no_rows(w);
+    var fill = 0;
+    var n = 0;
+    var j = 1;
+    while j < w.ntab {
+        let t = exec.p_tab() + 8 * j;
+        let onpos = contents(w.pos)[t + 5];
+        if onpos != 0 {
+            let (cnt, end) = eval.scan(e, onpos, contents(w.ws));
+            if cnt < 0 {
+                return exec.malformed();
+            }
+            if !quiet(e, onpos, end) {
+                return exec.unsupported();
+            }
+            let r = exec.ev(w, e, onpos, kinds, 1);
+            if r < 0 {
+                let s = exec.stat(w, r);
+                if s < 0 {
+                    return s;
+                }
+            } else if contents(w.ws)[b] == 0 {
+                return exec.unsupported();
+            } else if contents(w.ws)[b] != 2 {
+                exec.note(w, 6);
+            }
+        }
+        // the rows of table j
+        let tid = contents(w.pos)[t];
+        let dl = contents(w.pos)[t + 7];
+        contents(w.pos)[t + 1] = n;
+        commit_key(w, tid);
+        var kl = 4;
+        var more = true;
+        while more {
+            let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+            if r == btree.not_found() {
+                more = false;
+            } else if r < 0 {
+                return exec.tree_err(r);
+            } else {
+                let nk = r / 1024;
+                let nv = r % 1024;
+                if nk < 4 || commit.be(contents(w.key2), 0, 4) != tid {
+                    more = false;
+                } else {
+                    if !row.row_ok(contents(w.ctx)[2048 * j + 64..2048 * j + 64 + dl], contents(w.cur)[0..nv]) {
+                        return exec.damaged();
+                    }
+                    if n >= exec.max_rows() || fill + 2 + nv > exec.rows_size() {
+                        return exec.too_big();
+                    }
+                    contents(w.jix)[n] = fill;
+                    contents(w.jbuf)[fill] = byte_of(nv / 256);
+                    contents(w.jbuf)[fill + 1] = byte_of(nv % 256);
+                    fill = exec.copy(contents(w.cur), 0, nv, contents(w.jbuf), fill + 2);
+                    n = n + 1;
+                    exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+                    kl = nk;
+                }
+            }
+        }
+        contents(w.pos)[t + 2] = n - contents(w.pos)[t + 1];
+        j = j + 1;
+    }
+    // the level the loop is at: 0, a row of the first table is wanted
+    contents(w.pos)[exec.p_tab()] = 0;
+    return 0;
+}
+
+fn commit_key[&q](w: &!q exec.Work, tid: int) -> [] int {
+    contents(w.key)[0] = byte_of(tid / 16777216 % 256);
+    contents(w.key)[1] = byte_of(tid / 65536 % 256);
+    contents(w.key)[2] = byte_of(tid / 256 % 256);
+    contents(w.key)[3] = byte_of(tid % 256);
+    return 0;
+}
+
+// The next row of the statement's tables, joined (a nested loop in the order they are written): its first table's row length (at least 1), -1 when there is no other, or a refusal. With one table this is
+// `exec.scan_next`.
+fn rows_next[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read] int {
+    if w.ntab == 1 {
+        return exec.scan_next(p, w, root);
+    }
+    let b = eval.max_nodes();
+    let last = w.ntab - 1;
+    var level = contents(w.pos)[exec.p_tab()];
+    var answer = 0;
+    while answer == 0 {
+        if level == 0 {
+            let rl = exec.scan_next(p, w, root);
+            if rl < 0 {
+                return rl;
+            }
+            level = 1;
+            contents(w.pos)[exec.p_tab() + 8 + 3] = 0;
+            contents(w.pos)[exec.p_tab() + 8 + 6] = 0;
+        } else {
+            let t = exec.p_tab() + 8 * level;
+            let cur = contents(w.pos)[t + 3];
+            var bound = false;
+            if cur < contents(w.pos)[t + 2] {
+                // the next row of this table, and its ON over the rows bound so far
+                let off = contents(w.jix)[contents(w.pos)[t + 1] + cur];
+                let nv = int_of(contents(w.jbuf)[off]) * 256 + int_of(contents(w.jbuf)[off + 1]);
+                exec.copy(contents(w.jbuf), off + 2, nv, contents(w.ctx), 2048 * level + 1024);
+                contents(w.cx)[6 * level + 5] = nv;
+                contents(w.pos)[t + 3] = cur + 1;
+                bound = true;
+                let onpos = contents(w.pos)[t + 5];
+                if onpos != 0 {
+                    let r = exec.ev(w, e, onpos, kinds, 1);
+                    if r < 0 {
+                        return exec.unsupported();
+                    }
+                    bound = contents(w.ws)[b + 1] == 0 && contents(w.ws)[b + 2] == 1;
+                }
+                if bound {
+                    contents(w.pos)[t + 6] = 1;
+                }
+            } else if contents(w.pos)[t + 4] == 2 && contents(w.pos)[t + 6] == 0 {
+                // a left join that no row of this table satisfied: once, with a row of nulls
+                contents(w.cx)[6 * level + 5] = 0 - 1;
+                contents(w.pos)[t + 6] = 1;
+                bound = true;
+            } else {
+                level = level - 1;
+            }
+            if bound && level == last {
+                answer = 1;
+            } else if bound {
+                level = level + 1;
+                contents(w.pos)[exec.p_tab() + 8 * level + 3] = 0;
+                contents(w.pos)[exec.p_tab() + 8 * level + 6] = 0;
+            }
+        }
+    }
+    contents(w.pos)[exec.p_tab()] = level;
+    return 1;
 }
 
 // ---- grouped queries (docs/m3-engine.md 6i)
@@ -457,8 +639,9 @@ fn set_slots[&q](w: &!q exec.Work, rec: int, real: bool) -> [] int {
 // Evaluate an expression of the group phase: no row is bound, the slots are, and the arena is filled up to `af`.
 fn gev[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], af: int) -> [] int {
     contents(w.info)[0] = af;
-    contents(w.cx)[5] = 0 - 1;
-    return eval.eval(e, at, kinds, contents(w.ctx), contents(w.cx), 1, contents(w.ws), contents(w.ar), contents(w.info));
+    exec.no_rows(w);
+    let n = w.ntab;
+    return eval.eval(e, at, kinds, contents(w.ctx), contents(w.cx), n, contents(w.ws), contents(w.ar), contents(w.info));
 }
 
 // How two stored values that are not null, of one type, in two buffers, compare.
@@ -665,8 +848,8 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
             ge = contents(w.pos)[exec.p_iend() + place - 1];
             contents(w.pos)[exec.p_grp() + i] = ga;
             contents(w.pos)[exec.p_gend() + i] = ge;
-        } else if int_of(e[ga]) == 7 && int_of(e[ga + 1]) == 1 && int_of(e[ga + 2]) == 1 {
-            // a constant with a minus is a place too, for PostgreSQL, and never one that exists
+        } else if minus_constant(e, ga) {
+            // a constant under minus signs is a constant too, for PostgreSQL (it folds them as it reads): a place, and `- - 1` the first one
             return exec.unsupported();
         }
         if has_call(e, ga, ge) {
@@ -677,8 +860,8 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
         while int_of(e[inner]) == 10 {
             inner = inner + eval.node_size(e, inner);
         }
-        if int_of(e[inner]) == 0 && inner != ga {
-            // a column under a cast: whether naming the column elsewhere is then an error is not decided here
+        if int_of(e[inner]) == 0 && (inner != ga || w.ntab > 1) {
+            // a column under a cast, or a column in a join (it may be the key of its table): whether naming a column elsewhere is then an error is not decided here
             keyed = true;
         } else if int_of(e[ga]) == 0 {
             // a column of the key: PostgreSQL then lets every column of the table be named
@@ -760,7 +943,7 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
     if rw < 0 {
         return rw;
     }
-    contents(w.cx)[5] = 0 - 1;
+    exec.no_rows(w);
     i = 0;
     while i < ng {
         let r = exec.ev(w, e, contents(w.pos)[exec.p_grp() + i], kinds, 1);
@@ -878,7 +1061,7 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
     exec.scan_start(w);
     var more = true;
     while more {
-        let rl = exec.scan_next(p, w, root);
+        let rl = rows_next(p, w, root, e, kinds);
         if rl == 0 - 1 {
             more = false;
         } else if rl < 0 {
@@ -1029,15 +1212,39 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if at + 4 > len(e) {
         return exec.malformed();
     }
-    if commit.be(e, at, 4) != 1 {
-        // joins: not in this slice
+    let nt = commit.be(e, at, 4);
+    if nt < 1 || nt > exec.max_tables() {
         return exec.unsupported();
     }
     let name_at = at + 4;
-    if name_at + 2 > len(e) {
-        return exec.malformed();
+    at = name_at;
+    i = 0;
+    while i < nt {
+        // a table: its name, how it is joined, its ON (kept in `pos` until the tables are bound)
+        if at + 2 > len(e) || at + 2 + commit.be(e, at, 2) + 2 > len(e) {
+            return exec.malformed();
+        }
+        let t = exec.p_tab() + 8 * i;
+        contents(w.pos)[t + 1] = at;
+        at = at + 2 + commit.be(e, at, 2);
+        let kind = int_of(e[at]);
+        contents(w.pos)[t + 4] = kind;
+        contents(w.pos)[t + 5] = 0;
+        if kind > 2 {
+            return exec.unsupported();
+        }
+        if int_of(e[at + 1]) == 1 {
+            let (cnt, end) = eval.scan(e, at + 2, contents(w.ws));
+            if cnt < 0 {
+                return exec.malformed();
+            }
+            contents(w.pos)[t + 5] = at + 2;
+            at = end;
+        } else {
+            at = at + 2;
+        }
+        i = i + 1;
     }
-    at = name_at + 2 + commit.be(e, name_at, 2) + 2;
     if at >= len(e) {
         return exec.malformed();
     }
@@ -1118,7 +1325,8 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                 return exec.unsupported();
             }
             slot = place - 1;
-        } else if int_of(e[at]) == 7 && int_of(e[at + 1]) == 1 && int_of(e[at + 2]) == 1 {
+        } else if minus_constant(e, at) {
+            // PostgreSQL folds the minus signs into the constant as it reads, and the result is a place (`- - 1` is the first item)
             return exec.unsupported();
         } else {
             // the same expression as an item is that item
@@ -1156,6 +1364,21 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     let r0 = exec.bind_table(p, w, root, e, name_at);
     if r0 != 0 {
         return r0;
+    }
+    i = 1;
+    while i < nt {
+        let t = exec.p_tab() + 8 * i;
+        let r = exec.bind_join(p, w, root, e, contents(w.pos)[t + 1], i, contents(w.pos)[t + 4], contents(w.pos)[t + 5]);
+        if r != 0 {
+            return r;
+        }
+        i = i + 1;
+    }
+    if nt > 1 {
+        let r = join_load(p, w, root, e, kinds, wpos);
+        if r < 0 {
+            return r;
+        }
     }
     var calls = false;
     i = 0;
@@ -1202,7 +1425,7 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if rw < 0 {
         return rw;
     }
-    contents(w.cx)[5] = 0 - 1;
+    exec.no_rows(w);
     i = 0;
     while i < no {
         if contents(w.pos)[exec.p_oval() + i] >= ni {
@@ -1248,7 +1471,7 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     exec.scan_start(w);
     var more = true;
     while more {
-        let rl = exec.scan_next(p, w, root);
+        let rl = rows_next(p, w, root, e, kinds);
         if rl == 0 - 1 {
             more = false;
         } else if rl < 0 {
