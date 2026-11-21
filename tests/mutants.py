@@ -1505,7 +1505,8 @@ BTREE = [
     ("btree: a leaf may be made fuller than a page", "src/btree.cho", "    if 7 + total <= 4096 {\n        emit_at(sc, w2(), 1, ncount, w1(), total);", "    if 7 + total <= 4200 {\n        emit_at(sc, w2(), 1, ncount, w1(), total);"),
     ("btree: the last entry of a leaf is not dropped from its parent", "src/btree.cho", "var removed = count == 1;", "var removed = count == 0;"),
     ("btree: a page with one child that is deleted stays", "src/btree.cho", "if removed && pcount == 0 {", "if false {"),
-    ("btree: the key of child 0 is kept when it is deleted", "src/btree.cho", "                    pat = pat + 5 + kl0;\n                    e = 2;", "                    pat = pat + 5 + kl0;\n                    e = 1;"),
+    # (`e = 1` there is an equivalent mutant: it copies one more entry, of zeros, past the count the page states, and the count is what is read)
+    ("btree: deleting the first child also drops the next entry", "src/btree.cho", "                    pat = pat + 5 + kl0;\n                    e = 2;", "                    pat = pat + 5 + kl0;\n                    e = 3;"),
     ("btree: a value's length is one byte", "src/btree.cho", "    build.put_be(sc, at + 1, len(vbytes), 2);", "    build.put_be(sc, at + 1, len(vbytes), 1);"),
     ("btree: a value of 801 bytes is taken", "src/btree.cho", "len(vbytes) > max_value()", "len(vbytes) > 900"),
     ("btree: a key of 201 bytes is taken", "src/btree.cho", "len(key) > max_key()", "len(key) > 300"),
@@ -1514,7 +1515,6 @@ BTREE = [
     ("btree: a scan takes the nearest right sibling it saw first", "src/btree.cho", "                if al != 0 {\n                    alt = al;\n                }", "                if al != 0 && alt == 0 {\n                    alt = al;\n                }"),
     ("pager: the CRC of a page is not checked", "src/pager.cho", "    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {\n        return 0 - 2;\n    }", ""),
     ("pager: the CRC is checked over less than the page", "src/pager.cho", "    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {", "    if crc.crc32_of(out[7..4000]) != commit.be(out, 3, 4) {"),
-    ("pager: a page short of its length is accepted", "src/pager.cho", "            Read::End => {\n                return 0 - 2;\n            }\n            Read::Failed(e) => {\n                return 0 - 1;\n            }\n        }\n    }\n    if crc", "            Read::End => {\n                got = 4096;\n            }\n            Read::Failed(e) => {\n                return 0 - 1;\n            }\n        }\n    }\n    if crc"),
 ]
 
 

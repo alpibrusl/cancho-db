@@ -110,28 +110,37 @@ def main():
             bad = [(i, a, w) for i, (a, w) in enumerate(zip(out, want + tail_want)) if not (a == w or (w == "ok" and a.startswith("ok ")))]
             check("seed %d: %d commands and %d scan steps all answer as the model does" % (seed, len(lines), len(tail)), not bad, bad[:2] + [(lines + tail)[bad[0][0]] if bad else ""])
 
-    # a tree of three levels
+    # a tree of three levels (100-byte keys: about 39 to a page, so 40,000 of them need internal pages of internal pages, and internal splits)
     rng = random.Random(7)
+    ks = sorted({rng.randbytes(100) for _ in range(40000)})
+    order = list(ks)
+    rng.shuffle(order)
     with tempfile.TemporaryDirectory() as d:
-        path = os.path.join(d, "pages")
-        ks = sorted({rng.randrange(10 ** 9).to_bytes(5, "big") for _ in range(60000)})
-        order = list(ks)
-        rng.shuffle(order)
-        lines = ["put 0 %s %s" % (k.hex(), k[:2].hex()) for k in order]
-        out, rc = run(path, lines + ["steps"])
-        check("60,000 small entries: every put answers ok", rc == 0 and all(a.startswith("ok ") for a in out[:-1]), out[:2])
-        sample = rng.sample(ks, 300)
-        out, rc = run(path, lines + ["get 0 %s" % k.hex() for k in sample] + ["next 0 %s 0" % ks[i].hex() for i in range(0, 60000, 997)])
-        tail = out[len(lines):]
-        check("... and 300 gets and a scan sample answer as the model does", all(tail[i] == "val " + sample[i][:2].hex() for i in range(300)) and
-              all(tail[300 + j] == ("kv %s %s" % (ks[i + 1].hex(), ks[i + 1][:2].hex()) if i + 1 < len(ks) else "none") for j, i in enumerate(range(0, 60000, 997))), tail[:2])
-        size = os.path.getsize(path)
-        check("... in a file that is a whole number of pages", size % 4096 == 0, size)
-        # deleting every key leaves the empty tree
-        dels = ["del 0 %s" % k.hex() for k in order[:3000]]
-        small = ["put 0 %s 01" % k.hex() for k in order[:3000]] + dels + ["next 0 - 1", "root 0"]
-        out, rc = run(os.path.join(d, "pages2"), small)
-        check("3,000 puts and the 3,000 deletes leave the empty tree", out[-2] == "none" and out[-1] == "root 0", out[-3:])
+        puts = ["put 0 %s %s" % (k.hex(), k[:2].hex()) for k in order]
+        gets = ["get 0 %s" % k.hex() for k in ks]
+        scan = ["next 0 - 1"] + ["next 0 %s 0" % k.hex() for k in ks]
+        out, rc = run(os.path.join(d, "pages"), puts + gets + scan)
+        check("%d entries of 100 bytes: every put answers ok" % len(ks), rc == 0 and all(a.startswith("ok ") for a in out[:len(puts)]), out[:2])
+        check("... every get answers right", out[len(puts):len(puts) + len(ks)] == ["val " + k[:2].hex() for k in ks])
+        want = ["kv %s %s" % (k.hex(), k[:2].hex()) for k in ks] + ["none"]
+        check("... and a scan from the empty key in order gives every key, once, in key order, and then nothing", out[len(puts) + len(ks):] == want, [a for a, w in zip(out[len(puts) + len(ks):], want) if a != w][:1])
+        check("... in a file that is a whole number of pages", os.path.getsize(os.path.join(d, "pages")) % 4096 == 0)
+        # delete every key, in key order (subtrees empty from the left, one page at a time) and in reverse (from the right); the smallest remaining key is asked for now and then
+        for name, seq in (("in key order", ks), ("in reverse", ks[::-1])):
+            lines = ["put 0 %s 01" % k.hex() for k in ks]
+            expect = []
+            for n, k in enumerate(seq):
+                lines.append("del 0 %s" % k.hex())
+                expect.append("ok")
+                if n % 997 == 0 or n >= len(seq) - 3:
+                    rest = sorted(seq[n + 1:])
+                    lines.append("next 0 - 1")
+                    expect.append("kv %s 01" % rest[0].hex() if rest else "none")
+            lines.append("root 0")
+            out, rc = run(os.path.join(d, "del-" + name.replace(" ", "")), lines)
+            tail = out[len(ks):]
+            check("deleting all %d keys %s: every answer is the model's and the tree ends empty (root 0)" % (len(ks), name), [t if t == "ok" or not t.startswith("ok ") else "ok" for t in tail[:-1]] == expect and tail[-1] == "root 0",
+                  [(a, w) for a, w in zip(tail, expect) if a != w][:2] + tail[-1:])
 
     # copy-on-write: a fork keeps the old tree whole
     with tempfile.TemporaryDirectory() as d:
