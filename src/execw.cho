@@ -63,7 +63,7 @@ fn null_in[&q, &r](w: &!q exec.Work, r: &r [byte]) -> [] bool {
 fn tree_key[&q, &r](w: &!q exec.Work, r: &r [byte]) -> [] int {
     let dl = w.dlen;
     build.put_be(contents(w.key2), 0, w.tid, 4);
-    let n = row.stored_key(contents(w.ctx)[64..64 + dl], r, contents(w.key2)[4..btree.max_key()]);
+    let n = row.stored_key(contents(w.ctx)[64..64 + dl], r, contents(w.key2)[4..4 + exec.max_stored_key()]);
     if n < 0 {
         return 0 - 1;
     }
@@ -220,7 +220,7 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                 }
                 if from >= 0 {
                     let l = tables.stored_len(contents(w.tmp), from);
-                    if ra + l > 800 {
+                    if ra + l > exec.max_stored_row() {
                         return exec.too_big();
                     }
                     ra = exec.copy(contents(w.tmp), from, l, contents(w.nrow), ra);
@@ -228,14 +228,14 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                     let el = w.elen;
                     let da = tables.default_at(contents(w.ent)[0..el], c);
                     if da < 0 {
-                        if ra + 1 > 800 {
+                        if ra + 1 > exec.max_stored_row() {
                             return exec.too_big();
                         }
                         contents(w.nrow)[ra] = byte_of(0);
                         ra = ra + 1;
                     } else {
                         let l = tables.stored_len(contents(w.ent), da);
-                        if ra + l > 800 {
+                        if ra + l > exec.max_stored_row() {
                             return exec.too_big();
                         }
                         ra = exec.copy(contents(w.ent), da, l, contents(w.nrow), ra);
@@ -284,9 +284,9 @@ fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int) 
         if g != btree.not_found() {
             return exec.tree_err(g);
         }
-        let nw = btree.put(p, contents(w.sc), nroot, contents(w.key2)[0..kl], contents(w.cur)[0..rl]);
+        let nw = exec.put_key(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl]);
         if nw < 0 {
-            return exec.tree_err(nw);
+            return nw;
         }
         nroot = nw;
         let cr = exec.change(w, contents(w.cur)[0..0], false, contents(w.cur)[0..rl], true);
@@ -442,12 +442,12 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                         }
                         if from >= 0 {
                             let l = tables.stored_len(contents(w.tmp), from);
-                            if ra + l > 800 {
+                            if ra + l > exec.max_stored_row() {
                                 return exec.too_big();
                             }
                             ra = exec.copy(contents(w.tmp), from, l, contents(w.nrow), ra);
                         } else {
-                            if ra + ol > 800 {
+                            if ra + ol > exec.max_stored_row() {
                                 return exec.too_big();
                             }
                             ra = exec.copy(contents(w.cur), oa, ol, contents(w.nrow), ra);
@@ -472,9 +472,9 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                         moved = !exec.same(contents(w.key), 0, okl, contents(w.key2), 0, kl);
                     }
                     if !moved {
-                        let nw = btree.put(p, contents(w.sc), nroot, contents(w.key)[0..okl], contents(w.nrow)[0..ra]);
+                        let nw = exec.put_key(p, w, nroot, contents(w.key), okl, contents(w.nrow)[0..ra]);
                         if nw < 0 {
-                            return exec.tree_err(nw);
+                            return nw;
                         }
                         nroot = nw;
                         let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.nrow)[0..ra], true);
@@ -603,12 +603,12 @@ fn settle[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nroot: int, s
                 exec.copy(contents(w.key2), 1, nk - 1, contents(w.tmp), 65540);
                 var nw = 0;
                 if pass == 0 {
-                    nw = btree.del(p, contents(w.sc), out, contents(w.tmp)[65536..65539 + nk]);
+                    nw = exec.del_key(p, w, out, contents(w.tmp)[65536..65539 + nk], 3 + nk);
                 } else {
-                    nw = btree.put(p, contents(w.sc), out, contents(w.tmp)[65536..65539 + nk], contents(w.cur)[0..nv]);
+                    nw = exec.put_key(p, w, out, contents(w.tmp)[65536..65539 + nk], 3 + nk, contents(w.cur)[0..nv]);
                 }
                 if nw < 0 {
-                    return exec.tree_err(nw);
+                    return nw;
                 }
                 out = nw;
             }
@@ -665,9 +665,9 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
             }
             if pass == 1 {
                 let kl = w.klen;
-                let nw = btree.del(p, contents(w.sc), nroot, contents(w.key)[0..kl]);
+                let nw = exec.del_key(p, w, nroot, contents(w.key), kl);
                 if nw < 0 {
-                    return exec.tree_err(nw);
+                    return nw;
                 }
                 nroot = nw;
                 let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);
@@ -683,6 +683,74 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     }
     if w.code != 0 {
         return exec.verdict(w);
+    }
+    w.root = nroot;
+    return 0;
+}
+
+// Erase a row and its past (docs/m3-engine.md 6n): `e` is a DELETE whose WHERE is `<the key> = <a constant>` and nothing else. The row is removed with no history entry made for it, and every history
+// entry of its key is removed: AS OF any transaction the row is then not there, and after two commits and a sweep (6c) no page of the file holds it. On 0 `count_of` is the row (0 or 1) plus the entries
+// removed. A row that was moved to another key by an UPDATE has entries under each key it had: each is erased by its own key.
+pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 3 || int_of(e[0]) != 3 {
+        return exec.unsupported();
+    }
+    let r0 = exec.bind_table(p, w, root, e, 1);
+    if r0 != 0 {
+        return r0;
+    }
+    let at = 3 + w.nlen;
+    if at + 1 >= len(e) || int_of(e[at]) != 1 {
+        return exec.unsupported();
+    }
+    let rw = exec.where_static(w, e, kinds, at + 1);
+    if rw < 0 {
+        return rw;
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    let kn = w.lon;
+    if w.nconj != 1 || kn < 0 || w.hin != kn || !exec.same(contents(w.lo), 0, kn, contents(w.hi), 0, kn) {
+        return exec.unsupported();
+    }
+    // the key in the tree, in `tmp` from 65536
+    build.put_be(contents(w.tmp), 65536, w.tid, 4);
+    exec.copy(contents(w.lo), 0, kn, contents(w.tmp), 65540);
+    var nroot = root;
+    let d = btree.del(p, contents(w.sc), nroot, contents(w.tmp)[65536..65540 + kn]);
+    if d >= 0 {
+        nroot = d;
+        w.count = 1;
+    } else if d != btree.not_found() {
+        return exec.tree_err(d);
+    }
+    build.put_be(contents(w.key), 0, 4294967295, 4);
+    var kl = 4;
+    var more = true;
+    while more {
+        let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return exec.tree_err(r);
+        } else {
+            let nk = r / 1024;
+            if nk < 12 || commit.be(contents(w.key2), 0, 4) != 4294967295 {
+                return exec.damaged();
+            }
+            if exec.same(contents(w.key2), 12, nk - 12, contents(w.tmp), 65536, 4 + kn) {
+                let nw = btree.del(p, contents(w.sc), nroot, contents(w.key2)[0..nk]);
+                if nw < 0 {
+                    return exec.tree_err(nw);
+                }
+                nroot = nw;
+                w.count = w.count + 1;
+            }
+            exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+            kl = nk;
+        }
     }
     w.root = nroot;
     return 0;
@@ -832,7 +900,7 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
             contents(w.tmp)[xa] = byte_of(marks);
             xa = xa + 1;
         }
-        if da + xa > 800 {
+        if da + xa > exec.max_stored_row() {
             return exec.too_big();
         }
         c = c + 1;
@@ -853,7 +921,17 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     if w.code != 0 {
         return exec.verdict(w);
     }
-    let nw = tables.create(p, contents(w.sc), root, e[4..4 + nl], contents(w.key), contents(w.ent)[0..total]);
+    // the counter of table numbers and the table's entry are keys of the tree like any other: their history is kept
+    let ekl = tables.entry_key(e[4..4 + nl], contents(w.key));
+    let r1 = exec.remember(p, w, root, contents(w.key), 4);
+    if r1 < 0 {
+        return r1;
+    }
+    let r2 = exec.remember(p, w, r1, contents(w.key), ekl);
+    if r2 < 0 {
+        return r2;
+    }
+    let nw = tables.create(p, contents(w.sc), r2, e[4..4 + nl], contents(w.key), contents(w.ent)[0..total]);
     if nw < 0 {
         return exec.tree_err(nw);
     }
@@ -882,15 +960,21 @@ pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
             return rl;
         } else {
             let kl = w.klen;
-            let nw = btree.del(p, contents(w.sc), nroot, contents(w.key)[0..kl]);
+            let nw = exec.del_key(p, w, nroot, contents(w.key), kl);
             if nw < 0 {
-                return exec.tree_err(nw);
+                return nw;
             }
             nroot = nw;
         }
     }
     let nl = w.nlen;
-    let nw = tables.remove(p, contents(w.sc), nroot, e[4..4 + nl], contents(w.key));
+    // the table's entry in the catalog is a key of the tree like any other: its history is kept, so the table is there AS OF before
+    let ekl = tables.entry_key(e[4..4 + nl], contents(w.key));
+    let rm = exec.remember(p, w, nroot, contents(w.key), ekl);
+    if rm < 0 {
+        return rm;
+    }
+    let nw = tables.remove(p, contents(w.sc), rm, e[4..4 + nl], contents(w.key));
     if nw < 0 {
         return exec.tree_err(nw);
     }

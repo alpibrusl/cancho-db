@@ -107,7 +107,7 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 | **M3f** (built, 6i and 6j: `count`, `sum`, `min`, `max`) | aggregates and `group by`, `having` | gate 4 |
 | **M3g** (built, 6k and 6l: nested loop; inner and left) | joins (nested loop first) | gate 4 |
 | **M3h** | `alter table`, `create index` (an index is a second tree) | gate 4 on the catalog after each |
-| **M3i** | native `cancho_fork`, `AS OF`, `cancho_merge`, `cancho_erase` on the engine | the existing fork, as-of, merge and erase end-to-end suites pass on it |
+| **M3i** (6n and 6o: the history, `AS OF`, a fork and an erase are built in the engine and its harness; merge and the proxy's functions are not) | native `cancho_fork`, `AS OF`, `cancho_merge`, `cancho_erase` on the engine | the existing fork, as-of, merge and erase end-to-end suites pass on it |
 | **M3j** | the shadow run, then a database option to serve from the engine | gate 5, then the full gate on the engine for one database |
 
 ## 6b. M3a, built
@@ -404,6 +404,45 @@ use of the engine (M3j). Nothing in the entries depends on that.
 
 **Gate.** At random points of the random history of 6h the tables are read; later, `AS OF` each of those points must read the same bytes, also from a new process after a commit, after a sweep, and on
 a fork. Erasure and merge are M3i and are not claimed by this.
+
+## 6o. The history, built: AS OF, a fork, an erase; and what the test corrected
+
+`remember`, `put_key`, `del_key`, `as_of`, `last_txn` and `mark_txn` in `src/exec.cho`; `erase` in `src/execw.cho`; `!txn`, `!asof`, `!fork`, `!branch` and `!erase` in the harness.
+
+**AS OF.** A random history of some 300 writes (inserts, updates that move keys, deletes, tables dropped and made again under the same name) is cut at 11 points where every table is read. Later each
+point is read again with `!asof`: by another process after a commit; after a sweep and more writes; on a fork that has since been written to (12 points, the fork's own included); and on the branch the
+fork was made from, which is byte for byte as it was. All equal, on 16 seeds. A statement that writes while the past is being read is refused (`engine-as-of-write`).
+
+**A fork is a copied root** (`!fork` copies a slot of the catalog): its cost is nothing and its history is the branch's, because the history is in the tree (D-M3-9).
+
+**An erase** (`!erase delete from T where KEY = CONSTANT`) removes the row, with no entry made for its removal, and every entry of its key. Checked on the file's bytes and on what is read: a row that was
+updated and a row that was deleted are both still in the file after two commits and a sweep (their past is history, and `AS OF` reads it); after their keys are erased and two commits and a sweep, no
+byte of either is in the file, `AS OF` any earlier transaction they are not there, and a third row that was not erased still has its past. An erase with any other `where` is refused.
+
+**This corrects 6h and claim C152**, which said a deleted row is gone from the file two commits and a sweep later. That was true of an engine with no history; with one, *a `delete` is not an erasure*,
+which is the product's point and also what the capture does in front of PostgreSQL (`m2g-erasure.md`). The test that held the old claim failed the moment the history was switched on, and now holds the
+new one.
+
+**What the erase test found in the design:** the number of a branch's last transaction was read off its newest history entry. Erasing the newest entries made the next statement take a number that had
+been used, and `AS OF` that number then read the wrong state. The number is now kept in the tree by itself (under the history's prefix alone, before every entry) and never derived.
+
+**Measured, with the history on** (as 6h: one process, no `fsync` between statements; 6h's own numbers are from before it):
+
+| | before (6h) | with the history |
+|---|---|---|
+| 20,000 inserts, one a statement | 4.1 s (4,900 a second) | 11.1 s (1,800 a second) |
+| the page file after them | 192 MiB | 633 MiB: 32 KiB a row |
+| an update of every row | 2.7 s | 6.7 s |
+| a sweep after it | 0.8 s | 2.2 s, 281,162 pages (1.1 GiB) freed |
+| the tables AS OF 10,000 transactions back, twice | | 7.4 s |
+
+So the history costs what 6n said and more: a single-row insert now writes three paths of pages (the entry, the row, the number) where it wrote one, and none is reused before a sweep. **The engine is
+correct and wasteful**; the remedy is the one 6h names (a page written by the statement in progress can be written again in place, since no root names it yet), and it is the next thing to build before
+anything is served from this.
+
+**Not built, and not claimed:** transactions of several statements (a statement is one; the rule that a transaction's first value of a key is the one kept is written and has no test, since no statement
+writes a key twice); merge; erasing the past of a table that was dropped (the erase finds a table by its name: erase the keys first); a retention rule (the history only grows); the log's commit ids
+in place of the harness's transaction numbers (M3j).
 
 ## 7. Taking over, safely
 

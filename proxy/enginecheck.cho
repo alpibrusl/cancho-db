@@ -20,6 +20,11 @@ import cdb.execw;
 //     !commit        make the statements so far durable (src/pstore.cho)      -> `committed SEQ` or `err CODE`
 //     !sweep         zero and reuse the pages nothing names                   -> `swept N` or `err CODE`
 //     !steps         how many writes and syncs the page file has seen         -> `steps N`
+//     !txn           the number of the branch's last transaction (6n)                 -> `txn N`
+//     !asof N        statements read the branch as it was after transaction N (`-`: as it is)  -> `asof N`
+//     !erase DELETE  the row that `delete from T where KEY = CONSTANT` names, and its history (6n)   -> `ok ERASE N`
+//     !fork S        slot S becomes the same tree as the branch                -> `forked`
+//     !branch S      statements go to slot S (the branch is slot 0 at start)   -> `branch`
 //     !mark          nothing                                                  -> `mark` (a separator for a test that reads the output)
 //     anything else  one SQL statement, which is run and, if it is done, becomes the state the next one sees
 //
@@ -182,7 +187,7 @@ fn put_changes[&i, &q](io: &!i Io, w: &!q exec.Work) -> [io_write] int {
 }
 
 // Run one statement over the tree `root`: the tree after it (`root` itself unless the statement is done).
-fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, sql: &s [byte], root: int) -> [heap, io_write, file_read, file_write] int {
+fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, sql: &s [byte], root: int, mode: int) -> [heap, io_write, file_read, file_write] int {
     let cap = len(sql) + 4;
     var tb = box_slice(heap, 4 * cap, 0);
     var nb = box_slice(heap, 6 * (cap + 64), 0);
@@ -237,7 +242,14 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                             } else {
                                                                 let e = contents(iw)[0..ln];
                                                                 kind = int_of(e[0]);
-                                                                if kind == 6 {
+                                                                if mode == 1 && kind != 6 {
+                                                                    // the tree read AS OF a transaction is not one to write to
+                                                                    put_str(io, "refused engine-as-of-write");
+                                                                    named = true;
+                                                                } else if mode == 2 {
+                                                                    rc = execw.erase(pg, w, root, e, contents(xw));
+                                                                    kind = 9;
+                                                                } else if kind == 6 {
                                                                     rc = execs.select(pg, w, root, e, contents(xw));
                                                                 } else if kind == 1 {
                                                                     rc = execw.insert(pg, w, root, e, contents(xw));
@@ -274,6 +286,8 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                                 put_str(io, "UPDATE ");
                                                             } else if kind == 3 {
                                                                 put_str(io, "DELETE ");
+                                                            } else if kind == 9 {
+                                                                put_str(io, "ERASE ");
                                                             } else if kind == 7 {
                                                                 put_str(io, "CREATE ");
                                                             } else {
@@ -283,7 +297,7 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                             putchar(io, '\n');
                                                             if kind == 6 {
                                                                 put_rows(io, w);
-                                                            } else {
+                                                            } else if kind != 9 {
                                                                 put_changes(io, w);
                                                             }
                                                             put_str(io, ".");
@@ -335,10 +349,45 @@ fn starts[&a](all: &a [byte], ls: int, le: int, word: &static [byte]) -> [] bool
     return true;
 }
 
+// Whether the line begins with `word` and goes on.
+fn begins[&a](all: &a [byte], ls: int, le: int, word: &static [byte]) -> [] bool {
+    if le - ls <= len(word) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if int_of(all[ls + i]) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The digits from `from` to `to` as a number (-1 if there is anything else, or too much).
+fn number[&a](all: &a [byte], from: int, to: int) -> [] int {
+    var v = 0;
+    var i = from;
+    if to <= from || to - from > 15 {
+        return 0 - 1;
+    }
+    while i < to {
+        let c = int_of(all[i]);
+        if c < '0' || c > '9' {
+            return 0 - 1;
+        }
+        v = v * 10 + c - '0';
+        i = i + 1;
+    }
+    return v;
+}
+
 fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, all: &a [byte]) -> [heap, io_write, file_read, file_write] int {
     var roots = box_slice(heap, 16, 0);
     var seq = 0;
     var status = 0;
+    var cur = 0;
+    var view = 0 - 1;
     borrow mut roots as &!rw in {
         let rs = contents(rw);
         seq = pstore.load(pg, exec.scratch(w), rs);
@@ -383,8 +432,71 @@ fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &
                 put_str(io, "steps ");
                 put_int(io, pager.steps(pg));
                 putchar(io, '\n');
+            } else if starts(all, ls, le, "!txn") {
+                put_str(io, "txn ");
+                put_int(io, exec.last_txn(pg, w, rs[cur]));
+                putchar(io, '\n');
+            } else if begins(all, ls, le, "!asof ") {
+                if int_of(all[ls + 6]) == '-' {
+                    view = 0 - 1;
+                    put_str(io, "asof -\n");
+                } else {
+                    let t = number(all, ls + 6, le);
+                    view = exec.as_of(pg, w, rs[cur], t);
+                    if view < 0 {
+                        put_str(io, "err ");
+                        put_int(io, view);
+                        view = 0 - 1;
+                    } else {
+                        put_str(io, "asof ");
+                        put_int(io, t);
+                    }
+                    putchar(io, '\n');
+                }
+            } else if begins(all, ls, le, "!erase ") {
+                // the row a `delete from T where KEY = CONSTANT` names, and its past
+                if view < 0 {
+                    rs[cur] = run_sql(heap, io, pg, w, all[ls + 7..le], rs[cur], 2);
+                }
+            } else if begins(all, ls, le, "!fork ") {
+                let to = number(all, ls + 6, le);
+                if to >= 0 && to < 16 {
+                    rs[to] = rs[cur];
+                    put_str(io, "forked\n");
+                }
+            } else if begins(all, ls, le, "!branch ") {
+                let to = number(all, ls + 8, le);
+                if to >= 0 && to < 16 {
+                    cur = to;
+                    view = 0 - 1;
+                    put_str(io, "branch\n");
+                }
             } else if le > ls {
-                rs[0] = run_sql(heap, io, pg, w, all[ls..le], rs[0]);
+                if view >= 0 {
+                    run_sql(heap, io, pg, w, all[ls..le], view, 1);
+                } else {
+                    // a statement that writes is the branch's next transaction (one that fails leaves the tree, and so the number, as they were)
+                    let last = exec.last_txn(pg, w, rs[cur]);
+                    if last < 0 {
+                        put_str(io, "err ");
+                        put_int(io, last);
+                        putchar(io, '\n');
+                    } else {
+                        exec.set_txn(w, last + 1);
+                        let after = run_sql(heap, io, pg, w, all[ls..le], rs[cur], 0);
+                        if after != rs[cur] {
+                            // the statement wrote: its number is used
+                            let marked = exec.mark_txn(pg, w, after, last + 1);
+                            if marked < 0 {
+                                put_str(io, "err ");
+                                put_int(io, marked);
+                                putchar(io, '\n');
+                            } else {
+                                rs[cur] = marked;
+                            }
+                        }
+                    }
+                }
             }
             if pager.crashed(pg) {
                 // the crash point was reached (the test hook of src/pager.cho): nothing more is written, as if the process had died there

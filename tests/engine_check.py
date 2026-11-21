@@ -850,27 +850,161 @@ def order_dependent(pg):
     return notes
 
 
+def history(seed):
+    """AS OF (docs/m3-engine.md 6n): what the tables held at a point of a random history of writes is what `!asof` reads there later: from another process after a commit, after a sweep and more writes,
+    and on a fork that has gone its own way; and the branch that was forked from is as it was."""
+    rng = random.Random(seed * 7919 + 5)
+    g = Gen(rng)
+    names = ["ta", "tb", "tc"]
+    dumps = ["select * from %s order by k" % n for n in names]
+    tables = {}
+    lines = []
+    for name in names[:2]:
+        tables[name] = g.table(name)
+        lines.append(tables[name].ddl())
+
+    def writes(n):
+        out = []
+        while len(out) < n:
+            g.t = tables[rng.choice(sorted(tables))]
+            r = rng.random()
+            if r < 0.03:
+                name = rng.choice(names)
+                if name in tables:
+                    out.append("drop table %s" % name)
+                tables[name] = g.table(name)
+                out.append(tables[name].ddl())
+            elif r < 0.55:
+                out.append(g.insert())
+            elif r < 0.85:
+                out.append(g.update())
+            else:
+                out.append(g.delete())
+        return out
+
+    def checkpoint():
+        return ["!txn", "!mark"] + dumps + ["!mark"]
+
+    def read(out):
+        """the `txn` numbers and the blocks between pairs of marks"""
+        txns = [int(l.split()[1]) for l in out.split("\n") if l.startswith("txn ")]
+        blocks, cur, inside = [], [], False
+        for l in out.split("\n"):
+            if l == "mark":
+                if inside:
+                    blocks.append("\n".join(cur))
+                cur, inside = [], not inside
+            elif inside:
+                cur.append(l)
+        return txns, blocks
+
+    def run(path, script):
+        r = subprocess.run([EXE, path], input="\n".join(script) + "\n", capture_output=True, text=True)
+        if r.returncode != 0 or "\nerr " in r.stdout or "engine-damaged" in r.stdout or "engine-io" in r.stdout:
+            raise SystemExit("engine_check: history: status %d: %s" % (r.returncode, r.stdout[-300:]))
+        return read(r.stdout)
+
+    def asof(points):
+        script = []
+        for t, _ in points:
+            script += ["!asof %d" % t, "!mark"] + dumps + ["!mark"]
+        return script + ["!asof -"]
+
+    def check(what, points, blocks):
+        if len(blocks) != len(points):
+            raise SystemExit("engine_check: history, %s: %d answers for %d points" % (what, len(blocks), len(points)))
+        for (t, want), got in zip(points, blocks):
+            if got != want:
+                raise SystemExit("engine_check: history, %s: AS OF transaction %d the tables are not what they were then\n     then: %s\n     now:  %s" % (what, t, want[:300], got[:300]))
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "history.db")
+        script = list(lines)
+        for _ in range(8):
+            script += writes(25) + checkpoint()
+        txns, blocks = run(path, script + ["!commit"])
+        points = list(zip(txns, blocks))
+        if len(points) != 8 or len(set(txns)) < 6:
+            raise SystemExit("engine_check: history: the transactions did not advance: %s" % txns)
+        # the same process cannot have been asked (the numbers were not known): another one, after the commit
+        _, got = run(path, asof(points))
+        check("after a commit, from another process", points, got)
+        # a sweep, more writes, more points: the old points still read the same, and so do the new
+        script = ["!sweep"]
+        for _ in range(3):
+            script += writes(25) + checkpoint()
+        txns, blocks = run(path, script + ["!commit", "!sweep"])
+        points += list(zip(txns, blocks))
+        _, got = run(path, asof(points) + ["!mark"] + dumps + ["!mark"])
+        check("after a sweep and more writes", points, got[:-1])
+        tip = got[-1]
+        if tip != points[-1][1]:
+            raise SystemExit("engine_check: history: after `!asof -` the tables are not the tip's")
+        # a fork goes its own way: its history up to the fork is the branch's, and the branch is untouched
+        script = ["!fork 1", "!branch 1"] + writes(40) + checkpoint()
+        txns, blocks = run(path, script + ["!commit"])
+        forked = points + list(zip(txns, blocks))
+        _, got = run(path, ["!branch 1"] + asof(forked) + ["!branch 0", "!mark"] + dumps + ["!mark"] + asof(points))
+        check("on a fork", forked, got[:len(forked)])
+        if got[len(forked)] != tip:
+            raise SystemExit("engine_check: history: the branch changed when its fork was written to")
+        check("on the branch, after its fork was written to", points, got[len(forked) + 1:])
+        # nothing may be written while the past is being read
+        r = subprocess.run([EXE, path], input="!asof %d\ninsert into ta (k) values (1)\n" % points[0][0], capture_output=True, text=True)
+        if "refused engine-as-of-write" not in r.stdout:
+            raise SystemExit("engine_check: history: a write AS OF a past transaction: %s" % r.stdout[-200:])
+        return len(points), len(forked)
+
+
 def erasure():
-    """What a DELETE or a DROP TABLE removed is gone from the page file two commits and a sweep later (docs/m3-engine.md 6c, D-M3-2), and what was not removed is still there."""
-    one, two = "MARKER-ROW-ONE-xyzzy", "MARKER-ROW-TWO-plugh"
+    """A DELETE keeps the row in the history (it is read AS OF before it); an erase of its key removes the row and its past, and two commits and a sweep later no byte of the page file holds it
+    (docs/m3-engine.md 6c, 6n, D-M3-2). What was not erased is still there."""
+    one, two, three = "MARKER-ROW-ONE-xyzzy", "MARKER-ROW-TWO-plugh", "MARKER-ROW-THREE-frotz"
+    settle = ["!commit", "!sweep", "!commit", "!sweep"]
+
+    def heads(out):
+        return [b[0] if b else "" for b in out]
+
+    def texts(block):
+        return [bytes.fromhex(l.split()[1]).decode() for l in block if l.startswith("R ")]
+
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "erase.db")
-        run_engine(path, ["create table er (k integer primary key, s text)", "insert into er values (1, '%s'), (2, '%s')" % (one, two), "!commit"])
+        run_engine(path, ["create table er (k integer primary key, s text)", "insert into er values (1, '%s'), (2, '%s'), (3, '%s')" % (one, two, three), "!commit"])
+        data = open(path, "rb").read()
+        if one.encode() not in data or two.encode() not in data or three.encode() not in data:
+            raise SystemExit("engine_check: the rows are not in the page file after a commit")
+        # an update and a delete: what the rows were stays in the history, in the file and to AS OF
+        newer = "THIRD-NEW-rezrov"
+        run_engine(path, ["update er set s = 'CHANGED-VALUE-nitfol' where k = 1", "delete from er where k = 2", "update er set s = '%s' where k = 3" % newer] + settle)
         data = open(path, "rb").read()
         if one.encode() not in data or two.encode() not in data:
-            raise SystemExit("engine_check: the rows are not in the page file after a commit")
-        run_engine(path, ["delete from er where k = 1", "!commit", "!sweep", "!commit", "!sweep"])
+            raise SystemExit("engine_check: the history of an updated and of a deleted row is not in the page file")
+        out = run_engine(path, ["!asof 2", "select s from er order by k", "!asof -", "select s from er order by k"])
+        if texts(out[0]) != [one, two, three] or texts(out[1]) != ["CHANGED-VALUE-nitfol", newer]:
+            raise SystemExit("engine_check: before the erase, AS OF and now read %s and %s" % (texts(out[0]), texts(out[1])))
+        # an erase of a key: of a row that is there (with a past) and of one that is gone (with a past)
+        out = run_engine(path, ["!erase delete from er where k = 1", "!erase delete from er where k = 2", "!erase delete from er where k = 9",
+                                "!erase delete from er where s = 'x'", "!erase delete from er", "!erase delete from er where k = 3 and s = 'y'"] + settle)
+        if heads(out) != ["ok ERASE 3", "ok ERASE 2", "ok ERASE 0", "refused engine-unsupported", "refused engine-unsupported", "refused engine-unsupported"]:
+            raise SystemExit("engine_check: the erases answered %s" % heads(out))
         data = open(path, "rb").read()
-        if one.encode() in data:
-            raise SystemExit("engine_check: a deleted row is still in the page file after two commits and a sweep")
-        if two.encode() not in data:
-            raise SystemExit("engine_check: a row that was not deleted is gone from the page file")
-        out = run_engine(path, ["select s from er"])
-        if out != [["ok SELECT 1", "T 3", "R " + two.encode().hex()]]:
-            raise SystemExit("engine_check: after the sweep the table reads %s" % out)
-        run_engine(path, ["drop table er", "!commit", "!sweep", "!commit", "!sweep"])
-        if two.encode() in open(path, "rb").read():
-            raise SystemExit("engine_check: a row of a dropped table is still in the page file after two commits and a sweep")
+        for gone in (one, two, "CHANGED-VALUE-nitfol"):
+            if gone.encode() in data:
+                raise SystemExit("engine_check: %s is still in the page file after its key was erased, two commits and a sweep" % gone)
+        if three.encode() not in data or newer.encode() not in data:
+            raise SystemExit("engine_check: a row that was not erased, or its past, is gone from the page file")
+        # the row that was not erased still has its past: what it held before its update is read AS OF before it
+        out = run_engine(path, ["!asof 2", "select s from er order by k", "!asof 4", "select s from er order by k", "!asof -", "select s from er order by k"])
+        if [texts(b) for b in out] != [[three], [three], [newer]]:
+            raise SystemExit("engine_check: after the erase, AS OF and now read %s" % [texts(b) for b in out])
+        # a dropped table keeps its history like a deleted row: its rows are read AS OF before the drop, until their keys are erased
+        run_engine(path, ["drop table er"] + settle)
+        if three.encode() not in open(path, "rb").read():
+            raise SystemExit("engine_check: the history of a dropped table is not in the page file")
+        out = run_engine(path, ["!asof 5", "select s from er order by k", "!asof 2", "select s from er order by k"])
+        if texts(out[0]) != [newer] or texts(out[1]) != [three]:
+            raise SystemExit("engine_check: a dropped table AS OF before the drop reads %s" % out)
         # text that is not UTF-8 is refused (PostgreSQL would not take it either), and the engine goes on
         r = subprocess.run([EXE, path], input=b"create table u8 (k integer primary key, s text)\ninsert into u8 values (1, '\xff\xfe')\ninsert into u8 values (2, 'a\xc3')\ninsert into u8 values (3, '\xc3\xb1')\nselect k from u8\n", capture_output=True)
         heads = [b.split(b"\n")[0] for b in r.stdout.split(b"\n.\n")]
@@ -943,8 +1077,10 @@ def main():
     print("engine_check: %d statements whose outcome depends on PostgreSQL's order are refused as such, and %d that are refused on purpose" % (len(DEP), len(UNSUP)))
     for note in notes:
         print("engine_check: NOTE (PostgreSQL %s) %s" % (version, note))
+    npoints, nforked = history(SEED)
+    print("engine_check: AS OF %d points of a history reads what was there, from another process, after a sweep and more writes, and on a fork (%d points); the branch is untouched by its fork" % (npoints, nforked))
     erasure()
-    print("engine_check: a deleted row and a dropped table are gone from the page file two commits and a sweep later")
+    print("engine_check: a deleted row and a dropped table stay in the history; an erased key is gone from the page file two commits and a sweep later, and from every AS OF")
     print("engine_check: %d statements (seed %d): %s" % (len(stmts), SEED, ", ".join("%s=%d" % kv for kv in sorted(counts.items()))))
     print("engine_check: PostgreSQL answers %d that the engine refuses, of %d it answers in all" % (refused_answered, refused_answered + answered))
     if fails:

@@ -179,6 +179,8 @@ pub res struct Work {
     gix: Box[[int]],
     jbuf: Box[[byte]],
     jix: Box[[int]],
+    ukey: Box[[byte]],
+    uval: Box[[byte]],
     chg: Box[[byte]],
     lit: Box[[byte]],
     lsc: Box[[int]],
@@ -206,6 +208,7 @@ pub res struct Work {
     hin: int,
     fresh: bool,
     ntab: int,
+    txn: int,
 }
 
 pub fn rows_size() -> [] int {
@@ -217,11 +220,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -241,6 +244,8 @@ pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
     unbox_slice(heap, gix);
     unbox_slice(heap, jbuf);
     unbox_slice(heap, jix);
+    unbox_slice(heap, ukey);
+    unbox_slice(heap, uval);
     unbox_slice(heap, chg);
     unbox_slice(heap, lit);
     unbox_slice(heap, lsc);
@@ -1056,6 +1061,170 @@ pub fn change[&q, &o, &n](w: &!q Work, old: &o [byte], has_old: bool, new: &n [b
     w.cfill = at;
     w.nchg = w.nchg + 1;
     return 0;
+}
+
+// ---- the history (docs/m3-engine.md 6n)
+
+// The limits a key and a value of a table have, so that their history entries fit the tree's.
+pub fn max_stored_key() -> [] int {
+    return 184;
+}
+
+pub fn max_stored_row() -> [] int {
+    return 780;
+}
+
+// The transaction the next statement that writes belongs to (1 or more; 0: no history is kept).
+pub fn set_txn[&q](w: &!q Work, txn: int) -> [] int {
+    w.txn = txn;
+    return 0;
+}
+
+// The key of the history entry of transaction `txn` for the tree key `k[0..kn]`, into `out`: its length. Entries sort newest first.
+fn undo_key[&k, &o](txn: int, k: &k [byte], kn: int, out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, 4294967295, 4);
+    build.put_be(out, 4, 9223372036854775807 - txn, 8);
+    return copy(k, 0, kn, out, 12);
+}
+
+// Before the key `k[0..kn]` of the tree `root` is written by the current transaction: record what it holds now (`0`: nothing; `1` and the value), unless this transaction has recorded it already (what a
+// key held BEFORE the transaction is its first record). The tree with the entry, or a refusal.
+pub fn remember[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int) -> [file_read, file_write] int {
+    if w.txn == 0 {
+        return root;
+    }
+    if kn > 188 {
+        return too_big();
+    }
+    let ul = undo_key(w.txn, k, kn, contents(w.ukey));
+    let g = btree.get(p, contents(w.sc), root, contents(w.ukey)[0..ul], contents(w.uval));
+    if g >= 0 {
+        return root;
+    }
+    if g != btree.not_found() {
+        return tree_err(g);
+    }
+    let o = btree.get(p, contents(w.sc), root, k[0..kn], contents(w.uval)[1..1024]);
+    var n = 1;
+    if o >= 0 {
+        if o > 799 {
+            return too_big();
+        }
+        contents(w.uval)[0] = byte_of(1);
+        n = 1 + o;
+    } else if o == btree.not_found() {
+        contents(w.uval)[0] = byte_of(0);
+    } else {
+        return tree_err(o);
+    }
+    let nw = btree.put(p, contents(w.sc), root, contents(w.ukey)[0..ul], contents(w.uval)[0..n]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// Set the key `k[0..kn]` of the tree `root` to `v`, its history kept: the new tree, or a refusal.
+pub fn put_key[&q, &z, &k, &v](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int, v: &v [byte]) -> [file_read, file_write] int {
+    let r = remember(p, w, root, k, kn);
+    if r < 0 {
+        return r;
+    }
+    let nw = btree.put(p, contents(w.sc), r, k[0..kn], v);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// Remove the key `k[0..kn]` (which is there) from the tree `root`, its history kept: the new tree (0: empty), or a refusal.
+pub fn del_key[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int) -> [file_read, file_write] int {
+    let r = remember(p, w, root, k, kn);
+    if r < 0 {
+        return r;
+    }
+    let nw = btree.del(p, contents(w.sc), r, k[0..kn]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// The number of the branch's last transaction (0: none), or a refusal. It is kept in the tree under the history's number alone (a key before every entry), and not read off the newest entry: an erase
+// may remove that entry, and a number must never be given twice.
+pub fn last_txn[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_read] int {
+    if root == 0 {
+        return 0;
+    }
+    build.put_be(contents(w.key), 0, 4294967295, 4);
+    let r = btree.get(p, contents(w.sc), root, contents(w.key)[0..4], contents(w.uval));
+    if r == btree.not_found() {
+        return 0;
+    }
+    if r < 0 {
+        return tree_err(r);
+    }
+    if r != 8 {
+        return damaged();
+    }
+    return commit.be(contents(w.uval), 0, 8);
+}
+
+// The tree `root` with `t` as the number of its last transaction: what a statement that wrote ends with. The new tree, or a refusal.
+pub fn mark_txn[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, t: int) -> [file_read, file_write] int {
+    build.put_be(contents(w.key), 0, 4294967295, 4);
+    build.put_be(contents(w.uval), 0, t, 8);
+    let nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..4], contents(w.uval)[0..8]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// The tree `root` as it was when transaction `t` was its last: the entries of every later transaction are applied, newest first, onto a tree that shares every page it does not change. The answer is a tree
+// to read and then forget (it is named by no root: the next sweep takes its pages), or a refusal.
+pub fn as_of[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, t: int) -> [file_read, file_write] int {
+    var out = root;
+    if root == 0 {
+        return 0;
+    }
+    build.put_be(contents(w.key), 0, 4294967295, 4);
+    var kl = 4;
+    var more = true;
+    while more {
+        let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return tree_err(r);
+        } else {
+            let nk = r / 1024;
+            let nv = r % 1024;
+            if nk < 12 || nv < 1 || commit.be(contents(w.key2), 0, 4) != 4294967295 {
+                return damaged();
+            }
+            if 9223372036854775807 - commit.be(contents(w.key2), 4, 8) <= t {
+                more = false;
+            } else {
+                var nw = 0;
+                if int_of(contents(w.cur)[0]) == 0 {
+                    nw = btree.del(p, contents(w.sc), out, contents(w.key2)[12..nk]);
+                    if nw == btree.not_found() {
+                        nw = out;
+                    }
+                } else {
+                    nw = btree.put(p, contents(w.sc), out, contents(w.key2)[12..nk], contents(w.cur)[1..nv]);
+                }
+                if nw < 0 {
+                    return tree_err(nw);
+                }
+                out = nw;
+                copy(contents(w.key2), 0, nk, contents(w.key), 0);
+                kl = nk;
+            }
+        }
+    }
+    return out;
 }
 
 // The snapshot of the tree `root` that the lowering reads (`tables.schema_text`), into `out`: its length, or a refusal.
