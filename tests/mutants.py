@@ -1591,7 +1591,9 @@ ROW = [
     ("row: true and false are swapped", "src/row.cho", "        if int_of(row[vat + 1]) == 1 {\n            return puts(out, at, \"true\");", "        if int_of(row[vat + 1]) == 0 {\n            return puts(out, at, \"true\");"),
     ("row: bytes after a definition are taken", "src/row.cho", "    if at != len(def) || seen != keys * (keys + 1) / 2 {", "    if seen != keys * (keys + 1) / 2 {"),
     ("row: key places need not be 1 to k", "src/row.cho", "    if at != len(def) || seen != keys * (keys + 1) / 2 {", "    if at != len(def) {"),
-    ("row: a value of another type than its column is taken", "src/row.cho", "        } else if tag != col_type(def, i) {\n            return false;", "        } else if false {\n            return false;"),
+    ("row: a value of another type than its column is taken", "src/row.cho", "        } else if tag != storage_tag(col_type(def, i)) {\n            return false;", "        } else if false {\n            return false;"),
+    ("row: a smallint column takes any integer", "src/row.cho", "        return v >= 0 - 32768 && v <= 32767;", "        return true;"),
+    ("row: an integer column takes any integer", "src/row.cho", "        return v >= 0 - 2147483648 && v <= 2147483647;", "        return true;"),
 ]
 
 

@@ -566,6 +566,28 @@ fn emit_lit_const[&o, &c](out: &!o [byte], sc: &!c [int], text: &static [byte]) 
     return r;
 }
 
+// What the IR does not say about a `Const bytes` and an executor needs (docs/m3-engine.md 6e): that it was written as a number that is not an integer (kind 2), as `true` (4) or as `false` (5), and not as a
+// string. Noted for the executor beside the IR, when the scratch has room for it (at least 142 ints): sc[8] is how many notes there are, or -1 if there was no room for one, and note i is two ints from
+// sc[140 + 2 * i]: the position in the output of the `Const`'s first byte, and the kind. A caller that does not execute (the guard, the verifiers' tests) never looks.
+pub fn kinds_at() -> [] int {
+    return 140;
+}
+
+fn note_kind[&c](sc: &!c [int], kind: int) -> [] int {
+    if len(sc) < 142 || sc[8] < 0 {
+        return 0;
+    }
+    let at = 140 + 2 * sc[8];
+    if at + 2 > len(sc) {
+        sc[8] = 0 - 1;
+        return 0;
+    }
+    sc[at] = sc[0];
+    sc[at + 1] = kind;
+    sc[8] = sc[8] + 1;
+    return 0;
+}
+
 // ---- expressions
 
 // The IR operator of a parser operator code (parse.cho: 1 or, 2 and, 3 = ... 14 ||, 15 to 18 like and ilike, plain and negated).
@@ -651,6 +673,7 @@ fn visit[&s, &t, &n, &k, &m, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [
                 r = wn(out, sc, v, 8);
             }
         } else {
+            note_kind(sc, 2);
             r = emit_bytes_const(sql, toks, data, false, out, sc);
         }
         return r;
@@ -681,9 +704,11 @@ fn visit[&s, &t, &n, &k, &m, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [
         return r;
     }
     if kind == parse.n_true() {
+        note_kind(sc, 4);
         return emit_lit_const(out, sc, "true");
     }
     if kind == parse.n_false() {
+        note_kind(sc, 5);
         return emit_lit_const(out, sc, "false");
     }
     if kind == parse.n_col() {
@@ -1498,6 +1523,9 @@ pub fn lower[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nod
     sc[2] = 0;
     sc[3] = 0;
     sc[4] = 0;
+    if len(sc) > 8 {
+        sc[8] = 0;
+    }
     let kind = nodes[6 * root];
     var r0 = 0;
     if kind == parse.n_select() {
