@@ -1687,11 +1687,16 @@ def run_eval(cancho):
                 print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
                 survivors.append(label)
                 continue
-            try:
-                r = subprocess.run([sys.executable, str(ROOT / "tests/eval_check.py"), str(exe), "3000", "1"], capture_output=True, text=True, timeout=900, env=dict(os.environ, E2E_DB="cdb_evalmut"))
-                rc, out = r.returncode, r.stdout
-            except subprocess.TimeoutExpired:
-                rc, out = 1, "FAIL timed out"
+            # the two runs of scripts/check.sh: a mutant is killed by either
+            rc, out = 0, ""
+            for seed in ("1", "2"):
+                try:
+                    r = subprocess.run([sys.executable, str(ROOT / "tests/eval_check.py"), str(exe), "4000", seed], capture_output=True, text=True, timeout=900, env=dict(os.environ, E2E_DB="cdb_evalmut"))
+                    rc, out = r.returncode, r.stdout
+                except subprocess.TimeoutExpired:
+                    rc, out = 1, "FAIL timed out"
+                if rc != 0:
+                    break
             if rc == 0:
                 print("SURVIVED %-46s every expression agrees" % label)
                 survivors.append(label)
