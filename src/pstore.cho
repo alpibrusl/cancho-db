@@ -1,0 +1,183 @@
+edition 9;
+module cdb.pstore;
+
+import cdb.commit;
+import cdb.build;
+import cdb.pager;
+import cdb.btree;
+
+// What survives a restart (docs/m3-engine.md D-M3-3, slice M3a): the roots of the trees, and the order in which they are made durable.
+//
+// Pages 1 and 2 of the page file are the two *superblocks*, used in turn: the superblock of commit number `seq` is page `1 + seq % 2`, so a commit never writes over the superblock that is current. A superblock is a page
+// of type 3 whose body is the magic `CHODBSB1`, `seq` (8 bytes) and the number of the *catalog page*; the catalog page (type 4) holds the 16 roots, 4 bytes each. A tree page is written once and never changes, so what
+// a commit has to make durable is the pages it wrote, the catalog page, and then, last, one superblock.
+//
+// The order of a commit, with the crash hook's steps (src/pager.cho): the catalog page is written, `sync` (the pages of the trees, written as the trees were changed, and the catalog are durable), the superblock is
+// written, `sync`. A crash before the superblock is written leaves the previous superblock current and the new pages unreferenced; a crash that tears the superblock write leaves a page whose CRC does not match, which
+// is not a superblock, so the previous one is current. At start the valid superblock with the greater `seq` wins. If neither is valid and the file is not empty, the file is refused (`err_bad`): a flipped bit
+// in the only superblock must not read as an empty database.
+
+pub fn slots() -> [] int {
+    return 16;
+}
+
+fn magic_ok[&s](sc: &s [byte], at: int) -> [] bool {
+    let m = "CHODBSB1";
+    var i = 0;
+    while i < 8 {
+        if int_of(sc[at + i]) != int_of(m[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Write superblock `seq` naming catalog page `cat`, in the page of its parity, from the scratch buffer.
+fn write_super[&q, &s](p: &!q pager.Pager, sc: &!s [byte], seq: int, cat: int) -> [file_write] int {
+    let off = 0;
+    sc[off] = byte_of(3);
+    build.put_be(sc, off + 1, 0, 2);
+    build.put_be(sc, off + 3, 0, 4);
+    var i = 0;
+    let m = "CHODBSB1";
+    while i < 8 {
+        sc[off + 7 + i] = m[i];
+        i = i + 1;
+    }
+    build.put_be(sc, off + 15, seq, 8);
+    build.put_be(sc, off + 23, cat, 4);
+    i = off + 27;
+    while i < off + 4096 {
+        sc[i] = byte_of(0);
+        i = i + 1;
+    }
+    let rc = pager.write_page(p, 1 + seq % 2, sc[off..off + 4096]);
+    if rc < 0 {
+        return rc;
+    }
+    return 0;
+}
+
+fn write_catalog[&q, &s, &r](p: &!q pager.Pager, sc: &!s [byte], roots: &r [int]) -> [file_write] int {
+    sc[0] = byte_of(4);
+    build.put_be(sc, 1, slots(), 2);
+    build.put_be(sc, 3, 0, 4);
+    var i = 0;
+    while i < slots() {
+        build.put_be(sc, 7 + 4 * i, roots[i], 4);
+        i = i + 1;
+    }
+    i = 7 + 4 * slots();
+    while i < 4096 {
+        sc[i] = byte_of(0);
+        i = i + 1;
+    }
+    let id = pager.alloc(p);
+    let rc = pager.write_page(p, id, sc[0..4096]);
+    if rc < 0 {
+        return rc;
+    }
+    return id;
+}
+
+fn code(rc: int) -> [] int {
+    if rc == 0 - 1 {
+        return btree.err_io();
+    }
+    if rc == 0 - 3 {
+        return btree.err_crash();
+    }
+    return btree.err_bad();
+}
+
+// Make a new database in an empty file: an empty catalog, `sync`, the superblock naming it (sequence number 0, page 1), `sync`. 0 or an error.
+pub fn init[&q, &s](p: &!q pager.Pager, sc: &!s [byte]) -> [file_write] int {
+    var zero = 0;
+    region r {
+        let roots = alloc_slice[r](16, 0);
+        let cat = write_catalog(p, sc, roots);
+        if cat < 0 {
+            zero = cat;
+        } else {
+            // the same order as a commit: the catalog is durable before the superblock that names it is written. Sequence 0 lives in page 1 (page 2 is first written by commit 1).
+            zero = pager.sync(p);
+            if zero == 0 {
+                zero = write_super(p, sc, 0, cat);
+                if zero == 0 {
+                    zero = pager.sync(p);
+                }
+            }
+        }
+    }
+    if zero < 0 {
+        return code(zero);
+    }
+    return 0;
+}
+
+// The roots of the newest valid superblock, into `roots` (16 ints): its sequence number (0 or more), or `no_database()` if the file is empty, or an error (`err_bad` if the file is not empty and holds no valid
+// superblock).
+pub fn no_database() -> [] int {
+    return 0 - 200;
+}
+
+pub fn load[&q, &s, &r](p: &!q pager.Pager, sc: &!s [byte], roots: &!r [int]) -> [file_read] int {
+    if pager.next_page(p) <= 3 {
+        return no_database();
+    }
+    var best = 0 - 1;
+    var cat = 0;
+    var slot = 1;
+    while slot <= 2 {
+        let rc = pager.read_page(p, slot, sc[0..4096]);
+        if rc == 0 - 1 {
+            return btree.err_io();
+        }
+        if rc == 0 && int_of(sc[0]) == 3 && magic_ok(sc, 7) {
+            let seq = commit.be(sc, 15, 8);
+            if seq > best && seq % 2 == slot - 1 {
+                best = seq;
+                cat = commit.be(sc, 23, 4);
+            }
+        }
+        slot = slot + 1;
+    }
+    if best < 0 {
+        return btree.err_bad();
+    }
+    let rc = pager.read_page(p, cat, sc[0..4096]);
+    if rc < 0 {
+        return code(rc);
+    }
+    if int_of(sc[0]) != 4 || commit.be(sc, 1, 2) != slots() {
+        return btree.err_bad();
+    }
+    var i = 0;
+    while i < slots() {
+        roots[i] = commit.be(sc, 7 + 4 * i, 4);
+        i = i + 1;
+    }
+    return best;
+}
+
+// Make `roots` the state: the next sequence number `seq + 1`, or an error. The trees' pages were written as they were changed; this writes the catalog, syncs, writes the superblock and syncs.
+pub fn commit[&q, &s, &r](p: &!q pager.Pager, sc: &!s [byte], roots: &r [int], seq: int) -> [file_write] int {
+    let cat = write_catalog(p, sc, roots);
+    if cat < 0 {
+        return code(cat);
+    }
+    var rc = pager.sync(p);
+    if rc < 0 {
+        return code(rc);
+    }
+    rc = write_super(p, sc, seq + 1, cat);
+    if rc < 0 {
+        return code(rc);
+    }
+    rc = pager.sync(p);
+    if rc < 0 {
+        return code(rc);
+    }
+    return seq + 1;
+}

@@ -1,0 +1,655 @@
+edition 9;
+module cdb.btree;
+
+import cdb.commit;
+import cdb.build;
+import cdb.pager;
+
+// The copy-on-write B+tree of the engine (docs/m3-engine.md D-M3-1, slice M3a): bytes to bytes, keys in byte order, a tree named by the number of its root page (0 is the empty tree). A write never changes a page a
+// root still names: it writes new pages along the path from the leaf to the root and answers the new root, so the tree before the write is still whole, and two roots share every page they have not written.
+//
+// Pages (4096 bytes, `cdb.pager` stamps the CRC): byte 0 the type (1 leaf, 2 internal), bytes 1 and 2 the entry count.
+//   leaf     from byte 7: `count` entries, each `klen` (1 byte), `vlen` (2 bytes), the key, the value;
+//   internal from byte 7: `child0` (4 bytes), then `count` entries, each `klen` (1 byte), the key, `child` (4 bytes): `count + 1` children, and the key of entry i is the least key that can be in child i.
+// A key is 1 to 200 bytes and a value at most 800, so a leaf always holds at least four entries and an internal page at least nineteen.
+//
+// What it does not do yet (stated): no merging of pages that a delete leaves thin (a leaf that becomes empty is dropped from its parent, and a root with one child is replaced by it); no reuse of pages (a page
+// no root names is garbage until the page file is rewritten: the zeroing of freed pages is slice M3b); no cache (every read is a `pread`).
+//
+// Nothing here recurses and nothing grows with the data: the path from the root is at most 15 levels and lives in the caller's `scratch`, which holds `scratch_size()` bytes.
+
+pub fn scratch_size() -> [] int {
+    return 98560;
+}
+
+// Where things are in `scratch`: the pages of the path (15 of 4096 bytes), then four working buffers of 8192 bytes, then the path's own record (an id and a child index, 8 bytes a level).
+fn w1() -> [] int {
+    return 65536;
+}
+
+fn w2() -> [] int {
+    return 73728;
+}
+
+fn w3() -> [] int {
+    return 81920;
+}
+
+fn w4() -> [] int {
+    return 90112;
+}
+
+fn meta() -> [] int {
+    return 98304;
+}
+
+pub fn max_key() -> [] int {
+    return 200;
+}
+
+pub fn max_value() -> [] int {
+    return 800;
+}
+
+// Results: a length, an id or 0 or more on success; these on failure.
+pub fn not_found() -> [] int {
+    return 0 - 100;
+}
+
+pub fn err_io() -> [] int {
+    return 0 - 101;
+}
+
+pub fn err_bad() -> [] int {
+    return 0 - 102;
+}
+
+pub fn err_crash() -> [] int {
+    return 0 - 103;
+}
+
+pub fn err_big() -> [] int {
+    return 0 - 104;
+}
+
+pub fn err_deep() -> [] int {
+    return 0 - 105;
+}
+
+fn fail(rc: int) -> [] int {
+    if rc == 0 - 1 {
+        return err_io();
+    }
+    if rc == 0 - 3 {
+        return err_crash();
+    }
+    return err_bad();
+}
+
+fn cmp[&a, &b](x: &a [byte], y: &b [byte]) -> [] int {
+    var i = 0;
+    while i < len(x) && i < len(y) {
+        let c = int_of(x[i]);
+        let d = int_of(y[i]);
+        if c < d {
+            return 0 - 1;
+        }
+        if c > d {
+            return 1;
+        }
+        i = i + 1;
+    }
+    if len(x) < len(y) {
+        return 0 - 1;
+    }
+    if len(x) > len(y) {
+        return 1;
+    }
+    return 0;
+}
+
+fn copy[&d, &s](dst: &!d [byte], dpos: int, src: &s [byte], spos: int, n: int) -> [] int {
+    var i = 0;
+    while i < n {
+        dst[dpos + i] = src[spos + i];
+        i = i + 1;
+    }
+    return dpos + n;
+}
+
+fn zero_from[&d](buf: &!d [byte], from: int) -> [] int {
+    var i = from;
+    while i < len(buf) {
+        buf[i] = byte_of(0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+// One page made of `kind`, `count` and the bytes `body` (written from byte 7), the rest zero.
+fn emit[&d, &b](buf: &!d [byte], kind: int, count: int, body: &b [byte]) -> [] int {
+    buf[0] = byte_of(kind);
+    build.put_be(buf, 1, count, 2);
+    build.put_be(buf, 3, 0, 4);
+    copy(buf, 7, body, 0, len(body));
+    zero_from(buf, 7 + len(body));
+    return 0;
+}
+
+fn leaf_next[&p](pg: &p [byte], at: int) -> [] int {
+    return at + 3 + int_of(pg[at]) + commit.be(pg, at + 1, 2);
+}
+
+fn int_next[&p](pg: &p [byte], at: int) -> [] int {
+    return at + 5 + int_of(pg[at]);
+}
+
+fn child0[&p](pg: &p [byte]) -> [] int {
+    return commit.be(pg, 7, 4);
+}
+
+// The child of an internal page `pg` that holds `key`: its index (0 to count), its page number, and `alt`, the page number of the child after it (0 if there is none).
+fn pick[&p, &k](pg: &p [byte], key: &k [byte]) -> [] (int, int, int) {
+    let count = commit.be(pg, 1, 2);
+    var idx = 0;
+    var child = child0(pg);
+    var alt = 0;
+    var at = 11;
+    var i = 1;
+    var done = false;
+    while i <= count && !done {
+        let kl = int_of(pg[at]);
+        if cmp(key, pg[at + 1..at + 1 + kl]) >= 0 {
+            idx = i;
+            child = commit.be(pg, at + 1 + kl, 4);
+            at = at + 5 + kl;
+            i = i + 1;
+        } else {
+            alt = commit.be(pg, at + 1 + kl, 4);
+            done = true;
+        }
+    }
+    return (idx, child, alt);
+}
+
+fn setp[&s](sc: &!s [byte], d: int, id: int, idx: int) -> [] int {
+    build.put_be(sc, meta() + 8 * d, id, 4);
+    build.put_be(sc, meta() + 8 * d + 4, idx, 4);
+    return 0;
+}
+
+// The value of `key` in the tree `root`, copied into `out`: its length, `not_found()`, or an error.
+pub fn get[&q, &s, &k, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte], out: &!o [byte]) -> [file_read] int {
+    if root == 0 {
+        return not_found();
+    }
+    var id = root;
+    var depth = 0;
+    while depth < 16 {
+        let rc = pager.read_page(p, id, sc[0..4096]);
+        if rc < 0 {
+            return fail(rc);
+        }
+        if int_of(sc[0]) == 1 {
+            let count = commit.be(sc, 1, 2);
+            var at = 7;
+            var i = 0;
+            while i < count {
+                let kl = int_of(sc[at]);
+                let vl = commit.be(sc, at + 1, 2);
+                let c = cmp(key, sc[at + 3..at + 3 + kl]);
+                if c == 0 {
+                    if vl > len(out) {
+                        return err_big();
+                    }
+                    copy(out, 0, sc, at + 3 + kl, vl);
+                    return vl;
+                }
+                if c < 0 {
+                    return not_found();
+                }
+                at = at + 3 + kl + vl;
+                i = i + 1;
+            }
+            return not_found();
+        }
+        if int_of(sc[0]) != 2 {
+            return err_bad();
+        }
+        let (ix, ch, al) = pick(sc[0..4096], key);
+        id = ch;
+        depth = depth + 1;
+    }
+    return err_deep();
+}
+
+// ---- the writing side. Everything works inside `sc`, by offsets, so that one slice is borrowed at a time.
+
+fn mv[&s](sc: &!s [byte], dpos: int, spos: int, n: int) -> [] int {
+    var i = 0;
+    while i < n {
+        sc[dpos + i] = sc[spos + i];
+        i = i + 1;
+    }
+    return dpos + n;
+}
+
+// A leaf entry made of `key` and `vbytes`, written into `sc` at `at`: the position after it.
+fn put_entry[&z, &k, &v](sc: &!z [byte], at: int, key: &k [byte], vbytes: &v [byte]) -> [] int {
+    sc[at] = byte_of(len(key));
+    build.put_be(sc, at + 1, len(vbytes), 2);
+    copy(sc, at + 3, key, 0, len(key));
+    copy(sc, at + 3 + len(key), vbytes, 0, len(vbytes));
+    return at + 3 + len(key) + len(vbytes);
+}
+
+// An internal entry whose key is the `klen` bytes of `sc` at `ksrc`, with child `child`, written at `at`.
+fn put_int_entry[&s](sc: &!s [byte], at: int, ksrc: int, klen: int, child: int) -> [] int {
+    sc[at] = byte_of(klen);
+    mv(sc, at + 1, ksrc, klen);
+    build.put_be(sc, at + 1 + klen, child, 4);
+    return at + 5 + klen;
+}
+
+// The page of `kind` and `count` entries, at `off`, made of the `srclen` bytes at `srcoff`; the rest of its 4096 bytes zero.
+fn emit_at[&s](sc: &!s [byte], off: int, kind: int, count: int, srcoff: int, srclen: int) -> [] int {
+    sc[off] = byte_of(kind);
+    build.put_be(sc, off + 1, count, 2);
+    build.put_be(sc, off + 3, 0, 4);
+    mv(sc, off + 7, srcoff, srclen);
+    var i = off + 7 + srclen;
+    while i < off + 4096 {
+        sc[i] = byte_of(0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Write the page at `off` as a new page: its number, or an error.
+fn new_page[&q, &s](p: &!q pager.Pager, sc: &!s [byte], off: int) -> [file_write] int {
+    let id = pager.alloc(p);
+    let rc = pager.write_page(p, id, sc[off..off + 4096]);
+    if rc < 0 {
+        return fail(rc);
+    }
+    return id;
+}
+
+// Go down from `root` to the leaf that holds (or would hold) `key`, leaving the pages of the path in `sc` (level d at d * 4096) and, for each internal level, its page number and the child taken (`meta`).
+// The depth of the leaf, or an error.
+fn descend[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte]) -> [file_read] int {
+    var id = root;
+    var d = 0;
+    while d < 15 {
+        let rc = pager.read_page(p, id, sc[d * 4096..d * 4096 + 4096]);
+        if rc < 0 {
+            return fail(rc);
+        }
+        let t = int_of(sc[d * 4096]);
+        if t == 1 {
+            return d;
+        }
+        if t != 2 {
+            return err_bad();
+        }
+        let (ix, ch, al) = pick(sc[d * 4096..d * 4096 + 4096], key);
+        setp(sc, d, id, ix);
+        id = ch;
+        d = d + 1;
+    }
+    return err_deep();
+}
+
+// After a leaf or internal page was replaced, put the new pages in the parents, from the level above `d` to the root. `cid` is the page that replaces the child taken at each level; `split` says there are two,
+// `cid` and `rid`, with the key in `sc` at w3() (`seplen` bytes) between them. The new root, or an error.
+fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: bool, rid0: int, seplen0: int) -> [file_write] int {
+    var cid = cid0;
+    var split = split0;
+    var rid = rid0;
+    var seplen = seplen0;
+    var level = d - 1;
+    while level >= 0 {
+        let po = level * 4096;
+        let ix = commit.be(sc, meta() + 8 * level + 4, 4);
+        let count = commit.be(sc, po + 1, 2);
+        var wpos = w1();
+        var c0 = child0(sc[po..po + 4096]);
+        if ix == 0 {
+            c0 = cid;
+        }
+        build.put_be(sc, wpos, c0, 4);
+        wpos = wpos + 4;
+        if split && ix == 0 {
+            wpos = put_int_entry(sc, wpos, w3(), seplen, rid);
+        }
+        var at = po + 11;
+        var e = 1;
+        while e <= count {
+            let kl = int_of(sc[at]);
+            let ch = commit.be(sc, at + 1 + kl, 4);
+            wpos = mv(sc, wpos, at, 1 + kl);
+            var chn = ch;
+            if e == ix {
+                chn = cid;
+            }
+            build.put_be(sc, wpos, chn, 4);
+            wpos = wpos + 4;
+            if split && e == ix {
+                wpos = put_int_entry(sc, wpos, w3(), seplen, rid);
+            }
+            at = at + 5 + kl;
+            e = e + 1;
+        }
+        var ncount = count;
+        if split {
+            ncount = count + 1;
+        }
+        let total = wpos - w1();
+        if 7 + total <= 4096 {
+            emit_at(sc, w2(), 2, ncount, w1(), total);
+            let id = new_page(p, sc, w2());
+            if id < 0 {
+                return id;
+            }
+            cid = id;
+            split = false;
+        } else {
+            // split this internal page: the entry in the middle goes up, its child becomes the first child of the right page
+            var b = 4;
+            var j = 0;
+            while (b - 4) * 2 < total - 4 && j < ncount - 1 {
+                b = b + 5 + int_of(sc[w1() + b]);
+                j = j + 1;
+            }
+            let kl = int_of(sc[w1() + b]);
+            let rc0 = commit.be(sc, w1() + b + 1 + kl, 4);
+            let rest = total - (b + 5 + kl);
+            build.put_be(sc, w3() + 256, rc0, 4);
+            mv(sc, w3() + 260, w1() + b + 5 + kl, rest);
+            mv(sc, w3(), w1() + b + 1, kl);
+            emit_at(sc, w2(), 2, j, w1(), b);
+            emit_at(sc, w4(), 2, ncount - j - 1, w3() + 256, 4 + rest);
+            let lid = new_page(p, sc, w2());
+            if lid < 0 {
+                return lid;
+            }
+            let rid2 = new_page(p, sc, w4());
+            if rid2 < 0 {
+                return rid2;
+            }
+            cid = lid;
+            rid = rid2;
+            seplen = kl;
+            split = true;
+        }
+        level = level - 1;
+    }
+    if split {
+        build.put_be(sc, w1(), cid, 4);
+        let n = put_int_entry(sc, w1() + 4, w3(), seplen, rid);
+        emit_at(sc, w2(), 2, 1, w1(), n - w1());
+        return new_page(p, sc, w2());
+    }
+    return cid;
+}
+
+// The tree `root` with `key` set to `vbytes`: the root of the new tree (the old one is untouched), or an error.
+pub fn put[&q, &s, &k, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte], vbytes: &v [byte]) -> [file_read, file_write] int {
+    if len(key) < 1 || len(key) > max_key() || len(vbytes) > max_value() {
+        return err_big();
+    }
+    if root == 0 {
+        let n = put_entry(sc, w1(), key, vbytes);
+        emit_at(sc, w2(), 1, 1, w1(), n - w1());
+        return new_page(p, sc, w2());
+    }
+    let d = descend(p, sc, root, key);
+    if d < 0 {
+        return d;
+    }
+    let lo = d * 4096;
+    let count = commit.be(sc, lo + 1, 2);
+    var at = lo + 7;
+    var wpos = w1();
+    var placed = false;
+    var added = 1;
+    var i = 0;
+    while i < count {
+        let kl = int_of(sc[at]);
+        let elen = 3 + kl + commit.be(sc, at + 1, 2);
+        var c = 1;
+        if !placed {
+            c = cmp(key, sc[at + 3..at + 3 + kl]);
+        }
+        if !placed && c <= 0 {
+            wpos = put_entry(sc, wpos, key, vbytes);
+            placed = true;
+            if c == 0 {
+                added = 0;
+            } else {
+                wpos = mv(sc, wpos, at, elen);
+            }
+        } else {
+            wpos = mv(sc, wpos, at, elen);
+        }
+        at = at + elen;
+        i = i + 1;
+    }
+    if !placed {
+        wpos = put_entry(sc, wpos, key, vbytes);
+    }
+    let total = wpos - w1();
+    let ncount = count + added;
+    if 7 + total <= 4096 {
+        emit_at(sc, w2(), 1, ncount, w1(), total);
+        let id = new_page(p, sc, w2());
+        if id < 0 {
+            return id;
+        }
+        return climb(p, sc, d, id, false, 0, 0);
+    }
+    // the leaf is too full: two leaves, the second starting with the key that goes up
+    var b = 0;
+    var j = 0;
+    while b * 2 < total && j < ncount - 1 {
+        b = b + 3 + int_of(sc[w1() + b]) + commit.be(sc, w1() + b + 1, 2);
+        j = j + 1;
+    }
+    let sl = int_of(sc[w1() + b]);
+    mv(sc, w3(), w1() + b + 3, sl);
+    emit_at(sc, w2(), 1, j, w1(), b);
+    emit_at(sc, w4(), 1, ncount - j, w1() + b, total - b);
+    let lid = new_page(p, sc, w2());
+    if lid < 0 {
+        return lid;
+    }
+    let rid = new_page(p, sc, w4());
+    if rid < 0 {
+        return rid;
+    }
+    return climb(p, sc, d, lid, true, rid, sl);
+}
+
+// The tree `root` without `key`: the root of the new tree (0 if it is empty now), `not_found()` if `key` was not there (nothing is written), or an error.
+pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte]) -> [file_read, file_write] int {
+    if root == 0 {
+        return not_found();
+    }
+    let d = descend(p, sc, root, key);
+    if d < 0 {
+        return d;
+    }
+    let lo = d * 4096;
+    let count = commit.be(sc, lo + 1, 2);
+    var at = lo + 7;
+    var wpos = w1();
+    var found = false;
+    var i = 0;
+    while i < count {
+        let kl = int_of(sc[at]);
+        let elen = 3 + kl + commit.be(sc, at + 1, 2);
+        if !found && cmp(key, sc[at + 3..at + 3 + kl]) == 0 {
+            found = true;
+        } else {
+            wpos = mv(sc, wpos, at, elen);
+        }
+        at = at + elen;
+        i = i + 1;
+    }
+    if !found {
+        return not_found();
+    }
+    var removed = count == 1;
+    var cid = 0;
+    if !removed {
+        emit_at(sc, w2(), 1, count - 1, w1(), wpos - w1());
+        cid = new_page(p, sc, w2());
+        if cid < 0 {
+            return cid;
+        }
+    }
+    var level = d - 1;
+    while level >= 0 {
+        let po = level * 4096;
+        let ix = commit.be(sc, meta() + 8 * level + 4, 4);
+        let pcount = commit.be(sc, po + 1, 2);
+        if removed && pcount == 0 {
+            // the only child of this page is gone: so is this page
+            level = level - 1;
+        } else {
+            var w = w1();
+            var pat = po + 11;
+            var e = 1;
+            if removed {
+                // the page without child `ix`: child 0 goes with its key, any other child goes with its own
+                if ix == 0 {
+                    let kl0 = int_of(sc[pat]);
+                    build.put_be(sc, w, commit.be(sc, pat + 1 + kl0, 4), 4);
+                    w = w + 4;
+                    pat = pat + 5 + kl0;
+                    e = 2;
+                } else {
+                    build.put_be(sc, w, child0(sc[po..po + 4096]), 4);
+                    w = w + 4;
+                }
+                while e <= pcount {
+                    let kl = int_of(sc[pat]);
+                    if e != ix {
+                        w = mv(sc, w, pat, 5 + kl);
+                    }
+                    pat = pat + 5 + kl;
+                    e = e + 1;
+                }
+                emit_at(sc, w2(), 2, pcount - 1, w1(), w - w1());
+            } else {
+                var c0 = child0(sc[po..po + 4096]);
+                if ix == 0 {
+                    c0 = cid;
+                }
+                build.put_be(sc, w, c0, 4);
+                w = w + 4;
+                while e <= pcount {
+                    let kl = int_of(sc[pat]);
+                    w = mv(sc, w, pat, 1 + kl);
+                    var chn = commit.be(sc, pat + 1 + kl, 4);
+                    if e == ix {
+                        chn = cid;
+                    }
+                    build.put_be(sc, w, chn, 4);
+                    w = w + 4;
+                    pat = pat + 5 + kl;
+                    e = e + 1;
+                }
+                emit_at(sc, w2(), 2, pcount, w1(), w - w1());
+            }
+            cid = new_page(p, sc, w2());
+            if cid < 0 {
+                return cid;
+            }
+            removed = false;
+            level = level - 1;
+        }
+    }
+    if removed {
+        return 0;
+    }
+    // a root with a single child is the child
+    var guard = 0;
+    while guard < 16 {
+        let rc = pager.read_page(p, cid, sc[0..4096]);
+        if rc < 0 {
+            return fail(rc);
+        }
+        if int_of(sc[0]) == 2 && commit.be(sc, 1, 2) == 0 {
+            cid = child0(sc[0..4096]);
+            guard = guard + 1;
+        } else {
+            guard = 16;
+        }
+    }
+    return cid;
+}
+
+// The first entry after `key` (or at it, if `inclusive`) in the tree `root`, in key order: its key and value are copied into `kout` and `vout` and the answer is `key length * 1024 + value length`;
+// `not_found()` if there is none. Calling it with the key it answered walks the tree in order.
+pub fn next_after[&q, &s, &k, &a, &b](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte], inclusive: bool, kout: &!a [byte], vout: &!b [byte]) -> [file_read] int {
+    if root == 0 {
+        return not_found();
+    }
+    var id = root;
+    var alt = 0;
+    var leftmost = false;
+    var depth = 0;
+    while depth < 40 {
+        let rc = pager.read_page(p, id, sc[0..4096]);
+        if rc < 0 {
+            return fail(rc);
+        }
+        let t = int_of(sc[0]);
+        if t == 1 {
+            let count = commit.be(sc, 1, 2);
+            var at = 7;
+            var i = 0;
+            while i < count {
+                let kl = int_of(sc[at]);
+                let vl = commit.be(sc, at + 1, 2);
+                var take = leftmost;
+                if !leftmost {
+                    let c = cmp(sc[at + 3..at + 3 + kl], key);
+                    take = c > 0 || inclusive && c == 0;
+                }
+                if take {
+                    if kl > len(kout) || vl > len(vout) {
+                        return err_big();
+                    }
+                    copy(kout, 0, sc, at + 3, kl);
+                    copy(vout, 0, sc, at + 3 + kl, vl);
+                    return kl * 1024 + vl;
+                }
+                at = at + 3 + kl + vl;
+                i = i + 1;
+            }
+            if alt == 0 {
+                return not_found();
+            }
+            id = alt;
+            alt = 0;
+            leftmost = true;
+        } else {
+            if t != 2 {
+                return err_bad();
+            }
+            if leftmost {
+                id = child0(sc[0..4096]);
+            } else {
+                let (ix, ch, al) = pick(sc[0..4096], key);
+                if al != 0 {
+                    alt = al;
+                }
+                id = ch;
+            }
+        }
+        depth = depth + 1;
+    }
+    return err_deep();
+}

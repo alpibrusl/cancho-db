@@ -99,7 +99,7 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 
 | Slice | Delivers | Gate |
 |---|---|---|
-| **M3a** | the page file, page cache, superblocks, the COW B+tree (bytes to bytes), fork and drop | gates 1 to 3 on the tree alone, with the crash-point module |
+| **M3a** (built, below) | the page file, superblocks, the COW B+tree (bytes to bytes), fork (a slot made the same tree) | gates 1 and 2 on the tree alone, with the crash-point module; gate 3 and the page cache are not in it |
 | **M3b** | the delta segments and the zeroing of freed pages; recovery from a log ahead of the superblock | gate 2 with the log; `AS OF`-style reconstruction equals the model |
 | **M3c** | tables, the row encoding and image (D-M3-6), the catalog of tables inside the engine, `create table` and `drop table` | the image equals `to_jsonb` for every supported type, on the corpus |
 | **M3d** | the executor for `insert`, `update`, `delete` and `select ... where <key> = <constant>`, and the engine's `changes` | gate 4 for these; `changes` equals the capture's |
@@ -109,6 +109,27 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 | **M3h** | `alter table`, `create index` (an index is a second tree) | gate 4 on the catalog after each |
 | **M3i** | native `cancho_fork`, `AS OF`, `cancho_merge`, `cancho_erase` on the engine | the existing fork, as-of, merge and erase end-to-end suites pass on it |
 | **M3j** | the shadow run, then a database option to serve from the engine | gate 5, then the full gate on the engine for one database |
+
+## 6b. M3a, built
+
+`src/pager.cho` (4 KiB pages, a CRC-32 each, read and written by number, the crash hook), `src/btree.cho` (the copy-on-write B+tree: get, put, delete, and `next_after` for ordered scans; no recursion, a fixed scratch
+buffer), `src/pstore.cho` (the superblocks, the catalog page and the commit), `proxy/btcheck.cho` (a command-line harness over all three), `tests/btree_check.py`, `tests/pstore_check.py`, 28 mutants.
+
+**What differs from section 3, corrected in place.**
+* **The superblocks are pages 1 and 2 of the page file, not a separate `super` file** (Q7 said a directory with `pages` and `super`). One file means one handle and one `fsync` target, and the superblock is
+  protected the same way as every page, by its CRC, and not by a sector's atomicity: a superblock write that tears leaves a page whose CRC does not match, so the other superblock is current. The first page
+  handed out is 3.
+* **A page write that reaches the last non-zero byte of a superblock is a whole one**, because the rest of a superblock is zeros: a torn write of 100 bytes makes the commit visible and one of 1 byte does not; the
+  test says so.
+* **The catalog is 16 roots** (slots), not named branches; names come with M3i.
+* **A crashed creation is refused, not repaired.** A file that is not empty and holds no valid superblock is refused (`err 102`) rather than read as an empty database, so a flipped bit in the only
+  superblock cannot lose a database silently; the catalog page being written and the superblock not leaves exactly such a file, and the operator makes the engine directory again (there is no data in it).
+* **The tree does not merge thin pages** and **does not reuse pages**: a delete that empties a leaf drops it, nothing else is rebalanced, and a page no root names is garbage until M3b zeroes and reuses it. The page
+  cache is not built (every read is a `pread`).
+
+**What the tests found.** The first versions of both tests passed mutants they should have killed: a tree of 5-byte keys never had an internal split (a page holds 400 of them), and deleting in random order never emptied
+a subtree one page at a time. The tests now build a tree of 40,000 100-byte keys (three levels, internal splits) and delete it in key order and in reverse. One mutant is equivalent and is left out, with the reason in
+`tests/mutants.py`; another (a short read accepted) is equivalent because the CRC still refuses the page.
 
 ## 7. Taking over, safely
 
