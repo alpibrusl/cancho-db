@@ -121,6 +121,10 @@ quiet 2 python3 tests/store_check.py build/storecheck build/verify build/verify-
 echo "== the statement store rewrite (docs/m2g-erasure.md 6d): the cancho code against tools/erase_stmts.py, and the crash points"
 "$CANCHO" build --std proxy/erasecheck.cho src/store.cho src/build.cho src/commit.cho src/l1.cho src/ir.cho -o build/erasecheck
 quiet 2 python3 tests/erase_store_check.py build/erasecheck
+echo "== the engine's page file and B+tree (docs/m3-engine.md, M3a): against a model, a bit flipped in every page; a crash at every durable step with torn writes; the order of the calls"
+"$CANCHO" build --std proxy/btcheck.cho src/btree.cho src/pager.cho src/pstore.cho src/commit.cho src/build.cho -o build/btcheck
+quiet 2 python3 tests/btree_check.py build/btcheck
+quiet 2 python3 tests/pstore_check.py build/btcheck
 echo "== command lines";             python3 tests/cli_test.py vectors build/verify
 echo "== attenuation property";       python3 tests/properties.py 4000 1
 echo "== fuzz (three verifiers, no crash)"; python3 tests/fuzz.py vectors build/verify 3000 1
@@ -135,6 +139,7 @@ echo "== mutants, facts and state"; quiet 1 python3 tests/mutants.py state "$CAN
 echo "== mutants, guard";           quiet 1 python3 tests/mutants.py guard "$CANCHO"
 echo "== mutants, commit builder"; quiet 1 python3 tests/mutants.py build "$CANCHO"
 echo "== mutants, log directory"; quiet 1 python3 tests/mutants.py store "$CANCHO"
+echo "== mutants, B+tree, pages and superblocks"; quiet 1 python3 tests/mutants.py btree "$CANCHO"
 echo "== mutants, capture SQL and cdb.fork"; quiet 1 python3 tests/mutants.py sql "$CANCHO"
 echo "== mutants, L3a verifier"; quiet 1 python3 tests/mutants.py l3a "$CANCHO"
 echo "== mutants, L3a verifier in cancho"; quiet 1 python3 tests/mutants.py l3a-cho "$CANCHO"

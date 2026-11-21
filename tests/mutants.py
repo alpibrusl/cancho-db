@@ -1492,7 +1492,7 @@ def run_l3a_cho(cancho):
 
 
 
-# ---- the copy-on-write B+tree and its pages (src/btree.cho, src/pager.cho), judged by tests/btree_check.py
+# ---- the copy-on-write B+tree and its pages (src/btree.cho, src/pager.cho), judged by tests/btree_check.py; the superblocks and the commit (src/pstore.cho), judged by tests/pstore_check.py
 BTREE = [
     ("btree: keys compare backwards", "src/btree.cho", "        if c < d {\n            return 0 - 1;\n        }\n        if c > d {\n            return 1;\n        }", "        if c > d {\n            return 0 - 1;\n        }\n        if c < d {\n            return 1;\n        }"),
     ("btree: a key equal to a separator goes to the child on its left", "src/btree.cho", "if cmp(key, pg[at + 1..at + 1 + kl]) >= 0 {", "if cmp(key, pg[at + 1..at + 1 + kl]) > 0 {"),
@@ -1513,6 +1513,14 @@ BTREE = [
     ("btree: the first entry after a key may be the key", "src/btree.cho", "take = c > 0 || (inclusive && c == 0);", "take = c >= 0;"),
     ("btree: an inclusive scan skips the key", "src/btree.cho", "take = c > 0 || (inclusive && c == 0);", "take = c > 0;"),
     ("btree: a scan takes the nearest right sibling it saw first", "src/btree.cho", "                if al != 0 {\n                    alt = al;\n                }", "                if al != 0 && alt == 0 {\n                    alt = al;\n                }"),
+    ("pstore: a commit writes its superblock to the wrong page", "src/pstore.cho", "pager.write_page(p, 1 + seq % 2, sc[off..off + 4096]);", "pager.write_page(p, 2 - seq % 2, sc[off..off + 4096]);"),
+    ("pstore: the catalog is not synced before the superblock is written", "src/pstore.cho", "    var rc = pager.sync(p);\n    if rc < 0 {\n        return code(rc);\n    }\n    rc = write_super(p, sc, seq + 1, cat);", "    var rc = 0;\n    rc = write_super(p, sc, seq + 1, cat);"),
+    ("pstore: the superblock is not synced", "src/pstore.cho", "    rc = pager.sync(p);\n    if rc < 0 {\n        return code(rc);\n    }\n    return seq + 1;", "    return seq + 1;"),
+    ("pstore: a new database's catalog is not synced before its superblock", "src/pstore.cho", "            zero = pager.sync(p);\n            if zero == 0 {\n                zero = write_super(p, sc, 0, cat);", "            zero = 0;\n            if zero == 0 {\n                zero = write_super(p, sc, 0, cat);"),
+    ("pstore: the first valid superblock wins, not the newest", "src/pstore.cho", "            if seq > best && seq % 2 == slot - 1 {", "            if best < 0 && seq % 2 == slot - 1 {"),
+    ("pstore: a file with no valid superblock is an empty database", "src/pstore.cho", "    if best < 0 {\n        return btree.err_bad();\n    }", "    if best < 0 {\n        return no_database();\n    }"),
+    ("pstore: the roots are read from the wrong place", "src/pstore.cho", "        roots[i] = commit.be(sc, 7 + 4 * i, 4);", "        roots[i] = commit.be(sc, 8 + 4 * i, 4);"),
+    ("pager: a superblock page is handed out as a page of a tree", "src/pager.cho", "    if next < 3 {\n        next = 3;\n    }", "    if next < 1 {\n        next = 1;\n    }"),
     ("pager: the CRC of a page is not checked", "src/pager.cho", "    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {\n        return 0 - 2;\n    }", ""),
     ("pager: the CRC is checked over less than the page", "src/pager.cho", "    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {", "    if crc.crc32_of(out[7..4000]) != commit.be(out, 3, 4) {"),
 ]
@@ -1534,14 +1542,15 @@ def run_btree(cancho):
                 continue
             f.write_text(text.replace(old, new))
             exe = work / "btcheck"
-            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/btcheck.cho")] + [str(work / "src" / n) for n in ("btree.cho", "pager.cho", "commit.cho", "build.cho")] + ["-o", str(exe)],
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/btcheck.cho")] + [str(work / "src" / n) for n in ("btree.cho", "pager.cho", "pstore.cho", "commit.cho", "build.cho")] + ["-o", str(exe)],
                                capture_output=True, text=True)
             if b.returncode != 0:
                 print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
                 survivors.append(label)
                 continue
             try:
-                r = subprocess.run([sys.executable, str(ROOT / "tests/btree_check.py"), str(exe), "3"], capture_output=True, text=True, timeout=900)
+                judge = [str(ROOT / "tests/pstore_check.py"), str(exe)] if label.startswith("pstore:") or label.startswith("pager: a superblock") else [str(ROOT / "tests/btree_check.py"), str(exe), "3"]
+                r = subprocess.run([sys.executable] + judge, capture_output=True, text=True, timeout=900)
                 rc, out = r.returncode, r.stdout
             except subprocess.TimeoutExpired:
                 rc, out = 1, "FAIL timed out"

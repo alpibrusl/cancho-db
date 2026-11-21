@@ -4,6 +4,7 @@ import std.buffer;
 import std.io;
 import cdb.pager;
 import cdb.btree;
+import cdb.pstore;
 
 // `btcheck PAGEFILE [CRASH TORN]`: the copy-on-write B+tree (src/btree.cho) on its own, for tests/btree_check.py. PAGEFILE is made if it is missing and opened read-write. There are 16 *slots*, each holding a tree
 // (a root page number, 0 for empty); a command works on a slot, and a new write leaves the roots of the other slots (and the old root of the same slot) whole. Commands, one a line, keys and values in hex:
@@ -15,6 +16,9 @@ import cdb.btree;
 //     fork S T            slot T becomes the same tree as slot S               -> `ok ROOT`
 //     root S                                                                   -> `root ROOT`
 //     flip PAGE OFFSET    flip a bit of a byte of page PAGE in the file, CRC not restamped (flip again to put it back) -> `ok`
+//     init                a new database in an empty file (the two superblocks)    -> `ok`
+//     load                the roots of the newest valid superblock into the slots  -> `loaded SEQ`, `empty`, or `err CODE`
+//     commit              the slots' roots become the state (src/pstore.cho)        -> `seq N` or `err CODE`
 //     sync                fsync                                                -> `ok` or `err CODE`
 //     steps                                                                    -> `steps N`
 //
@@ -147,6 +151,7 @@ fn run[&h, &i, &p, &r](heap: &!h Heap, io: &!i Io, pg: &!p pager.Pager, roots: &
     var vb = box_slice(heap, 2048, byte_of(0));
     var ko = box_slice(heap, 512, byte_of(0));
     var vo = box_slice(heap, 2048, byte_of(0));
+    var seq = 0;
     var text = buffer.empty(heap, 4096);
     text = read_stdin(heap, io, text);
     borrow text as &t in {
@@ -328,6 +333,53 @@ fn run[&h, &i, &p, &r](heap: &!h Heap, io: &!i Io, pg: &!p pager.Pager, roots: &
                     } else {
                         put_str(io, "ok\n");
                     }
+                }
+            } else if ce - cs == 4 && int_of(all[cs]) == 'i' {
+                // init: a new database in an empty file
+                var r = 0;
+                borrow mut sc as &!sw in {
+                    r = pstore.init(pg, contents(sw));
+                }
+                if r < 0 {
+                    put_str(io, "err ");
+                    put_int(io, 0 - r);
+                    putchar(io, '\n');
+                } else {
+                    put_str(io, "ok\n");
+                }
+            } else if ce - cs == 4 && int_of(all[cs]) == 'l' {
+                // load: the roots of the newest valid superblock, into the slots
+                var r = 0;
+                borrow mut sc as &!sw in {
+                    r = pstore.load(pg, contents(sw), roots);
+                }
+                if r == pstore.no_database() {
+                    put_str(io, "empty\n");
+                } else if r < 0 {
+                    put_str(io, "err ");
+                    put_int(io, 0 - r);
+                    putchar(io, '\n');
+                } else {
+                    seq = r;
+                    put_str(io, "loaded ");
+                    put_int(io, r);
+                    putchar(io, '\n');
+                }
+            } else if ce - cs == 6 && int_of(all[cs]) == 'c' {
+                // commit: the slots' roots become the state
+                var r = 0;
+                borrow mut sc as &!sw in {
+                    r = pstore.commit(pg, contents(sw), roots, seq);
+                }
+                if r < 0 {
+                    put_str(io, "err ");
+                    put_int(io, 0 - r);
+                    putchar(io, '\n');
+                } else {
+                    seq = r;
+                    put_str(io, "seq ");
+                    put_int(io, r);
+                    putchar(io, '\n');
                 }
             } else if ce - cs == 4 && int_of(all[cs]) == 'r' {
                 if slot < 0 || slot > 15 {

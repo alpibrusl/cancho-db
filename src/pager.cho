@@ -24,7 +24,8 @@ pub fn header_size() -> [] int {
 
 pub res struct Pager {
     file: File,
-    // the next page number to hand out: the file's length in pages when it was opened, then one more for each `alloc`. Page 0 is never a page of a tree (a root of 0 is an empty tree).
+    // the next page number to hand out: the file's length in pages when it was opened, then one more for each `alloc`. Page 0 is never a page of a tree (a root of 0 is an empty tree), and pages 1 and 2 are the
+    // two superblocks (src/pstore.cho): the first page handed out is 3.
     next: int,
     crash: int,
     torn: int,
@@ -34,8 +35,8 @@ pub res struct Pager {
 
 pub fn new_pager(file: File, length: int) -> [] Pager {
     var next = length / 4096;
-    if next < 1 {
-        next = 1;
+    if next < 3 {
+        next = 3;
     }
     return Pager { file: file, next: next, crash: 0, torn: 0, steps: 0, dead: false };
 }
