@@ -101,9 +101,9 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 |---|---|---|
 | **M3a** (built, below) | the page file, superblocks, the COW B+tree (bytes to bytes), fork (a slot made the same tree) | gates 1 and 2 on the tree alone, with the crash-point module; gate 3 and the page cache are not in it |
 | **M3b** (the sweep built, 6c; the delta tree comes with the rows in M3c/M3d) | the zeroing and reuse of freed pages; the delta store as a tree; recovery from a log ahead of the superblock | gate 2 with the log; `AS OF`-style reconstruction equals the model |
-| **M3c** | tables, the row encoding and image (D-M3-6), the catalog of tables inside the engine, `create table` and `drop table` | the image equals `to_jsonb` for every supported type, on the corpus |
-| **M3d** | the executor for `insert`, `update`, `delete` and `select ... where <key> = <constant>`, and the engine's `changes` | gate 4 for these; `changes` equals the capture's |
-| **M3e** | predicates on any column, range scans on the key, `order by`, `limit`, `offset`, `distinct`, `in`, `case`, `cast`, `like` | gate 4 |
+| **M3c** (built, 6d and 6h) | tables, the row encoding and image (D-M3-6), the catalog of tables inside the engine, `create table` and `drop table` | the image equals `to_jsonb` for every supported type, on the corpus |
+| **M3d** (built, 6f to 6h; the delta tree is not) | the executor for `insert`, `update`, `delete` and `select ... where <key> = <constant>`, and the engine's `changes` | gate 4 for these; `changes` equals the capture's |
+| **M3e** (built, 6h, but for the lookup and range scan by key) | predicates on any column, range scans on the key, `order by`, `limit`, `offset`, `distinct`, `in`, `case`, `cast`, `like` | gate 4 |
 | **M3f** | aggregates and `group by`, `having` | gate 4 |
 | **M3g** | joins (nested loop first) | gate 4 |
 | **M3h** | `alter table`, `create index` (an index is a second tree) | gate 4 on the catalog after each |
@@ -188,7 +188,82 @@ arithmetic (PostgreSQL has other operators of those names), `IN` over mixed type
 * `x IN (...)` is an array of the members that name no column at one common type, plus separate comparisons of the others, so mixed types change the answer;
 * `varchar` is `character varying`, a type of its own; `LIKE` exists on `bytea`; `null - text` resolves to an operator on another type.
 
-Not built yet of M3d: the statements themselves (scan, insert, update, delete, the table catalog) and the engine's `changes`.
+## 6g. M3d, part 2, and M3e: the statements (design, written before the code)
+
+**D-M3-8. A branch is one tree.** A key of the tree is a table's number (`u32`) and then the row's stored key (6d); table number 0 is the catalog of tables, whose keys are table names and whose values are a
+table's number, its definition (6d), and for each column whether it is `not null` and its default. So a branch is still one root, a fork is still one copied slot, and the sweep (6c) needs to know nothing about
+tables. *What this costs:* `drop table` deletes the table's rows one by one (a path of pages written for each), where a tree per table would drop a pointer; a tree per table needs the sweep to follow roots held
+inside values, which is not built. A stored key is at most 196 bytes and a stored row at most 800 (the tree's limits): a longer one is refused (`engine-too-big`), never cut.
+
+**A statement is a new root, or nothing.** A statement reads the tree it was given and writes into a copy-on-write descendant; if it fails, its root is dropped and the pages it wrote are garbage for the next
+sweep. So an `update` reads the rows as they were before it began (no row is seen twice), and a failed statement changes nothing, with no undo code.
+
+**Which error.** PostgreSQL reports the first error it meets, and what it meets first depends on the order it reads rows in and on how it orders the conditions of a `where` (by estimated cost), neither of which
+the engine reproduces. So the engine does not stop at its first error: it finds **every error the statement could raise**, and
+* if they all have one SQLSTATE, that is the answer (it is PostgreSQL's whatever its order);
+* if they have several, the statement is refused (`engine-ambiguous-error`): PostgreSQL fails too, with one of them.
+
+Three places where whether there is an error at all depends on the order, each refused (`engine-order-dependent`) rather than guessed:
+* **a `where` whose conditions are joined by `AND`**: the engine computes every top-level condition for a row. No error: the row is kept if all are true. An error in one and every other one true: an error.
+  An error in one and another false or null: PostgreSQL raises or not according to which it computed first;
+* **an `update` that changes a key** to the key that another row of the same statement is moving away from (`set id = id + 1`): PostgreSQL fails or not according to which row it writes first. A new key that
+  meets a row that stays, or two rows that take one new key, are a certain `23505`;
+* **a `limit` or `offset`** on a statement in which some row raises an error: PostgreSQL may stop before reaching it.
+
+An `insert` has an order of its own (its rows as written, each stored before the next is checked), so its first error is exact; errors of its constants come before any row is stored, as PostgreSQL finds them
+when it plans.
+
+**Assignment.** A value stored in a column is converted as PostgreSQL's assignment does: a string literal is read as the column's type, an integer into another integer type with a range check (`22003`),
+anything into `text`; any other pair is `42804`. Text that is not valid UTF-8 or holds a zero byte is refused.
+
+**`changes`.** Each statement lists what it changed: the table, the plain key, the image before and the image after (6d), a row whose image did not change left out, a changed key as a delete and an insert:
+what the capture records for the same statement (`m1-commit-path.md`). The oracle in the tests is PostgreSQL itself, the table read before and after the statement.
+
+**Order.** `order by` compares integers as numbers, booleans false first, text as bytes (D-M3-5), nulls last ascending and first descending unless said. Rows that compare equal come in key order, where
+PostgreSQL's order for them is whatever its plan gives: the tests compare such results as sets.
+
+Not in this slice, refused with `engine-unsupported`: aggregates, `group by`, `having`, joins, a table with no primary key or with a `unique` column, `alter table`, indexes, and types outside D-M3-5.
+
+## 6h. M3d, part 2, and M3e, built: what the differential found, and what it costs
+
+`src/tables.cho` (the catalog inside the tree), `src/exec.cho` (what the statements share, and SELECT with `where`, `order by`, `limit`, `offset`, `distinct`), `src/execw.cho` (INSERT, UPDATE, DELETE,
+CREATE TABLE, DROP TABLE), `proxy/enginecheck.cho` (the harness: statements on standard input over a page file) and `tests/engine_check.py`.
+
+**The test.** A random history (create and drop table, insert, update, delete, select; many statements wrong on purpose) is run by the engine in two processes with a commit and a sweep between, then by
+PostgreSQL 16 statement by statement; a statement the engine refuses is rolled back in PostgreSQL so the two stay in step. Compared: the SQLSTATE of an error; the column types and rows of a select (in
+order where the `order by` decides it); the row count of a write and its `changes` against the table read from PostgreSQL before and after. **20 seeds of 2,000 statements: no disagreement**; of the 28,114 statements
+PostgreSQL answers the engine refuses 312 (1.1 %). Beside it: 63 fixed statements the engine must *answer* (so that a change which only refuses more cannot pass as "never wrong"), 5 statements whose outcome
+in PostgreSQL does depend on its order, each refused as such (below), and the page file read as bytes after a delete and after a drop. 59 mutants of the three files and of the assignment in `src/eval.cho`
+are all killed; two more were equivalent and are not listed (a sort that is not stable: equal rows have no order to keep; the assignment calling the conversion as an explicit cast: `assignable` has already
+left only the pairs where the two agree).
+
+**What the differential found** (not guessed in advance):
+* **An output column without an alias has a name, and `order by` binds to it first.** `select cast(k as text) from t order by k` orders by the *text*: PostgreSQL names a cast after what is cast and a CASE
+  after its ELSE (if that is a column or a call; else after the type, or `case`), and a bare name in `order by` is an output column before it is a table's. The lowering took only written aliases, so the
+  engine ordered by the integer; with two output columns of that name PostgreSQL says the name is ambiguous. Fixed in `src/lower.cho` (which changes the IR of such a statement: it now names the expression
+  that is ordered by), with 11 hand-written cases and 6 mutants.
+* **`null / 0` is null**: a division's error needs both operands, which the evaluator had right and one of the fixed cases had wrong.
+
+**The order dependence is real, and is PostgreSQL's cost model, not the text's order.** With rows stored 3, 2, 1: `where k > 2 and 10 / (k - 2) > 0` and the same conditions written the other way round both
+answer without an error (the cheaper condition is computed first wherever it is written); `select 10 / (k - 2) from t order by k limit 1` answers (the limit is reached first); `update t set k = k + 1`
+succeeds and `update t set k = k - 1` fails with `23505`. The engine refuses all five, and the test holds PostgreSQL to exactly these five outcomes, so a planner that changes them is noticed.
+
+**Measured** (one process, no `fsync` between statements, a table of an integer key, an integer and a short text; `enginecheck` on this machine):
+
+| | |
+|---|---|
+| 20,000 inserts, one a statement | 4.1 s (4,900 a second) |
+| the page file after them | 192 MiB: 9.8 KiB a row |
+| a select with a predicate over the 20,000 rows | 0.67 s (30,000 rows a second) |
+| an update of every row | 2.7 s; the file grows by 234 MiB |
+| a sweep after it | 0.8 s, 108,517 pages (424 MiB) freed |
+
+These are the costs of what is *not built*, and they are large: **every statement copies the path of pages from the root for each row it writes and nothing is reused before a sweep** (so the file is fifty
+times the data until one runs); a scan goes down from the root for every row and checks the CRC of each page on the way, with no page cache; `where key = constant` is a scan like any other. The first two
+are M3b's page reuse within a transaction and the page cache of gate 3; the third is the key lookup of M3e. None of them changes an answer.
+
+**Not built yet, as before:** the engine's delta tree and the `AS OF` reads over it, transactions over several statements (a statement is its own), the output column names a client is sent, and
+everything listed above as refused.
 
 ## 7. Taking over, safely
 

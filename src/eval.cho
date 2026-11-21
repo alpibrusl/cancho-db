@@ -510,6 +510,37 @@ fn convert[&w, &a, &i](ws: &!w [int], v: int, to: int, explicit: bool, ar: &!a [
     return no_cast();
 }
 
+// Whether a value of type `from` may be stored in a column of type `to` (PostgreSQL's assignment conversions among these types: a literal into anything, an integer into another integer type, anything into
+// text).
+pub fn assignable(from: int, to: int) -> [] bool {
+    return from == to || from == 0 || is_int(from) && is_int(to) || to == 3;
+}
+
+// Give the value at `v` the type `to` of the column it is to be stored in. 0, and the value may now be an error value (state 2: text that is not a number, an integer out of the column's range) even if it
+// was a constant, which the caller tells from a row's error by the constant mark it read before; `mismatch()` (42804) if there is no such conversion; `unsupported()`.
+pub fn assign[&w, &a, &i](ws: &!w [int], v: int, to: int, ar: &!a [byte], info: &!i [int]) -> [] int {
+    let from = ws[v];
+    if from == to {
+        return 0;
+    }
+    if !assignable(from, to) {
+        return mismatch();
+    }
+    if ws[v + 1] != 0 {
+        ws[v] = to;
+        return 0;
+    }
+    let constant = ws[v + 4];
+    ws[v + 4] = 0;
+    // `assignable` has left only what an explicit cast and an assignment do alike
+    let r = convert(ws, v, to, true, ar, info);
+    ws[v + 4] = constant;
+    if r == no_operator() || r == no_cast() {
+        return mismatch();
+    }
+    return r;
+}
+
 // Make the two values at `x` and `y` comparable: the type they are compared as, or a negative answer.
 fn unify[&w, &a, &i](ws: &!w [int], x: int, y: int, ar: &!a [byte], info: &!i [int]) -> [] int {
     var tx = ws[x];
