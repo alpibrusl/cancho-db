@@ -50,6 +50,9 @@ echo "== the capture install at start retries a deadlock (a CI run died on one)"
 quiet 3 python3 tests/install_retry_e2e.py build/proxy
 echo "== cancho_erase on a branch, and the extended protocol's refusal"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/erase_branch_e2e.py build/proxy
+echo "== the engine's rows against PostgreSQL (docs/m3-engine.md, M3c): the image is to_jsonb's, the plain key jsonb_build_array's, the stored keys in key order"
+"$CANCHO" build --std proxy/rowcheck.cho src/row.cho src/state.cho src/commit.cho src/build.cho -o build/rowcheck
+quiet 2 python3 tests/row_check.py build/rowcheck
 echo "== the statement store of a real session is version 3, and erasing one subject's constants leaves a log that verifies"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/stmts_v3_e2e.py build/proxy
 echo "== the extended protocol through the proxy (raw messages, a real PostgreSQL)"
@@ -140,6 +143,7 @@ echo "== mutants, guard";           quiet 1 python3 tests/mutants.py guard "$CAN
 echo "== mutants, commit builder"; quiet 1 python3 tests/mutants.py build "$CANCHO"
 echo "== mutants, log directory"; quiet 1 python3 tests/mutants.py store "$CANCHO"
 echo "== mutants, B+tree, pages and superblocks"; quiet 1 python3 tests/mutants.py btree "$CANCHO"
+echo "== mutants, the engine's rows"; quiet 1 python3 tests/mutants.py row "$CANCHO"
 echo "== mutants, capture SQL and cdb.fork"; quiet 1 python3 tests/mutants.py sql "$CANCHO"
 echo "== mutants, L3a verifier"; quiet 1 python3 tests/mutants.py l3a "$CANCHO"
 echo "== mutants, L3a verifier in cancho"; quiet 1 python3 tests/mutants.py l3a-cho "$CANCHO"

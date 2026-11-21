@@ -1,0 +1,127 @@
+edition 9;
+
+import std.buffer;
+import std.io;
+import cdb.state;
+import cdb.row;
+
+// `rowcheck`: the row functions of the engine (src/row.cho) on their own, for tests/row_check.py. Standard input: lines `DEFHEX ROWHEX`; for each, one line `IMAGEHEX PLAINKEYHEX STOREDKEYHEX`, or `bad def` /
+// `bad row` if the definition or the row is not well formed.
+
+fn digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+fn put_hex[&i, &s](io: &!i Io, bytes: &s [byte]) -> [io_write] int {
+    var j = 0;
+    while j < len(bytes) {
+        putchar(io, digit(int_of(bytes[j]) / 16));
+        putchar(io, digit(int_of(bytes[j]) % 16));
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn put_str[&i, &s](io: &!i Io, text: &s [byte]) -> [io_write] int {
+    var j = 0;
+    while j < len(text) {
+        putchar(io, int_of(text[j]));
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer) -> [heap, io_read] buffer.Buffer {
+    var out = text;
+    var c = getchar(io);
+    while c >= 0 {
+        out = buffer.push(heap, out, byte_of(c));
+        c = getchar(io);
+    }
+    return out;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(tty);
+    release(ffi);
+    release(net);
+    release(clock);
+    release(signals);
+    release(exec);
+    release(fs);
+    release(args);
+    borrow mut heap as &!h in {
+        var text = buffer.empty(h, 4096);
+        borrow mut io as &!i in {
+            text = read_stdin(h, i, text);
+        }
+        var def = box_slice(h, 8192, byte_of(0));
+        var row = box_slice(h, 8192, byte_of(0));
+        var out = box_slice(h, 32768, byte_of(0));
+        borrow text as &t in {
+            let all = buffer.bytes(t);
+            var ls = 0;
+            while ls < len(all) {
+                var le = ls;
+                while le < len(all) && int_of(all[le]) != '\n' {
+                    le = le + 1;
+                }
+                var sp = ls;
+                while sp < le && int_of(all[sp]) != ' ' {
+                    sp = sp + 1;
+                }
+                var dn = 0 - 1;
+                var rn = 0 - 1;
+                borrow mut def as &!dw in {
+                    dn = state.hexdec(all, ls, sp, contents(dw), 0);
+                }
+                if sp < le {
+                    borrow mut row as &!rw in {
+                        rn = state.hexdec(all, sp + 1, le, contents(rw), 0);
+                    }
+                }
+                borrow mut io as &!i in {
+                    borrow def as &d0 in {
+                        borrow row as &r0 in {
+                            borrow mut out as &!ow in {
+                                if dn < 0 || row.columns(contents(d0)[0..dn]) < 0 {
+                                    put_str(i, "bad def");
+                                } else if rn < 0 || !row.row_ok(contents(d0)[0..dn], contents(r0)[0..rn]) {
+                                    put_str(i, "bad row");
+                                } else {
+                                    let d = contents(d0)[0..dn];
+                                    let r = contents(r0)[0..rn];
+                                    let n1 = row.image(d, r, contents(ow));
+                                    if n1 < 0 {
+                                        put_str(i, "big");
+                                    } else {
+                                        put_hex(i, contents(ow)[0..n1]);
+                                        put_str(i, " ");
+                                        let n2 = row.plain_key(d, r, contents(ow));
+                                        put_hex(i, contents(ow)[0..n2]);
+                                        put_str(i, " ");
+                                        let n3 = row.stored_key(d, r, contents(ow));
+                                        put_hex(i, contents(ow)[0..n3]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    putchar(i, '\n');
+                }
+                ls = le + 1;
+            }
+        }
+        buffer.drop(h, text);
+        unbox_slice(h, def);
+        unbox_slice(h, row);
+        unbox_slice(h, out);
+    }
+    release(io);
+    release(heap);
+    return 0;
+}
