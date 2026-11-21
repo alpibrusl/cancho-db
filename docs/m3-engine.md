@@ -520,6 +520,55 @@ have scattered the free pages, so that pages of one statement compete for slots;
 the unwritten page instead of writing it answers `engine-damaged` there, tried by hand). The fixed statements gained a table of several leaves, without which a scan that read one entry past a leaf's
 end passed every test. 7 mutants.
 
+## 6u. What PostgreSQL does on a write, read in its source, and what was taken from it (built)
+
+After 6t the engine read as fast as PostgreSQL and wrote 2 to 11 times slower. Instead of guessing further, PostgreSQL's own write path was read (a shallow clone of `postgres/postgres`) and the
+engine's was profiled (`valgrind --tool=callgrind`, an update of every row).
+
+**The profile.** About 500,000 instructions a row, 90 % of them in five loops that each walk a whole page: some twelve passes over 4 KiB for every row written (the leaf copied out of the cache, built
+again entry by entry, its tail zeroed, copied back; twice, for the row and for its history entry; and two lookups that copied a leaf each).
+
+**PostgreSQL, for the same write** (files in its tree):
+
+| PostgreSQL | the engine after 6t |
+|---|---|
+| changes the page where it is in the buffer pool: pin, change, `MarkBufferDirty` (`heapam.c`, `heap_insert`; `bufmgr.c`) | copied the leaf out, rebuilt it, copied it back |
+| a page is slotted: an insert moves a few line pointers and appends the tuple (`bufpage.c`, `PageAddItemExtended`) | rebuilt every entry of the leaf |
+| looks a key up by binary search over the line pointers (`nbtsearch.c`, `_bt_binsrch`) | walks the entries, which have no index |
+| remembers the last leaf and skips the walk down when the next key belongs there (`nbtinsert.c`, `_bt_search_insert`) | walked from the root four times a row |
+| the old version of a row stays on its page (`README.HOT`); nothing else is touched and nothing is looked up | looked up whether it had an entry, looked up the old value, and inserted an entry elsewhere in the tree |
+| is durable by a record of the change in a log written in order; pages are written later (`xlog.c`) | writes whole pages at every commit |
+
+**Taken from it:**
+1. **A leaf that is the statement's own is changed where it is in the cache** (`put_in_place`, `del_in_place` in `src/btree.cho`; `pager.own`): the entries after the one written are moved, and nothing else.
+   It is open only for a page of the open window that is already marked to be written (D-M3-10), so no page a root names is ever touched; anything else, and an entry that does not fit, takes the way
+   that was there before.
+2. **What is known is not looked up.** An update and a delete have the old row in hand, and an insert has just found the key absent: the history entry is written from that (`remember_known`), without
+   the two walks. This rests on a transaction being one statement in which no key is written twice; a transaction of several statements takes the old way (`set_once`), which is the tested one for
+   the catalog and for rows that change key.
+3. **A lookup reads the leaf where it is** (`leaf_get`), copying only the value.
+
+**Measured**, as before, PostgreSQL 16.15 beside it:
+
+| | PostgreSQL | after 6t | now |
+|---|---|---|---|
+| an update of every row (20,000) | 0.09 s | 0.97 s | 0.14 s |
+| a delete of half the rows | | | 0.12 s |
+| 20,000 inserts, one a statement | 1.6 s | 3.7 s | 2.4 s (8,200 a second) |
+| the same rows, 100 a statement | | 1.3 s | 0.73 s (27,000 rows a second) |
+
+**So a statement that writes many rows is now within a factor of two of PostgreSQL; a statement that writes one row is not**, and its cost is no longer in the tree: each such statement copies a path of
+pages once (it owns none when it starts) and writes them all at the end. That is the last row of the table above, and it is a decision of this design (D-M3-3: the tree is the durable state, there is
+no log of changes), not something a faster loop removes.
+
+**Not taken, and why.** *Slotted pages and binary search:* a change of the page format; the profile no longer points there first. *The last leaf remembered:* worth doing for loads in key order.
+*A log of changes with pages written later:* the one thing that would make a single-row commit cost a hundred bytes instead of sixteen thousand, and shrink the file; it turns D-M3-3 round and
+touches every crash test, so it is to be designed on this page before any code, not slipped in as a speed-up.
+
+**Tests.** The same as 6t, all through the new paths (the random history on 10 seeds, the crash at every step, statements larger than the cache, the tree's model). 8 mutants of the three changes are
+killed. Two were not and are not listed, each because the code allows less than the mutant tests: `pager.own` asks that the page is of the open window, and a page marked to be written always is;
+and a first version of `own` marked a clean page itself, a branch no test reached (it needs sixteen thousand pages written by one statement), so that branch was removed rather than left untested.
+
 ## 6q. M3h: `alter table ... add column`, `create index`, `drop index` (design, written before the code)
 
 The parser's closed DDL is `create table`, `alter table T add [column] <column>`, `drop table`, `create [unique] index N on T (columns)` and `drop index N` (`src/stmt.cho`). What the engine does with

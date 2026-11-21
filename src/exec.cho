@@ -218,6 +218,7 @@ pub res struct Work {
     fresh: bool,
     ntab: int,
     txn: int,
+    once: bool,
 }
 
 pub fn rows_size() -> [] int {
@@ -229,11 +230,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -1135,6 +1136,64 @@ pub fn remember[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [b
         return tree_err(o);
     }
     let nw = btree.put(p, contents(w.sc), root, contents(w.ukey)[0..ul], contents(w.uval)[0..n]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// Whether the transaction is one statement (the default): then no key is written twice in it, and a writer that knows what a key held need not look (`put_known`, `del_known`).
+pub fn set_once[&q](w: &!q Work, once: bool) -> [] int {
+    w.once = once;
+    return 0;
+}
+
+// As `remember`, for a caller that knows what the key holds now (`old`, if `has_old`; nothing otherwise). In a transaction of one statement the tree is not asked at all: PostgreSQL does not look a
+// row up again to keep its old version either (docs/m3-engine.md 6u). Otherwise this is `remember`.
+pub fn remember_known[&q, &z, &k, &o](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int, old: &o [byte], has_old: bool) -> [file_read, file_write] int {
+    if w.txn == 0 {
+        return root;
+    }
+    if !w.once {
+        return remember(p, w, root, k, kn);
+    }
+    if kn > 188 || len(old) > 799 {
+        return too_big();
+    }
+    let ul = undo_key(w.txn, k, kn, contents(w.ukey));
+    var n = 1;
+    contents(w.uval)[0] = byte_of(0);
+    if has_old {
+        contents(w.uval)[0] = byte_of(1);
+        n = copy(old, 0, len(old), contents(w.uval), 1);
+    }
+    let nw = btree.put(p, contents(w.sc), root, contents(w.ukey)[0..ul], contents(w.uval)[0..n]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// `put_key` for a caller that knows what the key held (`remember_known`).
+pub fn put_known[&q, &z, &k, &v, &o](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int, v: &v [byte], old: &o [byte], has_old: bool) -> [file_read, file_write] int {
+    let r = remember_known(p, w, root, k, kn, old, has_old);
+    if r < 0 {
+        return r;
+    }
+    let nw = btree.put(p, contents(w.sc), r, k[0..kn], v);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// `del_key` for a caller that knows what the key held.
+pub fn del_known[&q, &z, &k, &o](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int, old: &o [byte]) -> [file_read, file_write] int {
+    let r = remember_known(p, w, root, k, kn, old, true);
+    if r < 0 {
+        return r;
+    }
+    let nw = btree.del(p, contents(w.sc), r, k[0..kn]);
     if nw < 0 {
         return tree_err(nw);
     }
