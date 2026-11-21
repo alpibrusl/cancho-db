@@ -62,6 +62,8 @@ echo "== the engine's statements against PostgreSQL (docs/m3-engine.md 6g, 6h): 
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 1
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 2
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 3
+echo "== the engine's statements across a crash at every durable step (gate 2 at the level of SQL): the tables after a restart are those of a commit, and the file takes writes again"
+quiet 3 python3 tests/engine_crash.py build/enginecheck
 echo "== the statement store of a real session is version 3, and erasing one subject's constants leaves a log that verifies"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/stmts_v3_e2e.py build/proxy
 echo "== the extended protocol through the proxy (raw messages, a real PostgreSQL)"

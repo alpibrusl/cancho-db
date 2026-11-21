@@ -14,12 +14,16 @@ import cdb.exec;
 import cdb.execs;
 import cdb.execw;
 
-// `enginecheck PAGEFILE`: the engine's statements (src/exec.cho, src/execw.cho) over a page file, for tests/engine_check.py. PAGEFILE is made if it is missing; the branch is slot 0 of its catalog. Standard
+// `enginecheck PAGEFILE [CRASH TORN]`: the engine's statements (src/exec.cho, src/execw.cho) over a page file, for tests/engine_check.py. PAGEFILE is made if it is missing; the branch is slot 0 of its catalog. Standard
 // input, a line each:
 //
 //     !commit        make the statements so far durable (src/pstore.cho)      -> `committed SEQ` or `err CODE`
 //     !sweep         zero and reuse the pages nothing names                   -> `swept N` or `err CODE`
+//     !steps         how many writes and syncs the page file has seen         -> `steps N`
+//     !mark          nothing                                                  -> `mark` (a separator for a test that reads the output)
 //     anything else  one SQL statement, which is run and, if it is done, becomes the state the next one sees
+//
+// With CRASH and TORN the process stops being able to write at step CRASH (TORN bytes of that write happen): it prints `crashed` and ends with status 6, leaving the file as a kill there would.
 //
 // For a statement: `refused TAG` (the lexer, the parser, the lowering or the engine refuses it), `error SQLSTATE`, or `ok KIND N` (N rows) followed by, for a SELECT, a line `T` with the type of each column
 // and a line `R` for each row with each value (`-` null, a number, 0 or 1, or the bytes in hex, `.` if there are none); for a statement that writes, a line `C TABLE KEY BEFORE AFTER` for each change (hex,
@@ -373,8 +377,19 @@ fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &
                 }
                 put_int(io, r);
                 putchar(io, '\n');
+            } else if starts(all, ls, le, "!mark") {
+                put_str(io, "mark\n");
+            } else if starts(all, ls, le, "!steps") {
+                put_str(io, "steps ");
+                put_int(io, pager.steps(pg));
+                putchar(io, '\n');
             } else if le > ls {
                 rs[0] = run_sql(heap, io, pg, w, all[ls..le], rs[0]);
+            }
+            if pager.crashed(pg) {
+                // the crash point was reached (the test hook of src/pager.cho): nothing more is written, as if the process had died there
+                put_str(io, "crashed\n");
+                status = 6;
             }
             ls = le + 1;
         }
@@ -394,7 +409,7 @@ fn main(world: World) -> [] int {
     var status = 2;
     borrow fs as &fsr in {
         borrow args as &g in {
-            if arg_count(g) == 2 {
+            if arg_count(g) == 2 || arg_count(g) == 4 {
                 status = 3;
                 match open_new(fsr, arg(g, 1)) {
                     Opened::Ok(nf) => {
@@ -421,6 +436,23 @@ fn main(world: World) -> [] int {
                         }
                         borrow mut heap as &!hh in {
                             var pg = pager.new_pager(hh, f, size);
+                            if arg_count(g) == 4 {
+                                var crash = 0;
+                                var torn = 0;
+                                var i = 0;
+                                while i < len(arg(g, 2)) {
+                                    crash = crash * 10 + int_of(arg(g, 2)[i]) - '0';
+                                    i = i + 1;
+                                }
+                                i = 0;
+                                while i < len(arg(g, 3)) {
+                                    torn = torn * 10 + int_of(arg(g, 3)[i]) - '0';
+                                    i = i + 1;
+                                }
+                                borrow mut pg as &!cq in {
+                                    pager.set_crash(cq, crash, torn);
+                                }
+                            }
                             var wk = exec.new_work(hh);
                             var text = buffer.empty(hh, 4096);
                             borrow mut io as &!oo in {

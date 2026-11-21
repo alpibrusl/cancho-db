@@ -361,6 +361,22 @@ The engine refuses all three (`engine-unsupported`): which conditions PostgreSQL
 **Cost, said plainly.** A join of tables of *n* and *m* rows computes *n × m* conditions; the tables after the first are held in memory (16 MiB, 262,144 rows, refused beyond); there is no hash join
 and no lookup by key under a join. Not built: `right` and `full` joins, a table joined to itself, `using`, `natural`.
 
+## 6m. Gate 2 with statements: a crash at every durable step
+
+M3a's crash test (6b) stops the tree alone. `tests/engine_crash.py` does it to the engine with statements: a history of six commits (creates, multi-row inserts, updates that change keys, deletes, a
+dropped table, three sweeps) takes 534 page writes and `fsync`s; it is run 1,068 times, stopped at each step with the write torn at 0 and at 100 bytes, and a new process then reads every table. What it
+finds is **always the tables of a commit, and exactly the commit expected**: the last one whose superblock was written whole before the step (each of the seven states is found after some crash). After
+every restart a table is created, committed and read back by a third process, and the other tables are unchanged: the file a crash leaves is one that takes writes.
+
+Two things it showed that the page could have got wrong by assertion:
+* **A torn write can be a whole write.** A superblock is a few bytes at the head of a page of zeros, so a write of it cut at 100 bytes leaves exactly the page a whole write would: the commit is
+  there. The test first held that a torn superblock write always falls back to the commit before, which was false for this layout; it now allows either answer for that one step and no other.
+* **A crash while a new file's two superblocks are first written leaves a file that is refused** (3 of the 8 cases: the file is not empty and holds no valid superblock, which must not read as an
+  empty database, 6b). It holds nothing, and has to be deleted by hand. That is a rough edge of making a database, not of running one, and it is not smoothed over here.
+
+What this is not: a power failure (a stopped process leaves what it wrote; a machine may lose what was not synced, which is what the order of D-M3-3 is for and what only gate 3's failing `fsync` and a
+real power test would show), nor a test of several branches or of the delta tree, which do not exist yet.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
