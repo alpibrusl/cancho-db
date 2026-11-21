@@ -2172,42 +2172,44 @@ ENGINE = [
 ]
 
 def run_engine(cancho):
+    """Each mutant is built and judged on its own, so several are run at once (a database a worker): the group is the longest of the gate."""
+    import concurrent.futures
+    import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    survivors = []
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho", "execw.cho")
-    for label, rel, old, new in table:
+
+    def one(mutant):
+        label, rel, old, new = mutant
+        db = "cdb_enginemut_" + "".join(c for c in threading.current_thread().name if c.isdigit())
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             shutil.copytree(ROOT / "src", work / "src")
             f = work / rel
             text = f.read_text()
             if text.count(old) != 1:
-                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
-                survivors.append(label)
-                continue
+                return label, "STALE  %-48s original text occurs %d times" % (label, text.count(old)), True
             f.write_text(text.replace(old, new))
             exe = work / "enginecheck"
             b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/enginecheck.cho")] + [str(work / "src" / x) for x in srcs] + ["-o", str(exe)], capture_output=True, text=True)
             if b.returncode != 0:
-                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
-                survivors.append(label)
-                continue
-            killed = ""
+                return label, "BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]), True
             for seed in ("1", "2", "3"):
                 try:
-                    r = subprocess.run([sys.executable, str(ROOT / "tests/engine_check.py"), str(exe), "2500", seed], capture_output=True, text=True, timeout=900, env=dict(os.environ, E2E_DB="cdb_enginemut"))
+                    r = subprocess.run([sys.executable, str(ROOT / "tests/engine_check.py"), str(exe), "2500", seed], capture_output=True, text=True, timeout=900, env=dict(os.environ, E2E_DB=db))
                     rc, out = r.returncode, r.stdout + r.stderr
                 except subprocess.TimeoutExpired:
                     rc, out = 1, "FAIL timed out"
                 if rc != 0:
                     first = [l for l in out.splitlines() if l.startswith("FAIL")] or [l for l in out.splitlines() if l.startswith("engine_check:")][-1:]
-                    killed = "seed %s: %s" % (seed, (first[0] if first else "a crash")[:80])
-                    break
-            if killed:
-                print("killed   %-46s %s" % (label, killed))
-            else:
-                print("SURVIVED %-46s every statement agrees" % label)
+                    return label, "killed   %-46s seed %s: %s" % (label, seed, (first[0] if first else "a crash")[:80]), False
+            return label, "SURVIVED %-46s every statement agrees" % label, True
+
+    survivors = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(4, os.cpu_count() or 1))) as pool:
+        for label, line, alive in pool.map(one, table):
+            print(line, flush=True)
+            if alive:
                 survivors.append(label)
     print("%d mutants, %d not killed" % (len(table), len(survivors)))
     return 1 if survivors else 0
