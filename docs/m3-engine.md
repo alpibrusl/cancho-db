@@ -670,6 +670,56 @@ script of transactions; 179 mutants of the engine, 10 of them new (the text of a
 **Not built:** one writer at a time is all there is (two connections with transactions open at once do not exist in the harness: that is the proxy's to arrange, J5); isolation levels and savepoints
 are refused by the parser; an error's message.
 
+## 6w. The first user: `cancho-hooks`, and what it asks for
+
+All the `cancho-*` repositories were read for what they store in PostgreSQL. Four talk to it at all; one fits. `cancho-hooks` (the webhook delivery service) keeps three tables and sixteen
+queries (`sql/schema.sql`, `sql/queries.sql` there), **every column of which is a type the engine has** (`bigint`, `integer`, `smallint`, `text`, `boolean`; its times are integers), its database is optional
+and is not its source of truth (its log files are), and it is a product somebody runs, which is what M4's exit asks for. The others: `cancho-ota` (seventeen migrations: `timestamptz`, regular
+expressions in checks, foreign keys that cascade), `cancho-web` (an example with a `json` column), `cancho-sheets` (a browser *of* PostgreSQL).
+
+So the order of work from here is hooks' sixteen queries, and the measure is how many of them the engine answers as PostgreSQL does. What they need that was not built when this was written:
+
+| | queries that need it |
+|---|---|
+| parameters (`$1`, `$1::bigint`) | all 16 |
+| `returning` | 6 |
+| `coalesce`, `greatest` | 4 |
+| a subquery (a scalar one, a `count(*)` guard, `ctid in (select ...)`) | 3 |
+| `on conflict do nothing` | 2 |
+| sequences (`nextval`, `setval`), an identity column | 2, and one table |
+| a `with` whose body is a `delete ... returning` | 1 |
+| a primary key of several columns; `check`; `if not exists`; a partial index | the schema |
+
+**Parameters first (design).** A parameter is, to PostgreSQL's analysis, what a string literal is: a value of no type yet, which takes its type from what it meets (the other side of a comparison, a
+cast, the column it is stored in), and whose text is then read as that type. So the evaluator gives a `Param` node the text bound to it as a literal of unknown type, or a null, and everything already
+built for literals applies: `$1::bigint`, `where k = $1`, `values ($1, $2)`, `limit $1`. A parameter also makes the lookup by key (6h) possible, since `k = $1` compares the key with a constant.
+*The oracle:* PostgreSQL's extended protocol (`Parse` with no types given, `Bind` with text values), which is what `cancho-pg` sends.
+
+**Built, and where the design was wrong.** "What a string literal is" was false in three ways, each found by the differential within its first 2,500 statements and each now a refusal:
+
+1. *A parameter has one type in a statement, a literal has one at each place it is written.* PostgreSQL gives a parameter the type of its first use and reads the later uses as that type
+   (`n > $1 or s = $1` is an error where two literals would not be). The engine reads each use alone, so it answers only where that cannot differ: a parameter used once, or one whose every use
+   carries the same cast (`$1::bigint`, which is how hooks writes all of its repeated ones). `$1 between a and b` is two uses (it is `$1 >= a and $1 <= b`), and so is `$1 in (...)`.
+2. *A parameter that meets no type is an error (42P18), where a literal is read as text*: `$1 is null`. The evaluator marks a parameter's value until something gives it a type (a comparison
+   with a typed value, a cast, the column it is stored in, `||` beside text, `limit`) and refuses a node that leaves one unmet. This refuses more than PostgreSQL does (`$1 = $2`, which
+   PostgreSQL reads as two texts).
+3. *The statement must name every parameter that is bound, and no other*, and a statement that is not a query takes none.
+
+One rule of literals was wrong too and is corrected with it: in `x in (...)` a string (or a parameter) among integers of several widths is read by PostgreSQL at a width the engine did not
+reproduce (out of range at one, in range at another); that is refused now.
+
+An error in reading a parameter's text (`'abc'` bound where an integer is stored) is answered as the error it is, as for a literal.
+
+**Measured.** 20 seeds of 3,000 statements against PostgreSQL 16.15, three in ten of the queries with some of their literals made parameters (bare or cast, now and then one used twice, a null,
+text that is no number), sent by the extended protocol: no disagreement; of 13,355 statements with parameters the engine answers 7,140 (rows, changes or the error). 29 fixed statements with
+parameters must be answered, 9 are pinned as refused with PostgreSQL's own outcome beside them. 13 mutants, all killed (one survived until a grouped query with text parameters was added: the
+arena's start); the engine's group is 192.
+
+**The checklist** (`tests/hooks_check.py`; `tests/hooks/` holds hooks' own `schema.sql` and `queries.sql`). The schema, then 54 calls of the sixteen queries with values, on PostgreSQL and on
+the engine; after each call the answers are compared and so is every table. When this was written: **0 of 15 schema statements, 0 of 16 queries**. Six queries are refused only because their
+table is not there (`attempts_of`, `endpoints_all`, `schedule_by_id`, `schedules_all`, `schedules_due`, `advance_schedule`), so the schema comes next, before `returning`: a key of several
+columns, `if not exists`, `check`, an identity column, a sequence, an index with a condition, and `alter column ... type` to the type it has.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

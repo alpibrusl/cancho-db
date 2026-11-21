@@ -18,6 +18,7 @@ answers.
 """
 import os
 import random
+import re
 import socket
 import struct
 import subprocess
@@ -65,9 +66,20 @@ class Pg:
                 return out
 
     def query(self, sql):
-        """(error code or None, column type oids, rows, command tag); the column names of the last result are left in `self.names`"""
-        q = sql.encode() + b"\0"
-        self.s.sendall(b"Q" + struct.pack(">I", len(q) + 4) + q)
+        """(error code or None, column type oids, rows, command tag); the column names of the last result are left in `self.names`.
+        A statement with parameters (`P`) goes by the extended protocol, as cancho-pg sends it: Parse with no types given, Bind with the values as text, Describe, Execute, Sync."""
+        params = getattr(sql, "params", None)
+        if params is None:
+            q = sql.encode() + b"\0"
+            self.s.sendall(b"Q" + struct.pack(">I", len(q) + 4) + q)
+        else:
+            def m(t, body):
+                return t + struct.pack(">I", len(body) + 4) + body
+            bind = b"\0\0" + struct.pack(">HH", 0, len(params))
+            for v in params:
+                bind += struct.pack(">i", -1) if v is None else struct.pack(">i", len(v.encode())) + v.encode()
+            bind += struct.pack(">H", 0)
+            self.s.sendall(m(b"P", b"\0" + sql.encode() + b"\0" + struct.pack(">H", 0)) + m(b"B", bind) + m(b"D", b"P\0") + m(b"E", b"\0" + struct.pack(">I", 0)) + m(b"S", b""))
         err, oids, rows, tag = None, [], [], ""
         for t, body in self.until_ready():
             if t == b"E":
@@ -106,6 +118,71 @@ class Pg:
 def admin(sql):
     r = subprocess.run(["psql", "-h", "127.0.0.1", "-p", str(PORT), "-U", "postgres", "-At", "-q", "-d", "postgres", "-c", sql], capture_output=True, text=True)
     return r
+
+
+class P(str):
+    """A statement and the values bound to its parameters (text, or None for a null)."""
+    def __new__(cls, sql, *params):
+        o = str.__new__(cls, sql)
+        o.params = list(params)
+        return o
+
+
+def lines(stmts):
+    """What the harness is fed for these statements: a `!params` line before one that has parameters."""
+    out = []
+    for st in stmts:
+        params = getattr(st, "params", None)
+        if params:
+            out.append("!params " + " ".join("-" if v is None else "." if v == "" else v.encode().hex() for v in params))
+        out.append(str(st))
+    return out
+
+
+LITERAL = re.compile(r"'(?:[^']|'')*'|(?<![\w$.])\d+\b")
+
+
+def parametrise(rng, sql):
+    """Some of the literals of `sql` as parameters: mostly each its own, bare or cast; now and then one parameter used twice (answered only if both uses are cast alike), a null, or text that is
+    no number where a number is wanted."""
+    # a number that is an item of ORDER BY or GROUP BY is a place in the select list; a parameter there would be a constant, and the order nobody's
+    places = set()
+    for clause in re.finditer(r"(?:order|group) by (.*?)(?= limit | offset | having | order by |$)", sql):
+        for item in re.finditer(r"(?:^|, )(\d+)(?= asc| desc|,|$)", clause.group(1)):
+            places.add(clause.start(1) + item.start(1))
+    found = [m for m in LITERAL.finditer(sql) if m.start() not in places]
+    if not found:
+        return sql
+    chosen = [m for m in found if rng.random() < 0.6] or [rng.choice(found)]
+    params, out, at = [], [], 0
+    for m in chosen:
+        text = m.group(0)
+        isstr = text[0] == "'"
+        value = text[1:-1].replace("''", "'") if isstr else text
+        r = rng.random()
+        if r < 0.04:
+            value = None
+        elif r < 0.07:
+            value = rng.choice(["x", "", " 3 ", "99999999999999999999", "t"])
+        cast = ""
+        r = rng.random()
+        if r < 0.3:
+            cast = "::" + (rng.choice(["text", "text", "integer"]) if isstr else rng.choice(["integer", "bigint", "bigint", "smallint", "text"]))
+        if params and rng.random() < 0.12:
+            # one already bound, used again
+            n = rng.randrange(len(params)) + 1
+            if rng.random() < 0.7:
+                cast = casts[n - 1]
+        else:
+            params.append(value)
+            n = len(params)
+            if n == 1:
+                casts = []
+            casts.append(cast)
+        out.append(sql[at:m.start()] + "$%d%s" % (n, cast))
+        at = m.end()
+    out.append(sql[at:])
+    return P("".join(out), *params)
 
 
 def q(s):
@@ -872,6 +949,38 @@ FIXED = [
 
 
 # Statements whose outcome in PostgreSQL depends on the order it works in (6g), which the engine REFUSES as `engine-order-dependent`, and what PostgreSQL 16 does with each here. The rows were stored 3, 2, 1.
+FIXED += [
+    ("create table fp (k integer primary key, a bigint, s text, f boolean)", "ddl"),
+    (P("insert into fp values ($1, $2, $3, $4)", "1", "10", "one", "t"), "write"),
+    (P("insert into fp values ($1, $2, $3, $4), ($5::integer, $6::bigint, $7::text, $8::boolean)", "2", None, "", "false", "3", "30", "it's", None), "write"),
+    (P("insert into fp (k, s) values ($1, $2)", "1", "again"), "write"),
+    (P("insert into fp (k, f) values ($1, $2)", "5", "maybe"), "write"),
+    (P("insert into fp (k, a) values ($1, $2)", "99999999999", "1"), "write"),
+    (P("select * from fp where k = $1", "2"), "order"),
+    (P("select * from fp where k = $1", " 3 "), "order"),
+    (P("select * from fp where k = $1", None), "order"),
+    (P("select k, a + $1, s || $2, $3::bigint * 2, $4::text from fp order by k", "1", "x", "21", "t"), "order"),
+    (P("select k from fp where s = $1 and f = $2 and a = $3", "one", "true", "10"), "order"),
+    (P("select k from fp where k in ($1, $2) order by k", "1", "3"), "order"),
+    (P("select k from fp where k between $1 and $2 order by k", "2", "3"), "order"),
+    (P("select k from fp where s like $1 order by k", "o%"), "order"),
+    (P("select k from fp order by k limit $1 offset $2", "2", "1"), "order"),
+    (P("select k from fp order by k limit $1", None), "order"),
+    (P("select k from fp order by k limit $1", "-1"), "order"),
+    (P("select k from fp order by k offset $1::bigint", "-1"), "order"),
+    (P("select $1::integer + k, case when $2::boolean then s else $3 end from fp order by k", "100", "f", "other"), "order"),
+    (P("select $1::bigint, $1::bigint + 1 from fp where k = $2::integer or k = $2::integer + 1 order by k", "7", "1"), "order"),
+    (P("select count(*), min(a + $1), max($2::integer) from fp where k > $3", "1", "5", "0"), "order"),
+    (P("select f, count(*) from fp group by f having count(*) >= $1 order by 1", "1"), "order"),
+    (P("select s, s || $1, min(s) || $2, count(*) from fp group by s having max(s) <> $3 order by 1", "-suffix", "!", "nothing"), "order"),
+    (P("update fp set a = $1, s = $2 where k = $3", "11", "uno", "1"), "write"),
+    (P("update fp set a = a + $1::bigint where k >= $2::integer and $1::bigint > 0", "5", "2"), "write"),
+    (P("update fp set k = $1 where k = $2", "2", "1"), "write"),
+    (P("delete from fp where k = $1 and s = $2", "3", "it's"), "write"),
+    (P("delete from fp where a = $1::bigint / $2::bigint", "32", "2"), "write"),
+    ("select * from fp order by k", "order"),
+]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)"]
 DEP = [
@@ -919,6 +1028,15 @@ UNSUP = [
     ("select a1.k from fz a1 join fz a2 on a1.k = a2.k", None),          # a table joined to itself
     ("create unique index fzu on fz (n)", None),                         # a constraint that needs an index to hold
     ("select fw.m, count(*) from fz join fw on fz.k = fw.wk group by fw.wk", None),   # m depends on fw's key
+    # parameters (6w): PostgreSQL gives one the type of its first use, and refuses one that meets no type
+    (P("select k from fz where n > $1 or k = $1", "1"), None),          # used twice with no cast
+    (P("select $1::bigint, $1::text from fz", "1"), None),              # and with two casts
+    (P("select k from fz where $1 between k and n", "2"), None),         # BETWEEN uses it twice
+    (P("select k from fz where $1 in (k, 1)", "2"), None),               # and so does IN
+    (P("select k from fz where n in ($1, k::bigint)", "2"), None),       # a parameter among integers of two widths
+    (P("select k from fz where $1 is null", "1"), "42P18"),
+    (P("select k from fz where $1 = $2", "1", "1"), None),
+    (P("select k from fz where k = $2", "1", "2"), "42P18"),             # a parameter the statement does not name
 ]
 
 
@@ -945,7 +1063,7 @@ def order_dependent(pg):
                 raise SystemExit("engine_check: %s: PostgreSQL says %s, expected %s" % (sql, err, want))
             notes.append("%s: %s, where PostgreSQL 16 says %s" % (sql, err, want))
     with tempfile.TemporaryDirectory() as d:
-        eng = run_engine(os.path.join(d, "unsup.db"), DEP_SETUP + [x[0] for x in UNSUP])
+        eng = run_engine(os.path.join(d, "unsup.db"), DEP_SETUP + lines(x[0] for x in UNSUP))
     for (sql, want), ans in zip(UNSUP, eng[len(DEP_SETUP):]):
         pg.query("begin")
         err, _, _, _ = pg.query(sql)
@@ -1199,6 +1317,8 @@ def main():
         else:
             sql, how = g.select()
             stmts.append((sql, how, g.t.name))
+        if stmts[-1][1] != "ddl" and rng.random() < 0.3:
+            stmts[-1] = (parametrise(rng, stmts[-1][0]),) + stmts[-1][1:]
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "engine.db")
         if open_txn:
@@ -1214,12 +1334,14 @@ def main():
                 inside = True
             elif st[0] in ("commit", "rollback"):
                 inside = False
-        eng = run_engine(path, [s[0] for s in stmts[:half]] + ["!commit", "!sweep"])
-        eng += run_engine(path, [s[0] for s in stmts[half:]] + ["!commit"])
+        eng = run_engine(path, lines(s[0] for s in stmts[:half]) + ["!commit", "!sweep"])
+        eng += run_engine(path, lines(s[0] for s in stmts[half:]) + ["!commit"])
     counts, fails, refused_answered, answered = compare(pg, stmts, eng, False)
+    psent = [i for i, st in enumerate(stmts) if isinstance(st[0], P)]
+    pok = sum(1 for i in psent if eng[i] and not eng[i][0].startswith("refused "))
     with tempfile.TemporaryDirectory() as d:
-        feng = run_engine(os.path.join(d, "fixed.db"), [f[0] for f in FIXED])
-    fstmts = [(sql, how, "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fx")) for sql, how in FIXED]
+        feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
+    fstmts = [(sql, how, "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")) for sql, how in FIXED]
     fcounts, ffails, _, _ = compare(pg, fstmts, feng, True)
     print("engine_check: %d fixed statements, none refused: %s" % (len(FIXED), ", ".join("%s=%d" % kv for kv in sorted(fcounts.items()))))
     fails += ffails
@@ -1232,6 +1354,9 @@ def main():
     erasure()
     print("engine_check: a deleted row and a dropped table stay in the history; an erased key is gone from the page file two commits and a sweep later, and from every AS OF")
     print("engine_check: %d statements (seed %d): %s" % (len(stmts), SEED, ", ".join("%s=%d" % kv for kv in sorted(counts.items()))))
+    print("engine_check: %d of the statements have parameters and go by the extended protocol; the engine answers %d of them (rows, changes or the error)" % (len(psent), pok))
+    if pok * 3 < len(psent):
+        raise SystemExit("engine_check: the engine refuses more than two thirds of the statements with parameters")
     print("engine_check: PostgreSQL answers %d that the engine refuses, of %d it answers in all" % (refused_answered, refused_answered + answered))
     if fails:
         raise SystemExit("engine_check: %d disagreements (PostgreSQL %s)" % (fails, version))
@@ -1240,4 +1365,5 @@ def main():
     print("engine_check: ok (PostgreSQL %s)" % version)
 
 
-main()
+if __name__ == "__main__":
+    main()

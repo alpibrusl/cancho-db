@@ -215,6 +215,8 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
                                                         put_str(io, "refused ");
                                                         put_str(io, lex.error_name(0 - n));
                                                         named = true;
+                                                    } else if !exec.params_fit(w, sql, contents(tw), n) {
+                                                        rc = exec.unsupported();
                                                     } else {
                                                         parse.reset(contents(sw));
                                                         let q0 = stmt.statement(sql, contents(tw), 0, n, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(cw), contents(sw));
@@ -244,7 +246,10 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
                                                             } else {
                                                                 let e = contents(iw)[0..ln];
                                                                 kind = int_of(e[0]);
-                                                                if mode == 1 && kind != 6 {
+                                                                if exec.params_bound(w) > 0 && kind != 6 && kind != 1 && kind != 2 && kind != 3 {
+                                                                    // PostgreSQL takes no parameters in a statement that is not a query
+                                                                    rc = exec.unsupported();
+                                                                } else if mode == 1 && kind != 6 {
                                                                     // the tree read AS OF a transaction is not one to write to
                                                                     put_str(io, "refused engine-as-of-write");
                                                                     named = true;
@@ -398,6 +403,48 @@ fn starts[&a](all: &a [byte], ls: int, le: int, word: &static [byte]) -> [] bool
     return true;
 }
 
+fn unhex(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0 - 1;
+}
+
+// One value of a `!params` line, as the next parameter: false if it is not hex, or there is no room.
+fn set_param[&q, &t](w: &!q exec.Work, tok: &t [byte]) -> [] bool {
+    if len(tok) == 1 && int_of(tok[0]) == '-' {
+        return exec.param_add(w, tok[0..0], true);
+    }
+    if len(tok) == 1 && int_of(tok[0]) == '.' {
+        return exec.param_add(w, tok[0..0], false);
+    }
+    if len(tok) < 2 || len(tok) % 2 != 0 {
+        return false;
+    }
+    var ok = true;
+    region r {
+        let b = alloc_slice[r](len(tok) / 2, byte_of(0));
+        var i = 0;
+        while i < len(b) {
+            let hi = unhex(int_of(tok[2 * i]));
+            let lo = unhex(int_of(tok[2 * i + 1]));
+            if hi < 0 || lo < 0 {
+                ok = false;
+            } else {
+                b[i] = byte_of(hi * 16 + lo);
+            }
+            i = i + 1;
+        }
+        if ok {
+            ok = exec.param_add(w, b, false);
+        }
+    }
+    return ok;
+}
+
 // Whether the line begins with `word` and goes on.
 fn begins[&a](all: &a [byte], ls: int, le: int, word: &static [byte]) -> [] bool {
     if le - ls <= len(word) {
@@ -534,6 +581,23 @@ fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &
                         view = 0 - 1;
                         put_str(io, "branch\n");
                     }
+                } else if begins(all, ls, le, "!params ") {
+                    // the values bound to the parameters of the next statement: each in hex, `.` for an empty one, `-` for a null
+                    exec.params_clear(w);
+                    var okp = true;
+                    var a = ls + 8;
+                    while a < le && okp {
+                        var b = a;
+                        while b < le && int_of(all[b]) != ' ' {
+                            b = b + 1;
+                        }
+                        okp = set_param(w, all[a..b]);
+                        a = b + 1;
+                    }
+                    if !okp {
+                        put_str(io, "err params\n");
+                        status = 5;
+                    }
                 } else if le > ls {
                     if view >= 0 {
                         run_sql(heap, io, pg, w, all[ls..le], view, 1, fl);
@@ -616,6 +680,9 @@ fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &
                             put_str(io, "S E\n.\n");
                         }
                     }
+                }
+                if !begins(all, ls, le, "!params ") {
+                    exec.params_clear(w);
                 }
                 if pager.crashed(pg) {
                     // the crash point was reached (the test hook of src/pager.cho): nothing more is written, as if the process had died there

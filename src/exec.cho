@@ -8,6 +8,7 @@ import cdb.eval;
 import cdb.btree;
 import cdb.pager;
 import cdb.tables;
+import cdb.lex;
 
 // The executor of the engine (docs/m3-engine.md 6g): what the statements share. SELECT is in src/execs.cho, the statements that write in src/execw.cho.
 //
@@ -227,6 +228,7 @@ pub res struct Work {
     ntab: int,
     txn: int,
     once: bool,
+    pend: int,
 }
 
 pub fn rows_size() -> [] int {
@@ -238,11 +240,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -439,6 +441,134 @@ pub fn start[&q](w: &!q Work, root: int) -> [] int {
     return 0;
 }
 
+// The statement that follows has no parameters.
+pub fn params_clear[&q](w: &!q Work) -> [] int {
+    w.pend = 0;
+    contents(w.cx)[eval.params_at()] = 0;
+    return 0;
+}
+
+// The next parameter of the statement that follows (`$1` first): its text, or a null. False if there is no room (64 parameters, 65,536 bytes).
+pub fn param_add[&q, &v](w: &!q Work, text: &v [byte], null: bool) -> [] bool {
+    let n = contents(w.cx)[eval.params_at()];
+    if n >= 64 || w.pend + len(text) > 65536 {
+        return false;
+    }
+    contents(w.cx)[eval.params_at() + 2 * n + 1] = w.pend;
+    if null {
+        contents(w.cx)[eval.params_at() + 2 * n + 2] = 0 - 1;
+    } else {
+        contents(w.cx)[eval.params_at() + 2 * n + 2] = len(text);
+        w.pend = copy(text, 0, len(text), contents(w.ar), w.pend);
+    }
+    contents(w.cx)[eval.params_at()] = n + 1;
+    return true;
+}
+
+fn low(c: int) -> [] int {
+    if c >= 'A' && c <= 'Z' {
+        return c + 32;
+    }
+    return c;
+}
+
+// Whether the tokens at `a` and `b` are the same word, whatever its case.
+fn same_word[&s, &t](sql: &s [byte], toks: &t [int], a: int, b: int) -> [] bool {
+    if toks[4 * a] != lex.t_ident() || toks[4 * b] != lex.t_ident() || toks[4 * a + 2] != toks[4 * b + 2] {
+        return false;
+    }
+    var i = 0;
+    while i < toks[4 * a + 2] {
+        if low(int_of(sql[toks[4 * a + 1] + i])) != low(int_of(sql[toks[4 * b + 1] + i])) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Whether the token at `a` is the word `word` (given in lower case), whatever its case.
+fn is_word[&s, &t](sql: &s [byte], toks: &t [int], a: int, word: &static [byte]) -> [] bool {
+    if toks[4 * a] != lex.t_ident() || toks[4 * a + 2] != len(word) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if low(int_of(sql[toks[4 * a + 1] + i])) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The number a parameter token names.
+fn param_number[&s, &t](sql: &s [byte], toks: &t [int], i: int) -> [] int {
+    var v = 0;
+    var j = 1;
+    while j < toks[4 * i + 2] {
+        v = v * 10 + int_of(sql[toks[4 * i + 1] + j]) - '0';
+        j = j + 1;
+    }
+    return v;
+}
+
+// Whether the statement's parameters are ones the engine reads as PostgreSQL does (docs/m3-engine.md 6w): the statement names every one that was bound and no other, and one it names more than once
+// is each time written with the same cast (`$1::bigint`). PostgreSQL gives a parameter the type of its first use and reads the later ones as that type; the evaluator reads each use as a literal on
+// its own, which is the same only where every use says its type.
+pub fn params_fit[&q, &s, &t](w: &q Work, sql: &s [byte], toks: &t [int], n: int) -> [] bool {
+    let count = contents(w.cx)[eval.params_at()];
+    var seen = 0;
+    var i = 0;
+    while i < n {
+        if toks[4 * i] == lex.t_param() {
+            let v = param_number(sql, toks, i);
+            if v > count {
+                return false;
+            }
+            // the first use of this parameter, and every use is to be cast as it is
+            var first = 0;
+            while first < i && (toks[4 * first] != lex.t_param() || param_number(sql, toks, first) != v) {
+                first = first + 1;
+            }
+            if first == i {
+                seen = seen + 1;
+                var later = false;
+                var j = i + 1;
+                while j < n {
+                    if toks[4 * j] == lex.t_param() && param_number(sql, toks, j) == v {
+                        later = true;
+                    }
+                    j = j + 1;
+                }
+                if !later {
+                    // `$1 between a and b` is `$1 >= a and $1 <= b`: two uses
+                    var k = i + 1;
+                    while k < n && toks[4 * k] == lex.t_punct() && int_of(sql[toks[4 * k + 1]]) == ')' {
+                        k = k + 1;
+                    }
+                    if k < n && is_word(sql, toks, k, "not") {
+                        k = k + 1;
+                    }
+                    later = k < n && is_word(sql, toks, k, "between");
+                }
+                if later && (i + 2 >= n || toks[4 * (i + 1)] != lex.t_cast() || toks[4 * (i + 2)] != lex.t_ident()) {
+                    return false;
+                }
+            } else if i + 2 >= n || toks[4 * (i + 1)] != lex.t_cast() || !same_word(sql, toks, first + 2, i + 2) {
+                return false;
+            }
+        }
+        i = i + 1;
+    }
+    return seen == count;
+}
+
+// Where the evaluator's arena starts for an expression: after the parameters' text.
+pub fn arena_start[&q](w: &q Work) -> [] int {
+    return w.pend;
+}
+
 // An error the statement could raise.
 pub fn note[&q](w: &!q Work, code: int) -> [] int {
     if w.code == 0 {
@@ -471,12 +601,27 @@ pub fn stat[&q](w: &!q Work, r: int) -> [] int {
 
 // Evaluate the expression at `at` of `e` over the bound rows (`ntab` 1: the rows of every table of the statement) or over nothing (0): the evaluator's answer, the value in `ws` from `eval.max_nodes()`.
 pub fn ev[&q, &x, &k](w: &!q Work, e: &x [byte], at: int, kinds: &k [int], ntab: int) -> [] int {
-    contents(w.info)[0] = 0;
+    let r = ev_open(w, e, at, kinds, ntab);
+    if r > 0 {
+        // a parameter and nothing else, where nothing gives it a type
+        return unsupported();
+    }
+    return r;
+}
+
+// As `ev`, for a caller that gives the value its type (`eval.assign`): 1 says the expression is a parameter and nothing else.
+pub fn ev_open[&q, &x, &k](w: &!q Work, e: &x [byte], at: int, kinds: &k [int], ntab: int) -> [] int {
+    contents(w.info)[0] = w.pend;
     var n = 0;
     if ntab == 1 {
         n = w.ntab;
     }
     return eval.eval(e, at, kinds, contents(w.ctx), contents(w.cx), n, contents(w.ws), contents(w.ar), contents(w.info));
+}
+
+// How many parameters are bound for the statement.
+pub fn params_bound[&q](w: &q Work) -> [] int {
+    return contents(w.cx)[eval.params_at()];
 }
 
 pub fn copy[&s, &d](src: &s [byte], sa: int, n: int, dst: &!d [byte], da: int) -> [] int {
@@ -863,9 +1008,9 @@ fn bounds[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int]) -> [] int {
             let (c1, mid) = eval.scan(e, a + 2, contents(w.ws));
             let (c2, end) = eval.scan(e, mid, contents(w.ws));
             var vat = 0 - 1;
-            if c1 == 1 && c2 == 1 && int_of(e[a + 2]) == 0 && int_of(e[mid]) == 1 && is_col(w, e, a + 2, kc) {
+            if c1 == 1 && c2 == 1 && int_of(e[a + 2]) == 0 && (int_of(e[mid]) == 1 || int_of(e[mid]) == 2) && is_col(w, e, a + 2, kc) {
                 vat = mid;
-            } else if c1 == 1 && c2 == 1 && int_of(e[mid]) == 0 && int_of(e[a + 2]) == 1 && is_col(w, e, mid, kc) {
+            } else if c1 == 1 && c2 == 1 && int_of(e[mid]) == 0 && (int_of(e[a + 2]) == 1 || int_of(e[a + 2]) == 2) && is_col(w, e, mid, kc) {
                 vat = a + 2;
                 // constant < key is key > constant
                 if op == 2 || op == 3 {

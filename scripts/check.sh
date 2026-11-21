@@ -62,6 +62,8 @@ echo "== the engine's statements against PostgreSQL (docs/m3-engine.md 6g, 6h): 
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 1
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 2
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 3
+echo "== the first user's schema and queries on the engine (docs/m3-engine.md 6w): how many of cancho-hooks' statements are answered, and none differently from PostgreSQL"
+quiet 20 python3 tests/hooks_check.py build/enginecheck
 echo "== the engine's statements across a crash at every durable step (gate 2 at the level of SQL): the tables after a restart are those of a commit, and the file takes writes again"
 quiet 3 python3 tests/engine_crash.py build/enginecheck
 echo "== statements larger than the pager's cache: 30,000 rows rewritten five times, read back as a model says"

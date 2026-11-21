@@ -73,7 +73,7 @@ fn tree_key[&q, &r](w: &!q exec.Work, r: &r [byte]) -> [] int {
 // Evaluate the expression at `at` of `e` for column `c` and stage its stored value in `tmp` at `fill`: the position after it; -1 if it raised an error (noted); or a refusal (below -1).
 fn staged[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], ntab: int, c: int, fill: int) -> [] int {
     let b = eval.max_nodes();
-    let r = exec.ev(w, e, at, kinds, ntab);
+    let r = exec.ev_open(w, e, at, kinds, ntab);
     if r < 0 {
         return exec.unsupported();
     }
@@ -98,7 +98,7 @@ fn staged[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], 
 // Before any row: the expression at `at` for column `c` is checked. An error of its types, or an error of a constant (which PostgreSQL raises when it plans, whatever the rows), is noted. 0 or a refusal.
 fn checked[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], ntab: int, c: int) -> [] int {
     let b = eval.max_nodes();
-    let r = exec.ev(w, e, at, kinds, ntab);
+    let r = exec.ev_open(w, e, at, kinds, ntab);
     if r < 0 {
         return exec.stat(w, r);
     }
@@ -847,8 +847,12 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
             if ln < 0 {
                 return exec.unsupported();
             }
-            contents(w.info)[0] = 0;
+            contents(w.info)[0] = exec.arena_start(w);
             let r = eval.eval(contents(w.lit)[0..ln], 0, contents(w.lsc), contents(w.ctx), contents(w.cx), 0, contents(w.ws), contents(w.ar), contents(w.info));
+            if r > 0 {
+                // a parameter: PostgreSQL takes none in a definition
+                return exec.unsupported();
+            }
             if r < 0 {
                 let s = exec.stat(w, r);
                 if s < 0 {

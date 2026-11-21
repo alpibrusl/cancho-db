@@ -1,0 +1,3 @@
+schema.sql and queries.sql are copies of sql/ in cancho-hooks (https://github.com/alpibrusl/cancho-hooks, EUPL-1.2) at commit
+40b2ce0627a260d2bb47717ca454a9bcd8e05df2.
+tests/hooks_check.py runs them on the engine and on PostgreSQL.
