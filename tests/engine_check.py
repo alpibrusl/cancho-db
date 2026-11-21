@@ -63,7 +63,7 @@ class Pg:
                 return out
 
     def query(self, sql):
-        """(error code or None, column type oids, rows, command tag)"""
+        """(error code or None, column type oids, rows, command tag); the column names of the last result are left in `self.names`"""
         q = sql.encode() + b"\0"
         self.s.sendall(b"Q" + struct.pack(">I", len(q) + 4) + q)
         err, oids, rows, tag = None, [], [], ""
@@ -75,8 +75,11 @@ class Pg:
             elif t == b"T":
                 n = struct.unpack(">H", body[:2])[0]
                 at = 2
+                self.names = []
                 for _ in range(n):
-                    at = body.index(b"\0", at) + 1
+                    end = body.index(b"\0", at)
+                    self.names.append(body[at:end])
+                    at = end + 1
                     oids.append(struct.unpack(">I", body[at + 6:at + 10])[0])
                     at += 18
             elif t == b"D":
@@ -327,7 +330,7 @@ class Gen:
         pk = t.cols[t.pk][0]
         distinct = self.r.random() < 0.15
         star = self.r.random() < 0.25
-        items = ["*"] if star else [self.any_(2) for _ in range(self.r.randrange(1, 5))]
+        items = ["*"] if star else [self.any_(2) + (" as %s" % self.pick(["z1", "z2", "k", "\"Zed\"", "count"]) if self.r.random() < 0.15 else "") for _ in range(self.r.randrange(1, 5))]
         nout = len(t.cols) if star else len(items)
         s = "select %s%s from %s" % ("distinct " if distinct else "", ", ".join(items), t.name)
         if self.r.random() < 0.7:
@@ -624,9 +627,13 @@ def compare(pg, stmts, eng, must):
             raise SystemExit("engine_check: the two are out of step; stopping")
         kind, n = head.split()[1], int(head.split()[2])
         if kind == "SELECT":
-            types = [int(x) for x in eng[i][1].split()[1:]]
+            names = [unhex(x) for x in eng[i][1].split()[1:]]
+            types = [int(x) for x in eng[i][2].split()[1:]]
+            if names != pg.names:
+                fail(i, "the columns are named %s, PostgreSQL: %s" % (names, pg.names))
+                continue
             erows = []
-            for line in eng[i][2:]:
+            for line in eng[i][3:]:
                 row = []
                 for ty, v in zip(types, line.split()[1:]):
                     if v == "-":
@@ -749,6 +756,8 @@ FIXED = [
     ("select max(a), min(a) from fx group by b order by max(a) desc, min(a)", "set"),
     ("select sum(a / (k - 104)) from fx", "set"),
     ("select count(*) from fx having count(*)", "set"),
+    ("select k as kk, b as k, k + 1 as \"Sum\", cast(k as bigint), case when c then k end, case when c then 1 else k end, 'lit', - k from fx order by kk", "order"),
+    ("select count(*) as n, max(k), min(b) as \"min b\", sum(a) + 1 from fx", "set"),
     ("select 1, 'x' from fx having count(*) > 0", "set"),
     ("select 1 from fx having false", "set"),
     ("select 2 from fx having true", "set"),

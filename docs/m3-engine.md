@@ -512,6 +512,9 @@ of each, so that what is missing is a list and not an impression.
 **J1. The answer as a client sees it.** A select's answer has column *names* (PostgreSQL's rules for a column without an alias, of which the lowering knows the `order by` part, 6h), type identifiers,
 and values as text (`t`/`f`, digits, bytes as they are; the wire's binary format is refused). An error is a SQLSTATE *and* a message; the engine has the first. A command has a tag (`INSERT 0 3`).
 *Gate:* the bytes after the proxy's framing equal PostgreSQL's for the random history, names and tags included; messages are compared by SQLSTATE only, and the page says so.
+*Built of it: the names.* `lower.output_names` writes, for a select, the name of each output column: an alias, or the one PostgreSQL makes up (a column's, a function's, a cast's type as the catalog
+spells it, `case`, `?column?`), a `*` giving its tables' columns. `tests/engine_check.py` now compares them with the names in PostgreSQL's row description for every select of the random history (8 seeds
+of 3,000 statements, aliases included: no disagreement; 6 mutants). The values as text, the tags and the messages are not built.
 
 **J2. Transactions.** `begin`, `commit`, `rollback`: a transaction is a root of its own that the statements of one connection build on, published or dropped at the end. The history's rule for a key
 written twice in a transaction (6n) is then exercised for the first time. One writer at a time: a second connection's write waits or is refused; which, and what a reader sees meanwhile (the last

@@ -1279,6 +1279,142 @@ fn count_outputs[&s, &t, &n, &k, &m, &c](sql: &s [byte], toks: &t [int], nodes: 
     return found;
 }
 
+// Copy static text into `out` at `at`: the position after it, or -1 if it does not fit.
+fn put_text[&o](out: &!o [byte], at: int, text: &static [byte]) -> [] int {
+    if at < 0 || at + len(text) > len(out) {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < len(text) {
+        out[at + i] = text[i];
+        i = i + 1;
+    }
+    return at + len(text);
+}
+
+// The name PostgreSQL gives the output column of the expression `x0` when it has no alias (`names_output` asks whether a name IS that name; this writes it), into `out` at `at`: the position after it,
+// or -1. A column's name; a function's; through a cast or a CASE the name of what is cast or of the ELSE if that has one of those; otherwise the type's name, `case`, or `?column?`.
+fn write_output_name[&s, &t, &n, &k, &o](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], x0: int, out: &!o [byte], at: int) -> [] int {
+    var x = x0;
+    var weak = 0;
+    var code = 0;
+    var going = true;
+    while going {
+        let kind = nodes[6 * x];
+        if kind == parse.n_col() || kind == parse.n_call() {
+            var tok = nodes[6 * x + 1];
+            if kind == parse.n_col() && nodes[6 * x + 4] >= 0 {
+                tok = nodes[6 * x + 4];
+            }
+            let n = name_text(sql, toks, tok, out, at);
+            if n < 0 {
+                return 0 - 1;
+            }
+            return at + n;
+        }
+        if kind == parse.n_cast() {
+            if weak == 0 {
+                weak = 1;
+                code = nodes[6 * x + 1];
+            }
+            x = kids[nodes[6 * x + 2]];
+        } else if kind == parse.n_case() {
+            if weak == 0 {
+                weak = 2;
+            }
+            if nodes[6 * x + 5] == 1 && nodes[6 * x + 3] > 0 {
+                x = kids[nodes[6 * x + 2] + nodes[6 * x + 3] - 1];
+            } else {
+                going = false;
+            }
+        } else {
+            going = false;
+        }
+    }
+    if weak == 1 {
+        return put_text(out, at, cast_name(code));
+    }
+    if weak == 2 {
+        return put_text(out, at, "case");
+    }
+    return put_text(out, at, "?column?");
+}
+
+// The names of the output columns of the SELECT at `root`, as a client is sent them (docs/m3-engine.md 6e, 6s J1): for each column a `u16` length and the name, into `out`. The number of bytes, or
+// `0 - code`. This is what the lowering knows and the IR does not carry: an alias, or the name PostgreSQL makes up; a `*` gives its tables' columns. `sc` is scratch as for `lower`, which this may
+// follow or not (it reads the statement again).
+pub fn output_names[&s, &t, &n, &k, &m, &c, &o](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], sc: &!c [int], out: &!o [byte]) -> [] int {
+    if nodes[6 * root] != parse.n_select() {
+        return 0;
+    }
+    sc[5] = 0;
+    let items = clause_of(nodes, kids, root, parse.n_items(), 0);
+    let from = clause_of(nodes, kids, root, parse.n_from(), 0);
+    let r0 = flatten_from(sql, toks, nodes, kids, from, schema, sc);
+    if r0 < 0 {
+        return r0;
+    }
+    var at = 0;
+    var i = 0;
+    while i < nodes[6 * items + 3] {
+        let it = kids[nodes[6 * items + 2] + i];
+        if nodes[6 * it] == parse.n_star() {
+            var e = 0;
+            var last = sc[2];
+            if nodes[6 * it + 1] >= 0 {
+                e = scope_find(sql, toks, nodes[6 * it + 1], schema, sc);
+                if e < 0 {
+                    return fail(sc, nodes[6 * it + 1], e_unknown_table());
+                }
+                last = e + 1;
+            }
+            while e < last {
+                let line = sc[16 + 3 * e + 2];
+                var c = 0;
+                var ca = nth_column(schema, line, c, sc);
+                while ca >= 0 {
+                    let l = sc[6];
+                    if at + 2 + l > len(out) {
+                        return 0 - parse.e_too_big();
+                    }
+                    out[at] = byte_of(l / 256);
+                    out[at + 1] = byte_of(l % 256);
+                    var j = 0;
+                    while j < l {
+                        out[at + 2 + j] = schema[ca + j];
+                        j = j + 1;
+                    }
+                    at = at + 2 + l;
+                    c = c + 1;
+                    ca = nth_column(schema, line, c, sc);
+                }
+                e = e + 1;
+            }
+        } else {
+            if at + 2 > len(out) {
+                return 0 - parse.e_too_big();
+            }
+            var end = 0 - 1;
+            if nodes[6 * it + 1] >= 0 {
+                let n = name_text(sql, toks, nodes[6 * it + 1], out, at + 2);
+                if n >= 0 {
+                    end = at + 2 + n;
+                }
+            } else {
+                end = write_output_name(sql, toks, nodes, kids, kids[nodes[6 * it + 2]], out, at + 2);
+            }
+            if end < 0 {
+                return 0 - parse.e_too_big();
+            }
+            out[at] = byte_of((end - at - 2) / 256);
+            out[at + 1] = byte_of((end - at - 2) % 256);
+            at = end;
+        }
+        i = i + 1;
+    }
+    return at;
+}
+
 // A SELECT: Select2 (ir.md section 6).
 fn lower_select[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
     let items = clause_of(nodes, kids, root, parse.n_items(), 0);

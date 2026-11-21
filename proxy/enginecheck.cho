@@ -30,7 +30,7 @@ import cdb.execw;
 //
 // With CRASH and TORN the process stops being able to write at step CRASH (TORN bytes of that write happen): it prints `crashed` and ends with status 6, leaving the file as a kill there would.
 //
-// For a statement: `refused TAG` (the lexer, the parser, the lowering or the engine refuses it), `error SQLSTATE`, or `ok KIND N` (N rows) followed by, for a SELECT, a line `T` with the type of each column
+// For a statement: `refused TAG` (the lexer, the parser, the lowering or the engine refuses it), `error SQLSTATE`, or `ok KIND N` (N rows) followed by, for a SELECT, a line `N` with the name of each column (hex), a line `T` with the type of each column
 // and a line `R` for each row with each value (`-` null, a number, 0 or 1, or the bytes in hex, `.` if there are none); for a statement that writes, a line `C TABLE KEY BEFORE AFTER` for each change (hex,
 // `-` for no image). Then a line `.`.
 
@@ -311,6 +311,25 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                             put_int(io, exec.count_of(w));
                                                             putchar(io, '\n');
                                                             if kind == 6 {
+                                                                // the names of the columns, as a client is sent them: what the lowering knows and the IR does not carry
+                                                                let top2 = contents(sw)[2];
+                                                                let nn = lower.output_names(sql, contents(tw), contents(nw), contents(kw), top2, contents(mw)[0..sl], contents(xw), contents(iw));
+                                                                putchar(io, 'N');
+                                                                var na = 0;
+                                                                while na + 2 <= nn {
+                                                                    let l = int_of(contents(iw)[na]) * 256 + int_of(contents(iw)[na + 1]);
+                                                                    putchar(io, ' ');
+                                                                    var j = 0;
+                                                                    while j < l {
+                                                                        hex_byte(io, int_of(contents(iw)[na + 2 + j]));
+                                                                        j = j + 1;
+                                                                    }
+                                                                    if l == 0 {
+                                                                        putchar(io, '.');
+                                                                    }
+                                                                    na = na + 2 + l;
+                                                                }
+                                                                putchar(io, '\n');
                                                                 put_rows(io, w);
                                                             } else if kind < 9 {
                                                                 put_changes(io, w);
