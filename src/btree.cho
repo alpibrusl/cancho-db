@@ -616,7 +616,7 @@ pub fn next_after[&q, &s, &k, &a, &b](p: &!q pager.Pager, sc: &!s [byte], root: 
                 var take = leftmost;
                 if !leftmost {
                     let c = cmp(sc[at + 3..at + 3 + kl], key);
-                    take = c > 0 || (inclusive && c == 0);
+                    take = c > 0 || inclusive && c == 0;
                 }
                 if take {
                     if kl > len(kout) || vl > len(vout) {
