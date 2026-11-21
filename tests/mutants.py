@@ -1492,6 +1492,69 @@ def run_l3a_cho(cancho):
 
 
 
+# ---- the copy-on-write B+tree and its pages (src/btree.cho, src/pager.cho), judged by tests/btree_check.py
+BTREE = [
+    ("btree: keys compare backwards", "src/btree.cho", "        if c < d {\n            return 0 - 1;\n        }\n        if c > d {\n            return 1;\n        }", "        if c > d {\n            return 0 - 1;\n        }\n        if c < d {\n            return 1;\n        }"),
+    ("btree: a key equal to a separator goes to the child on its left", "src/btree.cho", "if cmp(key, pg[at + 1..at + 1 + kl]) >= 0 {", "if cmp(key, pg[at + 1..at + 1 + kl]) > 0 {"),
+    ("btree: a put of an existing key adds an entry", "src/btree.cho", "            if c == 0 {\n                added = 0;\n            } else {\n                wpos = mv(sc, wpos, at, elen);\n            }", "            wpos = mv(sc, wpos, at, elen);"),
+    ("btree: the first child is not replaced in the parent", "src/btree.cho", "        if ix == 0 {\n            c0 = cid;\n        }\n        build.put_be(sc, wpos, c0, 4);", "        build.put_be(sc, wpos, c0, 4);"),
+    ("btree: the wrong child is replaced in the parent", "src/btree.cho", "            if e == ix {\n                chn = cid;\n            }\n            build.put_be(sc, wpos, chn, 4);\n            wpos = wpos + 4;\n            if split && e == ix {", "            if e == ix + 1 {\n                chn = cid;\n            }\n            build.put_be(sc, wpos, chn, 4);\n            wpos = wpos + 4;\n            if split && e == ix {"),
+    ("btree: the right half of a split goes in the wrong place", "src/btree.cho", "            if split && e == ix {\n                wpos = put_int_entry(sc, wpos, w3(), seplen, rid);", "            if split && e == ix + 1 {\n                wpos = put_int_entry(sc, wpos, w3(), seplen, rid);"),
+    ("btree: a leaf split promotes the wrong key", "src/btree.cho", "mv(sc, w3(), w1() + b + 3, sl);", "mv(sc, w3(), w1() + b + 2, sl);"),
+    ("btree: an internal split promotes the wrong key", "src/btree.cho", "mv(sc, w3(), w1() + b + 1, kl);", "mv(sc, w3(), w1() + b, kl);"),
+    ("btree: a leaf may be made fuller than a page", "src/btree.cho", "    if 7 + total <= 4096 {\n        emit_at(sc, w2(), 1, ncount, w1(), total);", "    if 7 + total <= 4200 {\n        emit_at(sc, w2(), 1, ncount, w1(), total);"),
+    ("btree: the last entry of a leaf is not dropped from its parent", "src/btree.cho", "var removed = count == 1;", "var removed = count == 0;"),
+    ("btree: a page with one child that is deleted stays", "src/btree.cho", "if removed && pcount == 0 {", "if false {"),
+    ("btree: the key of child 0 is kept when it is deleted", "src/btree.cho", "                    pat = pat + 5 + kl0;\n                    e = 2;", "                    pat = pat + 5 + kl0;\n                    e = 1;"),
+    ("btree: a value's length is one byte", "src/btree.cho", "    build.put_be(sc, at + 1, len(vbytes), 2);", "    build.put_be(sc, at + 1, len(vbytes), 1);"),
+    ("btree: a value of 801 bytes is taken", "src/btree.cho", "len(vbytes) > max_value()", "len(vbytes) > 900"),
+    ("btree: a key of 201 bytes is taken", "src/btree.cho", "len(key) > max_key()", "len(key) > 300"),
+    ("btree: the first entry after a key may be the key", "src/btree.cho", "take = c > 0 || (inclusive && c == 0);", "take = c >= 0;"),
+    ("btree: an inclusive scan skips the key", "src/btree.cho", "take = c > 0 || (inclusive && c == 0);", "take = c > 0;"),
+    ("btree: a scan takes the nearest right sibling it saw first", "src/btree.cho", "                if al != 0 {\n                    alt = al;\n                }", "                if al != 0 && alt == 0 {\n                    alt = al;\n                }"),
+    ("pager: the CRC of a page is not checked", "src/pager.cho", "    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {\n        return 0 - 2;\n    }", ""),
+    ("pager: the CRC is checked over less than the page", "src/pager.cho", "    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {", "    if crc.crc32_of(out[7..4000]) != commit.be(out, 3, 4) {"),
+    ("pager: a page short of its length is accepted", "src/pager.cho", "            Read::End => {\n                return 0 - 2;\n            }\n            Read::Failed(e) => {\n                return 0 - 1;\n            }\n        }\n    }\n    if crc", "            Read::End => {\n                got = 4096;\n            }\n            Read::Failed(e) => {\n                return 0 - 1;\n            }\n        }\n    }\n    if crc"),
+]
+
+
+def run_btree(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in BTREE if not only or only in m[0]]
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "btcheck"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/btcheck.cho")] + [str(work / "src" / n) for n in ("btree.cho", "pager.cho", "commit.cho", "build.cho")] + ["-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            try:
+                r = subprocess.run([sys.executable, str(ROOT / "tests/btree_check.py"), str(exe), "3"], capture_output=True, text=True, timeout=900)
+                rc, out = r.returncode, r.stdout
+            except subprocess.TimeoutExpired:
+                rc, out = 1, "FAIL timed out"
+            if rc == 0:
+                print("SURVIVED %-46s every tree check passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in out.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d check(s), e.g. %s" % (label, len(first), first[0][5:70] if first else "a crash"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
     if kind == "guard":
         return run_guard(cancho)
@@ -1499,6 +1562,8 @@ def run(kind, cancho):
         return run_build(cancho)
     if kind == "store":
         return run_store(cancho)
+    if kind == "btree":
+        return run_btree(cancho)
     if kind == "sql":
         return run_sql(cancho)
     if kind == "l3a":

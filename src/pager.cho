@@ -1,0 +1,187 @@
+edition 9;
+module cdb.pager;
+
+import std.crc;
+import cdb.commit;
+import cdb.build;
+
+// The page file of the engine (docs/m3-engine.md, slice M3a): fixed pages of 4 KiB, read and written by number, each with a CRC-32 of its own bytes, over one file opened read-write (not append: a page is
+// overwritten in place only when the caller says so, and the tree of src/btree.cho never overwrites a page a root still names).
+//
+// A page's first seven bytes are its header: byte 0 the type, bytes 1 and 2 an entry count, bytes 3 to 6 the CRC-32 of bytes 7 to 4095. A page that was never written (zeros), or was cut short, or had a bit
+// flipped, does not match its CRC and is refused (`-2`): the engine never trusts a page it has not checked.
+//
+// Test hook (docs/m3-engine.md D-M3-7): every write and every sync is a numbered *step*. With `crash` set to n the n-th step does not happen (a write may happen in part, `torn` bytes of it) and every step
+// after it is refused (`-3`), which leaves on disk exactly what a process killed there would leave. `crash` is 0 in the engine.
+
+pub fn page_size() -> [] int {
+    return 4096;
+}
+
+pub fn header_size() -> [] int {
+    return 7;
+}
+
+pub res struct Pager {
+    file: File,
+    // the next page number to hand out: the file's length in pages when it was opened, then one more for each `alloc`. Page 0 is never a page of a tree (a root of 0 is an empty tree).
+    next: int,
+    crash: int,
+    torn: int,
+    steps: int,
+    dead: bool,
+}
+
+pub fn new_pager(file: File, length: int) -> [] Pager {
+    var next = length / 4096;
+    if next < 1 {
+        next = 1;
+    }
+    return Pager { file: file, next: next, crash: 0, torn: 0, steps: 0, dead: false };
+}
+
+pub fn drop_pager(p: Pager) -> [] int {
+    let Pager { file, next, crash, torn, steps, dead } = p;
+    return file_close(file);
+}
+
+// The test hook: stop at step `crash` (0 for never), writing `torn` bytes of it if it is a write (0 for none).
+pub fn set_crash[&q](p: &!q Pager, crash: int, torn: int) -> [] int {
+    p.crash = crash;
+    p.torn = torn;
+    return 0;
+}
+
+pub fn steps[&q](p: &q Pager) -> [] int {
+    return p.steps;
+}
+
+pub fn crashed[&q](p: &q Pager) -> [] bool {
+    return p.dead;
+}
+
+// A new page number.
+pub fn alloc[&q](p: &!q Pager) -> [] int {
+    let id = p.next;
+    p.next = p.next + 1;
+    return id;
+}
+
+pub fn next_page[&q](p: &q Pager) -> [] int {
+    return p.next;
+}
+
+// Read page `id` into `out` (4096 bytes): 0 if it is there and its CRC matches, -1 if the file could not be read, -2 if the page is missing, short or damaged.
+pub fn read_page[&q, &o](p: &!q Pager, id: int, out: &!o [byte]) -> [file_read] int {
+    if id < 1 || len(out) < 4096 {
+        return 0 - 2;
+    }
+    var got = 0;
+    while got < 4096 {
+        match file_pread(p.file, id * 4096 + got, out[got..4096]) {
+            Read::Got(n) => {
+                if n <= 0 {
+                    return 0 - 2;
+                }
+                got = got + n;
+            }
+            Read::End => {
+                return 0 - 2;
+            }
+            Read::Failed(e) => {
+                return 0 - 1;
+            }
+        }
+    }
+    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {
+        return 0 - 2;
+    }
+    return 0;
+}
+
+// Write page `page` (4096 bytes, its CRC stamped here) as page `id`. 0, -1 if the write failed, -3 if the crash point was reached before (or at) this step.
+pub fn write_page[&q, &o](p: &!q Pager, id: int, page: &!o [byte]) -> [file_write] int {
+    if id < 1 || len(page) < 4096 {
+        return 0 - 1;
+    }
+    build.put_be(page, 3, crc.crc32_of(page[7..4096]), 4);
+    if p.dead {
+        return 0 - 3;
+    }
+    p.steps = p.steps + 1;
+    var upto = 4096;
+    if p.crash > 0 && p.steps == p.crash {
+        p.dead = true;
+        upto = p.torn;
+        if upto <= 0 {
+            return 0 - 3;
+        }
+    }
+    var at = 0;
+    while at < upto {
+        match file_pwrite(p.file, id * 4096 + at, page[at..upto]) {
+            Done::Ok(n) => {
+                if n <= 0 {
+                    return 0 - 1;
+                }
+                at = at + n;
+            }
+            Done::Failed(e) => {
+                return 0 - 1;
+            }
+        }
+    }
+    if p.dead {
+        return 0 - 3;
+    }
+    return 0;
+}
+
+// Make what was written durable: `fsync`. 0, -1 if it failed (the engine stops: a failed sync is the end of the process, docs/m3-engine.md section 2), -3 at the crash point.
+pub fn sync[&q](p: &!q Pager) -> [file_write] int {
+    if p.dead {
+        return 0 - 3;
+    }
+    p.steps = p.steps + 1;
+    if p.crash > 0 && p.steps == p.crash {
+        p.dead = true;
+        return 0 - 3;
+    }
+    match file_sync(p.file) {
+        Done::Ok(n) => {
+            return 0;
+        }
+        Done::Failed(e) => {
+            return 0 - 1;
+        }
+    }
+}
+
+// Test hook: flip one bit of byte `off` of page `id`, in the file, without stamping the CRC again (what a bad sector or a stray write does), so that the page is refused when it is next read. Flipping the same
+// byte again puts it back. 0, or -1 if the file could not be read or written.
+pub fn flip[&q](p: &!q Pager, id: int, off: int) -> [file_read, file_write] int {
+    var rc = 0;
+    region r {
+        let b = alloc_slice[r](1, byte_of(0));
+        match file_pread(p.file, id * 4096 + off, b) {
+            Read::Got(n) => {
+                let v = int_of(b[0]);
+                b[0] = byte_of(v - v % 2 + 1 - v % 2);
+                match file_pwrite(p.file, id * 4096 + off, b) {
+                    Done::Ok(m) => {
+                    }
+                    Done::Failed(e) => {
+                        rc = 0 - 1;
+                    }
+                }
+            }
+            Read::End => {
+                rc = 0 - 1;
+            }
+            Read::Failed(e) => {
+                rc = 0 - 1;
+            }
+        }
+    }
+    return rc;
+}
