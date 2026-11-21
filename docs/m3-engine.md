@@ -478,7 +478,7 @@ replaced *and* no committed root names it, which is bookkeeping this slice does 
 | an update of every row | 0.09 s | 5.4 s | 60 times slower |
 | a row by its key | 0.08 ms | 0.1 to 0.2 ms | about the same |
 
-**So no: the performance problem is not solved.** What 6p solved is the size of the file. Reading is slow because every row is found by walking down from the root and every page on the way is read
+**So no: the performance problem is not solved** (as measured here; 6t is what was then done about it). What 6p solved is the size of the file. Reading is slow because every row is found by walking down from the root and every page on the way is read
 from the file and its CRC checked again: there is no page cache and no cursor that stays on a leaf. Writing is slow for the same reason three times a row (6o). Both are known work (a cache of checked
 pages, a scan that moves along the leaves), neither is built, and nothing here should be served to anyone who counts milliseconds until they are.
 
@@ -486,6 +486,39 @@ pages, a scan that moves along the leaves), neither is built, and nothing here s
 every step (928 steps, 1,856 crashes). Four mutants: writing over a page a root names, and keeping the marks of an earlier statement, are each killed by a wrong answer within twenty statements; two
 that write a page over the wrong one of the path are killed too. Switching the reuse off is not a wrong answer, so no differential sees it: `tests/engine_crash.py` holds the step count under 1,200 for
 that (a version that forgot the leaf's number took 1,422).
+
+## 6t. Speed: a cache of checked pages, a scan that stays on a leaf, a statement's pages written once (built)
+
+6p's table beside PostgreSQL said the engine was 6 to 450 times slower and why. Four changes, each measured, none changing an answer:
+
+1. **A cache of pages in the pager** (8,192 slots, a slot a page number): a page is read from the file and its CRC checked once, then served from memory; a page that is written, zeroed or (by the test
+   hook) damaged is dropped from it first.
+2. **A scan that stays on a leaf** (`btree.scan_step`): the next row of a scan is the next entry of the leaf already in hand, and the tree is walked from the root only when a leaf is used up.
+   (`next_after` is now that function with a leaf it forgets, so there is one account of the walk.)
+3. **A statement's own pages are written once.** A page of the open window (D-M3-10: no root names it) is kept in the cache and goes to the file when the window closes or at a `sync`, however many
+   times the statement wrote it; if another page wants its slot it is written first. The order of a commit (D-M3-3) is unchanged: everything is in the file before the `fsync` that precedes the superblock.
+4. **Nothing above a page written in place is written again**, and the walk down looks at the pages above the leaf where they are in the cache instead of copying them.
+
+**Beside PostgreSQL 16.15 again, same machine, same statements** (the engine still with no `fsync` between statements):
+
+| | PostgreSQL | the engine before (6p) | the engine now |
+|---|---|---|---|
+| 20,000 inserts, one a statement | 1.6 s | 9.7 s | 3.7 s (5,400 a second): 2.3 times slower |
+| the same rows, 100 a statement | | | 1.3 s (15,000 rows a second) |
+| a select with a predicate on a column that is not the key | 3.5 ms | 645 ms | 6 ms |
+| `count(*), sum(a)` over the table | 1.4 to 20 ms | 632 ms | 7 ms |
+| an update of every row | 0.09 s | 5.4 s | 0.97 s: 11 times slower |
+| a row by its key | 0.08 ms | 0.1 to 0.2 ms | 0.03 ms |
+
+**So: reading is where PostgreSQL is; writing is not.** A write still walks the tree four times a row (is there a history entry, what is the old value, store the entry, store the row), and each walk copies the
+leaf it changes. An update of every row is the worst case of that, and PostgreSQL does it eleven times faster. The file is no smaller than in 6p (a single-row statement still leaves a path of pages
+for the sweep). The comparison is also kinder to the engine than it looks: PostgreSQL was durable at every statement and spoke over a socket; the engine did neither.
+
+**Tests.** The random history against PostgreSQL, `AS OF`, the fork, and the tree's own model and crash tests all run through the cache. `tests/engine_crash.py`: the same six commits are now 94 writes
+and syncs (they were 928: most pages are written once), each still stopped at and checked. `tests/engine_big.py` is new and is the test of point 3: 30,000 rows rewritten five times after two sweeps
+have scattered the free pages, so that pages of one statement compete for slots; the sums a model predicts are read back, now and from a new process and `AS OF` the first load (a cache that dropped
+the unwritten page instead of writing it answers `engine-damaged` there, tried by hand). The fixed statements gained a table of several leaves, without which a scan that read one entry past a leaf's
+end passed every test. 7 mutants.
 
 ## 6q. M3h: `alter table ... add column`, `create index`, `drop index` (design, written before the code)
 

@@ -815,6 +815,17 @@ FIXED = [
     ("select fx.k, fy.k, fq.v from fx join fq on fq.k < fx.k join fy on fy.j is null order by 1, 2, 3", "order"),
     ("select fx.k from fx, fq where fq.k = 1 order by 1", "order"),
     ("select fx.k, fq.k from fx, fq where fq.k >= 2 and fx.k > 0 order by 1, 2", "order"),
+    # a table of several leaves: a scan has to go from one to the next
+    ("create table fwide (k integer primary key, a integer, s text)", "ddl"),
+    ("insert into fwide values " + ", ".join("(%d, %d, 'row %d padded so that a leaf of the tree holds only some of them')" % (k * 37 % 601, k % 13, k) for k in range(1, 601)), "write"),
+    ("select count(*), sum(k), sum(a), min(k), max(k) from fwide", "set"),
+    ("select k, a from fwide where a = 5 order by k", "order"),
+    ("select k from fwide where k >= 290 and k < 310 order by k desc", "order"),
+    ("update fwide set a = a + 1 where k % 2 = 0", "write"),
+    ("delete from fwide where k % 5 = 0", "write"),
+    ("select a, count(*), max(k) from fwide group by a order by a", "order"),
+    ("select * from fwide order by k", "order"),
+    ("drop table fwide", "ddl"),
     ("drop table fq", "ddl"),
     ("drop table fx", "ddl"),
     ("drop table fy", "ddl"),
@@ -1138,7 +1149,7 @@ def main():
     counts, fails, refused_answered, answered = compare(pg, stmts, eng, False)
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), [f[0] for f in FIXED])
-    fstmts = [(sql, how, "fq" if " fq " in sql and how == "write" else ("fy" if " fy" in sql else "fx")) for sql, how in FIXED]
+    fstmts = [(sql, how, "fwide" if " fwide" in sql and how == "write" else "fq" if " fq " in sql and how == "write" else ("fy" if " fy" in sql else "fx")) for sql, how in FIXED]
     fcounts, ffails, _, _ = compare(pg, fstmts, feng, True)
     print("engine_check: %d fixed statements, none refused: %s" % (len(FIXED), ", ".join("%s=%d" % kv for kv in sorted(fcounts.items()))))
     fails += ffails

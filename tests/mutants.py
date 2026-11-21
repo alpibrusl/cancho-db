@@ -1503,6 +1503,9 @@ def run_l3a_cho(cancho):
 
 # ---- the copy-on-write B+tree and its pages (src/btree.cho, src/pager.cho), judged by tests/btree_check.py; the superblocks and the commit (src/pstore.cho), judged by tests/pstore_check.py
 BTREE = [
+    ("pager: a page changed under the cache is still served", "src/pager.cho", "    var rc = 0;\n    forget(p, id);", "    var rc = 0;"),
+    ("btree: a page above one written anew is left as it was", "src/btree.cho", "        if !split && cid == was(sc, level + 1) {", "        if !split {"),
+    ("btree: after a removal a page above a new page is left as it was", "src/btree.cho", "        if !removed && cid == was(sc, level + 1) {", "        if !removed {"),
     ("btree: keys compare backwards", "src/btree.cho", "        if c < d {\n            return 0 - 1;\n        }\n        if c > d {\n            return 1;\n        }", "        if c > d {\n            return 0 - 1;\n        }\n        if c < d {\n            return 1;\n        }"),
     ("btree: a key equal to a separator goes to the child on its left", "src/btree.cho", "if cmp(key, pg[at + 1..at + 1 + kl]) >= 0 {", "if cmp(key, pg[at + 1..at + 1 + kl]) > 0 {"),
     ("btree: a put of an existing key adds an entry", "src/btree.cho", "            if c == 0 {\n                added = 0;\n            } else {\n                wpos = mv(sc, wpos, at, elen);\n            }", "            wpos = mv(sc, wpos, at, elen);"),
@@ -1713,6 +1716,18 @@ def run_eval(cancho):
 # The engine's statements (src/exec.cho, src/execw.cho, src/tables.cho, and the assignment of src/eval.cho), judged by tests/engine_check.py: the random history against PostgreSQL, the fixed statements that
 # must be answered, and the page file after a delete and a drop.
 ENGINE = [
+    ('cache: a commit does not write what is only in memory', 'src/pager.cho',
+     '    let fr = flush(p);\n    if fr < 0 {\n        return fr;\n    }',
+     '    let fr = 0;\n    if fr < 0 {\n        return fr;\n    }'),
+    ('scan: a leaf is read one entry past its end', 'src/btree.cho',
+     '    if st[0] == 1 && st[3] == root && st[2] < st[4] {',
+     '    if st[0] == 1 && st[3] == root && st[2] <= st[4] {'),
+    ('scan: the leaf kept is not moved along', 'src/btree.cho',
+     '        st[1] = at + 3 + kl + vl;\n        st[2] = st[2] + 1;\n        return kl * 1024 + vl;',
+     '        st[2] = st[2] + 1;\n        return kl * 1024 + vl;'),
+    ('tree: the path walked in memory is not noted', 'src/btree.cho',
+     '            setp(sc, d, id, ix0);\n',
+     ''),
     ("names: an expression's column is named after nothing", 'src/lower.cho',
      '    return put_text(out, at, "?column?");',
      '    return put_text(out, at, "column");'),

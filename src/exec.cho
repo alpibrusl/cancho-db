@@ -188,6 +188,8 @@ pub res struct Work {
     jix: Box[[int]],
     ukey: Box[[byte]],
     uval: Box[[byte]],
+    leaf: Box[[byte]],
+    lst: Box[[int]],
     chg: Box[[byte]],
     lit: Box[[byte]],
     lsc: Box[[int]],
@@ -227,11 +229,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -253,6 +255,8 @@ pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
     unbox_slice(heap, jix);
     unbox_slice(heap, ukey);
     unbox_slice(heap, uval);
+    unbox_slice(heap, leaf);
+    unbox_slice(heap, lst);
     unbox_slice(heap, chg);
     unbox_slice(heap, lit);
     unbox_slice(heap, lsc);
@@ -725,6 +729,7 @@ pub fn scan_start[&q](w: &!q Work) -> [] int {
     build.put_be(contents(w.key), 0, w.tid, 4);
     w.klen = 4;
     w.fresh = false;
+    contents(w.lst)[0] = 0;
     if w.lon >= 0 {
         // from the first key the WHERE can be true at (`bounds`)
         let n = w.lon;
@@ -740,7 +745,7 @@ pub fn scan_next[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_re
     let kl = w.klen;
     let at_it = w.fresh;
     w.fresh = false;
-    let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], at_it, contents(w.key2), contents(w.cur));
+    let r = btree.scan_step(p, contents(w.sc), root, contents(w.key)[0..kl], at_it, contents(w.key2), contents(w.cur), contents(w.leaf), contents(w.lst));
     if r == btree.not_found() {
         return 0 - 1;
     }

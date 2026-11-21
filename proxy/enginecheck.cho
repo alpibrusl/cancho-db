@@ -441,7 +441,13 @@ fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &
                 le = le + 1;
             }
             // each line is a window of the pager: the pages a statement hands out are its own until it is done
-            pager.begin(pg);
+            let wr = pager.begin(pg);
+            if wr < 0 && !pager.crashed(pg) {
+                put_str(io, "err ");
+                put_int(io, wr);
+                putchar(io, '\n');
+                status = 5;
+            }
             if starts(all, ls, le, "!commit") {
                 let r = pstore.commit(pg, exec.scratch(w), rs, seq);
                 if r < 0 {

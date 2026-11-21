@@ -191,6 +191,14 @@ pub fn get[&q, &s, &k, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
     var id = root;
     var depth = 0;
     while depth < 16 {
+        // a page above the leaves that is in memory is looked at where it is
+        var off = pager.pin(p, id);
+        while off >= 0 && depth < 16 && int_of(pager.bytes(p)[off]) == 2 {
+            let (ix0, ch0, al0) = pick(pager.bytes(p)[off..off + 4096], key);
+            id = ch0;
+            depth = depth + 1;
+            off = pager.pin(p, id);
+        }
         let rc = pager.read_page(p, id, sc[0..4096]);
         if rc < 0 {
             return fail(rc);
@@ -290,6 +298,15 @@ fn descend[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
     var id = root;
     var d = 0;
     while d < 15 {
+        // a page above the leaf that is in memory is looked at where it is; `climb` and `del` read it into `sc` if they have to write it again
+        var off = pager.pin(p, id);
+        while off >= 0 && d < 14 && int_of(pager.bytes(p)[off]) == 2 {
+            let (ix0, ch0, al0) = pick(pager.bytes(p)[off..off + 4096], key);
+            setp(sc, d, id, ix0);
+            id = ch0;
+            d = d + 1;
+            off = pager.pin(p, id);
+        }
         let rc = pager.read_page(p, id, sc[d * 4096..d * 4096 + 4096]);
         if rc < 0 {
             return fail(rc);
@@ -313,14 +330,22 @@ fn descend[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
 
 // After a leaf or internal page was replaced, put the new pages in the parents, from the level above `d` to the root. `cid` is the page that replaces the child taken at each level; `split` says there are two,
 // `cid` and `rid`, with the key in `sc` at w3() (`seplen` bytes) between them. The new root, or an error.
-fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: bool, rid0: int, seplen0: int) -> [file_write] int {
+fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: bool, rid0: int, seplen0: int) -> [file_read, file_write] int {
     var cid = cid0;
     var split = split0;
     var rid = rid0;
     var seplen = seplen0;
     var level = d - 1;
     while level >= 0 {
+        if !split && cid == was(sc, level + 1) {
+            // the page below was written where it was (it is the statement's own): this page names it as before, and so does everything above
+            return was(sc, 0);
+        }
         let po = level * 4096;
+        let lr = pager.read_page(p, was(sc, level), sc[po..po + 4096]);
+        if lr < 0 {
+            return fail(lr);
+        }
         let ix = commit.be(sc, meta() + 8 * level + 4, 4);
         let count = commit.be(sc, po + 1, 2);
         var wpos = w1();
@@ -523,6 +548,14 @@ pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
     while level >= 0 {
         let po = level * 4096;
         let ix = commit.be(sc, meta() + 8 * level + 4, 4);
+        if !removed && cid == was(sc, level + 1) {
+            // as in `climb`: nothing above the page that was written in place changes
+            return was(sc, 0);
+        }
+        let lr = pager.read_page(p, was(sc, level), sc[po..po + 4096]);
+        if lr < 0 {
+            return fail(lr);
+        }
         let pcount = commit.be(sc, po + 1, 2);
         if removed && pcount == 0 {
             // the only child of this page is gone: so is this page
@@ -604,6 +637,34 @@ pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
 // The first entry after `key` (or at it, if `inclusive`) in the tree `root`, in key order: its key and value are copied into `kout` and `vout` and the answer is `key length * 1024 + value length`;
 // `not_found()` if there is none. Calling it with the key it answered walks the tree in order.
 pub fn next_after[&q, &s, &k, &a, &b](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte], inclusive: bool, kout: &!a [byte], vout: &!b [byte]) -> [file_read] int {
+    // one account of the walk: `scan_step`, with a leaf it forgets
+    var rc = 0;
+    region r {
+        let leaf = alloc_slice[r](4096, byte_of(0));
+        let st = alloc_slice[r](5, 0);
+        rc = scan_step(p, sc, root, key, inclusive, kout, vout, leaf, st);
+    }
+    return rc;
+}
+
+// A scan in key order that stays on a leaf (docs/m3-engine.md 6t): as `next_after`, for a caller that walks ONE tree with the key it was last answered, and keeps for it a page `leaf` (4096 bytes) and
+// `st` (5 ints, st[0] 0 before the first call). While the leaf last read has entries left the next one is answered from it; the tree is walked from the root only when a leaf is used up. A tree is never
+// changed (a write makes another), so the leaf kept is still the tree's.
+pub fn scan_step[&q, &s, &k, &a, &b, &l, &c](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte], inclusive: bool, kout: &!a [byte], vout: &!b [byte], leaf: &!l [byte], st: &!c [int]) -> [file_read] int {
+    if st[0] == 1 && st[3] == root && st[2] < st[4] {
+        let at = st[1];
+        let kl = int_of(leaf[at]);
+        let vl = commit.be(leaf, at + 1, 2);
+        if kl > len(kout) || vl > len(vout) {
+            return err_big();
+        }
+        copy(kout, 0, leaf, at + 3, kl);
+        copy(vout, 0, leaf, at + 3 + kl, vl);
+        st[1] = at + 3 + kl + vl;
+        st[2] = st[2] + 1;
+        return kl * 1024 + vl;
+    }
+    st[0] = 0;
     if root == 0 {
         return not_found();
     }
@@ -635,6 +696,12 @@ pub fn next_after[&q, &s, &k, &a, &b](p: &!q pager.Pager, sc: &!s [byte], root: 
                     }
                     copy(kout, 0, sc, at + 3, kl);
                     copy(vout, 0, sc, at + 3 + kl, vl);
+                    copy(leaf, 0, sc, 0, 4096);
+                    st[0] = 1;
+                    st[1] = at + 3 + kl + vl;
+                    st[2] = i + 1;
+                    st[3] = root;
+                    st[4] = count;
                     return kl * 1024 + vl;
                 }
                 at = at + 3 + kl + vl;
