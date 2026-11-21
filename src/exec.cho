@@ -1,0 +1,1259 @@
+edition 9;
+module cdb.exec;
+
+import cdb.commit;
+import cdb.build;
+import cdb.row;
+import cdb.eval;
+import cdb.btree;
+import cdb.pager;
+import cdb.tables;
+
+// The executor of the engine (docs/m3-engine.md 6g): what the statements share. SELECT is in src/execs.cho, the statements that write in src/execw.cho.
+//
+// A statement answers 0 (done: `root`, `count` and the rows or the changes are in the `Work`), a number above 0 (an error of the statement, PostgreSQL's: `sqlstate` gives its code), or a number below 0 (a
+// refusal, with a rule tag: `refusal_name`). The rule of 6g: the engine finds every error a statement could raise; one SQLSTATE among them is the answer, several are `engine-ambiguous-error`, and where
+// whether there is an error at all depends on the order PostgreSQL works in, the statement is refused (`engine-order-dependent`).
+
+pub fn unsupported() -> [] int {
+    return 0 - 11;
+}
+
+pub fn order_dependent() -> [] int {
+    return 0 - 12;
+}
+
+pub fn ambiguous() -> [] int {
+    return 0 - 13;
+}
+
+pub fn too_big() -> [] int {
+    return 0 - 14;
+}
+
+pub fn io_failed() -> [] int {
+    return 0 - 15;
+}
+
+pub fn damaged() -> [] int {
+    return 0 - 16;
+}
+
+pub fn malformed() -> [] int {
+    return 0 - 19;
+}
+
+pub fn refusal_name(code: int) -> [] &static [byte] {
+    if code == order_dependent() {
+        return "engine-order-dependent";
+    }
+    if code == ambiguous() {
+        return "engine-ambiguous-error";
+    }
+    if code == too_big() {
+        return "engine-too-big";
+    }
+    if code == io_failed() {
+        return "engine-io";
+    }
+    if code == damaged() {
+        return "engine-damaged";
+    }
+    if code == malformed() {
+        return "engine-malformed";
+    }
+    return "engine-unsupported";
+}
+
+// The errors of a statement. 1 to 4 are the evaluator's errors of a value less one, 5 to 7 its errors of types negated.
+pub fn e_unique() -> [] int {
+    return 8;
+}
+
+pub fn e_not_null() -> [] int {
+    return 9;
+}
+
+pub fn e_table_exists() -> [] int {
+    return 10;
+}
+
+pub fn e_no_table() -> [] int {
+    return 11;
+}
+
+pub fn e_limit() -> [] int {
+    return 12;
+}
+
+pub fn e_offset() -> [] int {
+    return 13;
+}
+
+pub fn e_two_keys() -> [] int {
+    return 14;
+}
+
+pub fn e_column_twice() -> [] int {
+    return 15;
+}
+
+pub fn e_grouping() -> [] int {
+    return 16;
+}
+
+pub fn e_no_column() -> [] int {
+    return 17;
+}
+
+pub fn sqlstate(code: int) -> [] &static [byte] {
+    if code == 1 {
+        return "22012";
+    }
+    if code == 2 {
+        return "22003";
+    }
+    if code == 3 {
+        return "22P02";
+    }
+    if code == 4 {
+        return "22025";
+    }
+    if code == 5 {
+        return "42883";
+    }
+    if code == 6 {
+        return "42804";
+    }
+    if code == 7 {
+        return "42846";
+    }
+    if code == 8 {
+        return "23505";
+    }
+    if code == 9 {
+        return "23502";
+    }
+    if code == 10 {
+        return "42P07";
+    }
+    if code == 11 {
+        return "42P01";
+    }
+    if code == 12 {
+        return "2201W";
+    }
+    if code == 13 {
+        return "2201X";
+    }
+    if code == 14 {
+        return "42P16";
+    }
+    if code == 15 {
+        return "42701";
+    }
+    if code == 16 {
+        return "42803";
+    }
+    if code == 17 {
+        return "42703";
+    }
+    return "XX000";
+}
+
+// What a statement works in: made once, used by one statement at a time.
+//
+// `ctx` is what the evaluator is bound to: the table's name from 0, its definition from 64, the row from 1024 (`cx` says how long each is). `pos` holds positions and marks of the statement's parts (the
+// `p_...` offsets below). `rows` holds the rows of a SELECT's answer (each the values of its items and then of its ORDER BY expressions, as stored values) or the rows an INSERT is about to store, and `idx`
+// where each starts; `chg` the changes of a statement that writes (`changes_at`).
+pub res struct Work {
+    sc: Box[[byte]],
+    ws: Box[[int]],
+    ar: Box[[byte]],
+    ctx: Box[[byte]],
+    cx: Box[[int]],
+    info: Box[[int]],
+    ent: Box[[byte]],
+    key: Box[[byte]],
+    key2: Box[[byte]],
+    cur: Box[[byte]],
+    nrow: Box[[byte]],
+    tmp: Box[[byte]],
+    pos: Box[[int]],
+    rows: Box[[byte]],
+    idx: Box[[int]],
+    idx2: Box[[int]],
+    gix: Box[[int]],
+    jbuf: Box[[byte]],
+    jix: Box[[int]],
+    ukey: Box[[byte]],
+    uval: Box[[byte]],
+    leaf: Box[[byte]],
+    lst: Box[[int]],
+    chg: Box[[byte]],
+    lit: Box[[byte]],
+    lsc: Box[[int]],
+    lrs: Box[[int]],
+    lo: Box[[byte]],
+    hi: Box[[byte]],
+    root: int,
+    count: int,
+    first: int,
+    code: int,
+    multi: bool,
+    orderdep: bool,
+    nitems: int,
+    norder: int,
+    nconj: int,
+    rfill: int,
+    nchg: int,
+    cfill: int,
+    tid: int,
+    nlen: int,
+    dlen: int,
+    elen: int,
+    klen: int,
+    lon: int,
+    hin: int,
+    fresh: bool,
+    ntab: int,
+    txn: int,
+}
+
+pub fn rows_size() -> [] int {
+    return 16777216;
+}
+
+pub fn max_rows() -> [] int {
+    return 262144;
+}
+
+pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0 };
+}
+
+pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn } = w;
+    unbox_slice(heap, sc);
+    unbox_slice(heap, ws);
+    unbox_slice(heap, ar);
+    unbox_slice(heap, ctx);
+    unbox_slice(heap, cx);
+    unbox_slice(heap, info);
+    unbox_slice(heap, ent);
+    unbox_slice(heap, key);
+    unbox_slice(heap, key2);
+    unbox_slice(heap, cur);
+    unbox_slice(heap, nrow);
+    unbox_slice(heap, tmp);
+    unbox_slice(heap, pos);
+    unbox_slice(heap, rows);
+    unbox_slice(heap, idx);
+    unbox_slice(heap, idx2);
+    unbox_slice(heap, gix);
+    unbox_slice(heap, jbuf);
+    unbox_slice(heap, jix);
+    unbox_slice(heap, ukey);
+    unbox_slice(heap, uval);
+    unbox_slice(heap, leaf);
+    unbox_slice(heap, lst);
+    unbox_slice(heap, chg);
+    unbox_slice(heap, lit);
+    unbox_slice(heap, lsc);
+    unbox_slice(heap, lrs);
+    unbox_slice(heap, lo);
+    unbox_slice(heap, hi);
+    return 0;
+}
+
+// Where things are in `pos`.
+pub fn p_item() -> [] int {
+    return 0;
+}
+
+pub fn p_iend() -> [] int {
+    return 256;
+}
+
+pub fn p_itype() -> [] int {
+    return 512;
+}
+
+pub fn p_ord() -> [] int {
+    return 768;
+}
+
+pub fn p_odir() -> [] int {
+    return 832;
+}
+
+pub fn p_oval() -> [] int {
+    return 896;
+}
+
+pub fn p_conj() -> [] int {
+    return 960;
+}
+
+pub fn p_scol() -> [] int {
+    return 1024;
+}
+
+pub fn p_spos() -> [] int {
+    return 1088;
+}
+
+pub fn p_soff() -> [] int {
+    return 1152;
+}
+
+pub fn p_stack() -> [] int {
+    return 1280;
+}
+
+// The GROUP BY expressions: where each starts, where it ends, its type.
+pub fn p_grp() -> [] int {
+    return 1408;
+}
+
+pub fn p_gend() -> [] int {
+    return 1472;
+}
+
+pub fn p_gtype() -> [] int {
+    return 1536;
+}
+
+// The aggregates, eight ints each: where the call starts and ends, which it is (1 count, 2 sum, 3 min, 4 max), where its argument is (0: `*`), the type of its answer; then its count so far, and what was
+// added above zero and below.
+pub fn p_agg() -> [] int {
+    return 1600;
+}
+
+// The slots of a grouped query, four ints each: where the expression starts and ends, 0 for an aggregate or 1 for a GROUP BY expression, and which.
+pub fn p_slot() -> [] int {
+    return 2112;
+}
+
+pub fn max_slots() -> [] int {
+    return 128;
+}
+
+// Two results of reading column definitions (src/execw.cho): where the marks and defaults end in `tmp`, and how many columns are the key.
+pub fn p_ddl() -> [] int {
+    return 3300;
+}
+
+pub fn max_items() -> [] int {
+    return 255;
+}
+
+pub fn max_parts() -> [] int {
+    return 64;
+}
+
+// ---- what the callers read
+
+pub fn root_of[&q](w: &q Work) -> [] int {
+    return w.root;
+}
+
+pub fn count_of[&q](w: &q Work) -> [] int {
+    return w.count;
+}
+
+pub fn columns_of[&q](w: &q Work) -> [] int {
+    return w.nitems;
+}
+
+pub fn type_of[&q](w: &!q Work, i: int) -> [] int {
+    return contents(w.pos)[p_itype() + i];
+}
+
+// Where row `r` (0 for the first) of a SELECT's answer starts in `row_bytes`: its `columns_of` values follow one another as stored values.
+pub fn row_at[&q](w: &!q Work, r: int) -> [] int {
+    return contents(w.idx)[w.first + r];
+}
+
+pub fn row_byte[&q](w: &!q Work, at: int) -> [] int {
+    return int_of(contents(w.rows)[at]);
+}
+
+pub fn changes_of[&q](w: &q Work) -> [] int {
+    return w.nchg;
+}
+
+pub fn changes_len[&q](w: &q Work) -> [] int {
+    return w.cfill;
+}
+
+// The changes of the last statement, one after the other: the table's name (`u16` length and bytes), the plain key (the same), the image before (`u32` length and bytes, or 0xFFFFFFFF and nothing if the row
+// was not there) and the image after (the same).
+pub fn change_byte[&q](w: &!q Work, at: int) -> [] int {
+    return int_of(contents(w.chg)[at]);
+}
+
+// ---- shared by the statements
+
+pub fn tree_err(r: int) -> [] int {
+    if r == btree.err_big() {
+        return too_big();
+    }
+    if r == btree.err_io() || r == btree.err_crash() {
+        return io_failed();
+    }
+    return damaged();
+}
+
+pub fn start[&q](w: &!q Work, root: int) -> [] int {
+    w.root = root;
+    w.count = 0;
+    w.first = 0;
+    w.code = 0;
+    w.multi = false;
+    w.orderdep = false;
+    w.nitems = 0;
+    w.norder = 0;
+    w.nconj = 0;
+    w.rfill = 0;
+    w.nchg = 0;
+    w.cfill = 0;
+    w.lon = 0 - 1;
+    w.hin = 0 - 1;
+    w.ntab = 1;
+    contents(w.cx)[eval.slots_at()] = 0;
+    return 0;
+}
+
+// An error the statement could raise.
+pub fn note[&q](w: &!q Work, code: int) -> [] int {
+    if w.code == 0 {
+        w.code = code;
+    } else if w.code != code {
+        w.multi = true;
+    }
+    return 0;
+}
+
+// The answer of a statement that could raise the errors noted: 0 if none, the one code, or `ambiguous()`.
+pub fn verdict[&q](w: &q Work) -> [] int {
+    if w.multi {
+        return ambiguous();
+    }
+    return w.code;
+}
+
+// A negative answer of the evaluator: an error of the statement's types is noted (0); anything else is a refusal.
+pub fn stat[&q](w: &!q Work, r: int) -> [] int {
+    if r == eval.no_operator() || r == eval.mismatch() || r == eval.no_cast() {
+        note(w, 0 - r);
+        return 0;
+    }
+    if r == eval.malformed() {
+        return malformed();
+    }
+    return unsupported();
+}
+
+// Evaluate the expression at `at` of `e` over the bound rows (`ntab` 1: the rows of every table of the statement) or over nothing (0): the evaluator's answer, the value in `ws` from `eval.max_nodes()`.
+pub fn ev[&q, &x, &k](w: &!q Work, e: &x [byte], at: int, kinds: &k [int], ntab: int) -> [] int {
+    contents(w.info)[0] = 0;
+    var n = 0;
+    if ntab == 1 {
+        n = w.ntab;
+    }
+    return eval.eval(e, at, kinds, contents(w.ctx), contents(w.cx), n, contents(w.ws), contents(w.ar), contents(w.info));
+}
+
+pub fn copy[&s, &d](src: &s [byte], sa: int, n: int, dst: &!d [byte], da: int) -> [] int {
+    var i = 0;
+    while i < n {
+        dst[da + i] = src[sa + i];
+        i = i + 1;
+    }
+    return da + n;
+}
+
+pub fn same[&a, &b](x: &a [byte], xa: int, xn: int, y: &b [byte], ya: int, yn: int) -> [] bool {
+    if xn != yn {
+        return false;
+    }
+    var i = 0;
+    while i < xn {
+        if int_of(x[xa + i]) != int_of(y[ya + i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn put_i64[&o](out: &!o [byte], at: int, v: int) -> [] int {
+    var rest = v;
+    var i = 8;
+    while i > 0 {
+        i = i - 1;
+        var b = rest % 256;
+        if b < 0 {
+            b = b + 256;
+        }
+        out[at + i] = byte_of(b);
+        rest = (rest - b) / 256;
+    }
+    return 0;
+}
+
+// Whether the bytes are text PostgreSQL would store: UTF-8 (no overlong form, no surrogate, nothing above U+10FFFF) with no zero byte.
+pub fn text_ok[&a](ar: &a [byte], at: int, n: int) -> [] bool {
+    var i = 0;
+    while i < n {
+        let c = int_of(ar[at + i]);
+        var more = 0;
+        var least = 0;
+        var v = c;
+        if c == 0 {
+            return false;
+        }
+        if c < 128 {
+            more = 0;
+        } else if c >= 194 && c < 224 {
+            more = 1;
+            v = c - 192;
+            least = 128;
+        } else if c >= 224 && c < 240 {
+            more = 2;
+            v = c - 224;
+            least = 2048;
+        } else if c >= 240 && c < 245 {
+            more = 3;
+            v = c - 240;
+            least = 65536;
+        } else {
+            return false;
+        }
+        if i + more >= n {
+            return false;
+        }
+        var k = 1;
+        while k <= more {
+            let d = int_of(ar[at + i + k]);
+            if d < 128 || d >= 192 {
+                return false;
+            }
+            v = v * 64 + d - 128;
+            k = k + 1;
+        }
+        if v < least || v > 1114111 || v >= 55296 && v < 57344 {
+            return false;
+        }
+        i = i + more + 1;
+    }
+    return true;
+}
+
+// The value at `v` of `ws` (not an error value) as a stored value into `out` at `at`: the position after it, -1 if it does not fit, -2 if it is text that `text_ok` refuses.
+pub fn enc[&o, &w, &a](out: &!o [byte], at: int, ws: &w [int], v: int, ar: &a [byte]) -> [] int {
+    let ty = ws[v];
+    if ws[v + 1] != 0 {
+        if at + 1 > len(out) {
+            return 0 - 1;
+        }
+        out[at] = byte_of(0);
+        return at + 1;
+    }
+    if ty == 1 || ty == 5 || ty == 6 {
+        if at + 9 > len(out) {
+            return 0 - 1;
+        }
+        out[at] = byte_of(1);
+        put_i64(out, at + 1, ws[v + 2]);
+        return at + 9;
+    }
+    if ty == 2 {
+        if at + 2 > len(out) {
+            return 0 - 1;
+        }
+        out[at] = byte_of(2);
+        out[at + 1] = byte_of(ws[v + 2]);
+        return at + 2;
+    }
+    let n = ws[v + 3];
+    if n > 65535 || at + 3 + n > len(out) {
+        return 0 - 1;
+    }
+    var tag = 3;
+    if ty == 4 {
+        tag = 4;
+    } else if !text_ok(ar, ws[v + 2], n) {
+        return 0 - 2;
+    }
+    out[at] = byte_of(tag);
+    build.put_be(out, at + 1, n, 2);
+    return copy(ar, ws[v + 2], n, out, at + 3);
+}
+
+// Bind the table whose `Name` is at `at` of `e`, in the tree `root`: 0, an error (`e_no_table`), or a refusal. After it the evaluator sees the table with no row (every column null).
+pub fn bind_table[&q, &z, &x](p: &!z pager.Pager, w: &!q Work, root: int, e: &x [byte], at: int) -> [file_read] int {
+    if at + 2 > len(e) {
+        return malformed();
+    }
+    let nl = commit.be(e, at, 2);
+    if nl < 1 || at + 2 + nl > len(e) {
+        return malformed();
+    }
+    if nl > tables.max_name() {
+        return unsupported();
+    }
+    var i = 0;
+    while i < nl {
+        // a table as it was at a commit (ir.md 6.1) is not served yet
+        if int_of(e[at + 2 + i]) == '@' {
+            return unsupported();
+        }
+        i = i + 1;
+    }
+    let n = tables.find(p, contents(w.sc), root, e[at + 2..at + 2 + nl], contents(w.key), contents(w.ent));
+    if n == btree.not_found() {
+        return e_no_table();
+    }
+    if n < 0 {
+        return tree_err(n);
+    }
+    let dl = tables.def_len(contents(w.ent));
+    if dl > 800 {
+        return damaged();
+    }
+    copy(e, at + 2, nl, contents(w.ctx), 0);
+    copy(contents(w.ent), 6, dl, contents(w.ctx), 64);
+    w.elen = n;
+    w.dlen = dl;
+    w.nlen = nl;
+    w.tid = tables.id_of(contents(w.ent));
+    let x = contents(w.cx);
+    x[0] = 0;
+    x[1] = nl;
+    x[2] = 64;
+    x[3] = dl;
+    x[4] = 1024;
+    x[5] = 0 - 1;
+    return 0;
+}
+
+// No row is bound: every column of every table reads as null (what the types of a statement's expressions are learnt with).
+pub fn no_rows[&q](w: &!q Work) -> [] int {
+    var j = 0;
+    while j < w.ntab {
+        contents(w.cx)[6 * j + 5] = 0 - 1;
+        j = j + 1;
+    }
+    return 0;
+}
+
+// The tables of a join after the first, eight ints each from `pos[p_tab() + 8 * j]`: the table's number, where its rows start in `jix` and how many there are, the next one to try, how it is joined (0 a
+// comma, 1 `join`, 2 `left join`), where its ON is (0: none), whether a row of it was joined with the rows bound before it, and the length of its definition.
+pub fn p_tab() -> [] int {
+    return 3100;
+}
+
+pub fn max_tables() -> [] int {
+    return 8;
+}
+
+// Bind table `j` (1 or more) of a join: the `Name` at `at` of `e`. Its name, definition and row are in `ctx` from 2048 * j as the first table's are from 0. 0, an error, or a refusal (a table that is
+// already in the statement).
+pub fn bind_join[&q, &z, &x](p: &!z pager.Pager, w: &!q Work, root: int, e: &x [byte], at: int, j: int, kind: int, onpos: int) -> [file_read] int {
+    if j < 1 || j >= max_tables() || at + 2 > len(e) {
+        return unsupported();
+    }
+    let nl = commit.be(e, at, 2);
+    if nl < 1 || at + 2 + nl > len(e) {
+        return malformed();
+    }
+    if nl > tables.max_name() {
+        return unsupported();
+    }
+    var i = 0;
+    while i < nl {
+        if int_of(e[at + 2 + i]) == '@' {
+            return unsupported();
+        }
+        i = i + 1;
+    }
+    // `lit` is scratch here: the first table's entry stays in `ent`
+    let n = tables.find(p, contents(w.sc), root, e[at + 2..at + 2 + nl], contents(w.key), contents(w.lit));
+    if n == btree.not_found() {
+        return e_no_table();
+    }
+    if n < 0 {
+        return tree_err(n);
+    }
+    let dl = tables.def_len(contents(w.lit));
+    if dl > 800 {
+        return damaged();
+    }
+    let tid = tables.id_of(contents(w.lit));
+    let t = p_tab() + 8 * j;
+    if tid == w.tid {
+        return unsupported();
+    }
+    i = 1;
+    while i < j {
+        if contents(w.pos)[p_tab() + 8 * i] == tid {
+            return unsupported();
+        }
+        i = i + 1;
+    }
+    copy(e, at + 2, nl, contents(w.ctx), 2048 * j);
+    copy(contents(w.lit), 6, dl, contents(w.ctx), 2048 * j + 64);
+    let x = contents(w.cx);
+    x[6 * j] = 2048 * j;
+    x[6 * j + 1] = nl;
+    x[6 * j + 2] = 2048 * j + 64;
+    x[6 * j + 3] = dl;
+    x[6 * j + 4] = 2048 * j + 1024;
+    x[6 * j + 5] = 0 - 1;
+    contents(w.pos)[t] = tid;
+    contents(w.pos)[t + 1] = 0;
+    contents(w.pos)[t + 2] = 0;
+    contents(w.pos)[t + 3] = 0;
+    contents(w.pos)[t + 4] = kind;
+    contents(w.pos)[t + 5] = onpos;
+    contents(w.pos)[t + 6] = 0;
+    contents(w.pos)[t + 7] = dl;
+    w.ntab = j + 1;
+    return 0;
+}
+
+// Begin reading the rows of the bound table.
+pub fn scan_start[&q](w: &!q Work) -> [] int {
+    build.put_be(contents(w.key), 0, w.tid, 4);
+    w.klen = 4;
+    w.fresh = false;
+    contents(w.lst)[0] = 0;
+    if w.lon >= 0 {
+        // from the first key the WHERE can be true at (`bounds`)
+        let n = w.lon;
+        copy(contents(w.lo), 0, n, contents(w.key), 4);
+        w.klen = 4 + n;
+        w.fresh = true;
+    }
+    return 0;
+}
+
+// The next row of the bound table in the tree `root`, in key order: its length (the row is in `slot`, and bound; its key in `key`), -1 when there is no other, or a refusal.
+pub fn scan_next[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_read] int {
+    let kl = w.klen;
+    let at_it = w.fresh;
+    w.fresh = false;
+    let r = btree.scan_step(p, contents(w.sc), root, contents(w.key)[0..kl], at_it, contents(w.key2), contents(w.cur), contents(w.leaf), contents(w.lst));
+    if r == btree.not_found() {
+        return 0 - 1;
+    }
+    if r < 0 {
+        return tree_err(r);
+    }
+    let nk = r / 1024;
+    let nv = r % 1024;
+    if nk < 4 || commit.be(contents(w.key2), 0, 4) != w.tid {
+        return 0 - 1;
+    }
+    if w.hin >= 0 {
+        // past the last key the WHERE can be true at
+        let hn = w.hin;
+        if after_key(contents(w.key2), 4, nk - 4, contents(w.hi), hn) {
+            return 0 - 1;
+        }
+    }
+    let dl = w.dlen;
+    if !row.row_ok(contents(w.ctx)[64..64 + dl], contents(w.cur)[0..nv]) {
+        // a page that passed its CRC and does not hold a row of this table: nothing is computed from it
+        return damaged();
+    }
+    copy(contents(w.key2), 0, nk, contents(w.key), 0);
+    w.klen = nk;
+    copy(contents(w.cur), 0, nv, contents(w.ctx), 1024);
+    contents(w.cx)[5] = nv;
+    return nv;
+}
+
+// Whether the key `k[ka..ka + kn]` is after the key `h[0..hn]` in the tree's order (bytes, a shorter one first).
+fn after_key[&a, &b](k: &a [byte], ka: int, kn: int, h: &b [byte], hn: int) -> [] bool {
+    var i = 0;
+    while i < kn && i < hn {
+        let d = int_of(k[ka + i]) - int_of(h[i]);
+        if d != 0 {
+            return d > 0;
+        }
+        i = i + 1;
+    }
+    return kn > hn;
+}
+
+// Whether the `Col` at `at` of `e` is column `c` of the bound table.
+fn is_col[&q, &x](w: &!q Work, e: &x [byte], at: int, c: int) -> [] bool {
+    let dl = w.dlen;
+    let tn = commit.be(e, at + 1, 2);
+    let cn = commit.be(e, at + 3 + tn, 2);
+    let nm = row.col_name(contents(w.ctx)[64..64 + dl], c);
+    return same(nm, 0, len(nm), e, at + 5 + tn, cn);
+}
+
+// The part of the table a scan has to read, from the WHERE's conditions (listed by `where_static`): if the key is one column of integers or text and a condition compares it with a constant, the rows
+// before (`lo`) or after (`hi`) what that condition allows are not read. That may only be done when no condition can raise an error, because a row that is not read is a row whose error is not found (6g):
+// so every condition must be made of columns, constants, comparisons, AND, OR, NOT, IS NULL and IN and nothing else. The bounds leave out no row the WHERE is true for, and every row read is still judged
+// by the whole WHERE. 0, or a refusal.
+fn bounds[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int]) -> [] int {
+    let dl = w.dlen;
+    let b = eval.max_nodes();
+    if w.ntab != 1 {
+        // under a join a column of that name may be another table's
+        return 0;
+    }
+    if row.key_columns(contents(w.ctx)[64..64 + dl]) != 1 {
+        return 0;
+    }
+    var kc = 0;
+    while row.col_pk(contents(w.ctx)[64..64 + dl], kc) != 1 {
+        kc = kc + 1;
+    }
+    let kt = row.col_type(contents(w.ctx)[64..64 + dl], kc);
+    if kt == row.t_bool() || kt == row.t_bytea() {
+        return 0;
+    }
+    var j = 0;
+    while j < w.nconj {
+        let (cnt, end) = eval.scan(e, contents(w.pos)[p_conj() + j], contents(w.ws));
+        if cnt < 0 {
+            return malformed();
+        }
+        var i = 0;
+        while i < cnt {
+            let p = contents(w.ws)[i];
+            let tag = int_of(e[p]);
+            let quiet = tag == 0 || tag == 1 || tag == 8 || tag == 5 && int_of(e[p + 1]) <= 7 || tag == 7 && int_of(e[p + 1]) != 1;
+            if !quiet {
+                return 0;
+            }
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    j = 0;
+    while j < w.nconj {
+        let a = contents(w.pos)[p_conj() + j];
+        var op = 0 - 1;
+        if int_of(e[a]) == 5 {
+            op = int_of(e[a + 1]);
+        }
+        if op == 0 || op >= 2 && op <= 5 {
+            let (c1, mid) = eval.scan(e, a + 2, contents(w.ws));
+            let (c2, end) = eval.scan(e, mid, contents(w.ws));
+            var vat = 0 - 1;
+            if c1 == 1 && c2 == 1 && int_of(e[a + 2]) == 0 && int_of(e[mid]) == 1 && is_col(w, e, a + 2, kc) {
+                vat = mid;
+            } else if c1 == 1 && c2 == 1 && int_of(e[mid]) == 0 && int_of(e[a + 2]) == 1 && is_col(w, e, mid, kc) {
+                vat = a + 2;
+                // constant < key is key > constant
+                if op == 2 || op == 3 {
+                    op = op + 2;
+                } else if op == 4 || op == 5 {
+                    op = op - 2;
+                }
+            }
+            var n = 0 - 1;
+            if vat >= 0 && ev(w, e, vat, kinds, 0) == 0 && contents(w.ws)[b + 1] == 0 {
+                // the constant as a stored key (src/row.cho), in `nrow`
+                let vt = contents(w.ws)[b];
+                if kt != row.t_text() && (vt == 1 || vt == 5 || vt == 6) {
+                    put_i64(contents(w.nrow), 0, contents(w.ws)[b + 2]);
+                    contents(w.nrow)[0] = byte_of((int_of(contents(w.nrow)[0]) + 128) % 256);
+                    n = 8;
+                } else if kt == row.t_text() && (vt == 0 || vt == 3) && contents(w.ws)[b + 3] <= 90 {
+                    let va = contents(w.ws)[b + 2];
+                    let vn = contents(w.ws)[b + 3];
+                    n = 0;
+                    var i = 0;
+                    while i < vn {
+                        let c = int_of(contents(w.ar)[va + i]);
+                        contents(w.nrow)[n] = byte_of(c);
+                        n = n + 1;
+                        if c == 0 {
+                            contents(w.nrow)[n] = byte_of(255);
+                            n = n + 1;
+                        }
+                        i = i + 1;
+                    }
+                    contents(w.nrow)[n] = byte_of(0);
+                    contents(w.nrow)[n + 1] = byte_of(0);
+                    n = n + 2;
+                }
+            }
+            if n >= 0 && (op == 0 || op == 4 || op == 5) {
+                copy(contents(w.nrow), 0, n, contents(w.lo), 0);
+                w.lon = n;
+            }
+            if n >= 0 && (op == 0 || op == 2 || op == 3) {
+                copy(contents(w.nrow), 0, n, contents(w.hi), 0);
+                w.hin = n;
+            }
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+// The WHERE at `wpos` of `e` (0: there is none), before any row: its type is checked (an error is noted) and its top-level conditions (the operands of its ANDs) are listed. 0 or a refusal.
+pub fn where_static[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int], wpos: int) -> [] int {
+    w.nconj = 0;
+    if wpos == 0 {
+        return 0;
+    }
+    no_rows(w);
+    let r = ev(w, e, wpos, kinds, 1);
+    if r < 0 {
+        let s = stat(w, r);
+        if s < 0 {
+            return s;
+        }
+    } else {
+        let b = eval.max_nodes();
+        let ty = contents(w.ws)[b];
+        if ty == 0 {
+            // a literal as a whole condition: only NULL is read here
+            if contents(w.ws)[b + 1] != 1 {
+                return unsupported();
+            }
+        } else if ty != 2 {
+            note(w, 6);
+        }
+    }
+    contents(w.pos)[p_stack()] = wpos;
+    var sp = 1;
+    while sp > 0 {
+        sp = sp - 1;
+        let a = contents(w.pos)[p_stack() + sp];
+        if a + 2 <= len(e) && int_of(e[a]) == 5 && int_of(e[a + 1]) == 6 {
+            let (cnt, end) = eval.scan(e, a + 2, contents(w.ws));
+            if cnt < 0 {
+                return malformed();
+            }
+            if sp + 2 > 128 {
+                return too_big();
+            }
+            contents(w.pos)[p_stack() + sp] = end;
+            contents(w.pos)[p_stack() + sp + 1] = a + 2;
+            sp = sp + 2;
+        } else {
+            if w.nconj >= max_parts() {
+                return too_big();
+            }
+            contents(w.pos)[p_conj() + w.nconj] = a;
+            w.nconj = w.nconj + 1;
+        }
+    }
+    return bounds(w, e, kinds);
+}
+
+// Whether the bound row passes the WHERE at `wpos`: 1 it does, 0 it does not, 2 it raises an error (noted), or a refusal. With several conditions, an error in one beside another that is not true is
+// order-dependent (6g): that is marked in the `Work` and the answer is 0.
+pub fn passes[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int], wpos: int) -> [] int {
+    if wpos == 0 {
+        return 1;
+    }
+    let b = eval.max_nodes();
+    let r = ev(w, e, wpos, kinds, 1);
+    if r < 0 {
+        return unsupported();
+    }
+    let st = contents(w.ws)[b + 1];
+    let a = contents(w.ws)[b + 2];
+    if st == 0 && a == 1 {
+        return 1;
+    }
+    if w.nconj <= 1 {
+        if st == 2 {
+            note(w, a - 1);
+            return 2;
+        }
+        return 0;
+    }
+    var errs = 0;
+    var others = 0;
+    var j = 0;
+    while j < w.nconj {
+        let at = contents(w.pos)[p_conj() + j];
+        let rj = ev(w, e, at, kinds, 1);
+        if rj < 0 {
+            return unsupported();
+        }
+        let sj = contents(w.ws)[b + 1];
+        if sj == 2 {
+            // the codes are 2 to 5: a mark for each
+            let c = contents(w.ws)[b + 2];
+            if c == 2 && errs % 2 == 0 {
+                errs = errs + 1;
+            } else if c == 3 && errs / 2 % 2 == 0 {
+                errs = errs + 2;
+            } else if c == 4 && errs / 4 % 2 == 0 {
+                errs = errs + 4;
+            } else if c == 5 && errs / 8 % 2 == 0 {
+                errs = errs + 8;
+            }
+        } else if sj != 0 || contents(w.ws)[b + 2] != 1 {
+            others = others + 1;
+        }
+        j = j + 1;
+    }
+    if errs == 0 {
+        return 0;
+    }
+    if others > 0 {
+        w.orderdep = true;
+        return 0;
+    }
+    if errs % 2 == 1 {
+        note(w, 1);
+    }
+    if errs / 2 % 2 == 1 {
+        note(w, 2);
+    }
+    if errs / 4 % 2 == 1 {
+        note(w, 3);
+    }
+    if errs / 8 % 2 == 1 {
+        note(w, 4);
+    }
+    return 2;
+}
+
+// Record a change of the bound table: the row `old` (if `has_old`) became the row `new` (if `has_new`). 0, or `too_big()`.
+pub fn change[&q, &o, &n](w: &!q Work, old: &o [byte], has_old: bool, new: &n [byte], has_new: bool) -> [] int {
+    var at = w.cfill;
+    let nl = w.nlen;
+    let dl = w.dlen;
+    if at + 2 + nl + 2 + 8 > rows_size() {
+        return too_big();
+    }
+    build.put_be(contents(w.chg), at, nl, 2);
+    at = copy(contents(w.ctx), 0, nl, contents(w.chg), at + 2);
+    var kl = 0;
+    if has_old {
+        kl = row.plain_key(contents(w.ctx)[64..64 + dl], old, contents(w.chg)[at + 2..rows_size()]);
+    } else {
+        kl = row.plain_key(contents(w.ctx)[64..64 + dl], new, contents(w.chg)[at + 2..rows_size()]);
+    }
+    if kl < 0 || kl > 65535 {
+        return too_big();
+    }
+    build.put_be(contents(w.chg), at, kl, 2);
+    at = at + 2 + kl;
+    if at + 8 > rows_size() {
+        return too_big();
+    }
+    if has_old {
+        let il = row.image(contents(w.ctx)[64..64 + dl], old, contents(w.chg)[at + 4..rows_size()]);
+        if il < 0 {
+            return too_big();
+        }
+        build.put_be(contents(w.chg), at, il, 4);
+        at = at + 4 + il;
+    } else {
+        build.put_be(contents(w.chg), at, 4294967295, 4);
+        at = at + 4;
+    }
+    if at + 4 > rows_size() {
+        return too_big();
+    }
+    if has_new {
+        let il = row.image(contents(w.ctx)[64..64 + dl], new, contents(w.chg)[at + 4..rows_size()]);
+        if il < 0 {
+            return too_big();
+        }
+        build.put_be(contents(w.chg), at, il, 4);
+        at = at + 4 + il;
+    } else {
+        build.put_be(contents(w.chg), at, 4294967295, 4);
+        at = at + 4;
+    }
+    w.cfill = at;
+    w.nchg = w.nchg + 1;
+    return 0;
+}
+
+// ---- the history (docs/m3-engine.md 6n)
+
+// The limits a key and a value of a table have, so that their history entries fit the tree's.
+pub fn max_stored_key() -> [] int {
+    return 184;
+}
+
+pub fn max_stored_row() -> [] int {
+    return 780;
+}
+
+// The transaction the next statement that writes belongs to (1 or more; 0: no history is kept).
+pub fn set_txn[&q](w: &!q Work, txn: int) -> [] int {
+    w.txn = txn;
+    return 0;
+}
+
+// The key of the history entry of transaction `txn` for the tree key `k[0..kn]`, into `out`: its length. Entries sort newest first.
+fn undo_key[&k, &o](txn: int, k: &k [byte], kn: int, out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, 4294967295, 4);
+    build.put_be(out, 4, 9223372036854775807 - txn, 8);
+    return copy(k, 0, kn, out, 12);
+}
+
+// Before the key `k[0..kn]` of the tree `root` is written by the current transaction: record what it holds now (`0`: nothing; `1` and the value), unless this transaction has recorded it already (what a
+// key held BEFORE the transaction is its first record). The tree with the entry, or a refusal.
+pub fn remember[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int) -> [file_read, file_write] int {
+    if w.txn == 0 {
+        return root;
+    }
+    if kn > 188 {
+        return too_big();
+    }
+    let ul = undo_key(w.txn, k, kn, contents(w.ukey));
+    let g = btree.get(p, contents(w.sc), root, contents(w.ukey)[0..ul], contents(w.uval));
+    if g >= 0 {
+        return root;
+    }
+    if g != btree.not_found() {
+        return tree_err(g);
+    }
+    let o = btree.get(p, contents(w.sc), root, k[0..kn], contents(w.uval)[1..1024]);
+    var n = 1;
+    if o >= 0 {
+        if o > 799 {
+            return too_big();
+        }
+        contents(w.uval)[0] = byte_of(1);
+        n = 1 + o;
+    } else if o == btree.not_found() {
+        contents(w.uval)[0] = byte_of(0);
+    } else {
+        return tree_err(o);
+    }
+    let nw = btree.put(p, contents(w.sc), root, contents(w.ukey)[0..ul], contents(w.uval)[0..n]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// Set the key `k[0..kn]` of the tree `root` to `v`, its history kept: the new tree, or a refusal.
+pub fn put_key[&q, &z, &k, &v](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int, v: &v [byte]) -> [file_read, file_write] int {
+    let r = remember(p, w, root, k, kn);
+    if r < 0 {
+        return r;
+    }
+    let nw = btree.put(p, contents(w.sc), r, k[0..kn], v);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// Remove the key `k[0..kn]` (which is there) from the tree `root`, its history kept: the new tree (0: empty), or a refusal.
+pub fn del_key[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int) -> [file_read, file_write] int {
+    let r = remember(p, w, root, k, kn);
+    if r < 0 {
+        return r;
+    }
+    let nw = btree.del(p, contents(w.sc), r, k[0..kn]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// The number of the branch's last transaction (0: none), or a refusal. It is kept in the tree under the history's number alone (a key before every entry), and not read off the newest entry: an erase
+// may remove that entry, and a number must never be given twice.
+pub fn last_txn[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_read] int {
+    if root == 0 {
+        return 0;
+    }
+    build.put_be(contents(w.key), 0, 4294967295, 4);
+    let r = btree.get(p, contents(w.sc), root, contents(w.key)[0..4], contents(w.uval));
+    if r == btree.not_found() {
+        return 0;
+    }
+    if r < 0 {
+        return tree_err(r);
+    }
+    if r != 8 {
+        return damaged();
+    }
+    return commit.be(contents(w.uval), 0, 8);
+}
+
+// The tree `root` with `t` as the number of its last transaction: what a statement that wrote ends with. The new tree, or a refusal.
+pub fn mark_txn[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, t: int) -> [file_read, file_write] int {
+    build.put_be(contents(w.key), 0, 4294967295, 4);
+    build.put_be(contents(w.uval), 0, t, 8);
+    let nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..4], contents(w.uval)[0..8]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// The tree `root` as it was when transaction `t` was its last: the entries of every later transaction are applied, newest first, onto a tree that shares every page it does not change. The answer is a tree
+// to read and then forget (it is named by no root: the next sweep takes its pages), or a refusal.
+pub fn as_of[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, t: int) -> [file_read, file_write] int {
+    var out = root;
+    if root == 0 {
+        return 0;
+    }
+    build.put_be(contents(w.key), 0, 4294967295, 4);
+    var kl = 4;
+    var more = true;
+    while more {
+        let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return tree_err(r);
+        } else {
+            let nk = r / 1024;
+            let nv = r % 1024;
+            if nk < 12 || nv < 1 || commit.be(contents(w.key2), 0, 4) != 4294967295 {
+                return damaged();
+            }
+            if 9223372036854775807 - commit.be(contents(w.key2), 4, 8) <= t {
+                more = false;
+            } else {
+                var nw = 0;
+                if int_of(contents(w.cur)[0]) == 0 {
+                    nw = btree.del(p, contents(w.sc), out, contents(w.key2)[12..nk]);
+                    if nw == btree.not_found() {
+                        nw = out;
+                    }
+                } else {
+                    nw = btree.put(p, contents(w.sc), out, contents(w.key2)[12..nk], contents(w.cur)[1..nv]);
+                }
+                if nw < 0 {
+                    return tree_err(nw);
+                }
+                out = nw;
+                copy(contents(w.key2), 0, nk, contents(w.key), 0);
+                kl = nk;
+            }
+        }
+    }
+    return out;
+}
+
+// The snapshot of the tree `root` that the lowering reads (`tables.schema_text`), into `out`: its length, or a refusal.
+pub fn schema[&q, &z, &o](p: &!z pager.Pager, w: &!q Work, root: int, out: &!o [byte]) -> [file_read] int {
+    let n = tables.schema_text(p, contents(w.sc), root, contents(w.key), contents(w.key2), contents(w.ent), out);
+    if n < 0 {
+        return tree_err(n);
+    }
+    return n;
+}
+
+// The scratch of the tree, for a caller that commits or sweeps between statements.
+pub fn scratch[&q](w: &!q Work) -> [] &!q [byte] {
+    return contents(w.sc);
+}

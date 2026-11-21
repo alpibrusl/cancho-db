@@ -172,6 +172,11 @@ fn pick[&p, &k](pg: &p [byte], key: &k [byte]) -> [] (int, int, int) {
     return (idx, child, alt);
 }
 
+// The number of the page of the path at level `d` (what `descend` left).
+fn was[&s](sc: &s [byte], d: int) -> [] int {
+    return commit.be(sc, meta() + 8 * d, 4);
+}
+
 fn setp[&s](sc: &!s [byte], d: int, id: int, idx: int) -> [] int {
     build.put_be(sc, meta() + 8 * d, id, 4);
     build.put_be(sc, meta() + 8 * d + 4, idx, 4);
@@ -186,6 +191,14 @@ pub fn get[&q, &s, &k, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
     var id = root;
     var depth = 0;
     while depth < 16 {
+        // a page above the leaves that is in memory is looked at where it is
+        var off = pager.pin(p, id);
+        while off >= 0 && depth < 16 && int_of(pager.bytes(p)[off]) == 2 {
+            let (ix0, ch0, al0) = pick(pager.bytes(p)[off..off + 4096], key);
+            id = ch0;
+            depth = depth + 1;
+            off = pager.pin(p, id);
+        }
         let rc = pager.read_page(p, id, sc[0..4096]);
         if rc < 0 {
             return fail(rc);
@@ -265,9 +278,13 @@ fn emit_at[&s](sc: &!s [byte], off: int, kind: int, count: int, srcoff: int, src
     return 0;
 }
 
-// Write the page at `off` as a new page: its number, or an error.
-fn new_page[&q, &s](p: &!q pager.Pager, sc: &!s [byte], off: int) -> [file_write] int {
-    let id = pager.alloc(p);
+// Write the page at `off`, which takes the place of page `old` of the tree being changed (0: of none): its number, or an error. It is a new page, so that the tree `old` belongs to is untouched; unless
+// `old` was itself handed out in the window that is open (`pager.begin`), when no root names it yet and it is written again where it is.
+fn new_page[&q, &s](p: &!q pager.Pager, sc: &!s [byte], off: int, old: int) -> [file_write] int {
+    var id = old;
+    if old < 1 || !pager.is_fresh(p, old) {
+        id = pager.alloc(p);
+    }
     let rc = pager.write_page(p, id, sc[off..off + 4096]);
     if rc < 0 {
         return fail(rc);
@@ -281,12 +298,23 @@ fn descend[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
     var id = root;
     var d = 0;
     while d < 15 {
+        // a page above the leaf that is in memory is looked at where it is; `climb` and `del` read it into `sc` if they have to write it again
+        var off = pager.pin(p, id);
+        while off >= 0 && d < 14 && int_of(pager.bytes(p)[off]) == 2 {
+            let (ix0, ch0, al0) = pick(pager.bytes(p)[off..off + 4096], key);
+            setp(sc, d, id, ix0);
+            id = ch0;
+            d = d + 1;
+            off = pager.pin(p, id);
+        }
         let rc = pager.read_page(p, id, sc[d * 4096..d * 4096 + 4096]);
         if rc < 0 {
             return fail(rc);
         }
         let t = int_of(sc[d * 4096]);
         if t == 1 {
+            // the leaf's own number, beside those of the pages above it
+            setp(sc, d, id, 0);
             return d;
         }
         if t != 2 {
@@ -302,14 +330,22 @@ fn descend[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
 
 // After a leaf or internal page was replaced, put the new pages in the parents, from the level above `d` to the root. `cid` is the page that replaces the child taken at each level; `split` says there are two,
 // `cid` and `rid`, with the key in `sc` at w3() (`seplen` bytes) between them. The new root, or an error.
-fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: bool, rid0: int, seplen0: int) -> [file_write] int {
+fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: bool, rid0: int, seplen0: int) -> [file_read, file_write] int {
     var cid = cid0;
     var split = split0;
     var rid = rid0;
     var seplen = seplen0;
     var level = d - 1;
     while level >= 0 {
+        if !split && cid == was(sc, level + 1) {
+            // the page below was written where it was (it is the statement's own): this page names it as before, and so does everything above
+            return was(sc, 0);
+        }
         let po = level * 4096;
+        let lr = pager.read_page(p, was(sc, level), sc[po..po + 4096]);
+        if lr < 0 {
+            return fail(lr);
+        }
         let ix = commit.be(sc, meta() + 8 * level + 4, 4);
         let count = commit.be(sc, po + 1, 2);
         var wpos = w1();
@@ -347,7 +383,7 @@ fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: 
         let total = wpos - w1();
         if 7 + total <= 4096 {
             emit_at(sc, w2(), 2, ncount, w1(), total);
-            let id = new_page(p, sc, w2());
+            let id = new_page(p, sc, w2(), was(sc, level));
             if id < 0 {
                 return id;
             }
@@ -369,11 +405,11 @@ fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: 
             mv(sc, w3(), w1() + b + 1, kl);
             emit_at(sc, w2(), 2, j, w1(), b);
             emit_at(sc, w4(), 2, ncount - j - 1, w3() + 256, 4 + rest);
-            let lid = new_page(p, sc, w2());
+            let lid = new_page(p, sc, w2(), was(sc, level));
             if lid < 0 {
                 return lid;
             }
-            let rid2 = new_page(p, sc, w4());
+            let rid2 = new_page(p, sc, w4(), 0);
             if rid2 < 0 {
                 return rid2;
             }
@@ -388,7 +424,7 @@ fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: 
         build.put_be(sc, w1(), cid, 4);
         let n = put_int_entry(sc, w1() + 4, w3(), seplen, rid);
         emit_at(sc, w2(), 2, 1, w1(), n - w1());
-        return new_page(p, sc, w2());
+        return new_page(p, sc, w2(), 0);
     }
     return cid;
 }
@@ -401,7 +437,7 @@ pub fn put[&q, &s, &k, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
     if root == 0 {
         let n = put_entry(sc, w1(), key, vbytes);
         emit_at(sc, w2(), 1, 1, w1(), n - w1());
-        return new_page(p, sc, w2());
+        return new_page(p, sc, w2(), 0);
     }
     let d = descend(p, sc, root, key);
     if d < 0 {
@@ -442,7 +478,7 @@ pub fn put[&q, &s, &k, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
     let ncount = count + added;
     if 7 + total <= 4096 {
         emit_at(sc, w2(), 1, ncount, w1(), total);
-        let id = new_page(p, sc, w2());
+        let id = new_page(p, sc, w2(), was(sc, d));
         if id < 0 {
             return id;
         }
@@ -459,11 +495,11 @@ pub fn put[&q, &s, &k, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
     mv(sc, w3(), w1() + b + 3, sl);
     emit_at(sc, w2(), 1, j, w1(), b);
     emit_at(sc, w4(), 1, ncount - j, w1() + b, total - b);
-    let lid = new_page(p, sc, w2());
+    let lid = new_page(p, sc, w2(), was(sc, d));
     if lid < 0 {
         return lid;
     }
-    let rid = new_page(p, sc, w4());
+    let rid = new_page(p, sc, w4(), 0);
     if rid < 0 {
         return rid;
     }
@@ -503,7 +539,7 @@ pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
     var cid = 0;
     if !removed {
         emit_at(sc, w2(), 1, count - 1, w1(), wpos - w1());
-        cid = new_page(p, sc, w2());
+        cid = new_page(p, sc, w2(), was(sc, d));
         if cid < 0 {
             return cid;
         }
@@ -512,6 +548,14 @@ pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
     while level >= 0 {
         let po = level * 4096;
         let ix = commit.be(sc, meta() + 8 * level + 4, 4);
+        if !removed && cid == was(sc, level + 1) {
+            // as in `climb`: nothing above the page that was written in place changes
+            return was(sc, 0);
+        }
+        let lr = pager.read_page(p, was(sc, level), sc[po..po + 4096]);
+        if lr < 0 {
+            return fail(lr);
+        }
         let pcount = commit.be(sc, po + 1, 2);
         if removed && pcount == 0 {
             // the only child of this page is gone: so is this page
@@ -562,7 +606,7 @@ pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
                 }
                 emit_at(sc, w2(), 2, pcount, w1(), w - w1());
             }
-            cid = new_page(p, sc, w2());
+            cid = new_page(p, sc, w2(), was(sc, level));
             if cid < 0 {
                 return cid;
             }
@@ -593,6 +637,34 @@ pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
 // The first entry after `key` (or at it, if `inclusive`) in the tree `root`, in key order: its key and value are copied into `kout` and `vout` and the answer is `key length * 1024 + value length`;
 // `not_found()` if there is none. Calling it with the key it answered walks the tree in order.
 pub fn next_after[&q, &s, &k, &a, &b](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte], inclusive: bool, kout: &!a [byte], vout: &!b [byte]) -> [file_read] int {
+    // one account of the walk: `scan_step`, with a leaf it forgets
+    var rc = 0;
+    region r {
+        let leaf = alloc_slice[r](4096, byte_of(0));
+        let st = alloc_slice[r](5, 0);
+        rc = scan_step(p, sc, root, key, inclusive, kout, vout, leaf, st);
+    }
+    return rc;
+}
+
+// A scan in key order that stays on a leaf (docs/m3-engine.md 6t): as `next_after`, for a caller that walks ONE tree with the key it was last answered, and keeps for it a page `leaf` (4096 bytes) and
+// `st` (5 ints, st[0] 0 before the first call). While the leaf last read has entries left the next one is answered from it; the tree is walked from the root only when a leaf is used up. A tree is never
+// changed (a write makes another), so the leaf kept is still the tree's.
+pub fn scan_step[&q, &s, &k, &a, &b, &l, &c](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte], inclusive: bool, kout: &!a [byte], vout: &!b [byte], leaf: &!l [byte], st: &!c [int]) -> [file_read] int {
+    if st[0] == 1 && st[3] == root && st[2] < st[4] {
+        let at = st[1];
+        let kl = int_of(leaf[at]);
+        let vl = commit.be(leaf, at + 1, 2);
+        if kl > len(kout) || vl > len(vout) {
+            return err_big();
+        }
+        copy(kout, 0, leaf, at + 3, kl);
+        copy(vout, 0, leaf, at + 3 + kl, vl);
+        st[1] = at + 3 + kl + vl;
+        st[2] = st[2] + 1;
+        return kl * 1024 + vl;
+    }
+    st[0] = 0;
     if root == 0 {
         return not_found();
     }
@@ -624,6 +696,12 @@ pub fn next_after[&q, &s, &k, &a, &b](p: &!q pager.Pager, sc: &!s [byte], root: 
                     }
                     copy(kout, 0, sc, at + 3, kl);
                     copy(vout, 0, sc, at + 3 + kl, vl);
+                    copy(leaf, 0, sc, 0, 4096);
+                    st[0] = 1;
+                    st[1] = at + 3 + kl + vl;
+                    st[2] = i + 1;
+                    st[3] = root;
+                    st[4] = count;
                     return kl * 1024 + vl;
                 }
                 at = at + 3 + kl + vl;

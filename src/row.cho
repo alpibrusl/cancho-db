@@ -9,8 +9,8 @@ import cdb.build;
 //
 // A table definition: `u16` column count, then for each column its type (`u8`), its place in the primary key (`u8`: 0 if it is not part of it, else 1 for the first key column, 2 for the second...) and its
 // name (`u16` length and bytes).
-// Types: 1 integer (`smallint`, `integer`, `bigint`: one 64-bit value), 2 `boolean`, 3 text (`text`, `varchar`), 4 `bytea`.
-// A stored row: for each column in order a tag, 0 for null or the column's type, then the value: integer 8 bytes (two's complement, big-endian), boolean 1 byte, text and bytea a `u16` length and the bytes.
+// Types: 1 `bigint`, 5 `integer`, 6 `smallint` (all three stored as one 64-bit value, which must be in the type's range), 2 `boolean`, 3 text (`text`, `varchar`), 4 `bytea`.
+// A stored row: for each column in order a tag, 0 for null or the column's storage tag (1 for the three integer types, else the type), then the value: integer 8 bytes (two's complement, big-endian), boolean 1 byte, text and bytea a `u16` length and the bytes.
 // A stored key: for each key column in key order, integer as 8 bytes big-endian with the sign bit flipped, boolean as 1 byte, text and bytea as the bytes with each 0x00 written 0x00 0xFF and then 0x00 0x00:
 // so keys compare as their values do, column by column.
 
@@ -28,6 +28,52 @@ pub fn t_text() -> [] int {
 
 pub fn t_bytea() -> [] int {
     return 4;
+}
+
+pub fn t_int4() -> [] int {
+    return 5;
+}
+
+pub fn t_int2() -> [] int {
+    return 6;
+}
+
+// The tag a value of type `ty` is stored with.
+pub fn storage_tag(ty: int) -> [] int {
+    if ty == 5 || ty == 6 {
+        return 1;
+    }
+    return ty;
+}
+
+// The 64-bit integer in the 8 bytes of `data` at `at` (two's complement, big-endian).
+pub fn int_at[&r](data: &r [byte], at: int) -> [] int {
+    let neg = int_of(data[at]) >= 128;
+    var v = 0;
+    var i = 0;
+    while i < 8 {
+        var b = int_of(data[at + i]);
+        if neg {
+            b = b - 255;
+        }
+        v = v * 256 + b;
+        i = i + 1;
+    }
+    if neg {
+        v = v - 1;
+    }
+    return v;
+}
+
+// Whether `v` is a value of integer type `ty`.
+pub fn int_fits(ty: int, v: int) -> [] bool {
+    if ty == 5 {
+        return v >= 0 - 2147483648 && v <= 2147483647;
+    }
+    if ty == 6 {
+        return v >= 0 - 32768 && v <= 32767;
+    }
+    return true;
 }
 
 pub fn max_columns() -> [] int {
@@ -54,7 +100,7 @@ pub fn columns[&d](def: &d [byte]) -> [] int {
         let ty = int_of(def[at]);
         let pk = int_of(def[at + 1]);
         let nl = commit.be(def, at + 2, 2);
-        if ty < 1 || ty > 4 || nl < 1 || at + 4 + nl > len(def) || pk > n {
+        if ty < 1 || ty > 6 || nl < 1 || at + 4 + nl > len(def) || pk > n {
             return 0 - 1;
         }
         if pk > 0 {
@@ -168,9 +214,11 @@ pub fn row_ok[&d, &r](def: &d [byte], row: &r [byte]) -> [] bool {
             if col_pk(def, i) > 0 {
                 return false;
             }
-        } else if tag != col_type(def, i) {
+        } else if tag != storage_tag(col_type(def, i)) {
             return false;
         } else if tag == 2 && int_of(row[at + 1]) > 1 {
+            return false;
+        } else if tag == 1 && !int_fits(col_type(def, i), int_at(row, at + 1)) {
             return false;
         }
         at = at + l;
@@ -237,21 +285,8 @@ fn json_string[&o, &t](out: &!o [byte], at: int, text: &t [byte]) -> [] int {
 
 // The 64-bit integer stored in the 8 bytes at `at`, in decimal.
 fn json_int[&o, &r](out: &!o [byte], at: int, row: &r [byte], vat: int) -> [] int {
-    // read as sign and magnitude without leaving 64 bits: the most negative value has no positive twin, so the digits are taken from the negative side
-    var neg = int_of(row[vat]) >= 128;
-    var v = 0;
-    var i = 0;
-    while i < 8 {
-        var b = int_of(row[vat + i]);
-        if neg {
-            b = b - 255;
-        }
-        v = v * 256 + b;
-        i = i + 1;
-    }
-    if neg {
-        v = v - 1;
-    }
+    let v = int_at(row, vat);
+    let neg = v < 0;
     var w = at;
     if neg {
         w = put1(out, w, '-');

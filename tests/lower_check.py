@@ -273,6 +273,41 @@ no("select id from orders where nope", "unknown-column")
 no("select id from orders group by nope", "unknown-column")
 no("select id from orders having nope > 1", "unknown-column")
 no("select id from orders order by nope", "unknown-column")
+# an ON sees the tables of its own join only (found by tests/engine_check.py: the lowering took a table joined later, and one standing before a comma)
+no("select o.id from orders o join customers c on o2.id = c.id join orders o2 on o2.id = o.id", "unknown-table")
+no("select o.id from orders o, customers c join orders o2 on o.id = o2.id", "unknown-table")
+no("select c.id from customers c, orders o join orders o2 on name = 'x'", "unknown-column")
+ok("select c.name from orders o, customers c join orders o2 on total = 1 and c.id = o2.id where o.id = 1",
+   Select2([Col("customers", "name")], [From("orders"), From("customers"), From("orders", 1, Op(AND, Op(EQ, Col("orders", "total"), Int(1)), Op(EQ, Col("customers", "id"), Col("orders", "id"))))],
+           where=Op(EQ, Col("orders", "id"), Int(1))),
+   [rd("orders"), rd("customers"), rd("customers", "name"), rd("orders", "total"), rd("customers", "id"), rd("orders", "id")])
+# an output column with no alias has the name PostgreSQL gives it, and ORDER BY binds a bare name to an output column before a table's (found by tests/engine_check.py: the engine ordered by the wrong thing)
+o = [From("orders")]
+ok("select cast(total as text) from orders order by total", Select2([Cast("text", Col("orders", "total"))], o, order=[Order(Cast("text", Col("orders", "total")))]),
+   [rd("orders"), rd("orders", "total")])
+ok("select case when id = 1 then 2 else total end from orders order by total desc",
+   Select2([Case([(Op(EQ, Col("orders", "id"), Int(1)), Int(2))], Col("orders", "total"))], o, order=[Order(Case([(Op(EQ, Col("orders", "id"), Int(1)), Int(2))], Col("orders", "total")), 1)]),
+   [rd("orders"), rd("orders", "id"), rd("orders", "total")])
+ok("select case when id = 1 then total else 2 end from orders order by total",
+   Select2([Case([(Op(EQ, Col("orders", "id"), Int(1)), Col("orders", "total"))], Int(2))], o, order=[Order(Col("orders", "total"))]),
+   [rd("orders"), rd("orders", "id"), rd("orders", "total")])
+ok("select cast(case when id = 1 then 2 else total end as bigint) from orders order by total",
+   Select2([Cast("bigint", Case([(Op(EQ, Col("orders", "id"), Int(1)), Int(2))], Col("orders", "total")))], o,
+           order=[Order(Cast("bigint", Case([(Op(EQ, Col("orders", "id"), Int(1)), Int(2))], Col("orders", "total"))))]),
+   [rd("orders"), rd("orders", "id"), rd("orders", "total")])
+ok("select cast(id + 1 as integer), total from orders order by int4", Select2([Cast("integer", Op(ADD, Col("orders", "id"), Int(1))), Col("orders", "total")], o,
+                                                                           order=[Order(Cast("integer", Op(ADD, Col("orders", "id"), Int(1))))]),
+   [rd("orders"), rd("orders", "id"), rd("orders", "total")])
+ok("select id + 1, total from orders order by total", Select2([Op(ADD, Col("orders", "id"), Int(1)), Col("orders", "total")], o, order=[Order(Col("orders", "total"))]),
+   [rd("orders"), rd("orders", "id"), rd("orders", "total")])
+ok("select cast(case when id = 1 then 2 else 3 end as text), total from orders order by text",
+   Select2([Cast("text", Case([(Op(EQ, Col("orders", "id"), Int(1)), Int(2))], Int(3))), Col("orders", "total")], o,
+           order=[Order(Cast("text", Case([(Op(EQ, Col("orders", "id"), Int(1)), Int(2))], Int(3))))]),
+   [rd("orders"), rd("orders", "id"), rd("orders", "total")])
+no("select total, case when id = 1 then 2 else total end from orders order by total", "ambiguous-column")
+no("select cast(id as text), cast(total as text) from orders order by text", "unknown-column")
+no("select cast(1 as text), cast(2 as text) from orders order by text", "ambiguous-column")
+no("select case when id = 1 then 2 end, case when id = 2 then 3 else 4 end from orders order by \"case\"", "ambiguous-column")
 no("select id from orders limit nope", "unknown-column")
 
 

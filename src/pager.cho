@@ -34,10 +34,32 @@ pub res struct Pager {
     // pages no root names, zeroed, to be handed out again before the file grows (`cdb.pstore.sweep` fills it)
     free: Box[[int]],
     nfree: int,
+    // the pages handed out since `begin` (a mark for each page of the first `fresh_max()`, and the list of those marked, to clear them): pages no root names yet, which the tree may write again in place
+    fresh: Box[[byte]],
+    flist: Box[[int]],
+    nfl: int,
+    window: bool,
+    // pages that were read and found whole, or written whole, kept in memory (`cache_slots()` of them, page `id` in slot `id % cache_slots()`; `ctag` says which page a slot holds, 0 for none): a
+    // page is checked once, not at every walk down the tree
+    cache: Box[[byte]],
+    ctag: Box[[int]],
+    // a page of the open window that is in the cache and not yet in the file (`cdirty`, by slot; `dlist` the slots to write, `ndl` of them): it is written once, when the window closes, however often
+    // the statement wrote it
+    cdirty: Box[[byte]],
+    dlist: Box[[int]],
+    ndl: int,
 }
 
 pub fn free_max() -> [] int {
     return 65536;
+}
+
+pub fn fresh_max() -> [] int {
+    return 4194304;
+}
+
+pub fn cache_slots() -> [] int {
+    return 8192;
 }
 
 pub fn new_pager[&h](heap: &!h Heap, file: File, length: int) -> [heap] Pager {
@@ -45,12 +67,18 @@ pub fn new_pager[&h](heap: &!h Heap, file: File, length: int) -> [heap] Pager {
     if next < 3 {
         next = 3;
     }
-    return Pager { file: file, next: next, crash: 0, torn: 0, steps: 0, dead: false, free: box_slice(heap, free_max(), 0), nfree: 0 };
+    return Pager { file: file, next: next, crash: 0, torn: 0, steps: 0, dead: false, free: box_slice(heap, free_max(), 0), nfree: 0, fresh: box_slice(heap, fresh_max(), byte_of(0)), flist: box_slice(heap, free_max(), 0), nfl: 0, window: false, cache: box_slice(heap, 4096 * cache_slots(), byte_of(0)), ctag: box_slice(heap, cache_slots(), 0), cdirty: box_slice(heap, cache_slots(), byte_of(0)), dlist: box_slice(heap, 2 * cache_slots(), 0), ndl: 0 };
 }
 
 pub fn drop_pager[&h](heap: &!h Heap, p: Pager) -> [heap] int {
-    let Pager { file, next, crash, torn, steps, dead, free, nfree } = p;
+    let Pager { file, next, crash, torn, steps, dead, free, nfree, fresh, flist, nfl, window, cache, ctag, cdirty, dlist, ndl } = p;
     unbox_slice(heap, free);
+    unbox_slice(heap, fresh);
+    unbox_slice(heap, flist);
+    unbox_slice(heap, cache);
+    unbox_slice(heap, ctag);
+    unbox_slice(heap, cdirty);
+    unbox_slice(heap, dlist);
     return file_close(file);
 }
 
@@ -69,15 +97,41 @@ pub fn crashed[&q](p: &q Pager) -> [] bool {
     return p.dead;
 }
 
-// A new page number: a free page if there is one, else the file grows.
+// A new page number: a free page if there is one, else the file grows. Inside a window (`begin`) the page is marked as handed out in it.
 pub fn alloc[&q](p: &!q Pager) -> [] int {
+    var id = p.next;
     if p.nfree > 0 {
         p.nfree = p.nfree - 1;
-        return contents(p.free)[p.nfree];
+        id = contents(p.free)[p.nfree];
+    } else {
+        p.next = p.next + 1;
     }
-    let id = p.next;
-    p.next = p.next + 1;
+    if p.window && id < fresh_max() && p.nfl < free_max() {
+        contents(p.fresh)[id] = byte_of(1);
+        contents(p.flist)[p.nfl] = id;
+        p.nfl = p.nfl + 1;
+    }
     return id;
+}
+
+// A window begins (a statement, docs/m3-engine.md 6p): from here until the next `begin`, a page handed out by `alloc` is one that no root names yet, and `is_fresh` says so. The caller's side of the
+// bargain: within a window it builds ONE tree from each tree it started with, and uses only the newest (an older one may share a page that has since been written again).
+pub fn begin[&q](p: &!q Pager) -> [file_write] int {
+    // what the window before left in memory goes to the file first: 0, or what `write_page` answers
+    let fr = flush(p);
+    var i = 0;
+    while i < p.nfl {
+        contents(p.fresh)[contents(p.flist)[i]] = byte_of(0);
+        i = i + 1;
+    }
+    p.nfl = 0;
+    p.window = true;
+    return fr;
+}
+
+// Whether page `id` was handed out in the window that is open.
+pub fn is_fresh[&q](p: &!q Pager, id: int) -> [] bool {
+    return p.window && id >= 3 && id < fresh_max() && int_of(contents(p.fresh)[id]) == 1;
 }
 
 pub fn next_page[&q](p: &q Pager) -> [] int {
@@ -88,6 +142,16 @@ pub fn next_page[&q](p: &q Pager) -> [] int {
 pub fn read_page[&q, &o](p: &!q Pager, id: int, out: &!o [byte]) -> [file_read] int {
     if id < 1 || len(out) < 4096 {
         return 0 - 2;
+    }
+    let slot = id % cache_slots();
+    if contents(p.ctag)[slot] == id {
+        let from = 4096 * slot;
+        var i = 0;
+        while i < 4096 {
+            out[i] = contents(p.cache)[from + i];
+            i = i + 1;
+        }
+        return 0;
     }
     var got = 0;
     while got < 4096 {
@@ -109,14 +173,123 @@ pub fn read_page[&q, &o](p: &!q Pager, id: int, out: &!o [byte]) -> [file_read] 
     if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {
         return 0 - 2;
     }
+    keep(p, id, out);
     return 0;
 }
 
-// Write page `page` (4096 bytes, its CRC stamped here) as page `id`. 0, -1 if the write failed, -3 if the crash point was reached before (or at) this step.
+// Where page `id` is in the cache (`bytes`), if it is there: so that a reader that only looks need not copy it. -1 if it is not (read it with `read_page`, which puts it there).
+pub fn pin[&q](p: &q Pager, id: int) -> [] int {
+    if id < 1 {
+        return 0 - 1;
+    }
+    let slot = id % cache_slots();
+    if contents(p.ctag)[slot] == id {
+        return 4096 * slot;
+    }
+    return 0 - 1;
+}
+
+pub fn bytes[&q](p: &q Pager) -> [] &q [byte] {
+    return contents(p.cache);
+}
+
+// Page `id` is `page` on the file, whole: remember it.
+fn keep[&q, &o](p: &!q Pager, id: int, page: &o [byte]) -> [] int {
+    let slot = id % cache_slots();
+    if int_of(contents(p.cdirty)[slot]) == 1 && contents(p.ctag)[slot] != id {
+        // the slot holds a page that is only there: it stays
+        return 0;
+    }
+    let to = 4096 * slot;
+    var i = 0;
+    while i < 4096 {
+        contents(p.cache)[to + i] = page[i];
+        i = i + 1;
+    }
+    contents(p.ctag)[slot] = id;
+    return 0;
+}
+
+// What is remembered of page `id` is no longer what the file holds (or may not be).
+fn forget[&q](p: &!q Pager, id: int) -> [] int {
+    let slot = id % cache_slots();
+    if contents(p.ctag)[slot] == id {
+        contents(p.ctag)[slot] = 0;
+        contents(p.cdirty)[slot] = byte_of(0);
+    }
+    return 0;
+}
+
+// Write the page a slot holds, if it is not in the file yet: 0, or what `store` answers.
+fn flush_slot[&q](p: &!q Pager, slot: int) -> [file_write] int {
+    if int_of(contents(p.cdirty)[slot]) != 1 {
+        return 0;
+    }
+    contents(p.cdirty)[slot] = byte_of(0);
+    let id = contents(p.ctag)[slot];
+    return store(p, id, contents(p.cache)[4096 * slot..4096 * slot + 4096]);
+}
+
+// Write every page that is only in memory: 0, or the first failure.
+pub fn flush[&q](p: &!q Pager) -> [file_write] int {
+    var rc = 0;
+    var i = 0;
+    while i < p.ndl && rc == 0 {
+        rc = flush_slot(p, contents(p.dlist)[i]);
+        i = i + 1;
+    }
+    p.ndl = 0;
+    return rc;
+}
+
+// Write page `page` (4096 bytes) as page `id`. A page of the open window (`is_fresh`: no root names it yet) is kept in memory and written when the window closes (`begin`, `sync`), once however often it
+// is written here; any other page is written now. 0, -1 if the write failed, -3 if the crash point was reached before (or at) this step.
 pub fn write_page[&q, &o](p: &!q Pager, id: int, page: &!o [byte]) -> [file_write] int {
     if id < 1 || len(page) < 4096 {
         return 0 - 1;
     }
+    if p.dead {
+        return 0 - 3;
+    }
+    if is_fresh(p, id) {
+        let slot = id % cache_slots();
+        if contents(p.ctag)[slot] != id {
+            let r = flush_slot(p, slot);
+            if r < 0 {
+                return r;
+            }
+        }
+        if p.ndl >= 2 * cache_slots() {
+            let r = flush(p);
+            if r < 0 {
+                return r;
+            }
+        }
+        let to = 4096 * slot;
+        var i = 0;
+        while i < 4096 {
+            contents(p.cache)[to + i] = page[i];
+            i = i + 1;
+        }
+        contents(p.ctag)[slot] = id;
+        if int_of(contents(p.cdirty)[slot]) != 1 {
+            contents(p.cdirty)[slot] = byte_of(1);
+            contents(p.dlist)[p.ndl] = slot;
+            p.ndl = p.ndl + 1;
+        }
+        return 0;
+    }
+    forget(p, id);
+    let r = store(p, id, page);
+    if r < 0 {
+        return r;
+    }
+    keep(p, id, page);
+    return 0;
+}
+
+// Put `page` in the file as page `id`, its CRC stamped here: a step (the crash hook counts it). 0, -1, or -3.
+fn store[&q, &o](p: &!q Pager, id: int, page: &!o [byte]) -> [file_write] int {
     build.put_be(page, 3, crc.crc32_of(page[7..4096]), 4);
     if p.dead {
         return 0 - 3;
@@ -155,6 +328,10 @@ pub fn sync[&q](p: &!q Pager) -> [file_write] int {
     if p.dead {
         return 0 - 3;
     }
+    let fr = flush(p);
+    if fr < 0 {
+        return fr;
+    }
     p.steps = p.steps + 1;
     if p.crash > 0 && p.steps == p.crash {
         p.dead = true;
@@ -174,6 +351,7 @@ pub fn sync[&q](p: &!q Pager) -> [file_write] int {
 // byte again puts it back. 0, or -1 if the file could not be read or written.
 pub fn flip[&q](p: &!q Pager, id: int, off: int) -> [file_read, file_write] int {
     var rc = 0;
+    forget(p, id);
     region r {
         let b = alloc_slice[r](1, byte_of(0));
         match file_pread(p.file, id * 4096 + off, b) {
@@ -225,6 +403,7 @@ pub fn zero_page[&q](p: &!q Pager, id: int) -> [file_read, file_write] int {
     if id < 3 {
         return 0 - 1;
     }
+    forget(p, id);
     var rc = 0;
     region r {
         let buf = alloc_slice[r](4096, byte_of(0));

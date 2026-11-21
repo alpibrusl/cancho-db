@@ -1,0 +1,1210 @@
+edition 9;
+module cdb.execw;
+
+import cdb.commit;
+import cdb.build;
+import cdb.row;
+import cdb.eval;
+import cdb.btree;
+import cdb.pager;
+import cdb.tables;
+import cdb.parse;
+import cdb.lower;
+import cdb.exec;
+
+// The statements of the engine that write (docs/m3-engine.md 6g): INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE. Each reads the tree it is given and answers as src/exec.cho says; on 0 the new root is
+// `exec.root_of`, the number of rows `exec.count_of`, and the changes are recorded. Nothing of the tree it was given is overwritten, so a statement that fails has changed nothing.
+
+// The column of the bound table whose name is the `Name` at `at` of `e`: its index, or -1.
+fn column[&q, &x](w: &!q exec.Work, e: &x [byte], at: int) -> [] int {
+    let cl = commit.be(e, at, 2);
+    let dl = w.dlen;
+    let def = contents(w.ctx)[64..64 + dl];
+    let n = row.columns(def);
+    var c = 0;
+    while c < n {
+        let nm = row.col_name(def, c);
+        if exec.same(nm, 0, len(nm), e, at + 2, cl) {
+            return c;
+        }
+        c = c + 1;
+    }
+    return 0 - 1;
+}
+
+fn col_type[&q](w: &!q exec.Work, c: int) -> [] int {
+    let dl = w.dlen;
+    return row.col_type(contents(w.ctx)[64..64 + dl], c);
+}
+
+fn columns[&q](w: &!q exec.Work) -> [] int {
+    let dl = w.dlen;
+    return row.columns(contents(w.ctx)[64..64 + dl]);
+}
+
+// Whether the row `r` has a null where the bound table does not take one.
+fn null_in[&q, &r](w: &!q exec.Work, r: &r [byte]) -> [] bool {
+    let dl = w.dlen;
+    let el = w.elen;
+    let n = columns(w);
+    var at = 0;
+    var c = 0;
+    while c < n {
+        if int_of(r[at]) == 0 && (row.col_pk(contents(w.ctx)[64..64 + dl], c) > 0 || tables.not_null(contents(w.ent)[0..el], c)) {
+            return true;
+        }
+        at = at + tables.stored_len(r, at);
+        c = c + 1;
+    }
+    return false;
+}
+
+// The key of the row `r` of the bound table in the tree (the table's number, then the stored key), into `key2`: its length, or -1 if it is too long.
+fn tree_key[&q, &r](w: &!q exec.Work, r: &r [byte]) -> [] int {
+    let dl = w.dlen;
+    build.put_be(contents(w.key2), 0, w.tid, 4);
+    let n = row.stored_key(contents(w.ctx)[64..64 + dl], r, contents(w.key2)[4..4 + exec.max_stored_key()]);
+    if n < 0 {
+        return 0 - 1;
+    }
+    return 4 + n;
+}
+
+// Evaluate the expression at `at` of `e` for column `c` and stage its stored value in `tmp` at `fill`: the position after it; -1 if it raised an error (noted); or a refusal (below -1).
+fn staged[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], ntab: int, c: int, fill: int) -> [] int {
+    let b = eval.max_nodes();
+    let r = exec.ev(w, e, at, kinds, ntab);
+    if r < 0 {
+        return exec.unsupported();
+    }
+    let r2 = eval.assign(contents(w.ws), b, col_type(w, c), contents(w.ar), contents(w.info));
+    if r2 < 0 {
+        return exec.unsupported();
+    }
+    if contents(w.ws)[b + 1] == 2 {
+        exec.note(w, contents(w.ws)[b + 2] - 1);
+        return 0 - 1;
+    }
+    let f = exec.enc(contents(w.tmp)[0..65536], fill, contents(w.ws), b, contents(w.ar));
+    if f == 0 - 1 {
+        return exec.too_big();
+    }
+    if f < 0 {
+        return exec.unsupported();
+    }
+    return f;
+}
+
+// Before any row: the expression at `at` for column `c` is checked. An error of its types, or an error of a constant (which PostgreSQL raises when it plans, whatever the rows), is noted. 0 or a refusal.
+fn checked[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], ntab: int, c: int) -> [] int {
+    let b = eval.max_nodes();
+    let r = exec.ev(w, e, at, kinds, ntab);
+    if r < 0 {
+        return exec.stat(w, r);
+    }
+    let to = col_type(w, c);
+    if contents(w.ws)[b + 4] != 1 {
+        if !eval.assignable(contents(w.ws)[b], to) {
+            exec.note(w, 6);
+        }
+        return 0;
+    }
+    let r2 = eval.assign(contents(w.ws), b, to, contents(w.ar), contents(w.info));
+    if r2 < 0 {
+        return exec.stat(w, r2);
+    }
+    if contents(w.ws)[b + 1] == 2 {
+        exec.note(w, contents(w.ws)[b + 2] - 1);
+    }
+    return 0;
+}
+
+// ---- INSERT
+
+// INSERT (ir.md section 2): the rows as written, each stored before the next is checked.
+pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 3 || int_of(e[0]) != 1 {
+        return exec.malformed();
+    }
+    let r0 = exec.bind_table(p, w, root, e, 1);
+    if r0 != 0 {
+        return r0;
+    }
+    var at = 3 + w.nlen;
+    if at + 4 > len(e) {
+        return exec.malformed();
+    }
+    let nc = commit.be(e, at, 4);
+    at = at + 4;
+    if nc > exec.max_parts() {
+        return exec.too_big();
+    }
+    let n = columns(w);
+    var i = 0;
+    while i < nc {
+        if at + 2 > len(e) || at + 2 + commit.be(e, at, 2) > len(e) {
+            return exec.malformed();
+        }
+        let c = column(w, e, at);
+        if c < 0 {
+            return exec.malformed();
+        }
+        var j = 0;
+        while j < i {
+            if contents(w.pos)[exec.p_scol() + j] == c {
+                // a column named twice: PostgreSQL's error is not reproduced here
+                return exec.unsupported();
+            }
+            j = j + 1;
+        }
+        contents(w.pos)[exec.p_scol() + i] = c;
+        at = at + 2 + commit.be(e, at, 2);
+        i = i + 1;
+    }
+    if at + 4 > len(e) {
+        return exec.malformed();
+    }
+    let nr = commit.be(e, at, 4);
+    at = at + 4;
+    if nr > exec.max_rows() {
+        return exec.too_big();
+    }
+    // the rows are made first: an error of a constant comes before any row is stored
+    var fill = 0;
+    var r = 0;
+    while r < nr {
+        if at + 4 > len(e) || commit.be(e, at, 4) != nc {
+            return exec.malformed();
+        }
+        at = at + 4;
+        var tf = 0;
+        var bad = false;
+        i = 0;
+        while i < nc {
+            let c = contents(w.pos)[exec.p_scol() + i];
+            let s = checked(w, e, at, kinds, 0, c);
+            if s < 0 {
+                return s;
+            }
+            let end = contents(w.info)[1];
+            contents(w.pos)[exec.p_soff() + i] = tf;
+            if w.code == 0 {
+                let f = staged(w, e, at, kinds, 0, c, tf);
+                if f < 0 - 1 {
+                    return f;
+                }
+                if f < 0 {
+                    bad = true;
+                } else {
+                    tf = f;
+                }
+            } else {
+                bad = true;
+            }
+            at = end;
+            i = i + 1;
+        }
+        if !bad {
+            // the stored row: each column's value, or its default, or null
+            var ra = 0;
+            var c = 0;
+            while c < n {
+                var from = 0 - 1;
+                i = 0;
+                while i < nc {
+                    if contents(w.pos)[exec.p_scol() + i] == c {
+                        from = contents(w.pos)[exec.p_soff() + i];
+                    }
+                    i = i + 1;
+                }
+                if from >= 0 {
+                    let l = tables.stored_len(contents(w.tmp), from);
+                    if ra + l > exec.max_stored_row() {
+                        return exec.too_big();
+                    }
+                    ra = exec.copy(contents(w.tmp), from, l, contents(w.nrow), ra);
+                } else {
+                    let el = w.elen;
+                    let da = tables.default_at(contents(w.ent)[0..el], c);
+                    if da < 0 {
+                        if ra + 1 > exec.max_stored_row() {
+                            return exec.too_big();
+                        }
+                        contents(w.nrow)[ra] = byte_of(0);
+                        ra = ra + 1;
+                    } else {
+                        let l = tables.stored_len(contents(w.ent), da);
+                        if ra + l > exec.max_stored_row() {
+                            return exec.too_big();
+                        }
+                        ra = exec.copy(contents(w.ent), da, l, contents(w.nrow), ra);
+                    }
+                }
+                c = c + 1;
+            }
+            if fill + 2 + ra > exec.rows_size() {
+                return exec.too_big();
+            }
+            build.put_be(contents(w.rows), fill, ra, 2);
+            fill = exec.copy(contents(w.nrow), 0, ra, contents(w.rows), fill + 2);
+        }
+        r = r + 1;
+    }
+    if at != len(e) {
+        return exec.malformed();
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    return store_rows(p, w, root, nr);
+}
+
+// Store the `nr` rows staged in `rows` (a `u16` length before each), in order: the first row that has a null where none is taken, or whose key is there already, is the statement's error.
+fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int) -> [file_read, file_write] int {
+    var nroot = root;
+    var ra = 0;
+    var r = 0;
+    while r < nr {
+        let rl = commit.be(contents(w.rows), ra, 2);
+        exec.copy(contents(w.rows), ra + 2, rl, contents(w.nrow), 0);
+        ra = ra + 2 + rl;
+        exec.copy(contents(w.nrow), 0, rl, contents(w.cur), 0);
+        if null_in(w, contents(w.cur)[0..rl]) {
+            return exec.e_not_null();
+        }
+        let kl = tree_key(w, contents(w.cur)[0..rl]);
+        if kl < 0 {
+            return exec.too_big();
+        }
+        let g = btree.get(p, contents(w.sc), nroot, contents(w.key2)[0..kl], contents(w.nrow));
+        if g >= 0 {
+            return exec.e_unique();
+        }
+        if g != btree.not_found() {
+            return exec.tree_err(g);
+        }
+        let nw = exec.put_key(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl]);
+        if nw < 0 {
+            return nw;
+        }
+        nroot = nw;
+        let cr = exec.change(w, contents(w.cur)[0..0], false, contents(w.cur)[0..rl], true);
+        if cr < 0 {
+            return cr;
+        }
+        w.count = w.count + 1;
+        r = r + 1;
+    }
+    w.root = nroot;
+    return 0;
+}
+
+// ---- UPDATE and DELETE
+
+// The bytes before a key in the tree a statement keeps beside the table while it moves rows to new keys: `o` then a key a row is leaving, `n` then a key a row is taking (its value: the row).
+fn side_key[&q](w: &!q exec.Work, mark: int, from: int, n: int) -> [] int {
+    contents(w.tmp)[65536] = byte_of(mark);
+    exec.copy(contents(w.key2), from, n, contents(w.tmp), 65537);
+    return 1 + n;
+}
+
+// UPDATE (ir.md section 2). Every row is computed from the rows as they were before the statement.
+pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 3 || int_of(e[0]) != 2 {
+        return exec.malformed();
+    }
+    let r0 = exec.bind_table(p, w, root, e, 1);
+    if r0 != 0 {
+        return r0;
+    }
+    var at = 3 + w.nlen;
+    if at + 4 > len(e) {
+        return exec.malformed();
+    }
+    let ns = commit.be(e, at, 4);
+    at = at + 4;
+    if ns < 1 || ns > exec.max_parts() {
+        return exec.too_big();
+    }
+    let n = columns(w);
+    let dl = w.dlen;
+    var moves = false;
+    var i = 0;
+    while i < ns {
+        if at + 2 > len(e) || at + 2 + commit.be(e, at, 2) > len(e) {
+            return exec.malformed();
+        }
+        let c = column(w, e, at);
+        if c < 0 {
+            return exec.malformed();
+        }
+        var j = 0;
+        while j < i {
+            if contents(w.pos)[exec.p_scol() + j] == c {
+                return exec.unsupported();
+            }
+            j = j + 1;
+        }
+        if row.col_pk(contents(w.ctx)[64..64 + dl], c) > 0 {
+            moves = true;
+        }
+        at = at + 2 + commit.be(e, at, 2);
+        let (cnt, end) = eval.scan(e, at, contents(w.ws));
+        if cnt < 0 {
+            return exec.malformed();
+        }
+        contents(w.pos)[exec.p_scol() + i] = c;
+        contents(w.pos)[exec.p_spos() + i] = at;
+        at = end;
+        i = i + 1;
+    }
+    if at >= len(e) {
+        return exec.malformed();
+    }
+    var wpos = 0;
+    if int_of(e[at]) == 1 {
+        wpos = at + 1;
+        let (cnt, end) = eval.scan(e, wpos, contents(w.ws));
+        if cnt < 0 || end != len(e) {
+            return exec.malformed();
+        }
+    } else if at + 1 != len(e) {
+        return exec.malformed();
+    }
+    let rw = exec.where_static(w, e, kinds, wpos);
+    if rw < 0 {
+        return rw;
+    }
+    contents(w.cx)[5] = 0 - 1;
+    i = 0;
+    while i < ns {
+        let s = checked(w, e, contents(w.pos)[exec.p_spos() + i], kinds, 1, contents(w.pos)[exec.p_scol() + i]);
+        if s < 0 {
+            return s;
+        }
+        i = i + 1;
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    var nroot = root;
+    var side = 0;
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else {
+            let pass = exec.passes(w, e, kinds, wpos);
+            if pass < 0 {
+                return pass;
+            }
+            if pass == 1 {
+                w.count = w.count + 1;
+                var bad = false;
+                var tf = 0;
+                i = 0;
+                while i < ns {
+                    contents(w.pos)[exec.p_soff() + i] = tf;
+                    let f = staged(w, e, contents(w.pos)[exec.p_spos() + i], kinds, 1, contents(w.pos)[exec.p_scol() + i], tf);
+                    if f < 0 - 1 {
+                        return f;
+                    }
+                    if f < 0 {
+                        bad = true;
+                    } else {
+                        tf = f;
+                    }
+                    i = i + 1;
+                }
+                var ra = 0;
+                if !bad {
+                    // the new row: the old one with the assigned columns replaced
+                    var oa = 0;
+                    var c = 0;
+                    while c < n {
+                        let ol = tables.stored_len(contents(w.cur)[0..rl], oa);
+                        if ol < 0 {
+                            return exec.damaged();
+                        }
+                        var from = 0 - 1;
+                        i = 0;
+                        while i < ns {
+                            if contents(w.pos)[exec.p_scol() + i] == c {
+                                from = contents(w.pos)[exec.p_soff() + i];
+                            }
+                            i = i + 1;
+                        }
+                        if from >= 0 {
+                            let l = tables.stored_len(contents(w.tmp), from);
+                            if ra + l > exec.max_stored_row() {
+                                return exec.too_big();
+                            }
+                            ra = exec.copy(contents(w.tmp), from, l, contents(w.nrow), ra);
+                        } else {
+                            if ra + ol > exec.max_stored_row() {
+                                return exec.too_big();
+                            }
+                            ra = exec.copy(contents(w.cur), oa, ol, contents(w.nrow), ra);
+                        }
+                        oa = oa + ol;
+                        c = c + 1;
+                    }
+                    if null_in(w, contents(w.nrow)[0..ra]) {
+                        exec.note(w, exec.e_not_null());
+                        bad = true;
+                    }
+                }
+                if !bad && !exec.same(contents(w.cur), 0, rl, contents(w.nrow), 0, ra) {
+                    let okl = w.klen;
+                    var moved = false;
+                    var kl = okl;
+                    if moves {
+                        kl = tree_key(w, contents(w.nrow)[0..ra]);
+                        if kl < 0 {
+                            return exec.too_big();
+                        }
+                        moved = !exec.same(contents(w.key), 0, okl, contents(w.key2), 0, kl);
+                    }
+                    if !moved {
+                        let nw = exec.put_key(p, w, nroot, contents(w.key), okl, contents(w.nrow)[0..ra]);
+                        if nw < 0 {
+                            return nw;
+                        }
+                        nroot = nw;
+                        let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.nrow)[0..ra], true);
+                        if cr < 0 {
+                            return cr;
+                        }
+                    } else {
+                        // a row that takes another key: decided after the last row, when it is known which keys are left and which are taken
+                        var sl = side_key(w, 'n', 4, kl - 4);
+                        let g = btree.get(p, contents(w.sc), side, contents(w.tmp)[65536..65536 + sl], contents(w.lit));
+                        if g >= 0 {
+                            // two rows of this statement take one key
+                            exec.note(w, exec.e_unique());
+                        } else if g != btree.not_found() {
+                            return exec.tree_err(g);
+                        } else {
+                            let s1 = btree.put(p, contents(w.sc), side, contents(w.tmp)[65536..65536 + sl], contents(w.nrow)[0..ra]);
+                            if s1 < 0 {
+                                return exec.tree_err(s1);
+                            }
+                            side = s1;
+                        }
+                        exec.copy(contents(w.key), 0, okl, contents(w.key2), 0);
+                        sl = side_key(w, 'o', 4, okl - 4);
+                        let s2 = btree.put(p, contents(w.sc), side, contents(w.tmp)[65536..65536 + sl], contents(w.nrow)[0..0]);
+                        if s2 < 0 {
+                            return exec.tree_err(s2);
+                        }
+                        side = s2;
+                        var cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);
+                        if cr < 0 {
+                            return cr;
+                        }
+                        cr = exec.change(w, contents(w.cur)[0..0], false, contents(w.nrow)[0..ra], true);
+                        if cr < 0 {
+                            return cr;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if side != 0 {
+        let rm = settle(p, w, root, nroot, side);
+        if rm < 0 {
+            return rm;
+        }
+        nroot = rm;
+    }
+    if w.orderdep {
+        return exec.order_dependent();
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    w.root = nroot;
+    return 0;
+}
+
+// The rows of an UPDATE that take another key (`side`, see `side_key`), over the tree before the statement (`root`) and the tree it has made so far (`nroot`): the tree with them moved, or a refusal. A
+// taken key that a row which stays has is an error (noted); one that a row is leaving is order-dependent (marked): the answer is then `nroot`, which the caller drops.
+fn settle[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nroot: int, side: int) -> [file_read, file_write] int {
+    var out = nroot;
+    // first every key taken is checked
+    contents(w.key)[0] = byte_of('n');
+    var kl = 1;
+    var more = true;
+    while more {
+        let r = btree.next_after(p, contents(w.sc), side, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return exec.tree_err(r);
+        } else if int_of(contents(w.key2)[0]) != 'n' {
+            more = false;
+        } else {
+            let nk = r / 1024;
+            exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+            kl = nk;
+            // the key in the table
+            build.put_be(contents(w.tmp), 65536, w.tid, 4);
+            exec.copy(contents(w.key2), 1, nk - 1, contents(w.tmp), 65540);
+            let g = btree.get(p, contents(w.sc), root, contents(w.tmp)[65536..65539 + nk], contents(w.nrow));
+            if g >= 0 {
+                contents(w.key2)[0] = byte_of('o');
+                let g2 = btree.get(p, contents(w.sc), side, contents(w.key2)[0..nk], contents(w.nrow));
+                if g2 >= 0 {
+                    w.orderdep = true;
+                } else if g2 == btree.not_found() {
+                    exec.note(w, exec.e_unique());
+                } else {
+                    return exec.tree_err(g2);
+                }
+            } else if g != btree.not_found() {
+                return exec.tree_err(g);
+            }
+        }
+    }
+    if w.orderdep || w.code != 0 {
+        return out;
+    }
+    // then the rows leave their keys, and take the new ones
+    var pass = 0;
+    while pass < 2 {
+        var mark = 'o';
+        if pass == 1 {
+            mark = 'n';
+        }
+        contents(w.key)[0] = byte_of(mark);
+        kl = 1;
+        more = true;
+        while more {
+            let r = btree.next_after(p, contents(w.sc), side, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+            if r == btree.not_found() {
+                more = false;
+            } else if r < 0 {
+                return exec.tree_err(r);
+            } else if int_of(contents(w.key2)[0]) != mark {
+                more = false;
+            } else {
+                let nk = r / 1024;
+                let nv = r % 1024;
+                exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+                kl = nk;
+                build.put_be(contents(w.tmp), 65536, w.tid, 4);
+                exec.copy(contents(w.key2), 1, nk - 1, contents(w.tmp), 65540);
+                var nw = 0;
+                if pass == 0 {
+                    nw = exec.del_key(p, w, out, contents(w.tmp)[65536..65539 + nk], 3 + nk);
+                } else {
+                    nw = exec.put_key(p, w, out, contents(w.tmp)[65536..65539 + nk], 3 + nk, contents(w.cur)[0..nv]);
+                }
+                if nw < 0 {
+                    return nw;
+                }
+                out = nw;
+            }
+        }
+        pass = pass + 1;
+    }
+    return out;
+}
+
+// DELETE (ir.md section 2).
+pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 3 || int_of(e[0]) != 3 {
+        return exec.malformed();
+    }
+    let r0 = exec.bind_table(p, w, root, e, 1);
+    if r0 != 0 {
+        return r0;
+    }
+    let at = 3 + w.nlen;
+    if at >= len(e) {
+        return exec.malformed();
+    }
+    var wpos = 0;
+    if int_of(e[at]) == 1 {
+        wpos = at + 1;
+        let (cnt, end) = eval.scan(e, wpos, contents(w.ws));
+        if cnt < 0 || end != len(e) {
+            return exec.malformed();
+        }
+    } else if at + 1 != len(e) {
+        return exec.malformed();
+    }
+    let rw = exec.where_static(w, e, kinds, wpos);
+    if rw < 0 {
+        return rw;
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    var nroot = root;
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else {
+            let pass = exec.passes(w, e, kinds, wpos);
+            if pass < 0 {
+                return pass;
+            }
+            if pass == 1 {
+                let kl = w.klen;
+                let nw = exec.del_key(p, w, nroot, contents(w.key), kl);
+                if nw < 0 {
+                    return nw;
+                }
+                nroot = nw;
+                let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);
+                if cr < 0 {
+                    return cr;
+                }
+                w.count = w.count + 1;
+            }
+        }
+    }
+    if w.orderdep {
+        return exec.order_dependent();
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    w.root = nroot;
+    return 0;
+}
+
+// Erase a row and its past (docs/m3-engine.md 6n): `e` is a DELETE whose WHERE is `<the key> = <a constant>` and nothing else. The row is removed with no history entry made for it, and every history
+// entry of its key is removed: AS OF any transaction the row is then not there, and after two commits and a sweep (6c) no page of the file holds it. On 0 `count_of` is the row (0 or 1) plus the entries
+// removed. A row that was moved to another key by an UPDATE has entries under each key it had: each is erased by its own key.
+pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 3 || int_of(e[0]) != 3 {
+        return exec.unsupported();
+    }
+    let r0 = exec.bind_table(p, w, root, e, 1);
+    if r0 != 0 {
+        return r0;
+    }
+    let at = 3 + w.nlen;
+    if at + 1 >= len(e) || int_of(e[at]) != 1 {
+        return exec.unsupported();
+    }
+    let rw = exec.where_static(w, e, kinds, at + 1);
+    if rw < 0 {
+        return rw;
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    let kn = w.lon;
+    if w.nconj != 1 || kn < 0 || w.hin != kn || !exec.same(contents(w.lo), 0, kn, contents(w.hi), 0, kn) {
+        return exec.unsupported();
+    }
+    // the key in the tree, in `tmp` from 65536
+    build.put_be(contents(w.tmp), 65536, w.tid, 4);
+    exec.copy(contents(w.lo), 0, kn, contents(w.tmp), 65540);
+    var nroot = root;
+    let d = btree.del(p, contents(w.sc), nroot, contents(w.tmp)[65536..65540 + kn]);
+    if d >= 0 {
+        nroot = d;
+        w.count = 1;
+    } else if d != btree.not_found() {
+        return exec.tree_err(d);
+    }
+    build.put_be(contents(w.key), 0, 4294967295, 4);
+    var kl = 4;
+    var more = true;
+    while more {
+        let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return exec.tree_err(r);
+        } else {
+            let nk = r / 1024;
+            if nk < 12 || commit.be(contents(w.key2), 0, 4) != 4294967295 {
+                return exec.damaged();
+            }
+            if exec.same(contents(w.key2), 12, nk - 12, contents(w.tmp), 65536, 4 + kn) {
+                let nw = btree.del(p, contents(w.sc), nroot, contents(w.key2)[0..nk]);
+                if nw < 0 {
+                    return exec.tree_err(nw);
+                }
+                nroot = nw;
+                w.count = w.count + 1;
+            }
+            exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+            kl = nk;
+        }
+    }
+    w.root = nroot;
+    return 0;
+}
+
+// ---- CREATE TABLE and DROP TABLE
+
+fn name_ok[&d](data: &d [byte], at: int, n: int) -> [] bool {
+    if n < 1 || n > tables.max_name() {
+        return false;
+    }
+    var i = 0;
+    while i < n {
+        let c = int_of(data[at + i]);
+        let letter = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_';
+        if !letter && (i == 0 || c < '0' || c > '9') {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Read column definitions (the children of the node `list`: the first of them is column `c0` of the table, the last column `nc - 1`) into the entry being built: the definition in `ent` (the columns
+// before `c0` are there already, from 8; these go from `da0`), the marks and defaults in `tmp` from `xa0`. `keys0` of the columns before are the key. Errors are noted. The end of the definition, with
+// the end of the marks and the number of key columns left in `pos` (`exec.p_ddl`); or a refusal.
+fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], list: int, c0: int, nc: int, da0: int, xa0: int, keys0: int) -> [] int {
+    let b = eval.max_nodes();
+    var da = da0;
+    var xa = xa0;
+    var keys = keys0;
+    var c = c0;
+    while c < nc {
+        let cd = kids[nodes[6 * list + 2] + c - c0];
+        if nodes[6 * cd] != parse.n_coldef() || nodes[6 * cd + 3] < 1 {
+            return exec.malformed();
+        }
+        let flags = nodes[6 * cd + 4];
+        let tyn = kids[nodes[6 * cd + 2]];
+        let code = nodes[6 * tyn + 1];
+        var ty = 0;
+        if code == 1 {
+            ty = row.t_int2();
+        } else if code == 2 {
+            ty = row.t_int4();
+        } else if code == 3 {
+            ty = row.t_int();
+        } else if code == 4 {
+            ty = row.t_text();
+        } else if code == 5 {
+            ty = row.t_bool();
+        } else {
+            return exec.unsupported();
+        }
+        if flags / 4 % 2 == 1 {
+            // UNIQUE needs an index: not in this slice
+            return exec.unsupported();
+        }
+        var place = 0;
+        if flags / 2 % 2 == 1 {
+            keys = keys + 1;
+            place = 1;
+            if keys > 1 {
+                exec.note(w, exec.e_two_keys());
+                place = 0;
+            }
+        }
+        if da + 4 + tables.max_name() > 900 {
+            return exec.too_big();
+        }
+        let cl = lower.name_text(sql, toks, nodes[6 * cd + 1], contents(w.ent)[0..900], da + 4);
+        if cl < 0 || !name_ok(contents(w.ent), da + 4, cl) {
+            return exec.unsupported();
+        }
+        // a name that an earlier column has
+        var oa = 8;
+        var k = 0;
+        while k < c {
+            let ol = commit.be(contents(w.ent), oa + 2, 2);
+            if exec.same(contents(w.ent), oa + 4, ol, contents(w.ent), da + 4, cl) {
+                exec.note(w, exec.e_column_twice());
+            }
+            oa = oa + 4 + ol;
+            k = k + 1;
+        }
+        contents(w.ent)[da] = byte_of(ty);
+        contents(w.ent)[da + 1] = byte_of(place);
+        build.put_be(contents(w.ent), da + 2, cl, 2);
+        da = da + 4 + cl;
+        var marks = flags % 2;
+        if nodes[6 * cd + 3] >= 2 {
+            let dn = kids[nodes[6 * cd + 2] + 1];
+            let ln = lower.literal(sql, toks, nodes, kids, dn, contents(w.lrs), contents(w.lit), contents(w.lsc));
+            if ln < 0 {
+                return exec.unsupported();
+            }
+            contents(w.info)[0] = 0;
+            let r = eval.eval(contents(w.lit)[0..ln], 0, contents(w.lsc), contents(w.ctx), contents(w.cx), 0, contents(w.ws), contents(w.ar), contents(w.info));
+            if r < 0 {
+                let s = exec.stat(w, r);
+                if s < 0 {
+                    return s;
+                }
+            } else {
+                let vt = contents(w.ws)[b];
+                if contents(w.ws)[b + 1] == 0 && (vt == 1 || vt == 5 || vt == 6) && !row.int_fits(ty, contents(w.ws)[b + 2]) {
+                    // PostgreSQL takes the table and raises at each insert that uses the default: not reproduced
+                    return exec.unsupported();
+                }
+                let r2 = eval.assign(contents(w.ws), b, ty, contents(w.ar), contents(w.info));
+                if r2 < 0 {
+                    let s = exec.stat(w, r2);
+                    if s < 0 {
+                        return s;
+                    }
+                } else if contents(w.ws)[b + 1] == 2 {
+                    exec.note(w, contents(w.ws)[b + 2] - 1);
+                } else {
+                    marks = marks + 2;
+                    contents(w.tmp)[xa] = byte_of(marks);
+                    let f = exec.enc(contents(w.tmp), xa + 1, contents(w.ws), b, contents(w.ar));
+                    if f == 0 - 1 {
+                        return exec.too_big();
+                    }
+                    if f < 0 {
+                        return exec.unsupported();
+                    }
+                    xa = f;
+                }
+            }
+        }
+        if marks < 2 {
+            contents(w.tmp)[xa] = byte_of(marks);
+            xa = xa + 1;
+        }
+        if da + xa > exec.max_stored_row() {
+            return exec.too_big();
+        }
+        c = c + 1;
+    }
+    contents(w.pos)[exec.p_ddl()] = xa;
+    contents(w.pos)[exec.p_ddl() + 1] = keys;
+    return da;
+}
+
+// CREATE TABLE: the IR `e` names the table (ir.md section 2, `Ddl` kind 0); its columns are read from the parser's tree (`stmt` is the statement's node), which is all that has them (6e).
+pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 0 || nodes[6 * stmt] != parse.n_create_table() {
+        return exec.malformed();
+    }
+    let nl = commit.be(e, 2, 2);
+    if 4 + nl != len(e) {
+        return exec.malformed();
+    }
+    if !name_ok(e, 4, nl) {
+        return exec.unsupported();
+    }
+    let nc = nodes[6 * stmt + 3];
+    if nc < 1 || nc > row.max_columns() {
+        return exec.too_big();
+    }
+    // the definition is built in `ent` from 6, the marks and defaults in `tmp`
+    let da = column_defs(w, sql, toks, nodes, kids, stmt, 0, nc, 8, 0, 0);
+    if da < 0 {
+        return da;
+    }
+    let xa = contents(w.pos)[exec.p_ddl()];
+    let keys = contents(w.pos)[exec.p_ddl() + 1];
+    if keys == 0 {
+        // a table with no primary key has no key to store its rows by
+        return exec.unsupported();
+    }
+    build.put_be(contents(w.ent), 4, da - 6, 2);
+    build.put_be(contents(w.ent), 6, nc, 2);
+    let total = exec.copy(contents(w.tmp), 0, xa, contents(w.ent), da);
+    let g = tables.find(p, contents(w.sc), root, e[4..4 + nl], contents(w.key), contents(w.cur));
+    if g >= 0 {
+        exec.note(w, exec.e_table_exists());
+    } else if g != btree.not_found() {
+        return exec.tree_err(g);
+    }
+    // an index has a name among the tables' (PostgreSQL: one namespace for both)
+    let ikl = tables.index_key(e[4..4 + nl], contents(w.key));
+    let gi = btree.get(p, contents(w.sc), root, contents(w.key)[0..ikl], contents(w.cur));
+    if gi >= 0 {
+        exec.note(w, exec.e_table_exists());
+    } else if gi != btree.not_found() {
+        return exec.tree_err(gi);
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    // the counter of table numbers and the table's entry are keys of the tree like any other: their history is kept
+    let ekl = tables.entry_key(e[4..4 + nl], contents(w.key));
+    let r1 = exec.remember(p, w, root, contents(w.key), 4);
+    if r1 < 0 {
+        return r1;
+    }
+    let r2 = exec.remember(p, w, r1, contents(w.key), ekl);
+    if r2 < 0 {
+        return r2;
+    }
+    let nw = tables.create(p, contents(w.sc), r2, e[4..4 + nl], contents(w.key), contents(w.ent)[0..total]);
+    if nw < 0 {
+        return exec.tree_err(nw);
+    }
+    w.root = nw;
+    return 0;
+}
+
+// DROP TABLE (`Ddl` kind 2): the table's rows are removed one by one (D-M3-8), then its entry.
+pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte]) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 2 {
+        return exec.malformed();
+    }
+    let r0 = exec.bind_table(p, w, root, e, 2);
+    if r0 != 0 {
+        return r0;
+    }
+    var nroot = root;
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else {
+            let kl = w.klen;
+            let nw = exec.del_key(p, w, nroot, contents(w.key), kl);
+            if nw < 0 {
+                return nw;
+            }
+            nroot = nw;
+        }
+    }
+    let nl = w.nlen;
+    // the table's indexes go with it
+    build.put_be(contents(w.key), 0, 0, 4);
+    contents(w.key)[4] = byte_of(1);
+    var ikl = 5;
+    more = true;
+    while more {
+        let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..ikl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return exec.tree_err(r);
+        } else {
+            let nk = r / 1024;
+            let nv = r % 1024;
+            if nk < 6 || commit.be(contents(w.key2), 0, 4) != 0 || int_of(contents(w.key2)[4]) != 1 {
+                more = false;
+            } else {
+                if exec.same(contents(w.cur), 0, nv, e, 4, nl) {
+                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);
+                    if nw < 0 {
+                        return nw;
+                    }
+                    nroot = nw;
+                }
+                exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+                ikl = nk;
+            }
+        }
+    }
+    // the table's entry in the catalog is a key of the tree like any other: its history is kept, so the table is there AS OF before
+    let ekl = tables.entry_key(e[4..4 + nl], contents(w.key));
+    let rm = exec.remember(p, w, nroot, contents(w.key), ekl);
+    if rm < 0 {
+        return rm;
+    }
+    let nw = tables.remove(p, contents(w.sc), rm, e[4..4 + nl], contents(w.key));
+    if nw < 0 {
+        return exec.tree_err(nw);
+    }
+    w.root = nw;
+    return 0;
+}
+
+// ALTER TABLE ... ADD COLUMN (`Ddl` kind 1; docs/m3-engine.md 6q): the definition gains the column, and every row is written again with the column's default, or null.
+pub fn alter_add[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 1 || nodes[6 * stmt] != parse.n_alter_add() || nodes[6 * stmt + 3] != 1 {
+        return exec.malformed();
+    }
+    let r0 = exec.bind_table(p, w, root, e, 2);
+    if r0 != 0 {
+        return r0;
+    }
+    let nl = w.nlen;
+    let dl = w.dlen;
+    let el = w.elen;
+    let n0 = columns(w);
+    if n0 + 1 > row.max_columns() {
+        return exec.too_big();
+    }
+    // the marks and defaults of the columns there are go to `tmp`, where the new column's follow them; its definition follows theirs in `ent`
+    let xl = el - 6 - dl;
+    exec.copy(contents(w.ent), 6 + dl, xl, contents(w.tmp), 0);
+    let da = column_defs(w, sql, toks, nodes, kids, stmt, n0, n0 + 1, 6 + dl, xl, 1);
+    if da < 0 {
+        return da;
+    }
+    let xa = contents(w.pos)[exec.p_ddl()];
+    build.put_be(contents(w.ent), 4, da - 6, 2);
+    build.put_be(contents(w.ent), 6, n0 + 1, 2);
+    let total = exec.copy(contents(w.tmp), 0, xa, contents(w.ent), da);
+    // what a row there gets: the default, or null; which a column that takes no null refuses
+    let marks = int_of(contents(w.tmp)[xl]);
+    var nulls = marks < 2;
+    if marks >= 2 && int_of(contents(w.tmp)[xl + 1]) == 0 {
+        nulls = true;
+    }
+    var nroot = root;
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else if nulls && marks % 2 == 1 {
+            exec.note(w, exec.e_not_null());
+            more = false;
+        } else if w.code == 0 {
+            var ra = exec.copy(contents(w.cur), 0, rl, contents(w.nrow), 0);
+            if marks >= 2 {
+                if ra + xa - xl - 1 > exec.max_stored_row() {
+                    return exec.too_big();
+                }
+                ra = exec.copy(contents(w.tmp), xl + 1, xa - xl - 1, contents(w.nrow), ra);
+            } else {
+                if ra + 1 > exec.max_stored_row() {
+                    return exec.too_big();
+                }
+                contents(w.nrow)[ra] = byte_of(0);
+                ra = ra + 1;
+            }
+            let kl = w.klen;
+            let nw = exec.put_key(p, w, nroot, contents(w.key), kl, contents(w.nrow)[0..ra]);
+            if nw < 0 {
+                return nw;
+            }
+            nroot = nw;
+        }
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    let ekl = tables.entry_key(e[4..4 + nl], contents(w.key));
+    let nw = exec.put_key(p, w, nroot, contents(w.key), ekl, contents(w.ent)[0..total]);
+    if nw < 0 {
+        return nw;
+    }
+    w.root = nw;
+    return 0;
+}
+
+// CREATE INDEX (`Ddl` kind 3; 6q): the name is recorded and nothing is built. An index that is not UNIQUE changes no answer; a UNIQUE one is a constraint the engine cannot hold yet, and is refused.
+pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 3 || nodes[6 * stmt] != parse.n_create_index() {
+        return exec.malformed();
+    }
+    if nodes[6 * stmt + 4] == 1 {
+        return exec.unsupported();
+    }
+    let r0 = exec.bind_table(p, w, root, e, 2);
+    if r0 != 0 {
+        return r0;
+    }
+    let dl = w.dlen;
+    let nl = w.nlen;
+    // each column is one of the table's
+    var i = 0;
+    while i < nodes[6 * stmt + 3] {
+        let tok = nodes[6 * kids[nodes[6 * stmt + 2] + i] + 1];
+        let cl = lower.name_text(sql, toks, tok, contents(w.nrow)[0..256], 0);
+        if cl < 0 {
+            return exec.unsupported();
+        }
+        var found = false;
+        var c = 0;
+        while c < row.columns(contents(w.ctx)[64..64 + dl]) {
+            let nm = row.col_name(contents(w.ctx)[64..64 + dl], c);
+            if exec.same(nm, 0, len(nm), contents(w.nrow), 0, cl) {
+                found = true;
+            }
+            c = c + 1;
+        }
+        if !found {
+            exec.note(w, exec.e_no_column());
+        }
+        i = i + 1;
+    }
+    let il = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.nrow)[0..256], 0);
+    if il < 0 || !name_ok(contents(w.nrow), 0, il) {
+        return exec.unsupported();
+    }
+    // the name is free: no index has it, and no table
+    let kl = tables.index_key(contents(w.nrow)[0..il], contents(w.key2));
+    let g = btree.get(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.cur));
+    if g >= 0 {
+        exec.note(w, exec.e_table_exists());
+    } else if g != btree.not_found() {
+        return exec.tree_err(g);
+    }
+    let gt = tables.find(p, contents(w.sc), root, contents(w.nrow)[0..il], contents(w.key), contents(w.cur));
+    if gt >= 0 {
+        exec.note(w, exec.e_table_exists());
+    } else if gt != btree.not_found() {
+        return exec.tree_err(gt);
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    let nw = exec.put_key(p, w, root, contents(w.key2), kl, contents(w.ctx)[0..nl]);
+    if nw < 0 {
+        return nw;
+    }
+    w.root = nw;
+    return 0;
+}
+
+// DROP INDEX (`Ddl` kind 4; 6q): the name goes. The lowering has found the index in the snapshot, or refused.
+pub fn drop_index[&q, &z, &x, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], sql: &s [byte], toks: &t [int], nodes: &n [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 4 || nodes[6 * stmt] != parse.n_drop_index() {
+        return exec.malformed();
+    }
+    let il = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.nrow)[0..256], 0);
+    if il < 0 {
+        return exec.unsupported();
+    }
+    let kl = tables.index_key(contents(w.nrow)[0..il], contents(w.key2));
+    if kl < 0 {
+        return exec.unsupported();
+    }
+    let g = btree.get(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.cur));
+    if g == btree.not_found() {
+        return exec.unsupported();
+    }
+    if g < 0 {
+        return exec.tree_err(g);
+    }
+    let nw = exec.del_key(p, w, root, contents(w.key2), kl);
+    if nw < 0 {
+        return nw;
+    }
+    w.root = nw;
+    return 0;
+}
