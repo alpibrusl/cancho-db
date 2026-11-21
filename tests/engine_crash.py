@@ -96,6 +96,9 @@ def main():
         if len(states) != len(HISTORY) + 1 or len(ends) != len(HISTORY):
             raise SystemExit("engine_crash: could not read the whole run (%d states, %d commits)" % (len(states), len(ends)))
         total = ends[-1]
+        if total > 1200:
+            # 928 when this was written; 1,762 before a statement wrote its own pages again in place (docs/m3-engine.md 6p)
+            raise SystemExit("engine_crash: the history takes %d steps: a statement is no longer writing its own pages in place" % total)
         runs = 0
         seen = [0] * len(states)
         history = []

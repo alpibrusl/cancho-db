@@ -172,6 +172,11 @@ fn pick[&p, &k](pg: &p [byte], key: &k [byte]) -> [] (int, int, int) {
     return (idx, child, alt);
 }
 
+// The number of the page of the path at level `d` (what `descend` left).
+fn was[&s](sc: &s [byte], d: int) -> [] int {
+    return commit.be(sc, meta() + 8 * d, 4);
+}
+
 fn setp[&s](sc: &!s [byte], d: int, id: int, idx: int) -> [] int {
     build.put_be(sc, meta() + 8 * d, id, 4);
     build.put_be(sc, meta() + 8 * d + 4, idx, 4);
@@ -265,9 +270,13 @@ fn emit_at[&s](sc: &!s [byte], off: int, kind: int, count: int, srcoff: int, src
     return 0;
 }
 
-// Write the page at `off` as a new page: its number, or an error.
-fn new_page[&q, &s](p: &!q pager.Pager, sc: &!s [byte], off: int) -> [file_write] int {
-    let id = pager.alloc(p);
+// Write the page at `off`, which takes the place of page `old` of the tree being changed (0: of none): its number, or an error. It is a new page, so that the tree `old` belongs to is untouched; unless
+// `old` was itself handed out in the window that is open (`pager.begin`), when no root names it yet and it is written again where it is.
+fn new_page[&q, &s](p: &!q pager.Pager, sc: &!s [byte], off: int, old: int) -> [file_write] int {
+    var id = old;
+    if old < 1 || !pager.is_fresh(p, old) {
+        id = pager.alloc(p);
+    }
     let rc = pager.write_page(p, id, sc[off..off + 4096]);
     if rc < 0 {
         return fail(rc);
@@ -287,6 +296,8 @@ fn descend[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
         }
         let t = int_of(sc[d * 4096]);
         if t == 1 {
+            // the leaf's own number, beside those of the pages above it
+            setp(sc, d, id, 0);
             return d;
         }
         if t != 2 {
@@ -347,7 +358,7 @@ fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: 
         let total = wpos - w1();
         if 7 + total <= 4096 {
             emit_at(sc, w2(), 2, ncount, w1(), total);
-            let id = new_page(p, sc, w2());
+            let id = new_page(p, sc, w2(), was(sc, level));
             if id < 0 {
                 return id;
             }
@@ -369,11 +380,11 @@ fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: 
             mv(sc, w3(), w1() + b + 1, kl);
             emit_at(sc, w2(), 2, j, w1(), b);
             emit_at(sc, w4(), 2, ncount - j - 1, w3() + 256, 4 + rest);
-            let lid = new_page(p, sc, w2());
+            let lid = new_page(p, sc, w2(), was(sc, level));
             if lid < 0 {
                 return lid;
             }
-            let rid2 = new_page(p, sc, w4());
+            let rid2 = new_page(p, sc, w4(), 0);
             if rid2 < 0 {
                 return rid2;
             }
@@ -388,7 +399,7 @@ fn climb[&q, &s](p: &!q pager.Pager, sc: &!s [byte], d: int, cid0: int, split0: 
         build.put_be(sc, w1(), cid, 4);
         let n = put_int_entry(sc, w1() + 4, w3(), seplen, rid);
         emit_at(sc, w2(), 2, 1, w1(), n - w1());
-        return new_page(p, sc, w2());
+        return new_page(p, sc, w2(), 0);
     }
     return cid;
 }
@@ -401,7 +412,7 @@ pub fn put[&q, &s, &k, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
     if root == 0 {
         let n = put_entry(sc, w1(), key, vbytes);
         emit_at(sc, w2(), 1, 1, w1(), n - w1());
-        return new_page(p, sc, w2());
+        return new_page(p, sc, w2(), 0);
     }
     let d = descend(p, sc, root, key);
     if d < 0 {
@@ -442,7 +453,7 @@ pub fn put[&q, &s, &k, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
     let ncount = count + added;
     if 7 + total <= 4096 {
         emit_at(sc, w2(), 1, ncount, w1(), total);
-        let id = new_page(p, sc, w2());
+        let id = new_page(p, sc, w2(), was(sc, d));
         if id < 0 {
             return id;
         }
@@ -459,11 +470,11 @@ pub fn put[&q, &s, &k, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
     mv(sc, w3(), w1() + b + 3, sl);
     emit_at(sc, w2(), 1, j, w1(), b);
     emit_at(sc, w4(), 1, ncount - j, w1() + b, total - b);
-    let lid = new_page(p, sc, w2());
+    let lid = new_page(p, sc, w2(), was(sc, d));
     if lid < 0 {
         return lid;
     }
-    let rid = new_page(p, sc, w4());
+    let rid = new_page(p, sc, w4(), 0);
     if rid < 0 {
         return rid;
     }
@@ -503,7 +514,7 @@ pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
     var cid = 0;
     if !removed {
         emit_at(sc, w2(), 1, count - 1, w1(), wpos - w1());
-        cid = new_page(p, sc, w2());
+        cid = new_page(p, sc, w2(), was(sc, d));
         if cid < 0 {
             return cid;
         }
@@ -562,7 +573,7 @@ pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
                 }
                 emit_at(sc, w2(), 2, pcount, w1(), w - w1());
             }
-            cid = new_page(p, sc, w2());
+            cid = new_page(p, sc, w2(), was(sc, level));
             if cid < 0 {
                 return cid;
             }

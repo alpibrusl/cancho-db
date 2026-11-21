@@ -1537,7 +1537,7 @@ BTREE = [
     ("pstore: a sweep is not synced", "src/pstore.cho", "    let rc = pager.sync(p);\n    if rc < 0 {\n        return code(rc);\n    }\n    return count;", "    return count;"),
     ("pstore: a sweep keeps only the first child of a page", "src/pstore.cho", "                                st[top] = commit.be(sc, at + 1 + kl, 4);\n                                top = top + 1;", "                                st[top] = commit.be(sc, at + 1 + kl, 4);"),
     ("pstore: a sweep does not keep the first child of a page", "src/pstore.cho", "                            st[top] = commit.be(sc, 7, 4);\n                            top = top + 1;", "                            st[top] = commit.be(sc, 7, 4);"),
-    ("pstore: a free page is handed out twice", "src/pager.cho", "        p.nfree = p.nfree - 1;\n        return contents(p.free)[p.nfree];", "        return contents(p.free)[p.nfree - 1];"),
+    ("pstore: a free page is handed out twice", "src/pager.cho", "        p.nfree = p.nfree - 1;\n        id = contents(p.free)[p.nfree];", "        id = contents(p.free)[p.nfree - 1];"),
     ("pstore: zeroing a page stops at its first half", "src/pager.cho", "                var upto = 4096;\n                if p.crash > 0 && p.steps == p.crash {\n                    p.dead = true;\n                    upto = p.torn;\n                }", "                var upto = 2048;\n                if p.crash > 0 && p.steps == p.crash {\n                    p.dead = true;\n                    upto = p.torn;\n                }"),
     ("pager: the CRC of a page is not checked", "src/pager.cho", "    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {\n        return 0 - 2;\n    }", ""),
     ("pager: the CRC is checked over less than the page", "src/pager.cho", "    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {", "    if crc.crc32_of(out[7..4000]) != commit.be(out, 3, 4) {"),
@@ -1713,6 +1713,18 @@ def run_eval(cancho):
 # The engine's statements (src/exec.cho, src/execw.cho, src/tables.cho, and the assignment of src/eval.cho), judged by tests/engine_check.py: the random history against PostgreSQL, the fixed statements that
 # must be answered, and the page file after a delete and a drop.
 ENGINE = [
+    ('pages: a page a root names is written in place', 'src/btree.cho',
+     '    if old < 1 || !pager.is_fresh(p, old) {\n        id = pager.alloc(p);\n    }',
+     '    if old < 1 {\n        id = pager.alloc(p);\n    }'),
+    ('pages: a page handed out before the statement is still its own', 'src/pager.cho',
+     '        contents(p.fresh)[contents(p.flist)[i]] = byte_of(0);',
+     '        contents(p.fresh)[contents(p.flist)[i]] = byte_of(1);'),
+    ('pages: a page above the leaf is written where the leaf was', 'src/btree.cho',
+     '            emit_at(sc, w2(), 2, ncount, w1(), total);\n            let id = new_page(p, sc, w2(), was(sc, level));',
+     '            emit_at(sc, w2(), 2, ncount, w1(), total);\n            let id = new_page(p, sc, w2(), was(sc, d));'),
+    ('pages: the right half of a split leaf is written where the leaf was', 'src/btree.cho',
+     '    let rid = new_page(p, sc, w4(), 0);',
+     '    let rid = new_page(p, sc, w4(), was(sc, d));'),
     ('history: the value before is not kept', 'src/exec.cho',
      '        contents(w.uval)[0] = byte_of(1);\n        n = 1 + o;',
      '        contents(w.uval)[0] = byte_of(1);\n        n = 1;'),

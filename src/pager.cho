@@ -34,10 +34,19 @@ pub res struct Pager {
     // pages no root names, zeroed, to be handed out again before the file grows (`cdb.pstore.sweep` fills it)
     free: Box[[int]],
     nfree: int,
+    // the pages handed out since `begin` (a mark for each page of the first `fresh_max()`, and the list of those marked, to clear them): pages no root names yet, which the tree may write again in place
+    fresh: Box[[byte]],
+    flist: Box[[int]],
+    nfl: int,
+    window: bool,
 }
 
 pub fn free_max() -> [] int {
     return 65536;
+}
+
+pub fn fresh_max() -> [] int {
+    return 4194304;
 }
 
 pub fn new_pager[&h](heap: &!h Heap, file: File, length: int) -> [heap] Pager {
@@ -45,12 +54,14 @@ pub fn new_pager[&h](heap: &!h Heap, file: File, length: int) -> [heap] Pager {
     if next < 3 {
         next = 3;
     }
-    return Pager { file: file, next: next, crash: 0, torn: 0, steps: 0, dead: false, free: box_slice(heap, free_max(), 0), nfree: 0 };
+    return Pager { file: file, next: next, crash: 0, torn: 0, steps: 0, dead: false, free: box_slice(heap, free_max(), 0), nfree: 0, fresh: box_slice(heap, fresh_max(), byte_of(0)), flist: box_slice(heap, free_max(), 0), nfl: 0, window: false };
 }
 
 pub fn drop_pager[&h](heap: &!h Heap, p: Pager) -> [heap] int {
-    let Pager { file, next, crash, torn, steps, dead, free, nfree } = p;
+    let Pager { file, next, crash, torn, steps, dead, free, nfree, fresh, flist, nfl, window } = p;
     unbox_slice(heap, free);
+    unbox_slice(heap, fresh);
+    unbox_slice(heap, flist);
     return file_close(file);
 }
 
@@ -69,15 +80,39 @@ pub fn crashed[&q](p: &q Pager) -> [] bool {
     return p.dead;
 }
 
-// A new page number: a free page if there is one, else the file grows.
+// A new page number: a free page if there is one, else the file grows. Inside a window (`begin`) the page is marked as handed out in it.
 pub fn alloc[&q](p: &!q Pager) -> [] int {
+    var id = p.next;
     if p.nfree > 0 {
         p.nfree = p.nfree - 1;
-        return contents(p.free)[p.nfree];
+        id = contents(p.free)[p.nfree];
+    } else {
+        p.next = p.next + 1;
     }
-    let id = p.next;
-    p.next = p.next + 1;
+    if p.window && id < fresh_max() && p.nfl < free_max() {
+        contents(p.fresh)[id] = byte_of(1);
+        contents(p.flist)[p.nfl] = id;
+        p.nfl = p.nfl + 1;
+    }
     return id;
+}
+
+// A window begins (a statement, docs/m3-engine.md 6p): from here until the next `begin`, a page handed out by `alloc` is one that no root names yet, and `is_fresh` says so. The caller's side of the
+// bargain: within a window it builds ONE tree from each tree it started with, and uses only the newest (an older one may share a page that has since been written again).
+pub fn begin[&q](p: &!q Pager) -> [] int {
+    var i = 0;
+    while i < p.nfl {
+        contents(p.fresh)[contents(p.flist)[i]] = byte_of(0);
+        i = i + 1;
+    }
+    p.nfl = 0;
+    p.window = true;
+    return 0;
+}
+
+// Whether page `id` was handed out in the window that is open.
+pub fn is_fresh[&q](p: &!q Pager, id: int) -> [] bool {
+    return p.window && id >= 3 && id < fresh_max() && int_of(contents(p.fresh)[id]) == 1;
 }
 
 pub fn next_page[&q](p: &q Pager) -> [] int {

@@ -437,12 +437,40 @@ been used, and `AS OF` that number then read the wrong state. The number is now 
 | the tables AS OF 10,000 transactions back, twice | | 7.4 s |
 
 So the history costs what 6n said and more: a single-row insert now writes three paths of pages (the entry, the row, the number) where it wrote one, and none is reused before a sweep. **The engine is
-correct and wasteful**; the remedy is the one 6h names (a page written by the statement in progress can be written again in place, since no root names it yet), and it is the next thing to build before
-anything is served from this.
+correct and wasteful**; the remedy is the one 6h names (a page written by the statement in progress can be written again in place, since no root names it yet), built next (6p).
 
 **Not built, and not claimed:** transactions of several statements (a statement is one; the rule that a transaction's first value of a key is the one kept is written and has no test, since no statement
 writes a key twice); merge; erasing the past of a table that was dropped (the erase finds a table by its name: erase the keys first); a retention rule (the history only grows); the log's commit ids
 in place of the harness's transaction numbers (M3j).
+
+## 6p. A statement writes its own pages again in place (built)
+
+6h and 6o measured the waste: every write copied the path of pages from the root, and nothing was reused before a sweep. The remedy, as designed there:
+
+**D-M3-10. A page handed out since the statement began is no root's yet, so it may be written again where it is.** The pager marks the pages it hands out inside a *window* (`pager.begin`, which the
+caller opens for each statement); when the tree replaces a page that carries the mark, it writes the new page over it instead of taking another (`new_page` in `src/btree.cho`, which now knows which page
+of the path each new page replaces). A page from before the window is never touched: that is still what makes a statement a new root or nothing (6g), `AS OF` a throwaway tree, and a fork free.
+
+*The bargain the caller keeps:* within a window, of the trees it builds from one tree it uses only the newest. The engine's statements already did (each is a chain of roots); `btcheck`, which forks and
+reads old roots at will, opens no window and so runs exactly as before, with all its tests.
+
+**Measured** (as 6o; before and after this change, the history on in both):
+
+| | before | now |
+|---|---|---|
+| 20,000 inserts, one a statement: the file | 633 MiB | 324 MiB (16 KiB a row) |
+| the same rows, 100 a statement: the file | | 69 MiB (3.4 KiB a row), 3,800 rows a second |
+| an update of every row, one statement: the file grows by | about 470 MiB | 3.7 MiB |
+| the crash test's history: page writes and syncs | 1,762 | 928 |
+
+Time is unchanged for single-row statements (1,900 a second): it goes to walking down the tree and checking each page's CRC three times a row, which is the page cache that is still not built. What a
+single-row statement still wastes is one path of pages per statement, each superseded by the next statement's: reclaiming those without a sweep means freeing a page as soon as the root that named it is
+replaced *and* no committed root names it, which is bookkeeping this slice does not have.
+
+**Tests.** Everything that ran before runs through it: the random history against PostgreSQL (12 seeds), `AS OF` and the fork (whose untouched branch is exactly the property at risk), and the crash at
+every step (928 steps, 1,856 crashes). Four mutants: writing over a page a root names, and keeping the marks of an earlier statement, are each killed by a wrong answer within twenty statements; two
+that write a page over the wrong one of the path are killed too. Switching the reuse off is not a wrong answer, so no differential sees it: `tests/engine_crash.py` holds the step count under 1,200 for
+that (a version that forgot the leaf's number took 1,422).
 
 ## 7. Taking over, safely
 
