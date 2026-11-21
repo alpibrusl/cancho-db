@@ -181,3 +181,115 @@ pub fn commit[&q, &s, &r](p: &!q pager.Pager, sc: &!s [byte], roots: &r [int], s
     }
     return seq + 1;
 }
+
+// Find the pages nothing names, zero them and make them free to use again (docs/m3-engine.md D-M3-2, slice M3b). A page is named if it can be reached from `roots` (the trees as they are now, committed or
+// not), or from the catalog of EITHER superblock on disk (the one before the current is what a damaged current one falls back to, so its pages stay), or is a superblock or one of those catalogs. Every other page
+// is overwritten with zeros (it may hold a row that was erased) and goes on the pager's free list; then `sync`. So what a delete removed is gone from the file two commits and a sweep later, not before.
+// The number of free pages, or an error. A crash in the middle leaves some pages zeroed and none of them named: nothing to repair.
+pub fn sweep[&h, &q, &s, &r](heap: &!h Heap, p: &!q pager.Pager, sc: &!s [byte], roots: &r [int]) -> [heap, file_read, file_write] int {
+    let n = pager.next_page(p);
+    var marks = box_slice(heap, n + 1, byte_of(0));
+    var stack = box_slice(heap, 16384, 0);
+    var err = 0;
+    var count = 0;
+    borrow mut marks as &!mw in {
+        borrow mut stack as &!sw in {
+            let mk = contents(mw);
+            let st = contents(sw);
+            var top = 0;
+            var i = 0;
+            while i < slots() {
+                if roots[i] != 0 {
+                    st[top] = roots[i];
+                    top = top + 1;
+                }
+                i = i + 1;
+            }
+            var slot = 1;
+            while slot <= 2 && err == 0 {
+                let rc = pager.read_page(p, slot, sc[0..4096]);
+                if rc == 0 - 1 {
+                    err = btree.err_io();
+                } else if rc == 0 && int_of(sc[0]) == 3 && magic_ok(sc, 7) {
+                    let cat = commit.be(sc, 23, 4);
+                    if cat >= 3 && cat < n {
+                        mk[cat] = byte_of(1);
+                        let rc2 = pager.read_page(p, cat, sc[4096..8192]);
+                        if rc2 == 0 - 1 {
+                            err = btree.err_io();
+                        } else if rc2 == 0 && int_of(sc[4096]) == 4 {
+                            i = 0;
+                            while i < slots() {
+                                let root = commit.be(sc, 4096 + 7 + 4 * i, 4);
+                                if root != 0 {
+                                    st[top] = root;
+                                    top = top + 1;
+                                }
+                                i = i + 1;
+                            }
+                        }
+                    }
+                }
+                slot = slot + 1;
+            }
+            while top > 0 && err == 0 {
+                top = top - 1;
+                let id = st[top];
+                if id < 3 || id >= n {
+                    err = btree.err_bad();
+                } else if int_of(mk[id]) == 0 {
+                    mk[id] = byte_of(1);
+                    let rc = pager.read_page(p, id, sc[0..4096]);
+                    if rc < 0 {
+                        err = code(rc);
+                    } else if int_of(sc[0]) == 2 {
+                        let cnt = commit.be(sc, 1, 2);
+                        if top + cnt + 1 > len(st) {
+                            err = btree.err_deep();
+                        } else {
+                            st[top] = commit.be(sc, 7, 4);
+                            top = top + 1;
+                            var at = 11;
+                            var e = 0;
+                            while e < cnt {
+                                let kl = int_of(sc[at]);
+                                st[top] = commit.be(sc, at + 1 + kl, 4);
+                                top = top + 1;
+                                at = at + 5 + kl;
+                                e = e + 1;
+                            }
+                        }
+                    } else if int_of(sc[0]) != 1 {
+                        err = btree.err_bad();
+                    }
+                }
+            }
+            if err == 0 {
+                pager.clear_free(p);
+                var id = n - 1;
+                while id >= 3 && err == 0 {
+                    if int_of(mk[id]) == 0 {
+                        let rc = pager.zero_page(p, id);
+                        if rc < 0 {
+                            err = code(rc);
+                        } else {
+                            pager.push_free(p, id);
+                            count = count + 1;
+                        }
+                    }
+                    id = id - 1;
+                }
+            }
+        }
+    }
+    unbox_slice(heap, marks);
+    unbox_slice(heap, stack);
+    if err != 0 {
+        return err;
+    }
+    let rc = pager.sync(p);
+    if rc < 0 {
+        return code(rc);
+    }
+    return count;
+}

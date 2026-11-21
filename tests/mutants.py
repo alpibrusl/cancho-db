@@ -1521,6 +1521,15 @@ BTREE = [
     ("pstore: a file with no valid superblock is an empty database", "src/pstore.cho", "    if best < 0 {\n        return btree.err_bad();\n    }", "    if best < 0 {\n        return no_database();\n    }"),
     ("pstore: the roots are read from the wrong place", "src/pstore.cho", "        roots[i] = commit.be(sc, 7 + 4 * i, 4);", "        roots[i] = commit.be(sc, 8 + 4 * i, 4);"),
     ("pager: a superblock page is handed out as a page of a tree", "src/pager.cho", "    if next < 3 {\n        next = 3;\n    }", "    if next < 1 {\n        next = 1;\n    }"),
+    ("pstore: a sweep does not keep what is not committed yet", "src/pstore.cho", "                if roots[i] != 0 {\n                    st[top] = roots[i];", "                if false {\n                    st[top] = roots[i];"),
+    ("pstore: a sweep keeps only the pages of the first superblock", "src/pstore.cho", "            while slot <= 2 && err == 0 {\n                let rc = pager.read_page(p, slot, sc[0..4096]);\n                if rc == 0 - 1 {\n                    err = btree.err_io();\n                } else if", "            while slot <= 1 && err == 0 {\n                let rc = pager.read_page(p, slot, sc[0..4096]);\n                if rc == 0 - 1 {\n                    err = btree.err_io();\n                } else if"),
+    ("pstore: a sweep does not keep the catalog pages", "src/pstore.cho", "                        mk[cat] = byte_of(1);", "                        mk[cat] = byte_of(0);"),
+    ("pstore: a sweep does not zero the pages it frees", "src/pstore.cho", "                        let rc = pager.zero_page(p, id);", "                        let rc = 0;"),
+    ("pstore: a sweep is not synced", "src/pstore.cho", "    let rc = pager.sync(p);\n    if rc < 0 {\n        return code(rc);\n    }\n    return count;", "    return count;"),
+    ("pstore: a sweep keeps only the first child of a page", "src/pstore.cho", "                                st[top] = commit.be(sc, at + 1 + kl, 4);\n                                top = top + 1;", "                                st[top] = commit.be(sc, at + 1 + kl, 4);"),
+    ("pstore: a sweep does not keep the first child of a page", "src/pstore.cho", "                            st[top] = commit.be(sc, 7, 4);\n                            top = top + 1;", "                            st[top] = commit.be(sc, 7, 4);"),
+    ("pstore: a free page is handed out twice", "src/pager.cho", "        p.nfree = p.nfree - 1;\n        return contents(p.free)[p.nfree];", "        return contents(p.free)[p.nfree - 1];"),
+    ("pstore: zeroing a page stops at its first half", "src/pager.cho", "                var upto = 4096;\n                if p.crash > 0 && p.steps == p.crash {\n                    p.dead = true;\n                    upto = p.torn;\n                }", "                var upto = 2048;\n                if p.crash > 0 && p.steps == p.crash {\n                    p.dead = true;\n                    upto = p.torn;\n                }"),
     ("pager: the CRC of a page is not checked", "src/pager.cho", "    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {\n        return 0 - 2;\n    }", ""),
     ("pager: the CRC is checked over less than the page", "src/pager.cho", "    if crc.crc32_of(out[7..4096]) != commit.be(out, 3, 4) {", "    if crc.crc32_of(out[7..4000]) != commit.be(out, 3, 4) {"),
 ]
@@ -1564,6 +1573,61 @@ def run_btree(cancho):
     return 1 if survivors else 0
 
 
+# ---- the engine's rows (src/row.cho), judged by tests/row_check.py against PostgreSQL
+ROW = [
+    ("row: the image's keys are in byte order, not jsonb's", "src/row.cho", "    if len(x) != len(y) {\n        return len(x) < len(y);\n    }\n", ""),
+    ("row: the image separates columns with a comma alone", "src/row.cho", "            w = puts(out, w, \", \");\n        }\n        w = json_string(out, w, col_name(def, best));", "            w = puts(out, w, \",\");\n        }\n        w = json_string(out, w, col_name(def, best));"),
+    ("row: hex digits are upper case", "src/row.cho", "    return 'a' + v - 10;", "    return 'A' + v - 10;"),
+    ("row: the byte 0x1f is not escaped", "src/row.cho", "        } else if c < 32 {", "        } else if c < 31 {"),
+    ("row: a quote is not escaped", "src/row.cho", "        if c == '\"' || c == '\\\\' {", "        if c == '\\\\' {"),
+    ("row: a negative integer is one too large", "src/row.cho", "    if neg {\n        v = v - 1;\n    }\n", ""),
+    ("row: bytea's backslash is not doubled", "src/row.cho", 'var w = puts(out, at, "\\"\\\\\\\\x");', 'var w = puts(out, at, "\\"\\\\x");'),
+    ("row: a stored integer key keeps its sign bit", "src/row.cho", "                    b = (b + 128) % 256;", "                    b = b;"),
+    ("row: a stored text key has no terminator", "src/row.cho", "            w = put1(out, w, 0);\n            w = put1(out, w, 0);", "            w = w;"),
+    ("row: a null key column is taken", "src/row.cho", "            if col_pk(def, i) > 0 {\n                return false;\n            }", "            if false {\n                return false;\n            }"),
+    ("row: a boolean of 2 is taken", "src/row.cho", "} else if tag == 2 && int_of(row[at + 1]) > 1 {", "} else if tag == 2 && int_of(row[at + 1]) > 2 {"),
+    ("row: bytes after a row are taken", "src/row.cho", "    return at == len(row);", "    return at <= len(row);"),
+    ("row: the plain key separates with a comma alone", "src/row.cho", "        if k > 1 {\n            w = puts(out, w, \", \");", "        if k > 1 {\n            w = puts(out, w, \",\");"),
+    ("row: true and false are swapped", "src/row.cho", "        if int_of(row[vat + 1]) == 1 {\n            return puts(out, at, \"true\");", "        if int_of(row[vat + 1]) == 0 {\n            return puts(out, at, \"true\");"),
+    ("row: bytes after a definition are taken", "src/row.cho", "    if at != len(def) || seen != keys * (keys + 1) / 2 {", "    if seen != keys * (keys + 1) / 2 {"),
+    ("row: key places need not be 1 to k", "src/row.cho", "    if at != len(def) || seen != keys * (keys + 1) / 2 {", "    if at != len(def) {"),
+    ("row: a value of another type than its column is taken", "src/row.cho", "        } else if tag != col_type(def, i) {\n            return false;", "        } else if false {\n            return false;"),
+]
+
+
+def run_row(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in ROW if not only or only in m[0]]
+    survivors = []
+    for n, (label, rel, old, new) in enumerate(table):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "rowcheck"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/rowcheck.cho")] + [str(work / "src" / x) for x in ("row.cho", "state.cho", "commit.cho", "build.cho")] + ["-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            r = subprocess.run([sys.executable, str(ROOT / "tests/row_check.py"), str(exe)], capture_output=True, text=True, timeout=900, env=dict(os.environ, E2E_DB="cdb_rowmut"))
+            if r.returncode == 0:
+                print("SURVIVED %-46s every row check passes" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in r.stdout.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d check(s), e.g. %s" % (label, len(first), first[0][5:70] if first else (r.stderr.strip()[:60] or "a crash")))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
     if kind == "guard":
         return run_guard(cancho)
@@ -1573,6 +1637,8 @@ def run(kind, cancho):
         return run_store(cancho)
     if kind == "btree":
         return run_btree(cancho)
+    if kind == "row":
+        return run_row(cancho)
     if kind == "sql":
         return run_sql(cancho)
     if kind == "l3a":

@@ -19,6 +19,7 @@ import cdb.pstore;
 //     init                a new database in an empty file (the two superblocks)    -> `ok`
 //     load                the roots of the newest valid superblock into the slots  -> `loaded SEQ`, `empty`, or `err CODE`
 //     commit              the slots' roots become the state (src/pstore.cho)        -> `seq N` or `err CODE`
+//     sweep               zero the pages nothing names and make them free            -> `swept N` or `err CODE`
 //     sync                fsync                                                -> `ok` or `err CODE`
 //     steps                                                                    -> `steps N`
 //
@@ -365,6 +366,21 @@ fn run[&h, &i, &p, &r](heap: &!h Heap, io: &!i Io, pg: &!p pager.Pager, roots: &
                     put_int(io, r);
                     putchar(io, '\n');
                 }
+            } else if ce - cs == 5 && int_of(all[cs]) == 's' && int_of(all[cs + 1]) == 'w' {
+                // sweep: zero the pages nothing names and make them free
+                var r = 0;
+                borrow mut sc as &!sw in {
+                    r = pstore.sweep(heap, pg, contents(sw), roots);
+                }
+                if r < 0 {
+                    put_str(io, "err ");
+                    put_int(io, 0 - r);
+                    putchar(io, '\n');
+                } else {
+                    put_str(io, "swept ");
+                    put_int(io, r);
+                    putchar(io, '\n');
+                }
             } else if ce - cs == 6 && int_of(all[cs]) == 'c' {
                 // commit: the slots' roots become the state
                 var r = 0;
@@ -451,25 +467,25 @@ fn main(world: World) -> [] int {
                                 }
                             }
                         }
-                        var pg = pager.new_pager(f, size);
-                        if arg_count(g) == 4 {
-                            var crash = 0;
-                            var torn = 0;
-                            var i = 0;
-                            while i < len(arg(g, 2)) {
-                                crash = crash * 10 + int_of(arg(g, 2)[i]) - '0';
-                                i = i + 1;
-                            }
-                            i = 0;
-                            while i < len(arg(g, 3)) {
-                                torn = torn * 10 + int_of(arg(g, 3)[i]) - '0';
-                                i = i + 1;
-                            }
-                            borrow mut pg as &!cq in {
-                                pager.set_crash(cq, crash, torn);
-                            }
-                        }
                         borrow mut heap as &!hh in {
+                            var pg = pager.new_pager(hh, f, size);
+                            if arg_count(g) == 4 {
+                                var crash = 0;
+                                var torn = 0;
+                                var i = 0;
+                                while i < len(arg(g, 2)) {
+                                    crash = crash * 10 + int_of(arg(g, 2)[i]) - '0';
+                                    i = i + 1;
+                                }
+                                i = 0;
+                                while i < len(arg(g, 3)) {
+                                    torn = torn * 10 + int_of(arg(g, 3)[i]) - '0';
+                                    i = i + 1;
+                                }
+                                borrow mut pg as &!cq in {
+                                    pager.set_crash(cq, crash, torn);
+                                }
+                            }
                             var roots = box_slice(hh, 16, 0);
                             borrow mut io as &!oo in {
                                 borrow mut pg as &!pp in {
@@ -479,8 +495,8 @@ fn main(world: World) -> [] int {
                                 }
                             }
                             unbox_slice(hh, roots);
+                            pager.drop_pager(hh, pg);
                         }
-                        pager.drop_pager(pg);
                     }
                 }
             }

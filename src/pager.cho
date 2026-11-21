@@ -31,18 +31,26 @@ pub res struct Pager {
     torn: int,
     steps: int,
     dead: bool,
+    // pages no root names, zeroed, to be handed out again before the file grows (`cdb.pstore.sweep` fills it)
+    free: Box[[int]],
+    nfree: int,
 }
 
-pub fn new_pager(file: File, length: int) -> [] Pager {
+pub fn free_max() -> [] int {
+    return 65536;
+}
+
+pub fn new_pager[&h](heap: &!h Heap, file: File, length: int) -> [heap] Pager {
     var next = length / 4096;
     if next < 3 {
         next = 3;
     }
-    return Pager { file: file, next: next, crash: 0, torn: 0, steps: 0, dead: false };
+    return Pager { file: file, next: next, crash: 0, torn: 0, steps: 0, dead: false, free: box_slice(heap, free_max(), 0), nfree: 0 };
 }
 
-pub fn drop_pager(p: Pager) -> [] int {
-    let Pager { file, next, crash, torn, steps, dead } = p;
+pub fn drop_pager[&h](heap: &!h Heap, p: Pager) -> [heap] int {
+    let Pager { file, next, crash, torn, steps, dead, free, nfree } = p;
+    unbox_slice(heap, free);
     return file_close(file);
 }
 
@@ -61,8 +69,12 @@ pub fn crashed[&q](p: &q Pager) -> [] bool {
     return p.dead;
 }
 
-// A new page number.
+// A new page number: a free page if there is one, else the file grows.
 pub fn alloc[&q](p: &!q Pager) -> [] int {
+    if p.nfree > 0 {
+        p.nfree = p.nfree - 1;
+        return contents(p.free)[p.nfree];
+    }
     let id = p.next;
     p.next = p.next + 1;
     return id;
@@ -181,6 +193,96 @@ pub fn flip[&q](p: &!q Pager, id: int, off: int) -> [file_read, file_write] int 
             }
             Read::Failed(e) => {
                 rc = 0 - 1;
+            }
+        }
+    }
+    return rc;
+}
+
+// Forget the free pages (before a sweep fills the list again).
+pub fn clear_free[&q](p: &!q Pager) -> [] int {
+    p.nfree = 0;
+    return 0;
+}
+
+// Page `id` is free (no root names it and it is zeroed): false if the list is full (the page is then simply not reused until the next sweep).
+pub fn push_free[&q](p: &!q Pager, id: int) -> [] bool {
+    if p.nfree >= free_max() {
+        return false;
+    }
+    contents(p.free)[p.nfree] = id;
+    p.nfree = p.nfree + 1;
+    return true;
+}
+
+pub fn free_count[&q](p: &q Pager) -> [] int {
+    return p.nfree;
+}
+
+// Overwrite page `id` with zeros (a page no root names may hold an erased row: docs/m3-engine.md D-M3-2). A page that is zeros already is not written again (and is no step). A zero page does not match its
+// CRC, so it is refused if it is ever read as a page. 0, -1 if the file could not be read or written, -3 at the crash point.
+pub fn zero_page[&q](p: &!q Pager, id: int) -> [file_read, file_write] int {
+    if id < 3 {
+        return 0 - 1;
+    }
+    var rc = 0;
+    region r {
+        let buf = alloc_slice[r](4096, byte_of(0));
+        var got = 0;
+        var going = true;
+        while going && got < 4096 {
+            match file_pread(p.file, id * 4096 + got, buf[got..4096]) {
+                Read::Got(n) => {
+                    if n <= 0 {
+                        going = false;
+                    }
+                    got = got + n;
+                }
+                Read::End => {
+                    going = false;
+                }
+                Read::Failed(e) => {
+                    going = false;
+                    rc = 0 - 1;
+                }
+            }
+        }
+        var dirty = false;
+        var i = 0;
+        while i < got {
+            if int_of(buf[i]) != 0 {
+                dirty = true;
+                buf[i] = byte_of(0);
+            }
+            i = i + 1;
+        }
+        if rc == 0 && dirty {
+            if p.dead {
+                rc = 0 - 3;
+            } else {
+                p.steps = p.steps + 1;
+                var upto = 4096;
+                if p.crash > 0 && p.steps == p.crash {
+                    p.dead = true;
+                    upto = p.torn;
+                }
+                var at = 0;
+                while at < upto && rc == 0 {
+                    match file_pwrite(p.file, id * 4096 + at, buf[at..upto]) {
+                        Done::Ok(n) => {
+                            if n <= 0 {
+                                rc = 0 - 1;
+                            }
+                            at = at + n;
+                        }
+                        Done::Failed(e) => {
+                            rc = 0 - 1;
+                        }
+                    }
+                }
+                if p.dead && rc == 0 {
+                    rc = 0 - 3;
+                }
             }
         }
     }

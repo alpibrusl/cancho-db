@@ -100,7 +100,7 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 | Slice | Delivers | Gate |
 |---|---|---|
 | **M3a** (built, below) | the page file, superblocks, the COW B+tree (bytes to bytes), fork (a slot made the same tree) | gates 1 and 2 on the tree alone, with the crash-point module; gate 3 and the page cache are not in it |
-| **M3b** | the delta segments and the zeroing of freed pages; recovery from a log ahead of the superblock | gate 2 with the log; `AS OF`-style reconstruction equals the model |
+| **M3b** (the sweep built, 6c; the delta tree comes with the rows in M3c/M3d) | the zeroing and reuse of freed pages; the delta store as a tree; recovery from a log ahead of the superblock | gate 2 with the log; `AS OF`-style reconstruction equals the model |
 | **M3c** | tables, the row encoding and image (D-M3-6), the catalog of tables inside the engine, `create table` and `drop table` | the image equals `to_jsonb` for every supported type, on the corpus |
 | **M3d** | the executor for `insert`, `update`, `delete` and `select ... where <key> = <constant>`, and the engine's `changes` | gate 4 for these; `changes` equals the capture's |
 | **M3e** | predicates on any column, range scans on the key, `order by`, `limit`, `offset`, `distinct`, `in`, `case`, `cast`, `like` | gate 4 |
@@ -130,6 +130,30 @@ buffer), `src/pstore.cho` (the superblocks, the catalog page and the commit), `p
 **What the tests found.** The first versions of both tests passed mutants they should have killed: a tree of 5-byte keys never had an internal split (a page holds 400 of them), and deleting in random order never emptied
 a subtree one page at a time. The tests now build a tree of 40,000 100-byte keys (three levels, internal splits) and delete it in key order and in reverse. One mutant is equivalent and is left out, with the reason in
 `tests/mutants.py`; another (a short read accepted) is equivalent because the CRC still refuses the page.
+
+## 6c. M3b, built: the sweep; and the delta store moves into the tree (a correction)
+
+**Built:** `pstore.sweep` and the pager's free list. A page is *named* if it is reached from the trees as they are now (committed or not) or from the catalog of **either** superblock on disk (the one before the current is the
+fallback for a damaged current one, so its pages stay). Every other page is overwritten with zeros, goes on a free list and is handed out again before the file grows; the sweep ends with an `fsync`. So **what a delete
+removed is gone from the file two commits and a sweep later, not before**, which is the rule erasure on the engine (M3i) will follow. A crash in the middle of a sweep leaves pages that nothing names, zeroed or
+not: nothing to repair, and the crash test of 6b now runs through sweeps. The sweep reads every page of every tree (it is a mark and sweep, not reference counts): simple, and its cost is the size of the data; it
+is run when asked, not at every commit. Checked by `tests/pstore_check.py` (a deleted value's bytes before and after; five 700-byte values filling a page; a file rewritten for 60 commits stays 5 times smaller;
+uncommitted work survives; the fallback superblock still works; random scripts against the model; the `fsync` seen with `strace`) and nine more mutants.
+
+**Corrected: the delta store is a tree, not append-only segment files** (D-M3-2 and step 1 of D-M3-3 said segments, synced before the pages). A second file would need its own torn-tail repair and its own order against the
+superblock, and erasure would have to rewrite it as the proxy rewrites the statement store today. Kept as one more tree in the page file (keyed by the order number), the deltas are committed by the same
+superblock as the data they describe, atomically, with no extra `fsync`; erasure is a put of the scrubbed record and the sweep above. What it costs: a row image must fit a tree value (800 bytes) until overflow
+pages exist, which Q9 already says; and history shares the page file with the current state, so "move old segments to cold storage" (design.md) becomes a snapshot question for M4, not a file move. The commit
+order is therefore: pages (data and deltas) and catalog, `fsync`, the log record, `fsync` (as today), the superblock, `fsync`; recovery compares the superblock's sequence with the log's tip as D-M3-3 says.
+
+## 6d. M3c, part 1, built: the row, its image and its keys
+
+`src/row.cho`: a table definition (columns, types, key places), the stored row, and the three things made from it: the **image** (`to_jsonb(row)::text`, byte for byte: jsonb's key order of shorter names
+first, its `", "` and `": "`, its string escapes, `\\x` hex for `bytea`), the **plain key** (`jsonb_build_array(<key columns>)::text`) and the **stored key** (integers big-endian with the sign bit flipped,
+text with a terminator, so that stored keys sort as the key columns do). `tests/row_check.py` puts 1,051 random rows of 40 random tables into PostgreSQL and compares all three; 17 mutants.
+Not built yet of M3c: the catalog of tables in a tree and `create table` (the IR's `Ddl` carries only the kind and the table's name, so the column definitions have to come from the parsed statement, not from the
+IR: the executor of DDL reads the parser's tree). Stated limits: text is taken as bytes (that it is valid UTF-8 with no NUL is for the executor to check before a row is stored); a row or key that does not fit
+its buffer is refused.
 
 ## 7. Taking over, safely
 
