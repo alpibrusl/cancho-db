@@ -377,6 +377,34 @@ Two things it showed that the page could have got wrong by assertion:
 What this is not: a power failure (a stopped process leaves what it wrote; a machine may lose what was not synced, which is what the order of D-M3-3 is for and what only gate 3's failing `fsync` and a
 real power test would show), nor a test of several branches or of the delta tree, which do not exist yet.
 
+## 6n. The history inside the tree (design, written before the code; it settles what 6c left open)
+
+6c moved the delta store into the page file "as a tree". This says which tree, and what a record is.
+
+**D-M3-9. The history is undo entries in the branch's own tree.** Beside the tables (table numbers from 0, D-M3-8) the tree holds, under the number `0xFFFFFFFF`:
+
+    0xFFFFFFFF, then (2^63 - 1 - t) as 8 bytes, then a key K of the tree   ->   what K held before transaction t first wrote it: `0` (nothing), or `1` and the value
+
+where *t* counts the branch's transactions from 1. Every write of a key outside the history (a row, a table's entry in the catalog, the counter of table numbers) first records this, unless transaction
+*t* already has an entry for K (the first value is the one before the transaction). What follows from it, each a reason for the choice:
+
+* **`AS OF t` is the tip with the entries after *t* applied**, newest first, which is the order the keys sort in (hence the inverted number): a `put` of the old value or a `del`, onto a root that is
+  thrown away afterwards. It is an ordinary tree, so every statement of the engine reads it unchanged, tables that were dropped since included (the catalog is undone like any row);
+* **a fork carries its history**: the entries are in the tree a fork copies the root of, shared page for page, at no cost;
+* **a commit is atomic with its history**: one root holds the rows and what they were;
+* **`changes` is in the tree**, not only in memory: the entries of transaction *t* name every key it wrote and the value before; the value after is the tip's (or the next entry's);
+* **erasing a row is deleting its entries** and the row, then the sweep of 6c: no second store to scrub in step with the first.
+
+*What this costs.* A write is three more descents of the tree (is there an entry, what is the old value, store the entry), which roughly doubles the work of a write that is already the slow part
+(6h); the history is never trimmed (a retention rule is M4's signed snapshots); an entry's value is the old row plus a byte and its key the row's key plus twelve, so the limits of D-M3-8 fall to **184
+bytes for a stored key and 780 for a stored row**; `AS OF` far back writes a page path for every entry it undoes (garbage until the next sweep), where a persistent structure would share: correct first.
+
+**What a transaction is, for now:** each statement that writes is one (the harness numbers them); transactions of several statements, and which transaction a commit of the log is, belong to the proxy's
+use of the engine (M3j). Nothing in the entries depends on that.
+
+**Gate.** At random points of the random history of 6h the tables are read; later, `AS OF` each of those points must read the same bytes, also from a new process after a commit, after a sweep, and on
+a fork. Erasure and merge are M3i and are not claimed by this.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
