@@ -467,6 +467,21 @@ Time is unchanged for single-row statements (1,900 a second): it goes to walking
 single-row statement still wastes is one path of pages per statement, each superseded by the next statement's: reclaiming those without a sweep means freeing a page as soon as the root that named it is
 replaced *and* no committed root names it, which is bookkeeping this slice does not have.
 
+**Beside PostgreSQL, on the same machine and the same statements** (20,000 rows of an integer key, an integer and a short text; PostgreSQL 16.15 over a socket, the engine through its harness with no
+`fsync` between statements, which flatters the engine):
+
+| | PostgreSQL | the engine | |
+|---|---|---|---|
+| 20,000 inserts, one a statement | 1.6 s (12,900 a second) | 9.7 s (2,100 a second) | 6 times slower |
+| a select with a predicate on a column that is not the key | 3.5 ms | 645 ms | 180 times slower |
+| `count(*), sum(a)` over the table | 1.4 to 20 ms | 632 ms | 30 to 450 times slower |
+| an update of every row | 0.09 s | 5.4 s | 60 times slower |
+| a row by its key | 0.08 ms | 0.1 to 0.2 ms | about the same |
+
+**So no: the performance problem is not solved.** What 6p solved is the size of the file. Reading is slow because every row is found by walking down from the root and every page on the way is read
+from the file and its CRC checked again: there is no page cache and no cursor that stays on a leaf. Writing is slow for the same reason three times a row (6o). Both are known work (a cache of checked
+pages, a scan that moves along the leaves), neither is built, and nothing here should be served to anyone who counts milliseconds until they are.
+
 **Tests.** Everything that ran before runs through it: the random history against PostgreSQL (12 seeds), `AS OF` and the fork (whose untouched branch is exactly the property at risk), and the crash at
 every step (928 steps, 1,856 crashes). Four mutants: writing over a page a root names, and keeping the marks of an earlier statement, are each killed by a wrong answer within twenty statements; two
 that write a page over the wrong one of the path are killed too. Switching the reuse off is not a wrong answer, so no differential sees it: `tests/engine_crash.py` holds the step count under 1,200 for
