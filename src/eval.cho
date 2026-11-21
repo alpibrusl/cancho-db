@@ -365,6 +365,10 @@ fn convert[&w, &a, &i](ws: &!w [int], v: int, to: int, explicit: bool, ar: &!a [
     if from == to {
         return 0;
     }
+    if explicit && (from == 4 && is_int(to) || is_int(from) && to == 4) {
+        // PostgreSQL 16 has no cast between bytea and the integers (42846) and PostgreSQL 18 has one: where the versions differ, nothing is answered
+        return unsupported();
+    }
     let state = ws[v + 1];
     if state != 0 {
         // a null or an error keeps its state and takes the type, if the conversion exists at all

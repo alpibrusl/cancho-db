@@ -104,7 +104,7 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 | **M3c** (built, 6d and 6h) | tables, the row encoding and image (D-M3-6), the catalog of tables inside the engine, `create table` and `drop table` | the image equals `to_jsonb` for every supported type, on the corpus |
 | **M3d** (built, 6f to 6h; the delta tree is not) | the executor for `insert`, `update`, `delete` and `select ... where <key> = <constant>`, and the engine's `changes` | gate 4 for these; `changes` equals the capture's |
 | **M3e** (built, 6h) | predicates on any column, range scans on the key, `order by`, `limit`, `offset`, `distinct`, `in`, `case`, `cast`, `like` | gate 4 |
-| **M3f** | aggregates and `group by`, `having` | gate 4 |
+| **M3f** (built, 6i and 6j: `count`, `sum`, `min`, `max`) | aggregates and `group by`, `having` | gate 4 |
 | **M3g** | joins (nested loop first) | gate 4 |
 | **M3h** | `alter table`, `create index` (an index is a second tree) | gate 4 on the catalog after each |
 | **M3i** | native `cancho_fork`, `AS OF`, `cancho_merge`, `cancho_erase` on the engine | the existing fork, as-of, merge and erase end-to-end suites pass on it |
@@ -291,6 +291,34 @@ key), and the engine refuses rather than reproduce that rule.
 **Errors.** As 6g: every error is found (a row's group expression or aggregate argument is computed for every row the `where` lets through, `having` for every group, the items for every group `having`
 keeps), one SQLSTATE is the answer, several are refused, and any error under a `limit` is order-dependent. A `sum` whose running total could leave the `bigint` range in some order of the rows is
 order-dependent too (it cannot happen below four thousand million rows of `integer`, and is not tested).
+
+## 6j. M3f, built: what the differential found
+
+The grouped path is in `src/execs.cho` (SELECT moved there from `src/exec.cho`); the evaluator's slots are in `src/eval.cho`. `tests/engine_check.py` now writes grouped selects too (aggregates over
+columns and expressions, wrong types, columns that are not grouped, `having`, `order by` places and aggregates, `limit`). **40 seeds of 2,000 statements: no disagreement; of the 53,982 statements PostgreSQL
+answers the engine refuses 1,144 (2.1 %).** 88 fixed statements must be answered and are; 10 whose outcome depends on PostgreSQL's order and 9 the engine refuses on purpose are pinned with what PostgreSQL
+16 does for each. 105 mutants of the engine, 35 of them of the grouped path and the slots.
+
+**What the differential found** (each a wrong answer, or a claim of an error PostgreSQL does not raise, before it was fixed):
+* **A `having` condition with no aggregate in it is not a condition on groups.** PostgreSQL moves it into the `where` and applies it to rows before they are grouped; a `having false` means nothing is read
+  at all, not even the `where`. So `select k, sum(10 / (k - 2)) from t group by k having k > 2` never divides by zero, and `select count(*) from t where 10 / (k - 2) > 0 having false` answers no rows. The
+  engine, which had computed every row first, said `22012`. It now refuses (`engine-order-dependent`) whenever a row or a group raises an error in a query that has such a condition; with no error the
+  answer is the same either way.
+* **`select distinct` over items that cannot differ is a `limit 1`.** `select distinct 'x' from t where 10 / (k - 2) > 0` stops at the first row and never reaches the division. An error under `distinct`
+  is now order-dependent, as under `limit`.
+* **A cast to the column's own type is nothing.** With `k` a `smallint`, `group by cast(k as smallint)` groups by `k`, so `select k ...` is legal (and, `k` being the key, so is every other column).
+  The engine compared the bytes of the IR, found `k` outside every `group by` expression and said `42803`. A column under a cast in the `group by` now makes an ungrouped column a refusal, not an error.
+* **`group by - 1` is a place** (`42P10`), like `order by - 1`: the minus joins the literal before PostgreSQL asks what it is. Refused.
+* And one false alarm, which was the test's: an item can be *named* `k` by a cast or a CASE (6h), and then `order by k` is that item and does not break ties; the generator now writes the table's name
+  before the key.
+
+**Two PostgreSQL versions, found by CI.** The gate's first run of the evaluator's differential on GitHub's runner disagreed on one expression, `cast(y as integer)` with `y` a `bytea`: PostgreSQL 16.15
+(this machine) has no such cast (`42846`), the runner's newer PostgreSQL has one. The tests said "PostgreSQL 16" and were being run on two versions without saying so. Now each prints the server's version;
+a cast between `bytea` and an integer is refused; and what a refused statement does in PostgreSQL (the pinned outcomes above) is held to on version 16 and printed as a note on any other. **The engine
+answers only where the versions it is tested on agree**, which is two, not every one.
+
+**Limits of this slice.** A grouped query with a `group by` keeps a record for every row the `where` lets through and sorts them (262,144 rows or 16 MiB, refused beyond); without `group by` the rows are
+only counted through. `sum` over `bigint`, `avg`, and every function that is not one of the four aggregates are refused. The overflow of a `sum` is not tested (it needs more rows than the test makes).
 
 ## 7. Taking over, safely
 

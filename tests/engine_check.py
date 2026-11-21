@@ -346,7 +346,8 @@ class Gen:
                     k = self.any_(1)
                 keys.append(k + self.pick(["", "", " asc", " desc"]))
             if not distinct and self.r.random() < 0.75:
-                keys.append(pk + self.pick(["", " desc"]))
+                # with the table's name: a bare `k` may be an output column that a cast or a CASE named k, and then it decides nothing
+                keys.append(t.name + "." + pk + self.pick(["", " desc"]))
                 total = True
             if distinct and self.r.random() < 0.6:
                 keys = ["%d%s" % (i + 1, self.pick(["", " desc"])) for i in range(nout)]
@@ -361,6 +362,76 @@ class Gen:
                 if not total:
                     how = "count"
         return s, how
+
+
+def _agg(g):
+    t = g.t
+    r = g.r.random()
+    ints = [c[0] for c in t.cols if c[1] in ("smallint", "integer")]
+    if r < 0.25:
+        return "count(*)"
+    if r < 0.4:
+        return "count(%s)" % g.any_(1)
+    if r < 0.62:
+        if ints and g.r.random() < 0.85:
+            return "sum(%s)" % g.pick(ints + ["%s + 1" % g.pick(ints), "cast(%s as smallint)" % g.int_(0)])
+        return "sum(%s)" % g.any_(1)
+    arg = g.int_(1) if g.r.random() < 0.55 else (g.text_(1) if g.r.random() < 0.85 else g.any_(1))
+    return "%s(%s)" % (g.pick(["min", "max"]), arg)
+
+
+def gselect(g):
+    """A grouped SELECT: (sql, how to compare)"""
+    t = g.t
+    groups = []
+    for _ in range(g.pick([0, 0, 1, 1, 1, 2])):
+        r = g.r.random()
+        if r < 0.6:
+            groups.append(g.pick(t.cols)[0])
+        elif r < 0.8 and t.of("int"):
+            groups.append("(%s %% %s)" % (g.pick(t.of("int")), g.pick(["2", "3"])))
+        else:
+            groups.append(g.any_(1))
+    items = []
+    by = []
+    for i, ge in enumerate(groups):
+        if g.r.random() < 0.85:
+            items.append(ge)
+            by.append(str(len(items)) if g.r.random() < 0.3 else ge)
+        else:
+            by.append(ge)
+    for _ in range(g.r.randrange(1, 4)):
+        r = g.r.random()
+        if r < 0.7:
+            items.append(_agg(g))
+        elif r < 0.85:
+            items.append("(%s %s %s)" % (_agg(g), g.pick(["+", "-", "*", "/"]), g.pick([_agg(g), "1", "2", "0"])))
+        elif r < 0.93:
+            items.append(g.pick(t.cols)[0])   # often not grouped: 42803
+        else:
+            items.append("case when %s > 1 then %s else %s end" % (_agg(g), _agg(g), g.lit_int()))
+    g.r.shuffle(items) if g.r.random() < 0.3 and not any(b.isdigit() for b in by) else None
+    sql = "select %s%s from %s" % ("distinct " if g.r.random() < 0.08 else "", ", ".join(items), t.name)
+    if g.r.random() < 0.5:
+        sql += " where " + g.where()
+    if by:
+        sql += " group by " + ", ".join(by)
+    if g.r.random() < 0.3:
+        sql += " having " + g.pick(["count(*) > 1", "count(*) > 0", "%s is not null" % _agg(g), "%s > 2" % _agg(g), "(%s / (count(*) - 1)) >= 0" % _agg(g), g.bool_(1)])
+    how = "set"
+    if g.r.random() < 0.6:
+        if g.r.random() < 0.8:
+            keys = ["%d%s" % (i + 1, g.pick(["", " desc"])) for i in range(len(items))]
+            g.r.shuffle(keys)
+            how = "order"
+        else:
+            keys = [_agg(g) + g.pick(["", " desc"])]
+        sql += " order by " + ", ".join(keys)
+        if g.r.random() < 0.3:
+            sql += " limit " + g.pick(["1", "2", "5"])
+            if how != "order":
+                how = "count"
+    return sql, how
 
 
 def run_engine(path, lines):
@@ -546,6 +617,31 @@ FIXED = [
     ("select k from fx where b", "set"),
     ("select k from fx where b like 't%' or c is null", "set"),
     ("select k from fx where k in (102, 105, 1) and not (b = 'x')", "set"),
+    ("select count(*), count(a), sum(a), min(a), max(b), min(n), max(k) from fx", "set"),
+    ("select c, count(*) from fx group by c order by 1", "order"),
+    ("select b, sum(a), count(a) from fx group by b having count(*) >= 1 order by b", "order"),
+    ("select count(*), sum(a), min(b) from fx where k < 0", "set"),
+    ("select count(*) from fx where k < 0 group by c", "set"),
+    ("select a, count(*) from fx group by b", "set"),
+    ("select count(*) from fx order by b", "set"),
+    ("select count(*) from fx having b = 'x'", "set"),
+    ("select min(c) from fx", "set"),
+    ("select sum(b) from fx", "set"),
+    ("select k % 2, count(*), sum(a) + min(k) from fx group by k % 2 order by 1", "order"),
+    ("select 10 / (count(*) - count(*)) from fx", "set"),
+    ("select count(*) from fx having count(*) / 0 > 1", "set"),
+    ("select c from fx group by c having c", "set"),
+    ("select distinct count(*) from fx group by c", "set"),
+    ("select b from fx group by 1 order by count(*) desc, 1 limit 2", "order"),
+    ("select b, c, max(n) from fx group by c, b order by 1, 2", "order"),
+    ("select count(*) + 1, 'n', null from fx having min(a) > 30000", "set"),
+    ("select max(a), min(a) from fx group by b order by max(a) desc, min(a)", "set"),
+    ("select sum(a / (k - 104)) from fx", "set"),
+    ("select count(*) from fx having count(*)", "set"),
+    ("select max(k), min(k), sum(k), count(*) from fx where n < 0", "set"),
+    ("select b, min(k), max(k), sum(k - 200) from fx group by b order by 1", "order"),
+    ("select 2, c, 1 + count(*) from fx group by 1, 2 order by 3, 2", "order"),
+    ("select count(*) from fx group by 10 / (k - 104)", "set"),
     ("create table fx (k integer primary key)", "ddl"),
     ("create table fy (k integer primary key, k text)", "ddl"),
     ("create table fy (k integer primary key, j integer primary key)", "ddl"),
@@ -575,10 +671,37 @@ DEP = [
     ("update fz set k = k + 1", None),
     # the same rows the other way: 3 becomes 2, which is there
     ("update fz set k = k - 1", "23505"),
+    # every row of a DISTINCT over a constant is the same row, so one is enough: PostgreSQL stops there
+    ("select distinct 'x' from fz where 10 / (k - 2) > 0", None),
+    # and under an aggregation too: the group whose HAVING divides by zero is not reached
+    ("select distinct 'x' from fz group by n having 10 / (max(k) - 2) < 100", None),
+    # a HAVING condition with no aggregate in it is applied to the rows before they are grouped: the row with k = 2 is never summed
+    ("select k, sum(10 / (k - 2)) from fz group by k having k > 2", None),
+    # and one that is false for certain means nothing is read at all, not even the WHERE
+    ("select count(*) from fz where 10 / (k - 2) > 0 having false", None),
 ]
 
 
+# Statements the engine REFUSES as `engine-unsupported` on purpose, and what PostgreSQL 16 does with each: answers PostgreSQL has rules for that the engine does not reproduce. A change that starts
+# answering one of them has to show that the answer is PostgreSQL's.
+UNSUP = [
+    ("select sum(cast(n as bigint)) from fz", None),                    # a numeric
+    ("select k, count(*) from fz group by cast(k as integer)", None),   # the cast is nothing, so k is grouped
+    ("select k, n from fz group by k", None),                           # n depends on the key
+    ("select count(*) from fz group by - 1", "42P10"),                  # a place that does not exist
+    ("select sum(count(*)) from fz", "42803"),
+    ("select k from fz where count(*) > 0", "42803"),
+    ("select upper('a') from fz", None),
+    ("select k from fz order by - 1", "42P10"),
+    ("select k from fz order by 'a'", "42601"),
+]
+
+
+PGMAJOR = [0]
+
+
 def order_dependent(pg):
+    notes = []
     with tempfile.TemporaryDirectory() as d:
         eng = run_engine(os.path.join(d, "dep.db"), DEP_SETUP + [x[0] for x in DEP])
     for sql in DEP_SETUP:
@@ -592,8 +715,24 @@ def order_dependent(pg):
         if ans != ["refused engine-order-dependent"]:
             raise SystemExit("engine_check: %s: the engine says %s, and the answer depends on PostgreSQL's order" % (sql, ans))
         if err != want:
-            raise SystemExit("engine_check: %s: PostgreSQL says %s, expected %s" % (sql, err, want))
+            # what PostgreSQL 16 does is written down beside each statement; another version may plan otherwise, which is the point of refusing
+            if PGMAJOR[0] == 16:
+                raise SystemExit("engine_check: %s: PostgreSQL says %s, expected %s" % (sql, err, want))
+            notes.append("%s: %s, where PostgreSQL 16 says %s" % (sql, err, want))
+    with tempfile.TemporaryDirectory() as d:
+        eng = run_engine(os.path.join(d, "unsup.db"), DEP_SETUP + [x[0] for x in UNSUP])
+    for (sql, want), ans in zip(UNSUP, eng[len(DEP_SETUP):]):
+        pg.query("begin")
+        err, _, _, _ = pg.query(sql)
+        pg.query("rollback")
+        if ans != ["refused engine-unsupported"]:
+            raise SystemExit("engine_check: %s: the engine says %s, and this is one it does not answer" % (sql, ans))
+        if err != want:
+            if PGMAJOR[0] == 16:
+                raise SystemExit("engine_check: %s: PostgreSQL says %s, expected %s" % (sql, err, want))
+            notes.append("%s: %s, where PostgreSQL 16 says %s" % (sql, err, want))
     pg.query("drop table fz")
+    return notes
 
 
 def erasure():
@@ -630,6 +769,8 @@ def main():
     if r.returncode != 0:
         raise SystemExit("engine_check: " + r.stderr)
     pg = Pg(DB)
+    version = pg.query("show server_version")[2][0][0].decode().split()[0]
+    PGMAJOR[0] = int(version.split(".")[0])
     rng = random.Random(SEED)
     g = Gen(rng)
     tables = {}
@@ -663,6 +804,9 @@ def main():
         elif r < 0.64:
             pk = g.t.cols[g.t.pk][0]
             stmts.append(("select * from %s order by %s" % (g.t.name, pk), "order", g.t.name))
+        elif r < 0.78:
+            sql, how = gselect(g)
+            stmts.append((sql, how, g.t.name))
         else:
             sql, how = g.select()
             stmts.append((sql, how, g.t.name))
@@ -678,17 +822,19 @@ def main():
     fcounts, ffails, _, _ = compare(pg, fstmts, feng, True)
     print("engine_check: %d fixed statements, none refused: %s" % (len(FIXED), ", ".join("%s=%d" % kv for kv in sorted(fcounts.items()))))
     fails += ffails
-    order_dependent(pg)
-    print("engine_check: %d statements whose outcome depends on PostgreSQL's order are refused as such" % len(DEP))
+    notes = order_dependent(pg)
+    print("engine_check: %d statements whose outcome depends on PostgreSQL's order are refused as such, and %d that are refused on purpose" % (len(DEP), len(UNSUP)))
+    for note in notes:
+        print("engine_check: NOTE (PostgreSQL %s) %s" % (version, note))
     erasure()
     print("engine_check: a deleted row and a dropped table are gone from the page file two commits and a sweep later")
     print("engine_check: %d statements (seed %d): %s" % (len(stmts), SEED, ", ".join("%s=%d" % kv for kv in sorted(counts.items()))))
     print("engine_check: PostgreSQL answers %d that the engine refuses, of %d it answers in all" % (refused_answered, refused_answered + answered))
     if fails:
-        raise SystemExit("engine_check: %d disagreements" % fails)
+        raise SystemExit("engine_check: %d disagreements (PostgreSQL %s)" % (fails, version))
     if refused_answered * 2 > refused_answered + answered:
         raise SystemExit("engine_check: the engine refuses more than half of what PostgreSQL answers")
-    print("engine_check: ok")
+    print("engine_check: ok (PostgreSQL %s)" % version)
 
 
 main()

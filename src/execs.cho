@@ -215,6 +215,790 @@ fn bound[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], at: int, w
     return end;
 }
 
+// The rows of an answer, `n` of them in `idx`: DISTINCT, then the ORDER BY, then OFFSET and LIMIT (-1: none). 0.
+fn finish[&q](w: &!q exec.Work, n0: int, distinct: bool, limit: int, offset: int) -> [] int {
+    var n = n0;
+    let ni = w.nitems;
+    let no = w.norder;
+    var i = 0;
+    if distinct {
+        sort_rows(w, n, 1);
+        var kept = 0;
+        i = 0;
+        while i < n {
+            let cur = contents(w.idx)[i];
+            if kept == 0 || order(contents(w.rows), contents(w.pos), contents(w.idx)[kept - 1], cur, 1, ni, no) != 0 {
+                contents(w.idx)[kept] = cur;
+                kept = kept + 1;
+            }
+            i = i + 1;
+        }
+        n = kept;
+    }
+    if no > 0 {
+        sort_rows(w, n, 0);
+    }
+    var first = 0;
+    if offset > 0 {
+        first = offset;
+        if first > n {
+            first = n;
+        }
+    }
+    var count = n - first;
+    if limit >= 0 && limit < count {
+        count = limit;
+    }
+    w.first = first;
+    w.count = count;
+    return 0;
+}
+
+// ---- grouped queries (docs/m3-engine.md 6i)
+
+// Three counts kept in `pos` while a grouped query is prepared: the aggregates, the slots, and 1 if a column is named outside every aggregate and every GROUP BY expression.
+fn p_marks() -> [] int {
+    return 3000;
+}
+
+// Whether a function is called between `from` and `to` (the nodes of an expression follow one another).
+fn has_call[&x](e: &x [byte], from: int, to: int) -> [] bool {
+    var at = from;
+    while at < to {
+        if int_of(e[at]) == 4 {
+            return true;
+        }
+        let n = eval.node_size(e, at);
+        if n < 1 {
+            return false;
+        }
+        at = at + n;
+    }
+    return false;
+}
+
+// Which aggregate the call at `at` is: 1 count, 2 sum, 3 min, 4 max; 0 if it is none of them.
+fn agg_code[&x](e: &x [byte], at: int) -> [] int {
+    let nl = commit.be(e, at + 1, 2);
+    if exec.same(e, at + 3, nl, "count", 0, 5) {
+        return 1;
+    }
+    if exec.same(e, at + 3, nl, "sum", 0, 3) {
+        return 2;
+    }
+    if exec.same(e, at + 3, nl, "min", 0, 3) {
+        return 3;
+    }
+    if exec.same(e, at + 3, nl, "max", 0, 3) {
+        return 4;
+    }
+    return 0;
+}
+
+fn add_slot[&q](w: &!q exec.Work, at: int, end: int, kind: int, which: int) -> [] int {
+    let ns = contents(w.pos)[p_marks() + 1];
+    if ns >= exec.max_slots() {
+        return exec.too_big();
+    }
+    let s = exec.p_slot() + 4 * ns;
+    contents(w.pos)[s] = at;
+    contents(w.pos)[s + 1] = end;
+    contents(w.pos)[s + 2] = kind;
+    contents(w.pos)[s + 3] = which;
+    contents(w.pos)[p_marks() + 1] = ns + 1;
+    return 0;
+}
+
+// Read the expression from `from` to `to` of a grouped query: each aggregate, and each occurrence of one of the `ng` GROUP BY expressions, becomes a slot; a column outside all of them is marked. 0 or a
+// refusal.
+fn cover[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], from: int, to: int, ng: int) -> [] int {
+    var at = from;
+    while at < to {
+        let (cnt, end) = eval.scan(e, at, contents(w.ws));
+        if cnt < 0 {
+            return exec.malformed();
+        }
+        var g = 0 - 1;
+        var j = 0;
+        while j < ng && g < 0 {
+            let ga = contents(w.pos)[exec.p_grp() + j];
+            let ge = contents(w.pos)[exec.p_gend() + j];
+            if exec.same(e, at, end - at, e, ga, ge - ga) {
+                if noted_in(kinds, at, end) || noted_in(kinds, ga, ge) {
+                    // the same bytes may be two literals of different kinds (6e)
+                    return exec.unsupported();
+                }
+                g = j;
+            }
+            j = j + 1;
+        }
+        let tag = int_of(e[at]);
+        if g >= 0 {
+            let r = add_slot(w, at, end, 1, g);
+            if r < 0 {
+                return r;
+            }
+            at = end;
+        } else if tag == 4 {
+            let which = agg_code(e, at);
+            let nl = commit.be(e, at + 1, 2);
+            let arg = at + 3 + nl + 4;
+            if which == 0 || commit.be(e, at + 3 + nl, 4) != 1 || has_call(e, arg, end) {
+                return exec.unsupported();
+            }
+            var argpos = arg;
+            if int_of(e[arg]) == 6 {
+                if which != 1 {
+                    return exec.unsupported();
+                }
+                argpos = 0;
+            }
+            let na = contents(w.pos)[p_marks()];
+            if na >= exec.max_parts() {
+                return exec.too_big();
+            }
+            let a = exec.p_agg() + 8 * na;
+            contents(w.pos)[a] = at;
+            contents(w.pos)[a + 1] = end;
+            contents(w.pos)[a + 2] = which;
+            contents(w.pos)[a + 3] = argpos;
+            contents(w.pos)[a + 4] = 1;
+            contents(w.pos)[p_marks()] = na + 1;
+            let r = add_slot(w, at, end, 0, na);
+            if r < 0 {
+                return r;
+            }
+            at = end;
+        } else {
+            if tag == 0 {
+                contents(w.pos)[p_marks() + 2] = 1;
+            }
+            if tag == 6 {
+                return exec.unsupported();
+            }
+            at = at + eval.node_size(e, at);
+        }
+    }
+    return 0;
+}
+
+// The stored value at `off` of `src` as a slot's value (state, a, b) at `cx[c + 3 ..]`, its bytes copied into the arena at `af`: the arena's fill after it, or -1 if it does not fit.
+fn decode[&s, &c, &a](src: &s [byte], off: int, cx: &!c [int], c: int, ar: &!a [byte], af: int) -> [] int {
+    let tag = int_of(src[off]);
+    cx[c + 3] = 0;
+    cx[c + 4] = 0;
+    cx[c + 5] = 0;
+    if tag == 0 {
+        cx[c + 3] = 1;
+        return af;
+    }
+    if tag == 1 {
+        cx[c + 4] = row.int_at(src, off + 1);
+        return af;
+    }
+    if tag == 2 {
+        cx[c + 4] = int_of(src[off + 1]);
+        return af;
+    }
+    let n = commit.be(src, off + 1, 2);
+    if af + n > len(ar) {
+        return 0 - 1;
+    }
+    cx[c + 4] = af;
+    cx[c + 5] = n;
+    return exec.copy(src, off + 3, n, ar, af);
+}
+
+// Give the evaluator the slots' values. `real`: the GROUP BY values of the record at `rec` of `chg`, and the aggregates as accumulated. Not `real`: a null of each slot's type, which is enough to learn the
+// types of the expressions around them. The arena's fill after the values, or a refusal.
+fn set_slots[&q](w: &!q exec.Work, rec: int, real: bool) -> [] int {
+    let ns = contents(w.pos)[p_marks() + 1];
+    var af = 0;
+    contents(w.cx)[eval.slots_at()] = ns;
+    var s = 0;
+    while s < ns && af >= 0 {
+        let sp = exec.p_slot() + 4 * s;
+        let c = eval.slots_at() + 1 + 6 * s;
+        let which = contents(w.pos)[sp + 3];
+        contents(w.cx)[c] = contents(w.pos)[sp];
+        contents(w.cx)[c + 1] = contents(w.pos)[sp + 1];
+        contents(w.cx)[c + 3] = 1;
+        contents(w.cx)[c + 4] = 0;
+        contents(w.cx)[c + 5] = 0;
+        if contents(w.pos)[sp + 2] == 1 {
+            contents(w.cx)[c + 2] = contents(w.pos)[exec.p_gtype() + which];
+            if real {
+                let off = nth(contents(w.chg), rec, which);
+                af = decode(contents(w.chg), off, contents(w.cx), c, contents(w.ar), af);
+            }
+        } else {
+            let ab = exec.p_agg() + 8 * which;
+            let kind = contents(w.pos)[ab + 2];
+            let cnt = contents(w.pos)[ab + 5];
+            contents(w.cx)[c + 2] = contents(w.pos)[ab + 4];
+            if real && kind == 1 {
+                contents(w.cx)[c + 3] = 0;
+                contents(w.cx)[c + 4] = cnt;
+            } else if real && kind == 2 && cnt > 0 {
+                contents(w.cx)[c + 3] = 0;
+                contents(w.cx)[c + 4] = contents(w.pos)[ab + 6] + contents(w.pos)[ab + 7];
+            } else if real && cnt > 0 {
+                af = decode(contents(w.tmp), 1024 * which, contents(w.cx), c, contents(w.ar), af);
+            }
+        }
+        s = s + 1;
+    }
+    if af < 0 {
+        return exec.too_big();
+    }
+    return af;
+}
+
+// Evaluate an expression of the group phase: no row is bound, the slots are, and the arena is filled up to `af`.
+fn gev[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], af: int) -> [] int {
+    contents(w.info)[0] = af;
+    contents(w.cx)[5] = 0 - 1;
+    return eval.eval(e, at, kinds, contents(w.ctx), contents(w.cx), 1, contents(w.ws), contents(w.ar), contents(w.info));
+}
+
+// How two stored values that are not null, of one type, in two buffers, compare.
+fn cmp2[&a, &b](x: &a [byte], xa: int, y: &b [byte], ya: int) -> [] int {
+    let tag = int_of(x[xa]);
+    if tag == 1 {
+        let p = row.int_at(x, xa + 1);
+        let q = row.int_at(y, ya + 1);
+        if p < q {
+            return 0 - 1;
+        }
+        if p > q {
+            return 1;
+        }
+        return 0;
+    }
+    if tag == 2 {
+        return int_of(x[xa + 1]) - int_of(y[ya + 1]);
+    }
+    let xn = commit.be(x, xa + 1, 2);
+    let yn = commit.be(y, ya + 1, 2);
+    var i = 0;
+    while i < xn && i < yn {
+        let d = int_of(x[xa + 3 + i]) - int_of(y[ya + 3 + i]);
+        if d != 0 {
+            return d;
+        }
+        i = i + 1;
+    }
+    return xn - yn;
+}
+
+fn reset_aggs[&q](w: &!q exec.Work) -> [] int {
+    var j = 0;
+    while j < contents(w.pos)[p_marks()] {
+        let ab = exec.p_agg() + 8 * j;
+        contents(w.pos)[ab + 5] = 0;
+        contents(w.pos)[ab + 6] = 0;
+        contents(w.pos)[ab + 7] = 0;
+        j = j + 1;
+    }
+    return 0;
+}
+
+// Add the stored value at `off` of `chg` (a row's argument) to aggregate `j`. A null is not counted. 0 or a refusal.
+fn accumulate[&q](w: &!q exec.Work, j: int, off: int) -> [] int {
+    let ab = exec.p_agg() + 8 * j;
+    if int_of(contents(w.chg)[off]) == 0 {
+        return 0;
+    }
+    let kind = contents(w.pos)[ab + 2];
+    let cnt = contents(w.pos)[ab + 5];
+    if kind == 2 {
+        // what is above zero and what is below are added apart: if neither leaves the range, no order of the rows does
+        let v = row.int_at(contents(w.chg), off + 1);
+        if v > 0 {
+            if contents(w.pos)[ab + 6] > 9223372036854775807 - v {
+                w.orderdep = true;
+            } else {
+                contents(w.pos)[ab + 6] = contents(w.pos)[ab + 6] + v;
+            }
+        } else if v < 0 {
+            if contents(w.pos)[ab + 7] < 0 - 9223372036854775807 - 1 - v {
+                w.orderdep = true;
+            } else {
+                contents(w.pos)[ab + 7] = contents(w.pos)[ab + 7] + v;
+            }
+        }
+    } else if kind >= 3 {
+        let l = after(contents(w.chg), off) - off;
+        if l > 1024 {
+            return exec.too_big();
+        }
+        var take = cnt == 0;
+        if !take {
+            let c = cmp2(contents(w.chg), off, contents(w.tmp), 1024 * j);
+            take = kind == 3 && c < 0 || kind == 4 && c > 0;
+        }
+        if take {
+            exec.copy(contents(w.chg), off, l, contents(w.tmp), 1024 * j);
+        }
+    }
+    contents(w.pos)[ab + 5] = cnt + 1;
+    return 0;
+}
+
+// Where expression `k` of an answer's row is: an item, or after the items an ORDER BY expression that is not one.
+fn expr_at[&q](w: &!q exec.Work, k: int) -> [] int {
+    if k < w.nitems {
+        return contents(w.pos)[exec.p_item() + k];
+    }
+    var ea = 0;
+    var j = 0;
+    while j < w.norder {
+        if contents(w.pos)[exec.p_oval() + j] == k {
+            ea = contents(w.pos)[exec.p_ord() + j];
+        }
+        j = j + 1;
+    }
+    return ea;
+}
+
+// One group is complete (its record at `rec` of `chg`, its aggregates accumulated): HAVING, then its row of the answer. The number of rows of the answer after it (`n` before), or a refusal.
+fn emit_group[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], rec: int, hpos: int, extra: int, n: int) -> [] int {
+    let b = eval.max_nodes();
+    let af = set_slots(w, rec, true);
+    if af < 0 {
+        return af;
+    }
+    if hpos != 0 {
+        let r = gev(w, e, hpos, kinds, af);
+        if r < 0 {
+            return exec.unsupported();
+        }
+        if contents(w.ws)[b + 1] == 2 {
+            exec.note(w, contents(w.ws)[b + 2] - 1);
+            return n;
+        }
+        if contents(w.ws)[b + 1] != 0 || contents(w.ws)[b + 2] != 1 {
+            return n;
+        }
+    }
+    if n >= exec.max_rows() {
+        return exec.too_big();
+    }
+    let begin = w.rfill;
+    var fill = begin;
+    var bad = false;
+    var k = 0;
+    while k < w.nitems + extra {
+        let r = gev(w, e, expr_at(w, k), kinds, af);
+        if r < 0 {
+            return exec.unsupported();
+        }
+        if contents(w.ws)[b + 1] == 2 {
+            exec.note(w, contents(w.ws)[b + 2] - 1);
+            bad = true;
+        } else if !bad {
+            fill = exec.enc(contents(w.rows), fill, contents(w.ws), b, contents(w.ar));
+            if fill == 0 - 1 {
+                return exec.too_big();
+            }
+            if fill < 0 {
+                return exec.unsupported();
+            }
+        }
+        k = k + 1;
+    }
+    if bad {
+        return n;
+    }
+    contents(w.idx)[n] = begin;
+    w.rfill = fill;
+    return n + 1;
+}
+
+// Sort the `m` records of `chg` listed in `idx2` by their first `ng` values, so that the rows of a group are neighbours.
+fn sort_groups[&q](w: &!q exec.Work, m: int, ng: int) -> [] int {
+    var width = 1;
+    var flip = false;
+    while width < m {
+        if flip {
+            merge_pass(contents(w.gix), contents(w.idx2), contents(w.chg), contents(w.pos), m, width, 1, ng, 0);
+        } else {
+            merge_pass(contents(w.idx2), contents(w.gix), contents(w.chg), contents(w.pos), m, width, 1, ng, 0);
+        }
+        flip = !flip;
+        width = width * 2;
+    }
+    if flip {
+        var i = 0;
+        while i < m {
+            contents(w.idx2)[i] = contents(w.gix)[i];
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+// A SELECT with aggregates, GROUP BY or HAVING (6i), after `select` has read the statement and bound the table: `lat` is where the LIMIT is, `extra` how many ORDER BY expressions are not items.
+fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int], wpos: int, ng: int, hpos: int, lat: int, distinct: bool, extra: int) -> [file_read] int {
+    let ni = w.nitems;
+    let no = w.norder;
+    let b = eval.max_nodes();
+    let dl = w.dlen;
+    contents(w.pos)[p_marks()] = 0;
+    contents(w.pos)[p_marks() + 1] = 0;
+    contents(w.pos)[p_marks() + 2] = 0;
+    var keyed = false;
+    var i = 0;
+    while i < ng {
+        var ga = contents(w.pos)[exec.p_grp() + i];
+        var ge = contents(w.pos)[exec.p_gend() + i];
+        if int_of(e[ga]) == 1 {
+            // a bare constant: an integer is the place of an item
+            if int_of(e[ga + 1]) != 1 {
+                return exec.unsupported();
+            }
+            let place = row.int_at(e, ga + 2);
+            if place < 1 || place > ni {
+                return exec.unsupported();
+            }
+            ga = contents(w.pos)[exec.p_item() + place - 1];
+            ge = contents(w.pos)[exec.p_iend() + place - 1];
+            contents(w.pos)[exec.p_grp() + i] = ga;
+            contents(w.pos)[exec.p_gend() + i] = ge;
+        } else if int_of(e[ga]) == 7 && int_of(e[ga + 1]) == 1 && int_of(e[ga + 2]) == 1 {
+            // a constant with a minus is a place too, for PostgreSQL, and never one that exists
+            return exec.unsupported();
+        }
+        if has_call(e, ga, ge) {
+            return exec.unsupported();
+        }
+        // through casts (one to the column's own type is nothing to PostgreSQL, so `cast(k as integer)` may be `k` itself)
+        var inner = ga;
+        while int_of(e[inner]) == 10 {
+            inner = inner + eval.node_size(e, inner);
+        }
+        if int_of(e[inner]) == 0 && inner != ga {
+            // a column under a cast: whether naming the column elsewhere is then an error is not decided here
+            keyed = true;
+        } else if int_of(e[ga]) == 0 {
+            // a column of the key: PostgreSQL then lets every column of the table be named
+            let tn = commit.be(e, ga + 1, 2);
+            let cn = commit.be(e, ga + 3 + tn, 2);
+            var c = 0;
+            while c < row.columns(contents(w.ctx)[64..64 + dl]) {
+                let nm = row.col_name(contents(w.ctx)[64..64 + dl], c);
+                if row.col_pk(contents(w.ctx)[64..64 + dl], c) > 0 && exec.same(nm, 0, len(nm), e, ga + 5 + tn, cn) {
+                    keyed = true;
+                }
+                c = c + 1;
+            }
+        }
+        i = i + 1;
+    }
+    if wpos != 0 {
+        let (cnt, end) = eval.scan(e, wpos, contents(w.ws));
+        if has_call(e, wpos, end) {
+            return exec.unsupported();
+        }
+    }
+    i = 0;
+    while i < ni {
+        let r = cover(w, e, kinds, contents(w.pos)[exec.p_item() + i], contents(w.pos)[exec.p_iend() + i], ng);
+        if r < 0 {
+            return r;
+        }
+        i = i + 1;
+    }
+    var hfree = false;
+    if hpos != 0 {
+        let (cnt, end) = eval.scan(e, hpos, contents(w.ws));
+        let r = cover(w, e, kinds, hpos, end, ng);
+        if r < 0 {
+            return r;
+        }
+        // a condition of the HAVING with no aggregate in it is one PostgreSQL applies to the rows, before they are grouped (it moves it into the WHERE): the rows it turns away are never computed
+        contents(w.pos)[exec.p_stack()] = hpos;
+        var sp = 1;
+        while sp > 0 {
+            sp = sp - 1;
+            let a = contents(w.pos)[exec.p_stack() + sp];
+            let (c1, aend) = eval.scan(e, a, contents(w.ws));
+            if int_of(e[a]) == 5 && int_of(e[a + 1]) == 6 {
+                let (c2, mid) = eval.scan(e, a + 2, contents(w.ws));
+                if sp + 2 > 128 {
+                    return exec.too_big();
+                }
+                contents(w.pos)[exec.p_stack() + sp] = mid;
+                contents(w.pos)[exec.p_stack() + sp + 1] = a + 2;
+                sp = sp + 2;
+            } else if !has_call(e, a, aend) {
+                hfree = true;
+            }
+        }
+    }
+    i = 0;
+    while i < no {
+        if contents(w.pos)[exec.p_oval() + i] >= ni {
+            let oa = contents(w.pos)[exec.p_ord() + i];
+            let (cnt, end) = eval.scan(e, oa, contents(w.ws));
+            let r = cover(w, e, kinds, oa, end, ng);
+            if r < 0 {
+                return r;
+            }
+        }
+        i = i + 1;
+    }
+    if contents(w.pos)[p_marks() + 2] == 1 {
+        if keyed {
+            return exec.unsupported();
+        }
+        exec.note(w, exec.e_grouping());
+    }
+    let na = contents(w.pos)[p_marks()];
+    // before any row: the types
+    let rw = exec.where_static(w, e, kinds, wpos);
+    if rw < 0 {
+        return rw;
+    }
+    contents(w.cx)[5] = 0 - 1;
+    i = 0;
+    while i < ng {
+        let r = exec.ev(w, e, contents(w.pos)[exec.p_grp() + i], kinds, 1);
+        if r < 0 {
+            let s = exec.stat(w, r);
+            if s < 0 {
+                return s;
+            }
+        } else {
+            var ty = contents(w.ws)[b];
+            if ty == 0 {
+                ty = 3;
+            }
+            contents(w.pos)[exec.p_gtype() + i] = ty;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < na {
+        let ab = exec.p_agg() + 8 * i;
+        let kind = contents(w.pos)[ab + 2];
+        let argpos = contents(w.pos)[ab + 3];
+        if argpos != 0 {
+            let r = exec.ev(w, e, argpos, kinds, 1);
+            if r < 0 {
+                let s = exec.stat(w, r);
+                if s < 0 {
+                    return s;
+                }
+            } else if kind != 1 {
+                let ty = contents(w.ws)[b];
+                if ty == 0 || kind == 2 && ty == 1 {
+                    // a literal alone; and a sum of bigint, which PostgreSQL answers as a numeric
+                    return exec.unsupported();
+                }
+                if kind == 2 && (ty == 5 || ty == 6) {
+                    contents(w.pos)[ab + 4] = 1;
+                } else if kind >= 3 && (ty == 1 || ty == 5 || ty == 6 || ty == 3) {
+                    contents(w.pos)[ab + 4] = ty;
+                } else {
+                    // no such aggregate for this type
+                    exec.note(w, 5);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    let af0 = set_slots(w, 0 - 1, false);
+    if af0 < 0 {
+        return af0;
+    }
+    if hpos != 0 {
+        let r = gev(w, e, hpos, kinds, af0);
+        if r < 0 {
+            let s = exec.stat(w, r);
+            if s < 0 {
+                return s;
+            }
+        } else if contents(w.ws)[b] == 0 {
+            return exec.unsupported();
+        } else if contents(w.ws)[b] != 2 {
+            exec.note(w, 6);
+        }
+    }
+    i = 0;
+    while i < ni + extra {
+        let r = gev(w, e, expr_at(w, i), kinds, af0);
+        if r < 0 {
+            let s = exec.stat(w, r);
+            if s < 0 {
+                return s;
+            }
+        } else if i < ni {
+            var ty = contents(w.ws)[b];
+            if ty == 0 {
+                ty = 3;
+            }
+            contents(w.pos)[exec.p_itype() + i] = ty;
+        }
+        i = i + 1;
+    }
+    contents(w.cx)[eval.slots_at()] = 0;
+    var at = lat;
+    if at >= len(e) {
+        return exec.malformed();
+    }
+    // as in `select`: a DISTINCT may be answered from the first row
+    var bounded = distinct || int_of(e[at]) == 1;
+    at = bound(w, e, kinds, at, exec.e_limit());
+    if at < 0 {
+        return at;
+    }
+    let limit = contents(w.info)[2];
+    if at >= len(e) {
+        return exec.malformed();
+    }
+    if int_of(e[at]) == 1 {
+        bounded = true;
+    }
+    at = bound(w, e, kinds, at, exec.e_offset());
+    if at < 0 {
+        return at;
+    }
+    let offset = contents(w.info)[2];
+    if at != len(e) {
+        return exec.malformed();
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    // the rows: each one's GROUP BY values and aggregate arguments
+    reset_aggs(w);
+    var m = 0;
+    var cf = 0;
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else {
+            let pass = exec.passes(w, e, kinds, wpos);
+            if pass < 0 {
+                return pass;
+            }
+            if pass == 1 {
+                var fill = cf;
+                var bad = false;
+                var k = 0;
+                while k < ng + na {
+                    var ea = 0;
+                    if k < ng {
+                        ea = contents(w.pos)[exec.p_grp() + k];
+                    } else {
+                        ea = contents(w.pos)[exec.p_agg() + 8 * (k - ng) + 3];
+                    }
+                    if ea == 0 {
+                        // count(*): every row counts
+                        if fill + 2 > exec.rows_size() {
+                            return exec.too_big();
+                        }
+                        contents(w.chg)[fill] = byte_of(2);
+                        contents(w.chg)[fill + 1] = byte_of(1);
+                        fill = fill + 2;
+                    } else {
+                        let r = exec.ev(w, e, ea, kinds, 1);
+                        if r < 0 {
+                            return exec.unsupported();
+                        }
+                        if contents(w.ws)[b + 1] == 2 {
+                            exec.note(w, contents(w.ws)[b + 2] - 1);
+                            bad = true;
+                        } else if !bad {
+                            fill = exec.enc(contents(w.chg), fill, contents(w.ws), b, contents(w.ar));
+                            if fill == 0 - 1 {
+                                return exec.too_big();
+                            }
+                            if fill < 0 {
+                                return exec.unsupported();
+                            }
+                        }
+                    }
+                    k = k + 1;
+                }
+                if !bad && ng == 0 {
+                    var off = cf;
+                    k = 0;
+                    while k < na {
+                        let r = accumulate(w, k, off);
+                        if r < 0 {
+                            return r;
+                        }
+                        off = after(contents(w.chg), off);
+                        k = k + 1;
+                    }
+                } else if !bad {
+                    if m >= exec.max_rows() {
+                        return exec.too_big();
+                    }
+                    contents(w.idx2)[m] = cf;
+                    m = m + 1;
+                    cf = fill;
+                }
+            }
+        }
+    }
+    // the groups
+    var n = 0;
+    if ng == 0 {
+        let r = emit_group(w, e, kinds, 0 - 1, hpos, extra, n);
+        if r < 0 {
+            return r;
+        }
+        n = r;
+    } else {
+        sort_groups(w, m, ng);
+        i = 0;
+        while i < m {
+            let first = contents(w.idx2)[i];
+            reset_aggs(w);
+            var j = i;
+            while j < m && (j == i || order(contents(w.chg), contents(w.pos), first, contents(w.idx2)[j], 1, ng, 0) == 0) {
+                var off = nth(contents(w.chg), contents(w.idx2)[j], ng);
+                var k = 0;
+                while k < na {
+                    let r = accumulate(w, k, off);
+                    if r < 0 {
+                        return r;
+                    }
+                    off = after(contents(w.chg), off);
+                    k = k + 1;
+                }
+                j = j + 1;
+            }
+            let r = emit_group(w, e, kinds, first, hpos, extra, n);
+            if r < 0 {
+                return r;
+            }
+            n = r;
+            i = j;
+        }
+    }
+    contents(w.cx)[eval.slots_at()] = 0;
+    if w.orderdep {
+        return exec.order_dependent();
+    }
+    if w.code != 0 {
+        if bounded || hfree {
+            // PostgreSQL may stop before the row that raises, or never read it
+            return exec.order_dependent();
+        }
+        return exec.verdict(w);
+    }
+    return finish(w, n, distinct, limit, offset);
+}
+
 // SELECT (a `Select2`, ir.md section 6) over one table of the tree `root`. On 0: `count_of` rows of `columns_of` values (`type_of`, `row_at`, `row_byte`).
 pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read] int {
     exec.start(w, root);
@@ -271,11 +1055,36 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if at + 5 > len(e) {
         return exec.malformed();
     }
-    if commit.be(e, at, 4) != 0 || int_of(e[at + 4]) != 0 {
-        // GROUP BY and HAVING: not in this slice
-        return exec.unsupported();
+    let ng = commit.be(e, at, 4);
+    if ng > exec.max_parts() {
+        return exec.too_big();
     }
-    at = at + 5;
+    at = at + 4;
+    i = 0;
+    while i < ng {
+        let (cnt, end) = eval.scan(e, at, contents(w.ws));
+        if cnt < 0 {
+            return exec.malformed();
+        }
+        contents(w.pos)[exec.p_grp() + i] = at;
+        contents(w.pos)[exec.p_gend() + i] = end;
+        at = end;
+        i = i + 1;
+    }
+    if at >= len(e) {
+        return exec.malformed();
+    }
+    var hpos = 0;
+    if int_of(e[at]) == 1 {
+        hpos = at + 1;
+        let (cnt, end) = eval.scan(e, hpos, contents(w.ws));
+        if cnt < 0 {
+            return exec.malformed();
+        }
+        at = end;
+    } else {
+        at = at + 1;
+    }
     if at + 4 > len(e) {
         return exec.malformed();
     }
@@ -348,6 +1157,29 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if r0 != 0 {
         return r0;
     }
+    var calls = false;
+    i = 0;
+    while i < ni {
+        if has_call(e, contents(w.pos)[exec.p_item() + i], contents(w.pos)[exec.p_iend() + i]) {
+            calls = true;
+        }
+        i = i + 1;
+    }
+    if ng > 0 || hpos != 0 || calls {
+        return grouped(p, w, root, e, kinds, wpos, ng, hpos, at, distinct, extra);
+    }
+    i = 0;
+    while i < no {
+        // an ORDER BY expression that is not an item
+        if contents(w.pos)[exec.p_oval() + i] >= ni {
+            let oa = contents(w.pos)[exec.p_ord() + i];
+            let (cnt, end) = eval.scan(e, oa, contents(w.ws));
+            if has_call(e, oa, end) {
+                return grouped(p, w, root, e, kinds, wpos, ng, hpos, at, distinct, extra);
+            }
+        }
+        i = i + 1;
+    }
     // before any row: the types, and what is wrong with them
     i = 0;
     while i < ni {
@@ -387,7 +1219,8 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if at >= len(e) {
         return exec.malformed();
     }
-    var bounded = int_of(e[at]) == 1;
+    // a DISTINCT over items that cannot differ is a LIMIT 1 to PostgreSQL: it stops at the first row
+    var bounded = distinct || int_of(e[at]) == 1;
     at = bound(w, e, kinds, at, exec.e_limit());
     if at < 0 {
         return at;
@@ -483,36 +1316,5 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         }
         return exec.verdict(w);
     }
-    if distinct {
-        sort_rows(w, n, 1);
-        var kept = 0;
-        i = 0;
-        while i < n {
-            let cur = contents(w.idx)[i];
-            if kept == 0 || order(contents(w.rows), contents(w.pos), contents(w.idx)[kept - 1], cur, 1, ni, no) != 0 {
-                contents(w.idx)[kept] = cur;
-                kept = kept + 1;
-            }
-            i = i + 1;
-        }
-        n = kept;
-    }
-    if no > 0 {
-        sort_rows(w, n, 0);
-    }
-    var first = 0;
-    if offset > 0 {
-        first = offset;
-        if first > n {
-            first = n;
-        }
-    }
-    var count = n - first;
-    if limit >= 0 && limit < count {
-        count = limit;
-    }
-    w.first = first;
-    w.count = count;
-    return 0;
+    return finish(w, n, distinct, limit, offset);
 }
-

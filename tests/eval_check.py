@@ -258,7 +258,8 @@ def main():
     answered = counts["agree-values"] + counts["agree-error"]
     pg_answers = sum(1 for i in range(len(exprs)) if i not in pg_errs)
     print("eval_check: %d expressions (seed %d): %s" % (N, SEED, ", ".join("%s=%d" % kv for kv in counts.items())))
-    print("eval_check: PostgreSQL answers %d with values; the engine refuses %d of those as unsupported" % (pg_answers, unsupported_when_pg_answers))
+    version = subprocess.run(PSQL + ["-d", "postgres", "-c", "show server_version"], capture_output=True, text=True).stdout.strip()
+    print("eval_check: PostgreSQL %s answers %d with values; the engine refuses %d of those as unsupported" % (version, pg_answers, unsupported_when_pg_answers))
     subprocess.run(PSQL + ["-d", "postgres", "-c", "drop database if exists %s" % DB], capture_output=True)
     bad = counts["DISAGREE"] > 0 or unsupported_when_pg_answers * 2 > pg_answers or answered == 0
     return 1 if bad else 0

@@ -98,6 +98,10 @@ pub fn e_column_twice() -> [] int {
     return 15;
 }
 
+pub fn e_grouping() -> [] int {
+    return 16;
+}
+
 pub fn sqlstate(code: int) -> [] &static [byte] {
     if code == 1 {
         return "22012";
@@ -144,6 +148,9 @@ pub fn sqlstate(code: int) -> [] &static [byte] {
     if code == 15 {
         return "42701";
     }
+    if code == 16 {
+        return "42803";
+    }
     return "XX000";
 }
 
@@ -169,6 +176,7 @@ pub res struct Work {
     rows: Box[[byte]],
     idx: Box[[int]],
     idx2: Box[[int]],
+    gix: Box[[int]],
     chg: Box[[byte]],
     lit: Box[[byte]],
     lsc: Box[[int]],
@@ -206,11 +214,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 2048, byte_of(0)), cx: box_slice(heap, 6, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 2048, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -227,6 +235,7 @@ pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
     unbox_slice(heap, rows);
     unbox_slice(heap, idx);
     unbox_slice(heap, idx2);
+    unbox_slice(heap, gix);
     unbox_slice(heap, chg);
     unbox_slice(heap, lit);
     unbox_slice(heap, lsc);
@@ -279,6 +288,34 @@ pub fn p_soff() -> [] int {
 
 pub fn p_stack() -> [] int {
     return 1280;
+}
+
+// The GROUP BY expressions: where each starts, where it ends, its type.
+pub fn p_grp() -> [] int {
+    return 1408;
+}
+
+pub fn p_gend() -> [] int {
+    return 1472;
+}
+
+pub fn p_gtype() -> [] int {
+    return 1536;
+}
+
+// The aggregates, eight ints each: where the call starts and ends, which it is (1 count, 2 sum, 3 min, 4 max), where its argument is (0: `*`), the type of its answer; then its count so far, and what was
+// added above zero and below.
+pub fn p_agg() -> [] int {
+    return 1600;
+}
+
+// The slots of a grouped query, four ints each: where the expression starts and ends, 0 for an aggregate or 1 for a GROUP BY expression, and which.
+pub fn p_slot() -> [] int {
+    return 2112;
+}
+
+pub fn max_slots() -> [] int {
+    return 128;
 }
 
 pub fn max_items() -> [] int {
@@ -357,6 +394,7 @@ pub fn start[&q](w: &!q Work, root: int) -> [] int {
     w.cfill = 0;
     w.lon = 0 - 1;
     w.hin = 0 - 1;
+    contents(w.cx)[eval.slots_at()] = 0;
     return 0;
 }
 
