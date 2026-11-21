@@ -1,0 +1,360 @@
+edition 9;
+
+import std.buffer;
+import std.io;
+import cdb.lex;
+import cdb.parse;
+import cdb.stmt;
+import cdb.lower;
+import cdb.state;
+import cdb.commit;
+import cdb.row;
+import cdb.eval;
+
+// `evalcheck`: the expression evaluator of the engine (src/eval.cho) on its own, for tests/eval_check.py. Standard input, a line each:
+//
+//     def HEX        the definition of the one table, `t` (src/row.cho)
+//     row HEX        a row of it (any number of these)
+//     sql TEXT       a statement `select <one expression> from t`
+//
+// For each `sql` line, one line: `refused TAG` if the lexer, the parser or the lowering refuse it; `static CODE` if the evaluator refuses it whatever the rows (1 unsupported, 5 no such operator, 6 types
+// do not match, 7 no such cast, 9 malformed); else, for each row in order, ` TYPE:STATE:HEX` (STATE 0 a value, 1 null, 2 an error whose code is in HEX's place), where an integer or boolean is printed in
+// decimal and text and bytea in hex.
+
+fn digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+fn put_str[&i, &s](io: &!i Io, text: &s [byte]) -> [io_write] int {
+    var j = 0;
+    while j < len(text) {
+        putchar(io, int_of(text[j]));
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn put_int[&i](io: &!i Io, v: int) -> [io_write] int {
+    if v < 0 {
+        putchar(io, '-');
+        // the digits of a negative number, taken from the negative side
+        var div = 1;
+        while v / div <= 0 - 10 {
+            div = div * 10;
+        }
+        while div > 0 {
+            putchar(io, '0' - v / div % 10);
+            div = div / 10;
+        }
+        return 0;
+    }
+    var div = 1;
+    while v / div >= 10 {
+        div = div * 10;
+    }
+    while div > 0 {
+        putchar(io, '0' + v / div % 10);
+        div = div / 10;
+    }
+    return 0;
+}
+
+fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer) -> [heap, io_read] buffer.Buffer {
+    var out = text;
+    var c = getchar(io);
+    while c >= 0 {
+        out = buffer.push(heap, out, byte_of(c));
+        c = getchar(io);
+    }
+    return out;
+}
+
+// Lower `sql` against `schema` into `ir`, the notes of the literal kinds in `sc`: the length of the IR; or -1, -2, -3 for a refusal by the lexer, the parser, the lowering, with the code in `why[0]`.
+fn lower_sql[&h, &s, &m, &o, &c, &y](heap: &!h Heap, sql: &s [byte], schema: &m [byte], ir: &!o [byte], sc: &!c [int], why: &!y [int]) -> [heap] int {
+    let cap = len(sql) + 4;
+    var tb = box_slice(heap, 4 * cap, 0);
+    var nb = box_slice(heap, 6 * (cap + 64), 0);
+    var kb = box_slice(heap, cap + 64, 0);
+    var vb = box_slice(heap, 64, 0);
+    var ob = box_slice(heap, 4 * 64, 0);
+    var rb = box_slice(heap, 2 * 256, 0);
+    var st = box_slice(heap, 16, 0);
+    var gb = box_slice(heap, cap, 0);
+    var cb = box_slice(heap, 16, 0);
+    var answer = 0;
+    borrow mut tb as &!tw in {
+        borrow mut nb as &!nw in {
+            borrow mut kb as &!kw in {
+                borrow mut vb as &!vw in {
+                    borrow mut ob as &!ow in {
+                        borrow mut rb as &!rw in {
+                            borrow mut st as &!sw in {
+                                borrow mut gb as &!gw in {
+                                    borrow mut cb as &!cw in {
+                                        let n = lex.tokenize(sql, contents(tw));
+                                        if n < 0 {
+                                            why[0] = 0 - n;
+                                            answer = 0 - 1;
+                                        } else {
+                                            parse.reset(contents(sw));
+                                            let q = stmt.statement(sql, contents(tw), 0, n, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(cw), contents(sw));
+                                            if q < 0 {
+                                                why[0] = 0 - q;
+                                                answer = 0 - 2;
+                                            } else {
+                                                let w = lower.lower(sql, contents(tw), contents(nw), contents(kw), contents(sw)[2], schema, contents(rw), ir, sc);
+                                                if w < 0 {
+                                                    why[0] = 0 - w;
+                                                    answer = 0 - 3;
+                                                } else {
+                                                    answer = w;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unbox_slice(heap, tb);
+    unbox_slice(heap, nb);
+    unbox_slice(heap, kb);
+    unbox_slice(heap, vb);
+    unbox_slice(heap, ob);
+    unbox_slice(heap, rb);
+    unbox_slice(heap, st);
+    unbox_slice(heap, gb);
+    unbox_slice(heap, cb);
+    return answer;
+}
+
+fn starts[&a](all: &a [byte], ls: int, le: int, word: &static [byte]) -> [] bool {
+    if le - ls < len(word) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if int_of(all[ls + i]) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn run[&h, &i, &a](heap: &!h Heap, io: &!i Io, all: &a [byte]) -> [heap, io_write] int {
+    var ctx = box_slice(heap, 65536, byte_of(0));
+    var rows = box_slice(heap, 1048576, byte_of(0));
+    var rix = box_slice(heap, 2 * 4096, 0);
+    var schema = box_slice(heap, 8192, byte_of(0));
+    var ir = box_slice(heap, 16384, byte_of(0));
+    var sc = box_slice(heap, 1024, 0);
+    var ws = box_slice(heap, eval.ws_size(), 0);
+    var ar = box_slice(heap, 262144, byte_of(0));
+    var cx = box_slice(heap, 6, 0);
+    var info = box_slice(heap, 4, 0);
+    var why = box_slice(heap, 2, 0);
+    var deflen = 0;
+    var schemalen = 0;
+    var nrows = 0;
+    var rfill = 0;
+    var ls = 0;
+    while ls < len(all) {
+        var le = ls;
+        while le < len(all) && int_of(all[le]) != '\n' {
+            le = le + 1;
+        }
+        if starts(all, ls, le, "def ") {
+            borrow mut ctx as &!cw in {
+                let c = contents(cw);
+                c[0] = byte_of('t');
+                deflen = state.hexdec(all, ls + 4, le, c, 1);
+                // the snapshot line: `t: col col ...`
+                borrow mut schema as &!sw in {
+                    let s = contents(sw);
+                    s[0] = byte_of('t');
+                    s[1] = byte_of(':');
+                    var at = 2;
+                    let n = row.columns(c[1..1 + deflen]);
+                    var k = 0;
+                    while k < n {
+                        s[at] = byte_of(' ');
+                        at = at + 1;
+                        let nm = row.col_name(c[1..1 + deflen], k);
+                        var j = 0;
+                        while j < len(nm) {
+                            s[at] = nm[j];
+                            at = at + 1;
+                            j = j + 1;
+                        }
+                        k = k + 1;
+                    }
+                    s[at] = byte_of('\n');
+                    schemalen = at + 1;
+                }
+            }
+        } else if starts(all, ls, le, "row ") {
+            borrow mut rows as &!rw in {
+                borrow mut rix as &!xw in {
+                    let n = state.hexdec(all, ls + 4, le, contents(rw), rfill);
+                    contents(xw)[2 * nrows] = rfill;
+                    contents(xw)[2 * nrows + 1] = n;
+                    rfill = rfill + n;
+                    nrows = nrows + 1;
+                }
+            }
+        } else if starts(all, ls, le, "sql ") {
+            var n = 0;
+            borrow schema as &sr in {
+                borrow mut ir as &!iw in {
+                    borrow mut sc as &!kw in {
+                        borrow mut why as &!yw in {
+                            n = lower_sql(heap, all[ls + 4..le], contents(sr)[0..schemalen], contents(iw), contents(kw), contents(yw));
+                        }
+                    }
+                }
+            }
+            if n < 0 {
+                put_str(io, "refused ");
+                borrow why as &yr in {
+                    if n == 0 - 1 {
+                        put_str(io, lex.error_name(contents(yr)[0]));
+                    } else if n == 0 - 2 {
+                        put_str(io, parse.error_name(contents(yr)[0]));
+                    } else {
+                        put_str(io, lower.error_name(contents(yr)[0]));
+                    }
+                }
+            } else {
+                var r = 0;
+                var stat = 0;
+                while r < nrows && stat == 0 {
+                    // the row after the definition in the context
+                    borrow mut ctx as &!cw in {
+                        borrow rows as &rr in {
+                            borrow rix as &xr in {
+                                borrow mut cx as &!xw in {
+                                    let c = contents(cw);
+                                    let ra = contents(xr)[2 * r];
+                                    let rn = contents(xr)[2 * r + 1];
+                                    var j = 0;
+                                    while j < rn {
+                                        c[1 + deflen + j] = contents(rr)[ra + j];
+                                        j = j + 1;
+                                    }
+                                    let x = contents(xw);
+                                    x[0] = 0;
+                                    x[1] = 1;
+                                    x[2] = 1;
+                                    x[3] = deflen;
+                                    x[4] = 1 + deflen;
+                                    x[5] = rn;
+                                }
+                            }
+                        }
+                    }
+                    borrow ir as &ie in {
+                        borrow sc as &kr in {
+                            borrow ctx as &cr in {
+                                borrow cx as &xr in {
+                                    borrow mut ws as &!ww in {
+                                        borrow mut ar as &!aw in {
+                                            borrow mut info as &!nw in {
+                                                let e = contents(ie)[0..n];
+                                                contents(nw)[0] = 0;
+                                                // a Select2 with one item: tag, distinct, the count of items, the expression
+                                                if n < 6 || int_of(e[0]) != 6 || commit.be(e, 2, 4) != 1 {
+                                                    stat = 0 - 9;
+                                                } else {
+                                                    stat = eval.eval(e, 6, contents(kr), contents(cr), contents(xr), 1, contents(ww), contents(aw), contents(nw));
+                                                }
+                                                if stat == 0 {
+                                                    let w = contents(ww);
+                                                    let b = eval.max_nodes();
+                                                    putchar(io, ' ');
+                                                    put_int(io, w[b]);
+                                                    putchar(io, ':');
+                                                    put_int(io, w[b + 1]);
+                                                    putchar(io, ':');
+                                                    if w[b + 1] == 1 {
+                                                        putchar(io, '-');
+                                                    } else if w[b + 1] == 2 || w[b] == 1 || w[b] == 5 || w[b] == 6 || w[b] == 2 {
+                                                        put_int(io, w[b + 2]);
+                                                    } else {
+                                                        var j = 0;
+                                                        while j < w[b + 3] {
+                                                            let v = int_of(contents(aw)[w[b + 2] + j]);
+                                                            putchar(io, digit(v / 16));
+                                                            putchar(io, digit(v % 16));
+                                                            j = j + 1;
+                                                        }
+                                                        if w[b + 3] == 0 {
+                                                            putchar(io, '.');
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    r = r + 1;
+                }
+                if stat != 0 {
+                    put_str(io, " static ");
+                    put_int(io, 0 - stat);
+                }
+            }
+            putchar(io, '\n');
+        }
+        ls = le + 1;
+    }
+    unbox_slice(heap, ctx);
+    unbox_slice(heap, rows);
+    unbox_slice(heap, rix);
+    unbox_slice(heap, schema);
+    unbox_slice(heap, ir);
+    unbox_slice(heap, sc);
+    unbox_slice(heap, ws);
+    unbox_slice(heap, ar);
+    unbox_slice(heap, cx);
+    unbox_slice(heap, info);
+    unbox_slice(heap, why);
+    return 0;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(tty);
+    release(ffi);
+    release(net);
+    release(clock);
+    release(signals);
+    release(exec);
+    release(fs);
+    release(args);
+    borrow mut heap as &!h in {
+        var text = buffer.empty(h, 4096);
+        borrow mut io as &!i in {
+            text = read_stdin(h, i, text);
+        }
+        borrow text as &t in {
+            borrow mut io as &!i in {
+                run(h, i, buffer.bytes(t));
+            }
+        }
+        buffer.drop(h, text);
+    }
+    release(io);
+    release(heap);
+    return 0;
+}

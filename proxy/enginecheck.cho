@@ -1,0 +1,452 @@
+edition 9;
+
+import std.buffer;
+import std.io;
+import cdb.lex;
+import cdb.parse;
+import cdb.stmt;
+import cdb.lower;
+import cdb.commit;
+import cdb.pager;
+import cdb.btree;
+import cdb.pstore;
+import cdb.exec;
+import cdb.execs;
+import cdb.execw;
+
+// `enginecheck PAGEFILE`: the engine's statements (src/exec.cho, src/execw.cho) over a page file, for tests/engine_check.py. PAGEFILE is made if it is missing; the branch is slot 0 of its catalog. Standard
+// input, a line each:
+//
+//     !commit        make the statements so far durable (src/pstore.cho)      -> `committed SEQ` or `err CODE`
+//     !sweep         zero and reuse the pages nothing names                   -> `swept N` or `err CODE`
+//     anything else  one SQL statement, which is run and, if it is done, becomes the state the next one sees
+//
+// For a statement: `refused TAG` (the lexer, the parser, the lowering or the engine refuses it), `error SQLSTATE`, or `ok KIND N` (N rows) followed by, for a SELECT, a line `T` with the type of each column
+// and a line `R` for each row with each value (`-` null, a number, 0 or 1, or the bytes in hex, `.` if there are none); for a statement that writes, a line `C TABLE KEY BEFORE AFTER` for each change (hex,
+// `-` for no image). Then a line `.`.
+
+fn digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+fn put_str[&i, &s](io: &!i Io, text: &s [byte]) -> [io_write] int {
+    var j = 0;
+    while j < len(text) {
+        putchar(io, int_of(text[j]));
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn put_int[&i](io: &!i Io, v: int) -> [io_write] int {
+    if v < 0 {
+        putchar(io, '-');
+        var div = 1;
+        while v / div <= 0 - 10 {
+            div = div * 10;
+        }
+        while div > 0 {
+            putchar(io, '0' - v / div % 10);
+            div = div / 10;
+        }
+        return 0;
+    }
+    var div = 1;
+    while v / div >= 10 {
+        div = div * 10;
+    }
+    while div > 0 {
+        putchar(io, '0' + v / div % 10);
+        div = div / 10;
+    }
+    return 0;
+}
+
+fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer) -> [heap, io_read] buffer.Buffer {
+    var out = text;
+    var c = getchar(io);
+    while c >= 0 {
+        out = buffer.push(heap, out, byte_of(c));
+        c = getchar(io);
+    }
+    return out;
+}
+
+fn hex_byte[&i](io: &!i Io, v: int) -> [io_write] int {
+    putchar(io, digit(v / 16));
+    putchar(io, digit(v % 16));
+    return 0;
+}
+
+// The rows of a SELECT's answer.
+fn put_rows[&i, &q](io: &!i Io, w: &!q exec.Work) -> [io_write] int {
+    let nc = exec.columns_of(w);
+    putchar(io, 'T');
+    var c = 0;
+    while c < nc {
+        putchar(io, ' ');
+        put_int(io, exec.type_of(w, c));
+        c = c + 1;
+    }
+    putchar(io, '\n');
+    var r = 0;
+    while r < exec.count_of(w) {
+        var at = exec.row_at(w, r);
+        putchar(io, 'R');
+        c = 0;
+        while c < nc {
+            putchar(io, ' ');
+            let tag = exec.row_byte(w, at);
+            if tag == 0 {
+                putchar(io, '-');
+                at = at + 1;
+            } else if tag == 1 {
+                // eight bytes, two's complement
+                var v = exec.row_byte(w, at + 1);
+                if v >= 128 {
+                    v = v - 256;
+                }
+                var k = 1;
+                while k < 8 {
+                    v = v * 256 + exec.row_byte(w, at + 1 + k);
+                    k = k + 1;
+                }
+                put_int(io, v);
+                at = at + 9;
+            } else if tag == 2 {
+                put_int(io, exec.row_byte(w, at + 1));
+                at = at + 2;
+            } else {
+                let n = exec.row_byte(w, at + 1) * 256 + exec.row_byte(w, at + 2);
+                var k = 0;
+                while k < n {
+                    hex_byte(io, exec.row_byte(w, at + 3 + k));
+                    k = k + 1;
+                }
+                if n == 0 {
+                    putchar(io, '.');
+                }
+                at = at + 3 + n;
+            }
+            c = c + 1;
+        }
+        putchar(io, '\n');
+        r = r + 1;
+    }
+    return 0;
+}
+
+fn change_run[&i, &q](io: &!i Io, w: &!q exec.Work, at: int, size: int) -> [io_write] int {
+    var n = 0;
+    var k = 0;
+    while k < size {
+        n = n * 256 + exec.change_byte(w, at + k);
+        k = k + 1;
+    }
+    putchar(io, ' ');
+    if size == 4 && n == 4294967295 {
+        putchar(io, '-');
+        return at + 4;
+    }
+    k = 0;
+    while k < n {
+        hex_byte(io, exec.change_byte(w, at + size + k));
+        k = k + 1;
+    }
+    if n == 0 {
+        putchar(io, '.');
+    }
+    return at + size + n;
+}
+
+fn put_changes[&i, &q](io: &!i Io, w: &!q exec.Work) -> [io_write] int {
+    var at = 0;
+    var c = 0;
+    while c < exec.changes_of(w) {
+        putchar(io, 'C');
+        at = change_run(io, w, at, 2);
+        at = change_run(io, w, at, 2);
+        at = change_run(io, w, at, 4);
+        at = change_run(io, w, at, 4);
+        putchar(io, '\n');
+        c = c + 1;
+    }
+    return 0;
+}
+
+// Run one statement over the tree `root`: the tree after it (`root` itself unless the statement is done).
+fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, sql: &s [byte], root: int) -> [heap, io_write, file_read, file_write] int {
+    let cap = len(sql) + 4;
+    var tb = box_slice(heap, 4 * cap, 0);
+    var nb = box_slice(heap, 6 * (cap + 64), 0);
+    var kb = box_slice(heap, cap + 64, 0);
+    var vb = box_slice(heap, 64, 0);
+    var ob = box_slice(heap, 4 * 64, 0);
+    var rb = box_slice(heap, 2 * 256, 0);
+    var st = box_slice(heap, 16, 0);
+    var gb = box_slice(heap, cap, 0);
+    var cb = box_slice(heap, 16, 0);
+    var schema = box_slice(heap, 65536, byte_of(0));
+    var ir = box_slice(heap, 65536, byte_of(0));
+    var sc = box_slice(heap, 1024, 0);
+    var out = root;
+    borrow mut tb as &!tw in {
+        borrow mut nb as &!nw in {
+            borrow mut kb as &!kw in {
+                borrow mut vb as &!vw in {
+                    borrow mut ob as &!ow in {
+                        borrow mut rb as &!rw in {
+                            borrow mut st as &!sw in {
+                                borrow mut gb as &!gw in {
+                                    borrow mut cb as &!cw in {
+                                        borrow mut schema as &!mw in {
+                                            borrow mut ir as &!iw in {
+                                                borrow mut sc as &!xw in {
+                                                    var rc = 0;
+                                                    var kind = 0 - 1;
+                                                    var named = false;
+                                                    let sl = exec.schema(pg, w, root, contents(mw));
+                                                    let n = lex.tokenize(sql, contents(tw));
+                                                    if sl < 0 {
+                                                        rc = sl;
+                                                    } else if n < 0 {
+                                                        put_str(io, "refused ");
+                                                        put_str(io, lex.error_name(0 - n));
+                                                        named = true;
+                                                    } else {
+                                                        parse.reset(contents(sw));
+                                                        let q0 = stmt.statement(sql, contents(tw), 0, n, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(cw), contents(sw));
+                                                        if q0 < 0 {
+                                                            put_str(io, "refused ");
+                                                            put_str(io, parse.error_name(0 - q0));
+                                                            named = true;
+                                                        } else {
+                                                            let top = contents(sw)[2];
+                                                            let ln = lower.lower(sql, contents(tw), contents(nw), contents(kw), top, contents(mw)[0..sl], contents(rw), contents(iw), contents(xw));
+                                                            if ln < 0 {
+                                                                put_str(io, "refused ");
+                                                                put_str(io, lower.error_name(0 - ln));
+                                                                named = true;
+                                                            } else {
+                                                                let e = contents(iw)[0..ln];
+                                                                kind = int_of(e[0]);
+                                                                if kind == 6 {
+                                                                    rc = execs.select(pg, w, root, e, contents(xw));
+                                                                } else if kind == 1 {
+                                                                    rc = execw.insert(pg, w, root, e, contents(xw));
+                                                                } else if kind == 2 {
+                                                                    rc = execw.update(pg, w, root, e, contents(xw));
+                                                                } else if kind == 3 {
+                                                                    rc = execw.delete(pg, w, root, e, contents(xw));
+                                                                } else if kind == 4 && ln > 1 && int_of(e[1]) == 0 {
+                                                                    rc = execw.create_table(pg, w, root, e, sql, contents(tw), contents(nw), contents(kw), top);
+                                                                    kind = 7;
+                                                                } else if kind == 4 && ln > 1 && int_of(e[1]) == 2 {
+                                                                    rc = execw.drop_table(pg, w, root, e);
+                                                                    kind = 8;
+                                                                } else {
+                                                                    rc = exec.unsupported();
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if !named {
+                                                        if rc < 0 {
+                                                            put_str(io, "refused ");
+                                                            put_str(io, exec.refusal_name(rc));
+                                                        } else if rc > 0 {
+                                                            put_str(io, "error ");
+                                                            put_str(io, exec.sqlstate(rc));
+                                                        } else {
+                                                            put_str(io, "ok ");
+                                                            if kind == 6 {
+                                                                put_str(io, "SELECT ");
+                                                            } else if kind == 1 {
+                                                                put_str(io, "INSERT ");
+                                                            } else if kind == 2 {
+                                                                put_str(io, "UPDATE ");
+                                                            } else if kind == 3 {
+                                                                put_str(io, "DELETE ");
+                                                            } else if kind == 7 {
+                                                                put_str(io, "CREATE ");
+                                                            } else {
+                                                                put_str(io, "DROP ");
+                                                            }
+                                                            put_int(io, exec.count_of(w));
+                                                            putchar(io, '\n');
+                                                            if kind == 6 {
+                                                                put_rows(io, w);
+                                                            } else {
+                                                                put_changes(io, w);
+                                                            }
+                                                            put_str(io, ".");
+                                                            out = exec.root_of(w);
+                                                        }
+                                                    }
+                                                    if named || rc != 0 {
+                                                        put_str(io, "\n.");
+                                                    }
+                                                    putchar(io, '\n');
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unbox_slice(heap, tb);
+    unbox_slice(heap, nb);
+    unbox_slice(heap, kb);
+    unbox_slice(heap, vb);
+    unbox_slice(heap, ob);
+    unbox_slice(heap, rb);
+    unbox_slice(heap, st);
+    unbox_slice(heap, gb);
+    unbox_slice(heap, cb);
+    unbox_slice(heap, schema);
+    unbox_slice(heap, ir);
+    unbox_slice(heap, sc);
+    return out;
+}
+
+fn starts[&a](all: &a [byte], ls: int, le: int, word: &static [byte]) -> [] bool {
+    if le - ls != len(word) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if int_of(all[ls + i]) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, all: &a [byte]) -> [heap, io_write, file_read, file_write] int {
+    var roots = box_slice(heap, 16, 0);
+    var seq = 0;
+    var status = 0;
+    borrow mut roots as &!rw in {
+        let rs = contents(rw);
+        seq = pstore.load(pg, exec.scratch(w), rs);
+        if seq == pstore.no_database() {
+            seq = pstore.init(pg, exec.scratch(w));
+        }
+        if seq < 0 {
+            put_str(io, "err ");
+            put_int(io, seq);
+            putchar(io, '\n');
+            status = 5;
+        }
+        var ls = 0;
+        while ls < len(all) && status == 0 {
+            var le = ls;
+            while le < len(all) && int_of(all[le]) != '\n' {
+                le = le + 1;
+            }
+            if starts(all, ls, le, "!commit") {
+                let r = pstore.commit(pg, exec.scratch(w), rs, seq);
+                if r < 0 {
+                    put_str(io, "err ");
+                    put_int(io, r);
+                } else {
+                    seq = r;
+                    put_str(io, "committed ");
+                    put_int(io, r);
+                }
+                putchar(io, '\n');
+            } else if starts(all, ls, le, "!sweep") {
+                let r = pstore.sweep(heap, pg, exec.scratch(w), rs);
+                if r < 0 {
+                    put_str(io, "err ");
+                } else {
+                    put_str(io, "swept ");
+                }
+                put_int(io, r);
+                putchar(io, '\n');
+            } else if le > ls {
+                rs[0] = run_sql(heap, io, pg, w, all[ls..le], rs[0]);
+            }
+            ls = le + 1;
+        }
+    }
+    unbox_slice(heap, roots);
+    return status;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(tty);
+    release(ffi);
+    release(net);
+    release(clock);
+    release(signals);
+    release(exec);
+    var status = 2;
+    borrow fs as &fsr in {
+        borrow args as &g in {
+            if arg_count(g) == 2 {
+                status = 3;
+                match open_new(fsr, arg(g, 1)) {
+                    Opened::Ok(nf) => {
+                        file_close(nf);
+                    }
+                    Opened::Failed(e) => {
+                    }
+                }
+                match open_rw(fsr, arg(g, 1)) {
+                    Opened::Failed(e) => {
+                        status = 4;
+                    }
+                    Opened::Ok(rf) => {
+                        var f = rf;
+                        var size = 0;
+                        borrow mut f as &!fw in {
+                            match file_size(fw) {
+                                Done::Ok(n) => {
+                                    size = n;
+                                }
+                                Done::Failed(e) => {
+                                }
+                            }
+                        }
+                        borrow mut heap as &!hh in {
+                            var pg = pager.new_pager(hh, f, size);
+                            var wk = exec.new_work(hh);
+                            var text = buffer.empty(hh, 4096);
+                            borrow mut io as &!oo in {
+                                text = read_stdin(hh, oo, text);
+                            }
+                            borrow text as &t in {
+                                borrow mut io as &!oo in {
+                                    borrow mut pg as &!pp in {
+                                        borrow mut wk as &!ww in {
+                                            status = run(hh, oo, pp, ww, buffer.bytes(t));
+                                        }
+                                    }
+                                }
+                            }
+                            buffer.drop(hh, text);
+                            exec.drop_work(hh, wk);
+                            pager.drop_pager(hh, pg);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    release(fs);
+    release(args);
+    release(io);
+    release(heap);
+    return status;
+}

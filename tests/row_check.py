@@ -35,14 +35,14 @@ def pg(db, sql):
     return [l.split("\t") for l in r.stdout.split("\n") if l]
 
 
-TYPES = {1: ["bigint", "integer", "smallint"], 2: ["boolean"], 3: ["text", "varchar"], 4: ["bytea"]}
+TYPES = {1: ["bigint"], 5: ["integer"], 6: ["smallint"], 2: ["boolean"], 3: ["text", "varchar"], 4: ["bytea"]}
 TEXTS = ["", "a", "ana@example.org", 'say "hi"', "back\\slash", "tab\there", "line\nbreak", "\r\x08\x0c", "\x01\x1f\x7f", "ñandú", "日本語", "🙂 emoji", "{\"json\": [1]}", "'quote'", " ", "a" * 300]
 
 
 def rand_value(rng, ty, sqltype, key):
     if not key and rng.random() < .15:
         return None
-    if ty == 1:
+    if ty in (1, 5, 6):
         lim = {"bigint": 63, "integer": 31, "smallint": 15}[sqltype]
         return rng.choice([0, 1, -1, 2 ** lim - 1, -2 ** lim, rng.randrange(-2 ** lim, 2 ** lim), rng.randrange(-1000, 1000)])
     if ty == 2:
@@ -66,7 +66,7 @@ def enc_row(cols, row):
     for (name, ty, _, pk), v in zip(cols, row):
         if v is None:
             out += b"\x00"
-        elif ty == 1:
+        elif ty in (1, 5, 6):
             out += b"\x01" + struct.pack(">q", v)
         elif ty == 2:
             out += b"\x02" + bytes([1 if v else 0])
@@ -81,7 +81,7 @@ def enc_row(cols, row):
 def sql_lit(ty, v):
     if v is None:
         return "null"
-    if ty == 1:
+    if ty in (1, 5, 6):
         return str(v)
     if ty == 2:
         return "true" if v else "false"
@@ -111,7 +111,7 @@ def main():
         rng.shuffle(names)
         cols = []
         for nm in names:
-            ty = rng.choice([1, 1, 2, 3, 3, 4])
+            ty = rng.choice([1, 5, 6, 2, 3, 3, 4])
             cols.append([nm, ty, rng.choice(TYPES[ty]), 0])
         kcount = rng.randrange(1, min(3, n) + 1)
         for place, i in enumerate(rng.sample(range(n), kcount)):
@@ -149,7 +149,9 @@ def main():
     good_row = enc_row([["id", 1, "bigint", 1], ["v", 3, "text", 0]], [7, "x"])
     cases = [
         ("a definition with no columns", struct.pack(">H", 0), good_row, "bad def"),
-        ("a definition with a type 5", good_def.replace(b"\x01\x01\x00\x02id", b"\x05\x01\x00\x02id"), good_row, "bad def"),
+        ("a definition with a type 7", good_def.replace(b"\x01\x01\x00\x02id", b"\x07\x01\x00\x02id"), good_row, "bad def"),
+        ("a smallint column holding 32768", enc_def([["id", 6, "", 1]]), b"\x01" + struct.pack(">q", 32768), "bad row"),
+        ("an integer column holding -2147483649", enc_def([["id", 5, "", 1]]), b"\x01" + struct.pack(">q", -2147483649), "bad row"),
         ("a definition with an empty name", struct.pack(">H", 1) + b"\x01\x01\x00\x00", good_row, "bad def"),
         ("a definition with bytes over", good_def + b"\x00", good_row, "bad def"),
         ("a definition whose key places are 1 and 1", enc_def([["a", 1, "", 1], ["b", 1, "", 1]]), good_row, "bad def"),

@@ -566,6 +566,28 @@ fn emit_lit_const[&o, &c](out: &!o [byte], sc: &!c [int], text: &static [byte]) 
     return r;
 }
 
+// What the IR does not say about a `Const bytes` and an executor needs (docs/m3-engine.md 6e): that it was written as a number that is not an integer (kind 2), as `true` (4) or as `false` (5), and not as a
+// string. Noted for the executor beside the IR, when the scratch has room for it (at least 142 ints): sc[8] is how many notes there are, or -1 if there was no room for one, and note i is two ints from
+// sc[140 + 2 * i]: the position in the output of the `Const`'s first byte, and the kind. A caller that does not execute (the guard, the verifiers' tests) never looks.
+pub fn kinds_at() -> [] int {
+    return 140;
+}
+
+fn note_kind[&c](sc: &!c [int], kind: int) -> [] int {
+    if len(sc) < 142 || sc[8] < 0 {
+        return 0;
+    }
+    let at = 140 + 2 * sc[8];
+    if at + 2 > len(sc) {
+        sc[8] = 0 - 1;
+        return 0;
+    }
+    sc[at] = sc[0];
+    sc[at + 1] = kind;
+    sc[8] = sc[8] + 1;
+    return 0;
+}
+
 // ---- expressions
 
 // The IR operator of a parser operator code (parse.cho: 1 or, 2 and, 3 = ... 14 ||, 15 to 18 like and ilike, plain and negated).
@@ -651,6 +673,7 @@ fn visit[&s, &t, &n, &k, &m, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [
                 r = wn(out, sc, v, 8);
             }
         } else {
+            note_kind(sc, 2);
             r = emit_bytes_const(sql, toks, data, false, out, sc);
         }
         return r;
@@ -681,9 +704,11 @@ fn visit[&s, &t, &n, &k, &m, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [
         return r;
     }
     if kind == parse.n_true() {
+        note_kind(sc, 4);
         return emit_lit_const(out, sc, "true");
     }
     if kind == parse.n_false() {
+        note_kind(sc, 5);
         return emit_lit_const(out, sc, "false");
     }
     if kind == parse.n_col() {
@@ -945,6 +970,48 @@ fn emit_expr[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nod
     return 0;
 }
 
+// One expression that names no table (a column's default), lowered alone with its literal kinds noted (`sc` as for `lower`): the number of bytes written, or `0 - code`.
+pub fn literal[&s, &t, &n, &k, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
+    sc[0] = 0;
+    sc[1] = 0;
+    sc[2] = 0;
+    sc[3] = 0;
+    sc[4] = 0;
+    if len(sc) > 8 {
+        sc[8] = 0;
+    }
+    let r0 = emit_expr(sql, toks, nodes, kids, root, "", rs, out, sc);
+    if r0 < 0 {
+        return r0;
+    }
+    return sc[0];
+}
+
+// The name the token `tok` stands for, as a `Name` holds it (an unquoted name in lower case, a quoted one with its doubled quotes made single), into `out` from `at`: its length, or -1 if it does not fit.
+pub fn name_text[&s, &t, &o](sql: &s [byte], toks: &t [int], tok: int, out: &!o [byte], at: int) -> [] int {
+    let start = parse.tstart(toks, tok);
+    let n = parse.tlen(toks, tok);
+    let quoted = parse.tkind(toks, tok) == lex.t_quoted();
+    var i = 0;
+    var written = 0;
+    while i < n {
+        var ch = int_of(sql[start + i]);
+        if quoted && ch == '"' && i + 1 < n {
+            i = i + 1;
+        }
+        if !quoted {
+            ch = low(ch);
+        }
+        if at + written >= len(out) {
+            return 0 - 1;
+        }
+        out[at + written] = byte_of(ch);
+        written = written + 1;
+        i = i + 1;
+    }
+    return written;
+}
+
 // ---- statements
 
 // An optional expression: a flag, then the expression if there is one.
@@ -1028,6 +1095,100 @@ fn flatten_from[&s, &t, &n, &k, &m, &c](sql: &s [byte], toks: &t [int], nodes: &
     return 0;
 }
 
+// Whether the token `tok` (a name: an unquoted one is compared in lower case) spells `word`.
+fn tok_word[&s, &t](sql: &s [byte], toks: &t [int], tok: int, word: &static [byte]) -> [] bool {
+    let n = parse.tlen(toks, tok);
+    if n != len(word) {
+        return false;
+    }
+    let start = parse.tstart(toks, tok);
+    let fold = parse.tkind(toks, tok) == lex.t_ident();
+    var i = 0;
+    while i < n {
+        var x = int_of(sql[start + i]);
+        if fold {
+            x = low(x);
+        }
+        if x != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The name PostgreSQL gives a column that is a cast to the type of code `code` (src/parse.cho) and has no better name: the type's own name in its catalog.
+fn cast_name(code: int) -> [] &static [byte] {
+    if code == 1 {
+        return "int2";
+    }
+    if code == 2 {
+        return "int4";
+    }
+    if code == 3 {
+        return "int8";
+    }
+    if code == 5 {
+        return "bool";
+    }
+    if code == 6 {
+        return "numeric";
+    }
+    if code == 7 {
+        return "varchar";
+    }
+    if code == 11 {
+        return "float4";
+    }
+    return parse.type_name(code);
+}
+
+// Whether `name` is the name PostgreSQL gives the output column of the expression `x0` when it has no alias: a column's name; a function's; through a cast or a CASE the name of what is cast or of the ELSE,
+// if that has one of those two; otherwise the type's name for a cast and `case` for a CASE (the outermost of them); and nothing for any other expression (`?column?`, which no name in a statement equals).
+fn names_output[&s, &t, &n, &k](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], x0: int, name: int) -> [] bool {
+    var x = x0;
+    var weak = 0;
+    var code = 0;
+    var going = true;
+    while going {
+        let kind = nodes[6 * x];
+        if kind == parse.n_col() {
+            if nodes[6 * x + 4] >= 0 {
+                return same_name(sql, toks, name, nodes[6 * x + 4]);
+            }
+            return same_name(sql, toks, name, nodes[6 * x + 1]);
+        }
+        if kind == parse.n_call() {
+            return same_name(sql, toks, name, nodes[6 * x + 1]);
+        }
+        if kind == parse.n_cast() {
+            if weak == 0 {
+                weak = 1;
+                code = nodes[6 * x + 1];
+            }
+            x = kids[nodes[6 * x + 2]];
+        } else if kind == parse.n_case() {
+            if weak == 0 {
+                weak = 2;
+            }
+            if nodes[6 * x + 5] == 1 && nodes[6 * x + 3] > 0 {
+                x = kids[nodes[6 * x + 2] + nodes[6 * x + 3] - 1];
+            } else {
+                going = false;
+            }
+        } else {
+            going = false;
+        }
+    }
+    if weak == 1 {
+        return tok_word(sql, toks, name, cast_name(code));
+    }
+    if weak == 2 {
+        return tok_word(sql, toks, name, "case");
+    }
+    return false;
+}
+
 // How many DIFFERENT output columns of the select list the token names, capped at 2: an alias, the column a bare reference or a
 // cast of one names, or a column a `*` expands to. PostgreSQL's ORDER BY takes an output name first and refuses one that
 // two outputs have, but not when they are the same expression (`SELECT t.*, * ... ORDER BY b`): two plain references to one
@@ -1069,44 +1230,37 @@ fn count_outputs[&s, &t, &n, &k, &m, &c](sql: &s [byte], toks: &t [int], nodes: 
         } else if nodes[6 * it + 1] >= 0 {
             hit = same_name(sql, toks, name, nodes[6 * it + 1]);
         } else {
-            var x = kids[nodes[6 * it + 2]];
-            var plain = true;
-            while nodes[6 * x] == parse.n_cast() {
-                x = kids[nodes[6 * x + 2]];
-                plain = false;
-            }
-            if nodes[6 * x] == parse.n_col() {
+            let x = kids[nodes[6 * it + 2]];
+            hit = names_output(sql, toks, nodes, kids, x, name);
+            if hit && nodes[6 * x] == parse.n_col() {
                 var col = nodes[6 * x + 1];
                 var tab = 0 - 1;
                 if nodes[6 * x + 4] >= 0 {
                     col = nodes[6 * x + 4];
                     tab = nodes[6 * x + 1];
                 }
-                hit = same_name(sql, toks, name, col);
-                if hit && plain {
-                    // the same table and column as a star's or another reference's: identify them by (scope entry, snapshot position)
-                    var e = 0 - 1;
-                    if tab >= 0 {
-                        e = scope_find(sql, toks, tab, schema, sc);
-                    } else {
-                        var j = 0;
-                        while j < sc[2] && e < 0 {
-                            if has_column(sql, toks, col, schema, sc[16 + 3 * j + 2], sc) {
-                                e = j;
-                            }
-                            j = j + 1;
+                // the same table and column as a star's or another reference's: identify them by (scope entry, snapshot position)
+                var e = 0 - 1;
+                if tab >= 0 {
+                    e = scope_find(sql, toks, tab, schema, sc);
+                } else {
+                    var j = 0;
+                    while j < sc[2] && e < 0 {
+                        if has_column(sql, toks, col, schema, sc[16 + 3 * j + 2], sc) {
+                            e = j;
                         }
+                        j = j + 1;
                     }
-                    if e >= 0 {
-                        var c = 0;
-                        var at = nth_column(schema, sc[16 + 3 * e + 2], c, sc);
-                        while at >= 0 {
-                            if tok_is(sql, toks, col, schema, at, sc[6]) {
-                                ident = 65536 * (e + 1) + at;
-                            }
-                            c = c + 1;
-                            at = nth_column(schema, sc[16 + 3 * e + 2], c, sc);
+                }
+                if e >= 0 {
+                    var c = 0;
+                    var at = nth_column(schema, sc[16 + 3 * e + 2], c, sc);
+                    while at >= 0 {
+                        if tok_is(sql, toks, col, schema, at, sc[6]) {
+                            ident = 65536 * (e + 1) + at;
                         }
+                        c = c + 1;
+                        at = nth_column(schema, sc[16 + 3 * e + 2], c, sc);
                     }
                 }
             }
@@ -1289,7 +1443,7 @@ fn lower_select[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], 
     if r0 < 0 {
         return r0;
     }
-    // ORDER BY: a bare name equal to a select item's alias is that item
+    // ORDER BY: a bare name equal to the name of an output column (its alias, or the name PostgreSQL gives it without one) is that column
     var no = 0;
     if order != 0 {
         no = nodes[6 * order + 3];
@@ -1304,11 +1458,21 @@ fn lower_select[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], 
             if count_outputs(sql, toks, nodes, kids, items, nodes[6 * expr + 1], schema, sc) > 1 {
                 return fail(sc, nodes[6 * expr + 1], e_ambiguous_column());
             }
+            let ord_name = nodes[6 * expr + 1];
             var j = 0;
             while j < nodes[6 * items + 3] {
                 let it = kids[nodes[6 * items + 2] + j];
-                if nodes[6 * it] == parse.n_item() && nodes[6 * it + 1] >= 0 && same_name(sql, toks, nodes[6 * expr + 1], nodes[6 * it + 1]) {
-                    expr = kids[nodes[6 * it + 2]];
+                if nodes[6 * it] == parse.n_item() {
+                    // the item's alias, or the name it has without one
+                    var named = false;
+                    if nodes[6 * it + 1] >= 0 {
+                        named = same_name(sql, toks, ord_name, nodes[6 * it + 1]);
+                    } else {
+                        named = names_output(sql, toks, nodes, kids, kids[nodes[6 * it + 2]], ord_name);
+                    }
+                    if named {
+                        expr = kids[nodes[6 * it + 2]];
+                    }
                 }
                 j = j + 1;
             }
@@ -1498,6 +1662,9 @@ pub fn lower[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nod
     sc[2] = 0;
     sc[3] = 0;
     sc[4] = 0;
+    if len(sc) > 8 {
+        sc[8] = 0;
+    }
     let kind = nodes[6 * root];
     var r0 = 0;
     if kind == parse.n_select() {

@@ -911,6 +911,12 @@ STMT = [
 
 # ---- the lowering (src/lower.cho, tests/lower_check.py: IR bytes, effects through the verifier, refusals)
 LOWER = [
+    ("lower: an output column is named by a CASE's first condition", "src/lower.cho", "                x = kids[nodes[6 * x + 2] + nodes[6 * x + 3] - 1];", "                x = kids[nodes[6 * x + 2]];"),
+    ("lower: the innermost cast or CASE names the column", "src/lower.cho", "            if weak == 0 {\n                weak = 2;\n            }", "            weak = 2;"),
+    ("lower: a cast has no name of its own", "src/lower.cho", "        return tok_word(sql, toks, name, cast_name(code));", "        return false;"),
+    ("lower: a CASE has no name of its own", "src/lower.cho", "        return tok_word(sql, toks, name, \"case\");", "        return false;"),
+    ("lower: ORDER BY does not see the name of a column without an alias", "src/lower.cho", "                        named = names_output(sql, toks, nodes, kids, kids[nodes[6 * it + 2]], ord_name);", "                        named = false;"),
+    ("lower: integer is named integer", "src/lower.cho", "    if code == 2 {\n        return \"int4\";", "    if code == 2 {\n        return \"integer\";"),
     ("lower: a table read as of a commit is named without it", "src/lower.cho", "    let tok = sc[120 + e];\n    if tok < 0 {", "    let tok = sc[120 + e];\n    if true {"),
     ("lower: the scope forgets the commit", "src/lower.cho", "    sc[120 + sc[2]] = nodes[6 * node + 5];", "    sc[120 + sc[2]] = 0 - 1;"),
     ("lower: the commit's digits are one short", "src/lower.cho", "    while i < 64 && r >= 0 {\n        r = w8(out, sc, int_of(sql[parse.tstart(toks, tok) + i]));", "    while i < 63 && r >= 0 {\n        r = w8(out, sc, int_of(sql[parse.tstart(toks, tok) + i]));"),
@@ -934,7 +940,7 @@ LOWER = [
     ("lower: a left join is inner", "src/lower.cho", "            if nodes[6 * j + 1] == 1 {\n                kind = 2;", "            if nodes[6 * j + 1] == 1 {\n                kind = 1;"),
     ("lower: a join's condition is the wrong child", "src/lower.cho", "            sc[48 + 3 * sc[3] + 2] = kids[nodes[6 * j + 2] + 2];", "            sc[48 + 3 * sc[3] + 2] = kids[nodes[6 * j + 2] + 1];"),
     ("lower: DESC is ASC", "src/lower.cho", "            if nodes[6 * ord + 1] == 2 {\n                dir = 1;", "            if nodes[6 * ord + 1] == 2 {\n                dir = 0;"),
-    ("lower: ORDER BY ignores an alias", "src/lower.cho", "                if nodes[6 * it] == parse.n_item() && nodes[6 * it + 1] >= 0 && same_name(", "                if false && nodes[6 * it] == parse.n_item() && nodes[6 * it + 1] >= 0 && same_name("),
+    ("lower: ORDER BY ignores an alias", "src/lower.cho", "                        named = same_name(sql, toks, ord_name, nodes[6 * it + 1]);", "                        named = false;"),
     ("lower: an ambiguous ORDER BY name is accepted", "src/lower.cho", "nodes[6 * expr + 1], schema, sc) > 1 {", "nodes[6 * expr + 1], schema, sc) > 5 {"),
     ("lower: an INSERT row of the wrong width is accepted", "src/lower.cho", "        if nodes[6 * rn + 3] != width {", "        if false {"),
     ("lower: an UPDATE of an unknown column is accepted", "src/lower.cho", "            if !has_column(sql, toks, col, schema, line, sc) {\n                return fail(sc, col, e_unknown_column());\n            }\n            r0 = wname_tok(sql, toks, col, out, sc);", "            if false {\n                return fail(sc, col, e_unknown_column());\n            }\n            r0 = wname_tok(sql, toks, col, out, sc);"),
@@ -1591,7 +1597,9 @@ ROW = [
     ("row: true and false are swapped", "src/row.cho", "        if int_of(row[vat + 1]) == 1 {\n            return puts(out, at, \"true\");", "        if int_of(row[vat + 1]) == 0 {\n            return puts(out, at, \"true\");"),
     ("row: bytes after a definition are taken", "src/row.cho", "    if at != len(def) || seen != keys * (keys + 1) / 2 {", "    if seen != keys * (keys + 1) / 2 {"),
     ("row: key places need not be 1 to k", "src/row.cho", "    if at != len(def) || seen != keys * (keys + 1) / 2 {", "    if at != len(def) {"),
-    ("row: a value of another type than its column is taken", "src/row.cho", "        } else if tag != col_type(def, i) {\n            return false;", "        } else if false {\n            return false;"),
+    ("row: a value of another type than its column is taken", "src/row.cho", "        } else if tag != storage_tag(col_type(def, i)) {\n            return false;", "        } else if false {\n            return false;"),
+    ("row: a smallint column takes any integer", "src/row.cho", "        return v >= 0 - 32768 && v <= 32767;", "        return true;"),
+    ("row: an integer column takes any integer", "src/row.cho", "        return v >= 0 - 2147483648 && v <= 2147483647;", "        return true;"),
 ]
 
 
@@ -1628,7 +1636,442 @@ def run_row(cancho):
     return 1 if survivors else 0
 
 
+# ---- the engine's expression evaluator (src/eval.cho), judged by tests/eval_check.py against PostgreSQL
+EVAL = [
+    ("eval: less than is less or equal", "src/eval.cho", "op == 2 && c < 0", "op == 2 && c <= 0"),
+    ("eval: OR stops on false", "src/eval.cho", "            if op == 7 {\n                stop = 1;", "            if op == 7 {\n                stop = 0;"),
+    ("eval: division is the remainder", "src/eval.cho", "            r = x / y;", "            r = x % y;"),
+    ("eval: division by zero is out of range", "src/eval.cho", "        if y == 0 {\n            return (2, 0);", "        if y == 0 {\n            return (3, 0);"),
+    ("eval: a result need not fit its type", "src/eval.cho", "    if !row.int_fits(ty, r) {\n        return (3, 0);\n    }\n    return (0, r);", "    return (0, r);"),
+    ("eval: the narrower integer type wins", "src/eval.cho", "    if width(a) >= width(b) {", "    if width(a) <= width(b) {"),
+    ("eval: an underscore matches one byte", "src/eval.cho", "                s = s + char_len(int_of(ar[sa + s]));\n                p = p + 1;", "                s = s + 1;\n                p = p + 1;"),
+    ("eval: NOT ILIKE is case sensitive", "src/eval.cho", "op == 13 || op == 15", "op == 13"),
+    ("eval: NOT LIKE is LIKE", "src/eval.cho", "                } else if op >= 14 {\n                    bool3(ws, out, 0, 1 - m, all_const);", "                } else if op >= 14 {\n                    bool3(ws, out, 0, m, all_const);"),
+    ("eval: 'yes' is not a boolean", "src/eval.cho", 'name_is(ar, at, n, "yes")', 'name_is(ar, at, n, "yess")'),
+    ("eval: an integer literal is always an integer", "src/eval.cho", "            var ty = 5;\n            if !row.int_fits(5, v) {\n                ty = 1;", "            var ty = 5;\n            if !row.int_fits(5, v) {\n                ty = 5;"),
+    ("eval: a constant null is not folded", "src/eval.cho", "    return ws[x + 1] == 1 && ws[x + 4] == 1 || ws[y + 1] == 1 && ws[y + 4] == 1;", "    return false;"),
+    ("eval: the rightmost type error is the one reported", "src/eval.cho", "                if r < 0 {\n                    wrong = r;", "                if r < 0 && wrong == 0 {\n                    wrong = r;"),
+    ("eval: IN ignores NOT", "src/eval.cho", "            bool3(ws, out, 0, 1 - negated, all_const);", "            bool3(ws, out, 0, 1, all_const);"),
+    ("eval: IN with a null and no match is false", "src/eval.cho", "        } else if seen_null {\n            bool3(ws, out, 1, 0, all_const);", "        } else if seen_null {\n            bool3(ws, out, 0, negated, all_const);"),
+    ("eval: CASE takes the first condition that is false", "src/eval.cho", "            } else if ws[cv + 1] == 0 && ws[cv + 2] == 1 {\n                chosen = top - 6 * (2 * b + 1);", "            } else if ws[cv + 1] == 0 && ws[cv + 2] == 0 {\n                chosen = top - 6 * (2 * b + 1);"),
+    ("eval: IS NULL is IS NOT NULL", "src/eval.cho", "                if ws[x + 1] == 1 == (op == 2) {", "                if ws[x + 1] == 1 == (op == 3) {"),
+    ("eval: || writes the second text over the first", "src/eval.cho", "                    ar[start + xn + k] = ar[ya + k];", "                    ar[start + k] = ar[ya + k];"),
+    ("eval: only a positive integer is true", "src/eval.cho", "        if a != 0 {\n            t = 1;", "        if a > 0 {\n            t = 1;"),
+    ("eval: text after a number is ignored", "src/eval.cho", "    if i != end || digits == 0 {", "    if digits == 0 {"),
+    ("eval: a minus before a literal makes a bigint", "src/eval.cho", "            var t = 5;\n            if !row.int_fits(5, v) {\n                t = 1;\n            }\n            set(ws, out, t, 0, v, 0, 1);", "            var t = 1;\n            set(ws, out, t, 0, v, 0, 1);"),
+    ("eval: a condition's type is checked after the operand that follows it", "src/eval.cho", "                    } else if m % stride == 0 && m / stride < conds && ws[v] != 2 && ws[v] != 0 {\n                        wrong = mismatch();", "                    } else if false {\n                        wrong = mismatch();"),
+    ("eval: AND with a constant false still looks at the other side", "src/eval.cho", "            if ws[y + 4] == 1 && ys == 0 && yv == stop {", "            if false {"),
+    ("eval: subtraction adds", "src/eval.cho", "            yy = 0 - y;", "            yy = y;"),
+]
+
+
+def run_eval(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in EVAL if not only or only in m[0]]
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "evalcheck"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/evalcheck.cho")] + [str(work / "src" / x) for x in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho")] + ["-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            # the two runs of scripts/check.sh: a mutant is killed by either
+            rc, out = 0, ""
+            for seed in ("1", "2"):
+                try:
+                    r = subprocess.run([sys.executable, str(ROOT / "tests/eval_check.py"), str(exe), "4000", seed], capture_output=True, text=True, timeout=900, env=dict(os.environ, E2E_DB="cdb_evalmut"))
+                    rc, out = r.returncode, r.stdout
+                except subprocess.TimeoutExpired:
+                    rc, out = 1, "FAIL timed out"
+                if rc != 0:
+                    break
+            if rc == 0:
+                print("SURVIVED %-46s every expression agrees" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in out.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d expression(s), e.g. %s" % (label, len(first), first[0][5:70] if first else "a crash"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
+# The engine's statements (src/exec.cho, src/execw.cho, src/tables.cho, and the assignment of src/eval.cho), judged by tests/engine_check.py: the random history against PostgreSQL, the fixed statements that
+# must be answered, and the page file after a delete and a drop.
+ENGINE = [
+    ('grouped: the min of text by its first bytes', 'src/execs.cho',
+     '        let d = int_of(x[xa + 3 + i]) - int_of(y[ya + 3 + i]);\n        if d != 0 {\n            return d;\n        }\n        i = i + 1;\n    }\n    return xn - yn;',
+     '        let d = int_of(x[xa + 3 + i]) - int_of(y[ya + 3 + i]);\n        if d != 0 {\n            return d;\n        }\n        i = i + 1;\n    }\n    return 0;'),
+    ("grouped: a literal item's type is unknown", 'src/execs.cho',
+     '        } else if i < ni {\n            var ty = contents(w.ws)[b];\n            if ty == 0 {\n                ty = 3;\n            }',
+     '        } else if i < ni {\n            var ty = contents(w.ws)[b];'),
+    ('grouped: sum is min', 'src/execs.cho',
+     '    if exec.same(e, at + 3, nl, "sum", 0, 3) {\n        return 2;',
+     '    if exec.same(e, at + 3, nl, "sum", 0, 3) {\n        return 3;'),
+    ('grouped: min and max the other way', 'src/execs.cho',
+     '            take = kind == 3 && c < 0 || kind == 4 && c > 0;',
+     '            take = kind == 3 && c > 0 || kind == 4 && c < 0;'),
+    ('grouped: nulls are counted', 'src/execs.cho',
+     '    if int_of(contents(w.chg)[off]) == 0 {\n        return 0;\n    }\n    let kind = contents(w.pos)[ab + 2];',
+     '    let kind = contents(w.pos)[ab + 2];'),
+    ('grouped: what is below zero is not summed', 'src/execs.cho',
+     '        } else if v < 0 {\n            if contents(w.pos)[ab + 7]',
+     '        } else if false {\n            if contents(w.pos)[ab + 7]'),
+    ('grouped: the sum of no rows is 0', 'src/execs.cho',
+     '            } else if real && kind == 2 && cnt > 0 {',
+     '            } else if real && kind == 2 {'),
+    ('grouped: the min of no rows is what was left there', 'src/execs.cho',
+     '            } else if real && cnt > 0 {',
+     '            } else if real {'),
+    ('grouped: a sum is an integer', 'src/execs.cho',
+     '                if kind == 2 && (ty == 5 || ty == 6) {\n                    contents(w.pos)[ab + 4] = 1;',
+     '                if kind == 2 && (ty == 5 || ty == 6) {\n                    contents(w.pos)[ab + 4] = 5;'),
+    ('grouped: min has the type of a count', 'src/execs.cho',
+     '                    contents(w.pos)[ab + 4] = ty;',
+     '                    contents(w.pos)[ab + 4] = 1;'),
+    ('grouped: a sum of bigint is answered', 'src/execs.cho',
+     '                if ty == 0 || kind == 2 && ty == 1 {',
+     '                if ty == 0 {'),
+    ('grouped: no aggregate for the type is 42804', 'src/execs.cho',
+     '                    // no such aggregate for this type\n                    exec.note(w, 5);',
+     '                    // no such aggregate for this type\n                    exec.note(w, 6);'),
+    ('grouped: a column that is not grouped is read', 'src/execs.cho',
+     '        exec.note(w, exec.e_grouping());',
+     '        exec.note(w, 0);'),
+    ('grouped: grouping by the key frees no column', 'src/execs.cho',
+     '        if keyed {\n            return exec.unsupported();\n        }',
+     '        if false {\n            return exec.unsupported();\n        }'),
+    ('grouped: a cast in GROUP BY is not seen through', 'src/execs.cho',
+     '        if int_of(e[inner]) == 0 && inner != ga {',
+     '        if false {'),
+    ('grouped: an error is certain beside a HAVING without aggregates', 'src/execs.cho',
+     '        if bounded || hfree {',
+     '        if bounded {'),
+    ('grouped: an error is certain under DISTINCT', 'src/execs.cho',
+     '    // as in `select`: a DISTINCT may be answered from the first row\n    var bounded = distinct || int_of(e[at]) == 1;',
+     '    // as in `select`: a DISTINCT may be answered from the first row\n    var bounded = int_of(e[at]) == 1;'),
+    ('select: an error is certain under DISTINCT', 'src/execs.cho',
+     '    // a DISTINCT over items that cannot differ is a LIMIT 1 to PostgreSQL: it stops at the first row\n    var bounded = distinct || int_of(e[at]) == 1;',
+     '    // a DISTINCT over items that cannot differ is a LIMIT 1 to PostgreSQL: it stops at the first row\n    var bounded = int_of(e[at]) == 1;'),
+    ('grouped: GROUP BY 2 is GROUP BY 1', 'src/execs.cho',
+     '            ga = contents(w.pos)[exec.p_item() + place - 1];\n            ge = contents(w.pos)[exec.p_iend() + place - 1];',
+     '            ga = contents(w.pos)[exec.p_item()];\n            ge = contents(w.pos)[exec.p_iend()];'),
+    ('grouped: a constant with a minus is grouped by', 'src/execs.cho',
+     '        } else if int_of(e[ga]) == 7 && int_of(e[ga + 1]) == 1 && int_of(e[ga + 2]) == 1 {\n            // a constant with a minus is a place too',
+     '        } else if false {\n            // a constant with a minus is a place too'),
+    ('grouped: HAVING lets every group through', 'src/execs.cho',
+     '        if contents(w.ws)[b + 1] != 0 || contents(w.ws)[b + 2] != 1 {\n            return n;\n        }\n    }\n    if n >= exec.max_rows() {',
+     '    }\n    if n >= exec.max_rows() {'),
+    ('grouped: an error in HAVING is a group left out', 'src/execs.cho',
+     '        if contents(w.ws)[b + 1] == 2 {\n            exec.note(w, contents(w.ws)[b + 2] - 1);\n            return n;\n        }',
+     '        if contents(w.ws)[b + 1] == 2 {\n            return n;\n        }'),
+    ('grouped: a HAVING that is no boolean is 42883', 'src/execs.cho',
+     '        } else if contents(w.ws)[b] != 2 {\n            exec.note(w, 6);\n        }\n    }\n    i = 0;\n    while i < ni + extra {',
+     '        } else if contents(w.ws)[b] != 2 {\n            exec.note(w, 5);\n        }\n    }\n    i = 0;\n    while i < ni + extra {'),
+    ('grouped: every row is a group', 'src/execs.cho',
+     '            while j < m && (j == i || order(contents(w.chg), contents(w.pos), first, contents(w.idx2)[j], 1, ng, 0) == 0) {',
+     '            while j < m && j == i {'),
+    ('grouped: the rows are not sorted by group', 'src/execs.cho',
+     '        sort_groups(w, m, ng);\n',
+     ''),
+    ("grouped: the aggregates read the group's values", 'src/execs.cho',
+     '                var off = nth(contents(w.chg), contents(w.idx2)[j], ng);',
+     '                var off = nth(contents(w.chg), contents(w.idx2)[j], 0);'),
+    ("grouped: every GROUP BY expression has the first one's value", 'src/execs.cho',
+     '                let off = nth(contents(w.chg), rec, which);',
+     '                let off = nth(contents(w.chg), rec, 0);'),
+    ('grouped: count(*) counts nothing', 'src/execs.cho',
+     '                        contents(w.chg)[fill] = byte_of(2);\n                        contents(w.chg)[fill + 1] = byte_of(1);',
+     '                        contents(w.chg)[fill] = byte_of(0);\n                        contents(w.chg)[fill + 1] = byte_of(1);'),
+    ('grouped: the slots stay on while the rows are read', 'src/execs.cho',
+     '    contents(w.cx)[eval.slots_at()] = 0;\n    var at = lat;',
+     '    var at = lat;'),
+    ('grouped: an error in an item is a group left out', 'src/execs.cho',
+     '        if contents(w.ws)[b + 1] == 2 {\n            exec.note(w, contents(w.ws)[b + 2] - 1);\n            bad = true;\n        } else if !bad {\n            fill = exec.enc(contents(w.rows), fill, contents(w.ws), b, contents(w.ar));',
+     '        if contents(w.ws)[b + 1] == 2 {\n            bad = true;\n        } else if !bad {\n            fill = exec.enc(contents(w.rows), fill, contents(w.ws), b, contents(w.ar));'),
+    ("grouped: an error in a row's argument is a row left out", 'src/execs.cho',
+     '                        if contents(w.ws)[b + 1] == 2 {\n                            exec.note(w, contents(w.ws)[b + 2] - 1);\n                            bad = true;\n                        } else if !bad {\n                            fill = exec.enc(contents(w.chg), fill,',
+     '                        if contents(w.ws)[b + 1] == 2 {\n                            bad = true;\n                        } else if !bad {\n                            fill = exec.enc(contents(w.chg), fill,'),
+    ('grouped: a query with only a HAVING is not grouped', 'src/execs.cho',
+     '    if ng > 0 || hpos != 0 || calls {',
+     '    if ng > 0 || calls {'),
+    ('slots: what is inside a given expression is computed', 'src/eval.cho',
+     '        if p > cx[s] && p < cx[s + 1] {\n            return 0 - 2;',
+     '        if p > cx[s] && p < cx[s + 1] {\n            return 0 - 1;'),
+    ('slots: a given value is not used', 'src/eval.cho',
+     '        if cx[s] == p {\n            return j;\n        }',
+     '        if cx[s] == p {\n            return 0 - 1;\n        }'),
+    ('slots: a given value is a constant', 'src/eval.cho',
+     '            set(ws, base + 6 * sp, cx[s + 2], cx[s + 3], cx[s + 4], cx[s + 5], 0);',
+     '            set(ws, base + 6 * sp, cx[s + 2], cx[s + 3], cx[s + 4], cx[s + 5], 1);'),
+    ('bounds: rows skipped although a condition can raise', 'src/exec.cho',
+     '            if !quiet {\n                return 0;\n            }',
+     '            if false {\n                return 0;\n            }'),
+    ('bounds: arithmetic counted as unable to raise', 'src/exec.cho',
+     'tag == 5 && int_of(e[p + 1]) <= 7 ||',
+     'tag == 5 ||'),
+    ('bounds: the first key is left out', 'src/exec.cho',
+     '        w.klen = 4 + n;\n        w.fresh = true;',
+     '        w.klen = 4 + n;\n        w.fresh = false;'),
+    ('bounds: the last key is left out', 'src/exec.cho',
+     '    return kn > hn;\n}',
+     '    return kn >= hn;\n}'),
+    ('bounds: constant < key read as key < constant', 'src/exec.cho',
+     '                if op == 2 || op == 3 {\n                    op = op + 2;',
+     '                if op == 2 || op == 3 {\n                    op = op + 0;'),
+    ('bounds: constant > key read as key > constant', 'src/exec.cho',
+     '                } else if op == 4 || op == 5 {\n                    op = op - 2;',
+     '                } else if op == 4 || op == 5 {\n                    op = op - 0;'),
+    ('bounds: > sets the upper bound', 'src/exec.cho',
+     '            if n >= 0 && (op == 0 || op == 2 || op == 3) {',
+     '            if n >= 0 && (op == 0 || op == 4 || op == 5) {'),
+    ('bounds: < sets the lower bound', 'src/exec.cho',
+     '            if n >= 0 && (op == 0 || op == 4 || op == 5) {',
+     '            if n >= 0 && (op == 0 || op == 2 || op == 3) {'),
+    ('bounds: an integer key without its sign flipped', 'src/exec.cho',
+     '                    contents(w.nrow)[0] = byte_of((int_of(contents(w.nrow)[0]) + 128) % 256);',
+     '                    contents(w.nrow)[0] = byte_of((int_of(contents(w.nrow)[0]) + 0) % 256);'),
+    ('bounds: a text key without its end', 'src/exec.cho',
+     '                    contents(w.nrow)[n + 1] = byte_of(0);\n                    n = n + 2;',
+     '                    contents(w.nrow)[n + 1] = byte_of(0);\n                    n = n + 0;'),
+    ('bounds: any column is the key', 'src/exec.cho',
+     '    return same(nm, 0, len(nm), e, at + 5 + tn, cn);',
+     '    return true;'),
+    ('note: a second code is not seen', 'src/exec.cho',
+     '    } else if w.code != code {\n        w.multi = true;',
+     '    } else if w.code == code {\n        w.multi = true;'),
+    ('verdict: several codes answered as one', 'src/exec.cho',
+     '    if w.multi {\n        return ambiguous();',
+     '    if false {\n        return ambiguous();'),
+    ('where: a false condition passes', 'src/exec.cho',
+     '    if st == 0 && a == 1 {\n        return 1;\n    }\n    if w.nconj <= 1 {',
+     '    if st == 0 {\n        return 1;\n    }\n    if w.nconj <= 1 {'),
+    ('where: an error of the one condition is no error', 'src/exec.cho',
+     '        if st == 2 {\n            note(w, a - 1);\n            return 2;\n        }\n        return 0;',
+     '        return 0;'),
+    ('where: an error beside a false condition is certain', 'src/exec.cho',
+     '    if others > 0 {\n        w.orderdep = true;\n        return 0;\n    }',
+     '    if false {\n        w.orderdep = true;\n        return 0;\n    }'),
+    ('where: a false condition is not another condition', 'src/exec.cho',
+     '        } else if sj != 0 || contents(w.ws)[b + 2] != 1 {',
+     '        } else if sj != 0 {'),
+    ('where: errors beside true conditions are no error', 'src/exec.cho',
+     '    if errs % 2 == 1 {\n        note(w, 1);\n    }',
+     '    if errs % 2 == 3 {\n        note(w, 1);\n    }'),
+    ('select: an error under a limit is certain', 'src/execs.cho',
+     '        if bounded {\n',
+     '        if false {\n'),
+    ('order: nulls first going up', 'src/execs.cho',
+     '        if tx == 0 {\n            return 1;\n        }\n        return 0 - 1;',
+     '        if tx == 0 {\n            return 0 - 1;\n        }\n        return 1;'),
+    ('order: integers the other way', 'src/execs.cho',
+     '        if a < b {\n            return 0 - 1;\n        }\n        if a > b {\n            return 1;\n        }',
+     '        if a < b {\n            return 1;\n        }\n        if a > b {\n            return 0 - 1;\n        }'),
+    ('order: text by its first bytes only', 'src/execs.cho',
+     '        let d = int_of(rows[x + 3 + i]) - int_of(rows[y + 3 + i]);\n        if d != 0 {\n            return d;\n        }\n        i = i + 1;\n    }\n    return xn - yn;',
+     '        let d = int_of(rows[x + 3 + i]) - int_of(rows[y + 3 + i]);\n        if d != 0 {\n            return d;\n        }\n        i = i + 1;\n    }\n    return 0;'),
+    ('order: text as numbers of bytes', 'src/execs.cho',
+     '        let d = int_of(rows[x + 3 + i]) - int_of(rows[y + 3 + i]);\n        if d != 0 {\n            return d;\n        }',
+     '        let d = int_of(rows[x + 3 + i]) - int_of(rows[y + 3 + i]);\n        if d != 0 && xn == yn {\n            return d;\n        }'),
+    ('order: desc ignored', 'src/execs.cho',
+     '        if pos[exec.p_odir() + j] == 1 {',
+     '        if pos[exec.p_odir() + j] == 2 {'),
+    ('order: only the first expression', 'src/execs.cho',
+     '        if c != 0 {\n            return c;\n        }\n        j = j + 1;',
+     '        if c != 0 || j == 0 {\n            return c;\n        }\n        j = j + 1;'),
+    ('distinct: every row kept', 'src/execs.cho',
+     '            if kept == 0 || order(contents(w.rows), contents(w.pos), contents(w.idx)[kept - 1], cur, 1, ni, no) != 0 {',
+     '            if true {'),
+    ('distinct: rows compared on their first item', 'src/execs.cho',
+     '        let ea = nth(rows, a, nitems);\n        let eb = nth(rows, b, nitems);',
+     '        let ea = nth(rows, a, 1);\n        let eb = nth(rows, b, 1);'),
+    ('offset: ignored', 'src/execs.cho',
+     '        first = offset;\n',
+     '        first = 0;\n'),
+    ('limit: 0 is no limit', 'src/execs.cho',
+     '    if limit >= 0 && limit < count {',
+     '    if limit > 0 && limit < count {'),
+    ('limit: a negative one is no error', 'src/execs.cho',
+     '    if v < 0 {\n        exec.note(w, which);\n        return end;\n    }',
+     '    if v < 0 {\n        return end;\n    }'),
+    ('limit: null is zero', 'src/execs.cho',
+     '    if st == 1 && (ty == 0 || ty == 1 || ty == 5 || ty == 6) {\n        return end;\n    }',
+     '    if st == 1 && (ty == 0 || ty == 1 || ty == 5 || ty == 6) {\n        contents(w.info)[2] = 0;\n        return end;\n    }'),
+    ('order by 2 is order by 1', 'src/execs.cho',
+     '            slot = place - 1;',
+     '            slot = 0;'),
+    ("select: a literal's type is unknown", 'src/execs.cho',
+     '        } else {\n            var ty = contents(w.ws)[b];\n            if ty == 0 {\n                ty = 3;\n            }\n            contents(w.pos)[exec.p_itype() + i] = ty;',
+     '        } else {\n            var ty = contents(w.ws)[b];\n            contents(w.pos)[exec.p_itype() + i] = ty;'),
+    ('select: an error in a row is no error', 'src/execs.cho',
+     '                    if contents(w.ws)[b + 1] == 2 {\n                        exec.note(w, contents(w.ws)[b + 2] - 1);\n                        bad = true;',
+     '                    if contents(w.ws)[b + 1] == 2 {\n                        bad = true;'),
+    ('an error of types is always 42883', 'src/exec.cho',
+     '        note(w, 0 - r);\n        return 0;',
+     '        note(w, 5);\n        return 0;'),
+    ('where: a condition that is no boolean is 42883', 'src/exec.cho',
+     '        } else if ty != 2 {\n            note(w, 6);',
+     '        } else if ty != 2 {\n            note(w, 5);'),
+    ('scan: the rows of the next table too', 'src/exec.cho',
+     '    if nk < 4 || commit.be(contents(w.key2), 0, 4) != w.tid {\n        return 0 - 1;\n    }\n    if w.hin >= 0 {',
+     '    if nk < 4 {\n        return 0 - 1;\n    }\n    if w.hin >= 0 {'),
+    ('text: a byte that is no UTF-8 is taken', 'src/exec.cho',
+     '        } else {\n            return false;\n        }\n        if i + more >= n {\n            return false;\n        }',
+     '        } else {\n            more = 0;\n        }\n        if i + more >= n {\n            return false;\n        }'),
+    ('text: a sequence cut short is taken', 'src/exec.cho',
+     '        if i + more >= n {\n            return false;\n        }',
+     '        if i + more >= n {\n            return true;\n        }'),
+    ('change: the image before left out', 'src/exec.cho',
+     '        build.put_be(contents(w.chg), at, il, 4);\n        at = at + 4 + il;\n    } else {\n        build.put_be(contents(w.chg), at, 4294967295, 4);\n        at = at + 4;\n    }\n    if at + 4 > rows_size() {',
+     '        build.put_be(contents(w.chg), at, 0, 4);\n        at = at + 4;\n    } else {\n        build.put_be(contents(w.chg), at, 4294967295, 4);\n        at = at + 4;\n    }\n    if at + 4 > rows_size() {'),
+    ('a null is taken where not null is said', 'src/execw.cho',
+     '(row.col_pk(contents(w.ctx)[64..64 + dl], c) > 0 || tables.not_null(contents(w.ent)[0..el], c))',
+     'row.col_pk(contents(w.ctx)[64..64 + dl], c) > 0'),
+    ('a null is taken in a key', 'src/execw.cho',
+     '(row.col_pk(contents(w.ctx)[64..64 + dl], c) > 0 || tables.not_null(contents(w.ent)[0..el], c))',
+     'tables.not_null(contents(w.ent)[0..el], c)'),
+    ("a constant's error waits for a row", 'src/execw.cho',
+     '    if contents(w.ws)[b + 4] != 1 {\n        if !eval.assignable(contents(w.ws)[b], to) {',
+     '    if true {\n        if !eval.assignable(contents(w.ws)[b], to) {'),
+    ('a value of another type is 42883', 'src/execw.cho',
+     '        if !eval.assignable(contents(w.ws)[b], to) {\n            exec.note(w, 6);',
+     '        if !eval.assignable(contents(w.ws)[b], to) {\n            exec.note(w, 5);'),
+    ('insert: defaults ignored', 'src/execw.cho',
+     '                    let da = tables.default_at(contents(w.ent)[0..el], c);\n                    if da < 0 {',
+     '                    let da = tables.default_at(contents(w.ent)[0..el], c);\n                    if true {'),
+    ('insert: a key that is there is overwritten', 'src/execw.cho',
+     '        if g >= 0 {\n            return exec.e_unique();\n        }',
+     '        if false {\n            return exec.e_unique();\n        }'),
+    ('insert: a null is a unique violation', 'src/execw.cho',
+     '        if null_in(w, contents(w.cur)[0..rl]) {\n            return exec.e_not_null();',
+     '        if null_in(w, contents(w.cur)[0..rl]) {\n            return exec.e_unique();'),
+    ('insert: the key is checked before the null', 'src/execw.cho',
+     '        if null_in(w, contents(w.cur)[0..rl]) {\n            return exec.e_not_null();\n        }\n',
+     ''),
+    ('insert: rows counted twice', 'src/execw.cho',
+     '        w.count = w.count + 1;\n        r = r + 1;',
+     '        w.count = w.count + 2;\n        r = r + 1;'),
+    ('update: a row that did not change is a change', 'src/execw.cho',
+     '                if !bad && !exec.same(contents(w.cur), 0, rl, contents(w.nrow), 0, ra) {',
+     '                if !bad {'),
+    ('update: a changed key stays where it was', 'src/execw.cho',
+     '                        moved = !exec.same(contents(w.key), 0, okl, contents(w.key2), 0, kl);',
+     '                        moved = false;'),
+    ('update: two rows take one key', 'src/execw.cho',
+     '                            // two rows of this statement take one key\n                            exec.note(w, exec.e_unique());',
+     '                            // two rows of this statement take one key\n                            exec.note(w, 0);'),
+    ('update: a null assigned is no error', 'src/execw.cho',
+     '                    if null_in(w, contents(w.nrow)[0..ra]) {\n                        exec.note(w, exec.e_not_null());\n                        bad = true;',
+     '                    if null_in(w, contents(w.nrow)[0..ra]) {\n                        bad = true;'),
+    ('update: only matched rows that changed are counted', 'src/execw.cho',
+     '            if pass == 1 {\n                w.count = w.count + 1;\n                var bad = false;',
+     '            if pass == 1 {\n                var bad = false;'),
+    ('update: a taken key that a row leaves is an error', 'src/execw.cho',
+     '                if g2 >= 0 {\n                    w.orderdep = true;',
+     '                if g2 >= 0 {\n                    exec.note(w, exec.e_unique());'),
+    ('update: a taken key that a row keeps is no error', 'src/execw.cho',
+     '                } else if g2 == btree.not_found() {\n                    exec.note(w, exec.e_unique());',
+     '                } else if g2 == btree.not_found() {\n                    exec.note(w, 0);'),
+    ('update: the old keys are not left', 'src/execw.cho',
+     '                if pass == 0 {\n                    nw = btree.del(p, contents(w.sc), out, contents(w.tmp)[65536..65539 + nk]);',
+     '                if pass == 0 {\n                    nw = out;'),
+    ('delete: the row stays', 'src/execw.cho',
+     '                nroot = nw;\n                let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);',
+     '                let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);'),
+    ('delete: no change recorded', 'src/execw.cho',
+     '                let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);\n                if cr < 0 {\n                    return cr;\n                }\n                w.count = w.count + 1;',
+     '                w.count = w.count + 1;'),
+    ('create: smallint is integer', 'src/execw.cho',
+     '            ty = row.t_int2();',
+     '            ty = row.t_int4();'),
+    ('create: not null forgotten', 'src/execw.cho',
+     '        var marks = flags % 2;',
+     '        var marks = 0;'),
+    ('create: a table that is there is made again', 'src/execw.cho',
+     '    if g >= 0 {\n        exec.note(w, exec.e_table_exists());',
+     '    if false {\n        exec.note(w, exec.e_table_exists());'),
+    ('create: two keys taken', 'src/execw.cho',
+     '            if keys > 1 {\n                exec.note(w, exec.e_two_keys());\n                place = 0;',
+     '            if keys > 1 {\n                place = 0;'),
+    ('create: a column twice taken', 'src/execw.cho',
+     '                exec.note(w, exec.e_column_twice());',
+     '                exec.note(w, 0);'),
+    ('create: a default of another type taken as null', 'src/execw.cho',
+     '                    let s = exec.stat(w, r2);\n                    if s < 0 {\n                        return s;\n                    }\n                } else if contents(w.ws)[b + 1] == 2 {',
+     '                    let s = 0;\n                    if s < 0 {\n                        return s;\n                    }\n                } else if contents(w.ws)[b + 1] == 2 {'),
+    ('drop: the rows stay in the tree', 'src/execw.cho',
+     '            let nw = btree.del(p, contents(w.sc), nroot, contents(w.key)[0..kl]);\n            if nw < 0 {\n                return exec.tree_err(nw);\n            }\n            nroot = nw;\n        }\n    }\n    let nl = w.nlen;',
+     '            let nw = nroot;\n            if nw < 0 {\n                return exec.tree_err(nw);\n            }\n            nroot = nw;\n        }\n    }\n    let nl = w.nlen;'),
+    ('tables: every table has number 1', 'src/tables.cho',
+     '            build.put_be(b, 0, id + 1, 4);',
+     '            build.put_be(b, 0, id, 4);'),
+    ("tables: a default read as the next column's marks", 'src/tables.cho',
+     '        if int_of(ent[at]) / 2 % 2 == 1 {\n            at = at + 1 + stored_len(ent, at + 1);\n        } else {',
+     '        if false {\n            at = at + 1 + stored_len(ent, at + 1);\n        } else {'),
+    ('assign: an integer is not stored as text', 'src/eval.cho',
+     '    return from == to || from == 0 || is_int(from) && is_int(to) || to == 3;',
+     '    return from == to || from == 0 || is_int(from) && is_int(to);'),
+    ("assign: a constant's error is a refusal", 'src/eval.cho',
+     '    let constant = ws[v + 4];\n    ws[v + 4] = 0;',
+     '    let constant = ws[v + 4];'),
+]
+
+def run_engine(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in ENGINE if not only or only in m[0]]
+    survivors = []
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho", "execw.cho")
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "enginecheck"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/enginecheck.cho")] + [str(work / "src" / x) for x in srcs] + ["-o", str(exe)], capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            killed = ""
+            for seed in ("1", "2", "3"):
+                try:
+                    r = subprocess.run([sys.executable, str(ROOT / "tests/engine_check.py"), str(exe), "2500", seed], capture_output=True, text=True, timeout=900, env=dict(os.environ, E2E_DB="cdb_enginemut"))
+                    rc, out = r.returncode, r.stdout + r.stderr
+                except subprocess.TimeoutExpired:
+                    rc, out = 1, "FAIL timed out"
+                if rc != 0:
+                    first = [l for l in out.splitlines() if l.startswith("FAIL")] or [l for l in out.splitlines() if l.startswith("engine_check:")][-1:]
+                    killed = "seed %s: %s" % (seed, (first[0] if first else "a crash")[:80])
+                    break
+            if killed:
+                print("killed   %-46s %s" % (label, killed))
+            else:
+                print("SURVIVED %-46s every statement agrees" % label)
+                survivors.append(label)
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
+    if kind == "engine":
+        return run_engine(cancho)
     if kind == "guard":
         return run_guard(cancho)
     if kind == "build":
@@ -1639,6 +2082,8 @@ def run(kind, cancho):
         return run_btree(cancho)
     if kind == "row":
         return run_row(cancho)
+    if kind == "eval":
+        return run_eval(cancho)
     if kind == "sql":
         return run_sql(cancho)
     if kind == "l3a":

@@ -101,10 +101,10 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 |---|---|---|
 | **M3a** (built, below) | the page file, superblocks, the COW B+tree (bytes to bytes), fork (a slot made the same tree) | gates 1 and 2 on the tree alone, with the crash-point module; gate 3 and the page cache are not in it |
 | **M3b** (the sweep built, 6c; the delta tree comes with the rows in M3c/M3d) | the zeroing and reuse of freed pages; the delta store as a tree; recovery from a log ahead of the superblock | gate 2 with the log; `AS OF`-style reconstruction equals the model |
-| **M3c** | tables, the row encoding and image (D-M3-6), the catalog of tables inside the engine, `create table` and `drop table` | the image equals `to_jsonb` for every supported type, on the corpus |
-| **M3d** | the executor for `insert`, `update`, `delete` and `select ... where <key> = <constant>`, and the engine's `changes` | gate 4 for these; `changes` equals the capture's |
-| **M3e** | predicates on any column, range scans on the key, `order by`, `limit`, `offset`, `distinct`, `in`, `case`, `cast`, `like` | gate 4 |
-| **M3f** | aggregates and `group by`, `having` | gate 4 |
+| **M3c** (built, 6d and 6h) | tables, the row encoding and image (D-M3-6), the catalog of tables inside the engine, `create table` and `drop table` | the image equals `to_jsonb` for every supported type, on the corpus |
+| **M3d** (built, 6f to 6h; the delta tree is not) | the executor for `insert`, `update`, `delete` and `select ... where <key> = <constant>`, and the engine's `changes` | gate 4 for these; `changes` equals the capture's |
+| **M3e** (built, 6h) | predicates on any column, range scans on the key, `order by`, `limit`, `offset`, `distinct`, `in`, `case`, `cast`, `like` | gate 4 |
+| **M3f** (built, 6i and 6j: `count`, `sum`, `min`, `max`) | aggregates and `group by`, `having` | gate 4 |
 | **M3g** | joins (nested loop first) | gate 4 |
 | **M3h** | `alter table`, `create index` (an index is a second tree) | gate 4 on the catalog after each |
 | **M3i** | native `cancho_fork`, `AS OF`, `cancho_merge`, `cancho_erase` on the engine | the existing fork, as-of, merge and erase end-to-end suites pass on it |
@@ -154,6 +154,171 @@ text with a terminator, so that stored keys sort as the key columns do). `tests/
 Not built yet of M3c: the catalog of tables in a tree and `create table` (the IR's `Ddl` carries only the kind and the table's name, so the column definitions have to come from the parsed statement, not from the
 IR: the executor of DDL reads the parser's tree). Stated limits: text is taken as bytes (that it is valid UTF-8 with no NUL is for the executor to check before a row is stored); a row or key that does not fit
 its buffer is refused.
+
+## 6e. A correction to D-M3-4, found before the executor is written: the IR is not enough to execute
+
+D-M3-4 says the executor interprets the IR and nothing else. Reading the lowering (`src/lower.cho`) shows three things the IR does not carry, because it was made for effect inference and inference does not need them:
+
+* **The kind of a literal.** `true`, `false`, a number that is not an integer (`1.5`) and a string are all written `Const bytes`: the boolean `true` and the string `'true'` are the same IR, as are `1.5` and
+  `'1.5'`. PostgreSQL types them differently (`select 'true' = true` is a boolean comparison because of the other side; `select 1.5 || 'x'` and `select '1.5' || 'x'` differ in how they resolve).
+* **A table's columns.** `Ddl` is a kind and a table name. The columns, types, `not null`, `primary key` and `default` of a `create table` are only in the parser's tree.
+* **The names of a select's output columns**, which a client is sent before any row.
+
+So the executor takes, beside the IR, **what the lowering knew and did not write**: for each `Const`, in order, its kind (integer, other number, string, `true`, `false`, `null`); for a `create table`, the column
+definitions read from the tree; for a select, the output names. They are produced by the same walk that writes the IR (one more output array of the lowering), so the IR stays what the log commits to and the three
+verifiers are untouched; the executor refuses a statement whose side information does not match its IR one for one. What this costs: L3b (replaying statements from the log) will need the same information
+recorded, or a later IR version that carries literal kinds; that is noted for when bound values are recorded, not solved here.
+
+## 6f. M3d, part 1, built: the expression evaluator, against PostgreSQL
+
+`src/eval.cho` evaluates one IR expression over bound rows to a typed value: comparisons, `AND`/`OR`/`NOT` in three-valued logic, integer arithmetic at the width PostgreSQL uses (`smallint`, `integer`,
+`bigint`, with its out-of-range and division-by-zero errors), `LIKE`/`ILIKE` and their negations, `||` on text, `IS [NOT] NULL`, `IN`, `CASE`, `CAST` between integers, booleans and text. The lowering now
+notes the kind of each literal beside the IR (6e), and the row format carries the integer width.
+
+**The rule that makes it safe to be incomplete:** the evaluator may *refuse* (`unsupported`), and when it answers, the answer is PostgreSQL's. `tests/eval_check.py` runs random expressions (most well typed, some
+not) as `select <e> from t` on both, over twelve rows with nulls and the limits of each integer type, and compares `pg_typeof`, every row's value, or the SQLSTATE. Six seeds of 4,000: **no disagreement**; of the
+expressions PostgreSQL answers with values the engine refuses about 9 %. Refused on purpose: numbers that are not integers, `varchar` as a cast target, `LIKE` on `bytea`, a literal beside a non-integer in
+arithmetic (PostgreSQL has other operators of those names), `IN` over mixed types or with a failing member, parameters, calls, and **any error computed from constants alone**.
+
+**What the differential found** (each was a wrong answer or a wrong error before it was fixed; none was guessed in advance):
+* PostgreSQL reports the **leftmost** type error of an expression, and `CASE`, `AND` and `OR` check that a condition is a boolean before they read what follows it;
+* an operator given a **constant NULL** is folded to NULL when the statement is planned, so the other side's division by zero or overflow never happens; a constant `false` decides an `AND` the same way, and a `CASE`
+  whose conditions are constants is simplified before any row is read;
+* **`- 2147483648` is an `integer`**: the minus sign joins the literal before the literal has a type;
+* `x IN (...)` is an array of the members that name no column at one common type, plus separate comparisons of the others, so mixed types change the answer;
+* `varchar` is `character varying`, a type of its own; `LIKE` exists on `bytea`; `null - text` resolves to an operator on another type.
+
+## 6g. M3d, part 2, and M3e: the statements (design, written before the code)
+
+**D-M3-8. A branch is one tree.** A key of the tree is a table's number (`u32`) and then the row's stored key (6d); table number 0 is the catalog of tables, whose keys are table names and whose values are a
+table's number, its definition (6d), and for each column whether it is `not null` and its default. So a branch is still one root, a fork is still one copied slot, and the sweep (6c) needs to know nothing about
+tables. *What this costs:* `drop table` deletes the table's rows one by one (a path of pages written for each), where a tree per table would drop a pointer; a tree per table needs the sweep to follow roots held
+inside values, which is not built. A stored key is at most 196 bytes and a stored row at most 800 (the tree's limits): a longer one is refused (`engine-too-big`), never cut.
+
+**A statement is a new root, or nothing.** A statement reads the tree it was given and writes into a copy-on-write descendant; if it fails, its root is dropped and the pages it wrote are garbage for the next
+sweep. So an `update` reads the rows as they were before it began (no row is seen twice), and a failed statement changes nothing, with no undo code.
+
+**Which error.** PostgreSQL reports the first error it meets, and what it meets first depends on the order it reads rows in and on how it orders the conditions of a `where` (by estimated cost), neither of which
+the engine reproduces. So the engine does not stop at its first error: it finds **every error the statement could raise**, and
+* if they all have one SQLSTATE, that is the answer (it is PostgreSQL's whatever its order);
+* if they have several, the statement is refused (`engine-ambiguous-error`): PostgreSQL fails too, with one of them.
+
+Three places where whether there is an error at all depends on the order, each refused (`engine-order-dependent`) rather than guessed:
+* **a `where` whose conditions are joined by `AND`**: the engine computes every top-level condition for a row. No error: the row is kept if all are true. An error in one and every other one true: an error.
+  An error in one and another false or null: PostgreSQL raises or not according to which it computed first;
+* **an `update` that changes a key** to the key that another row of the same statement is moving away from (`set id = id + 1`): PostgreSQL fails or not according to which row it writes first. A new key that
+  meets a row that stays, or two rows that take one new key, are a certain `23505`;
+* **a `limit` or `offset`** on a statement in which some row raises an error: PostgreSQL may stop before reaching it.
+
+An `insert` has an order of its own (its rows as written, each stored before the next is checked), so its first error is exact; errors of its constants come before any row is stored, as PostgreSQL finds them
+when it plans.
+
+**Assignment.** A value stored in a column is converted as PostgreSQL's assignment does: a string literal is read as the column's type, an integer into another integer type with a range check (`22003`),
+anything into `text`; any other pair is `42804`. Text that is not valid UTF-8 or holds a zero byte is refused.
+
+**`changes`.** Each statement lists what it changed: the table, the plain key, the image before and the image after (6d), a row whose image did not change left out, a changed key as a delete and an insert:
+what the capture records for the same statement (`m1-commit-path.md`). The oracle in the tests is PostgreSQL itself, the table read before and after the statement.
+
+**Order.** `order by` compares integers as numbers, booleans false first, text as bytes (D-M3-5), nulls last ascending and first descending unless said. Rows that compare equal come in key order, where
+PostgreSQL's order for them is whatever its plan gives: the tests compare such results as sets.
+
+Not in this slice, refused with `engine-unsupported`: aggregates, `group by`, `having`, joins, a table with no primary key or with a `unique` column, `alter table`, indexes, and types outside D-M3-5.
+
+## 6h. M3d, part 2, and M3e, built: what the differential found, and what it costs
+
+`src/tables.cho` (the catalog inside the tree), `src/exec.cho` (what the statements share, and SELECT with `where`, `order by`, `limit`, `offset`, `distinct`), `src/execw.cho` (INSERT, UPDATE, DELETE,
+CREATE TABLE, DROP TABLE), `proxy/enginecheck.cho` (the harness: statements on standard input over a page file) and `tests/engine_check.py`.
+
+**The test.** A random history (create and drop table, insert, update, delete, select; many statements wrong on purpose) is run by the engine in two processes with a commit and a sweep between, then by
+PostgreSQL 16 statement by statement; a statement the engine refuses is rolled back in PostgreSQL so the two stay in step. Compared: the SQLSTATE of an error; the column types and rows of a select (in
+order where the `order by` decides it); the row count of a write and its `changes` against the table read from PostgreSQL before and after. **20 seeds of 2,000 statements: no disagreement**; of the 28,114 statements
+PostgreSQL answers the engine refuses 312 (1.1 %). Beside it: 63 fixed statements the engine must *answer* (so that a change which only refuses more cannot pass as "never wrong"), 6 statements whose outcome
+in PostgreSQL does depend on its order, each refused as such (below), and the page file read as bytes after a delete and after a drop. 70 mutants of the three files and of the assignment in `src/eval.cho`
+are all killed; three more were equivalent and are not listed (a sort that is not stable: equal rows have no order to keep; the assignment calling the conversion as an explicit cast: `assignable` has already
+left only the pairs where the two agree; `<>` taken as a bound of a scan: it sets neither end).
+
+**What the differential found** (not guessed in advance):
+* **An output column without an alias has a name, and `order by` binds to it first.** `select cast(k as text) from t order by k` orders by the *text*: PostgreSQL names a cast after what is cast and a CASE
+  after its ELSE (if that is a column or a call; else after the type, or `case`), and a bare name in `order by` is an output column before it is a table's. The lowering took only written aliases, so the
+  engine ordered by the integer; with two output columns of that name PostgreSQL says the name is ambiguous. Fixed in `src/lower.cho` (which changes the IR of such a statement: it now names the expression
+  that is ordered by), with 11 hand-written cases and 6 mutants.
+* **`null / 0` is null**: a division's error needs both operands, which the evaluator had right and one of the fixed cases had wrong.
+
+**The order dependence is real, and is PostgreSQL's cost model, not the text's order.** With rows stored 3, 2, 1: `where k > 2 and 10 / (k - 2) > 0` and the same conditions written the other way round both
+answer without an error (the cheaper condition is computed first wherever it is written); `select 10 / (k - 2) from t order by k limit 1` answers (the limit is reached first); `update t set k = k + 1`
+succeeds and `update t set k = k - 1` fails with `23505`. A sixth, `where k = 3 and 10 / (k - 2) > 0`, PostgreSQL answers by looking the key up and never reading the row that would divide by zero. The engine refuses all six, and the test holds PostgreSQL to
+exactly these outcomes, so a planner that changes them is noticed.
+
+**Measured** (one process, no `fsync` between statements, a table of an integer key, an integer and a short text; `enginecheck` on this machine):
+
+| | |
+|---|---|
+| 20,000 inserts, one a statement | 4.1 s (4,900 a second) |
+| the page file after them | 192 MiB: 9.8 KiB a row |
+| a select with a predicate over the 20,000 rows | 0.67 s (30,000 rows a second) |
+| `where k = 77`, and an update of that row, among the 20,000 | 0.2 ms each (a scan before the lookup by key was built: 0.7 s) |
+| `where k >= 100 and k < 110` | 0.8 ms |
+| an update of every row | 2.7 s; the file grows by 234 MiB |
+| a sweep after it | 0.8 s, 108,517 pages (424 MiB) freed |
+
+These are the costs of what is *not built*, and they are large: **every statement copies the path of pages from the root for each row it writes and nothing is reused before a sweep** (so the file is fifty
+times the data until one runs); a scan goes down from the root for every row and checks the CRC of each page on the way, with no page cache. They
+are M3b's page reuse within a transaction and the page cache of gate 3. Neither changes an answer.
+
+**The lookup and the range scan by key** (`bounds` in `src/exec.cho`). When the key is one column of integers or text and a top-level condition compares it with a constant, a `select`, `update` or
+`delete` reads only the keys that condition allows. *This is only done when no condition of the `where` can raise an error* (each is made of columns, constants, comparisons, `AND`, `OR`, `NOT`, `IS NULL`
+and `IN`): a row that is not read is a row whose error is not found, and the rule of 6g is that every error is found. So `where k = 77 and a / b > 1` is still a full scan, and says so here rather than
+answering by luck; every row that is read is still judged by the whole `where`.
+
+**Not built yet, as before:** the engine's delta tree and the `AS OF` reads over it, transactions over several statements (a statement is its own), the output column names a client is sent, and
+everything listed above as refused.
+
+## 6i. M3f: aggregates, `group by`, `having` (design, written before the code)
+
+**What is answered.** `count(*)`, `count(x)`, `sum(x)` over `smallint` and `integer` (a `bigint`), `min(x)` and `max(x)` over the integer types and `text`; `group by` expressions (an integer constant is the
+place of an item, as in `order by`); `having`; and `order by`, `distinct`, `limit` over the groups. Refused (`engine-unsupported`): `sum` over `bigint` and `avg` (PostgreSQL's answer is a `numeric`, a type
+the engine does not have), any other function, an aggregate inside an aggregate, in a `where` or in a `group by` (errors in PostgreSQL, with rules of their own), `distinct` inside an aggregate.
+
+**How.** The row phase reads the rows the `where` lets through and computes, for each, the `group by` expressions and every aggregate's argument. With no `group by` the aggregates are accumulated as the rows
+are read; with one, the rows' group values and arguments are kept, sorted by group, and accumulated run by run (so a grouped query is bounded by what the engine can hold: 262,144 rows, refused beyond). The
+group phase then computes `having`, the items and the `order by` expressions once a group, **with no row bound at all**: the evaluator is given *slots*, a value for the expression that starts at a given
+place, and each aggregate and each occurrence of a `group by` expression is one. So nothing in the group phase can read a column that is not grouped, by construction.
+
+**The check PostgreSQL makes (`42803`).** Every column an item, the `having` or an `order by` names must be inside an aggregate or inside an expression that is one of the `group by` expressions. The engine
+compares expressions as bytes of the IR. A column that is not covered is `42803`, except when the table's key is among the `group by` expressions: PostgreSQL then allows every column (they depend on the
+key), and the engine refuses rather than reproduce that rule.
+
+**Errors.** As 6g: every error is found (a row's group expression or aggregate argument is computed for every row the `where` lets through, `having` for every group, the items for every group `having`
+keeps), one SQLSTATE is the answer, several are refused, and any error under a `limit` is order-dependent. A `sum` whose running total could leave the `bigint` range in some order of the rows is
+order-dependent too (it cannot happen below four thousand million rows of `integer`, and is not tested).
+
+## 6j. M3f, built: what the differential found
+
+The grouped path is in `src/execs.cho` (SELECT moved there from `src/exec.cho`); the evaluator's slots are in `src/eval.cho`. `tests/engine_check.py` now writes grouped selects too (aggregates over
+columns and expressions, wrong types, columns that are not grouped, `having`, `order by` places and aggregates, `limit`). **40 seeds of 2,000 statements: no disagreement; of the 53,982 statements PostgreSQL
+answers the engine refuses 1,144 (2.1 %).** 88 fixed statements must be answered and are; 10 whose outcome depends on PostgreSQL's order and 9 the engine refuses on purpose are pinned with what PostgreSQL
+16 does for each. 105 mutants of the engine, 35 of them of the grouped path and the slots.
+
+**What the differential found** (each a wrong answer, or a claim of an error PostgreSQL does not raise, before it was fixed):
+* **A `having` condition with no aggregate in it is not a condition on groups.** PostgreSQL moves it into the `where` and applies it to rows before they are grouped; a `having false` means nothing is read
+  at all, not even the `where`. So `select k, sum(10 / (k - 2)) from t group by k having k > 2` never divides by zero, and `select count(*) from t where 10 / (k - 2) > 0 having false` answers no rows. The
+  engine, which had computed every row first, said `22012`. It now refuses (`engine-order-dependent`) whenever a row or a group raises an error in a query that has such a condition; with no error the
+  answer is the same either way.
+* **`select distinct` over items that cannot differ is a `limit 1`.** `select distinct 'x' from t where 10 / (k - 2) > 0` stops at the first row and never reaches the division. An error under `distinct`
+  is now order-dependent, as under `limit`.
+* **A cast to the column's own type is nothing.** With `k` a `smallint`, `group by cast(k as smallint)` groups by `k`, so `select k ...` is legal (and, `k` being the key, so is every other column).
+  The engine compared the bytes of the IR, found `k` outside every `group by` expression and said `42803`. A column under a cast in the `group by` now makes an ungrouped column a refusal, not an error.
+* **`group by - 1` is a place** (`42P10`), like `order by - 1`: the minus joins the literal before PostgreSQL asks what it is. Refused.
+* And one false alarm, which was the test's: an item can be *named* `k` by a cast or a CASE (6h), and then `order by k` is that item and does not break ties; the generator now writes the table's name
+  before the key.
+
+**Two PostgreSQL versions, found by CI.** The gate's first run of the evaluator's differential on GitHub's runner disagreed on one expression, `cast(y as integer)` with `y` a `bytea`: PostgreSQL 16.15
+(this machine) has no such cast (`42846`), the runner's newer PostgreSQL has one. The tests said "PostgreSQL 16" and were being run on two versions without saying so. Now each prints the server's version;
+a cast between `bytea` and an integer is refused; and what a refused statement does in PostgreSQL (the pinned outcomes above) is held to on version 16 and printed as a note on any other. **The engine
+answers only where the versions it is tested on agree**, which is two, not every one.
+
+**Limits of this slice.** A grouped query with a `group by` keeps a record for every row the `where` lets through and sorts them (262,144 rows or 16 MiB, refused beyond); without `group by` the rows are
+only counted through. `sum` over `bigint`, `avg`, and every function that is not one of the four aggregates are refused. The overflow of a `sum` is not tested (it needs more rows than the test makes).
 
 ## 7. Taking over, safely
 
