@@ -169,6 +169,27 @@ definitions read from the tree; for a select, the output names. They are produce
 verifiers are untouched; the executor refuses a statement whose side information does not match its IR one for one. What this costs: L3b (replaying statements from the log) will need the same information
 recorded, or a later IR version that carries literal kinds; that is noted for when bound values are recorded, not solved here.
 
+## 6f. M3d, part 1, built: the expression evaluator, against PostgreSQL
+
+`src/eval.cho` evaluates one IR expression over bound rows to a typed value: comparisons, `AND`/`OR`/`NOT` in three-valued logic, integer arithmetic at the width PostgreSQL uses (`smallint`, `integer`,
+`bigint`, with its out-of-range and division-by-zero errors), `LIKE`/`ILIKE` and their negations, `||` on text, `IS [NOT] NULL`, `IN`, `CASE`, `CAST` between integers, booleans and text. The lowering now
+notes the kind of each literal beside the IR (6e), and the row format carries the integer width.
+
+**The rule that makes it safe to be incomplete:** the evaluator may *refuse* (`unsupported`), and when it answers, the answer is PostgreSQL's. `tests/eval_check.py` runs random expressions (most well typed, some
+not) as `select <e> from t` on both, over twelve rows with nulls and the limits of each integer type, and compares `pg_typeof`, every row's value, or the SQLSTATE. Six seeds of 4,000: **no disagreement**; of the
+expressions PostgreSQL answers with values the engine refuses about 9 %. Refused on purpose: numbers that are not integers, `varchar` as a cast target, `LIKE` on `bytea`, a literal beside a non-integer in
+arithmetic (PostgreSQL has other operators of those names), `IN` over mixed types or with a failing member, parameters, calls, and **any error computed from constants alone**.
+
+**What the differential found** (each was a wrong answer or a wrong error before it was fixed; none was guessed in advance):
+* PostgreSQL reports the **leftmost** type error of an expression, and `CASE`, `AND` and `OR` check that a condition is a boolean before they read what follows it;
+* an operator given a **constant NULL** is folded to NULL when the statement is planned, so the other side's division by zero or overflow never happens; a constant `false` decides an `AND` the same way, and a `CASE`
+  whose conditions are constants is simplified before any row is read;
+* **`- 2147483648` is an `integer`**: the minus sign joins the literal before the literal has a type;
+* `x IN (...)` is an array of the members that name no column at one common type, plus separate comparisons of the others, so mixed types change the answer;
+* `varchar` is `character varying`, a type of its own; `LIKE` exists on `bytea`; `null - text` resolves to an operator on another type.
+
+Not built yet of M3d: the statements themselves (scan, insert, update, delete, the table catalog) and the engine's `changes`.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

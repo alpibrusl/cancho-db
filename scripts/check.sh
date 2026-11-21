@@ -53,6 +53,10 @@ E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/erase_branch_
 echo "== the engine's rows against PostgreSQL (docs/m3-engine.md, M3c): the image is to_jsonb's, the plain key jsonb_build_array's, the stored keys in key order"
 "$CANCHO" build --std proxy/rowcheck.cho src/row.cho src/state.cho src/commit.cho src/build.cho -o build/rowcheck
 quiet 2 python3 tests/row_check.py build/rowcheck
+echo "== the engine's expression evaluator against PostgreSQL (docs/m3-engine.md, M3d): it may refuse; when it answers, the type, every row's value or the SQLSTATE are PostgreSQL's"
+"$CANCHO" build --std proxy/evalcheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho -o build/evalcheck
+quiet 4 python3 tests/eval_check.py build/evalcheck 4000 1
+quiet 4 python3 tests/eval_check.py build/evalcheck 4000 2
 echo "== the statement store of a real session is version 3, and erasing one subject's constants leaves a log that verifies"
 E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/stmts_v3_e2e.py build/proxy
 echo "== the extended protocol through the proxy (raw messages, a real PostgreSQL)"
@@ -144,6 +148,7 @@ echo "== mutants, commit builder"; quiet 1 python3 tests/mutants.py build "$CANC
 echo "== mutants, log directory"; quiet 1 python3 tests/mutants.py store "$CANCHO"
 echo "== mutants, B+tree, pages and superblocks"; quiet 1 python3 tests/mutants.py btree "$CANCHO"
 echo "== mutants, the engine's rows"; quiet 1 python3 tests/mutants.py row "$CANCHO"
+echo "== mutants, the engine's expression evaluator"; quiet 1 python3 tests/mutants.py eval "$CANCHO"
 echo "== mutants, capture SQL and cdb.fork"; quiet 1 python3 tests/mutants.py sql "$CANCHO"
 echo "== mutants, L3a verifier"; quiet 1 python3 tests/mutants.py l3a "$CANCHO"
 echo "== mutants, L3a verifier in cancho"; quiet 1 python3 tests/mutants.py l3a-cho "$CANCHO"

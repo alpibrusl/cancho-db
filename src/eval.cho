@@ -1,0 +1,1409 @@
+edition 9;
+module cdb.eval;
+
+import cdb.commit;
+import cdb.row;
+
+// The expression evaluator of the engine (docs/m3-engine.md, slice M3d): one IR expression (docs/spec/ir.md sections 2 and 6), with the literal kinds the lowering noted beside it (6e), over the rows that are
+// bound, to one typed value. What PostgreSQL would answer for the same expression is the oracle (tests/eval_check.py); where this file is not sure to answer as PostgreSQL does it REFUSES (`unsupported`): a
+// flag or a gap may change whether there is an answer, never what the answer is.
+//
+// Types: 0 unknown (a string literal that has not met a type yet), 1 bigint, 5 integer, 6 smallint, 2 boolean, 3 text, 4 bytea (the codes of src/row.cho).
+// A value is six ints: [type, state, a, b, constant, spare]. state 0 is a value, 1 null, 2 an error that happened while computing it (a is its code): an error value is only an error of the statement if it is
+// the value that is used, which is how CASE, AND and OR skip what PostgreSQL skips. An integer or boolean is in `a`; text and bytea are `b` bytes of the arena at `a`.
+//
+// Errors that do not depend on a row are answers of `eval` itself, negative: `unsupported()`, `no_operator()` (42883), `mismatch()` (42804), `no_cast()` (42846), `malformed()`.
+// Errors of a value (state 2): 2 division by zero (22012), 3 out of range (22003), 4 not a number or a boolean (22P02), 5 a LIKE pattern that ends in its escape (22025).
+// An error computed from constants alone is refused as `unsupported`: PostgreSQL folds constants when it plans, and whether it then raises depends on where the constant sits.
+//
+// No recursion: the expression is in prefix order, so its nodes are listed once going forward and computed going backward, each node finding its operands on a stack (the first operand on top).
+
+pub fn unsupported() -> [] int {
+    return 0 - 1;
+}
+
+pub fn no_operator() -> [] int {
+    return 0 - 5;
+}
+
+pub fn mismatch() -> [] int {
+    return 0 - 6;
+}
+
+pub fn no_cast() -> [] int {
+    return 0 - 7;
+}
+
+pub fn malformed() -> [] int {
+    return 0 - 9;
+}
+
+// The workspace `ws` holds the node list (from 0, at most `max_nodes()`) and the value stack (from `max_nodes()`, six ints a value): at least `ws_size()` ints.
+pub fn max_nodes() -> [] int {
+    return 1024;
+}
+
+pub fn ws_size() -> [] int {
+    return 1024 + 6 * 1024;
+}
+
+fn is_int(ty: int) -> [] bool {
+    return ty == 1 || ty == 5 || ty == 6;
+}
+
+fn width(ty: int) -> [] int {
+    if ty == 1 {
+        return 3;
+    }
+    if ty == 5 {
+        return 2;
+    }
+    return 1;
+}
+
+fn wider(a: int, b: int) -> [] int {
+    if width(a) >= width(b) {
+        return a;
+    }
+    return b;
+}
+
+fn max8() -> [] int {
+    return 9223372036854775807;
+}
+
+fn min8() -> [] int {
+    return 0 - 9223372036854775807 - 1;
+}
+
+fn name_len[&x](e: &x [byte], at: int) -> [] int {
+    if at + 2 > len(e) {
+        return 0 - 1;
+    }
+    let n = commit.be(e, at, 2);
+    if at + 2 + n > len(e) {
+        return 0 - 1;
+    }
+    return n;
+}
+
+// The bytes one node takes at `at` (not its operands) and how many operands it has: (size, operands), or (-1, 0) if it is not a node.
+fn node[&x](e: &x [byte], at: int) -> [] (int, int) {
+    if at >= len(e) {
+        return (0 - 1, 0);
+    }
+    let tag = int_of(e[at]);
+    if tag == 0 {
+        let a = name_len(e, at + 1);
+        if a < 0 {
+            return (0 - 1, 0);
+        }
+        let b = name_len(e, at + 3 + a);
+        if b < 0 {
+            return (0 - 1, 0);
+        }
+        return (1 + 2 + a + 2 + b, 0);
+    }
+    if tag == 1 {
+        if at + 2 > len(e) {
+            return (0 - 1, 0);
+        }
+        let vt = int_of(e[at + 1]);
+        if vt == 0 {
+            return (2, 0);
+        }
+        if vt == 1 && at + 10 <= len(e) {
+            return (10, 0);
+        }
+        if vt == 2 && at + 6 <= len(e) {
+            let n = commit.be(e, at + 2, 4);
+            if at + 6 + n <= len(e) {
+                return (6 + n, 0);
+            }
+        }
+        return (0 - 1, 0);
+    }
+    if tag == 2 && at + 5 <= len(e) {
+        return (5, 0);
+    }
+    if tag == 3 || tag == 10 {
+        let a = name_len(e, at + 1);
+        if a < 0 {
+            return (0 - 1, 0);
+        }
+        if tag == 10 {
+            return (3 + a, 1);
+        }
+        return (3 + a, 0);
+    }
+    if tag == 4 {
+        let a = name_len(e, at + 1);
+        if a < 0 || at + 3 + a + 4 > len(e) {
+            return (0 - 1, 0);
+        }
+        return (3 + a + 4, commit.be(e, at + 3 + a, 4));
+    }
+    if tag == 5 && at + 2 <= len(e) {
+        return (2, 2);
+    }
+    if tag == 6 {
+        return (1, 0);
+    }
+    if tag == 7 && at + 2 <= len(e) {
+        return (2, 1);
+    }
+    if tag == 8 && at + 6 <= len(e) {
+        return (6, 1 + commit.be(e, at + 2, 4));
+    }
+    if tag == 9 && at + 6 <= len(e) {
+        return (6, 2 * commit.be(e, at + 1, 4) + int_of(e[at + 5]));
+    }
+    return (0 - 1, 0);
+}
+
+// List the nodes of the expression that starts at `at` into `ws` (their positions): (how many, where the expression ends), or (-1, 0) if it is not one or has more than `max_nodes()` nodes.
+pub fn scan[&x, &w](e: &x [byte], at: int, ws: &!w [int]) -> [] (int, int) {
+    var owed = 1;
+    var n = 0;
+    var p = at;
+    while owed > 0 {
+        let (size, ops) = node(e, p);
+        if size < 0 || n >= max_nodes() || ops > len(e) {
+            return (0 - 1, 0);
+        }
+        ws[n] = p;
+        n = n + 1;
+        p = p + size;
+        owed = owed - 1 + ops;
+    }
+    return (n, p);
+}
+
+fn low(c: int) -> [] int {
+    if c >= 'A' && c <= 'Z' {
+        return c + 32;
+    }
+    return c;
+}
+
+fn name_is[&x](e: &x [byte], at: int, n: int, word: &static [byte]) -> [] bool {
+    if n != len(word) {
+        return false;
+    }
+    var i = 0;
+    while i < n {
+        if low(int_of(e[at + i])) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The type a cast's name stands for, or -1.
+fn type_of_name[&x](e: &x [byte], at: int, n: int) -> [] int {
+    if name_is(e, at, n, "bigint") || name_is(e, at, n, "int8") {
+        return 1;
+    }
+    if name_is(e, at, n, "integer") || name_is(e, at, n, "int") || name_is(e, at, n, "int4") {
+        return 5;
+    }
+    if name_is(e, at, n, "smallint") || name_is(e, at, n, "int2") {
+        return 6;
+    }
+    if name_is(e, at, n, "boolean") || name_is(e, at, n, "bool") {
+        return 2;
+    }
+    // (`varchar` is a type of its own to PostgreSQL, `character varying`: a cast to it is not read here)
+    if name_is(e, at, n, "text") {
+        return 3;
+    }
+    if name_is(e, at, n, "bytea") {
+        return 4;
+    }
+    return 0 - 1;
+}
+
+fn set[&w](ws: &!w [int], v: int, ty: int, state: int, a: int, b: int, constant: int) -> [] int {
+    ws[v] = ty;
+    ws[v + 1] = state;
+    ws[v + 2] = a;
+    ws[v + 3] = b;
+    ws[v + 4] = constant;
+    ws[v + 5] = 0;
+    return 0;
+}
+
+// Copy `n` bytes of `src` at `at` into the arena: where they are, or -1 if the arena is full. `info[0]` is the arena's fill.
+fn keep[&s, &a, &i](src: &s [byte], at: int, n: int, ar: &!a [byte], info: &!i [int]) -> [] int {
+    let start = info[0];
+    if start + n > len(ar) {
+        return 0 - 1;
+    }
+    var k = 0;
+    while k < n {
+        ar[start + k] = src[at + k];
+        k = k + 1;
+    }
+    info[0] = start + n;
+    return start;
+}
+
+fn is_ws(c: int) -> [] bool {
+    return c == ' ' || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
+}
+
+// The integer the text `ar[at..at + n]` is, PostgreSQL's plain form only (blanks, a sign, digits, blanks): (status, value). status 0 it is one; 1 it is not a number (22P02); 2 it does not fit 64 bits
+// (22003); 3 it is some form this file does not read (a `0x`, an underscore): unsupported.
+fn parse_int[&a](ar: &a [byte], at: int, n: int) -> [] (int, int) {
+    var i = at;
+    let end = at + n;
+    while i < end && is_ws(int_of(ar[i])) {
+        i = i + 1;
+    }
+    var neg = false;
+    if i < end && (int_of(ar[i]) == '-' || int_of(ar[i]) == '+') {
+        neg = int_of(ar[i]) == '-';
+        i = i + 1;
+    }
+    var digits = 0;
+    var v = 0;
+    var over = false;
+    while i < end && int_of(ar[i]) >= '0' && int_of(ar[i]) <= '9' {
+        let d = int_of(ar[i]) - '0';
+        // accumulate on the negative side, which holds one more value
+        if v < (min8() + d) / 10 {
+            over = true;
+        } else {
+            v = v * 10 - d;
+        }
+        digits = digits + 1;
+        i = i + 1;
+    }
+    if i < end && (int_of(ar[i]) == '_' || int_of(ar[i]) == 'x' || int_of(ar[i]) == 'X' || int_of(ar[i]) == 'o' || int_of(ar[i]) == 'O' || int_of(ar[i]) == 'b' || int_of(ar[i]) == 'B') {
+        return (3, 0);
+    }
+    while i < end && is_ws(int_of(ar[i])) {
+        i = i + 1;
+    }
+    if i != end || digits == 0 {
+        return (1, 0);
+    }
+    if over {
+        return (2, 0);
+    }
+    if neg {
+        return (0, v);
+    }
+    if v == min8() {
+        return (2, 0);
+    }
+    return (0, 0 - v);
+}
+
+// The boolean the text is, as PostgreSQL reads one: 1, 0, or -1 if it is not one.
+fn parse_bool[&a](ar: &a [byte], at0: int, n0: int) -> [] int {
+    var at = at0;
+    var n = n0;
+    while n > 0 && is_ws(int_of(ar[at])) {
+        at = at + 1;
+        n = n - 1;
+    }
+    while n > 0 && is_ws(int_of(ar[at + n - 1])) {
+        n = n - 1;
+    }
+    if name_is(ar, at, n, "t") || name_is(ar, at, n, "tr") || name_is(ar, at, n, "tru") || name_is(ar, at, n, "true") || name_is(ar, at, n, "y") || name_is(ar, at, n, "ye") || name_is(ar, at, n, "yes") || name_is(ar, at, n, "on") || name_is(ar, at, n, "1") {
+        return 1;
+    }
+    if name_is(ar, at, n, "f") || name_is(ar, at, n, "fa") || name_is(ar, at, n, "fal") || name_is(ar, at, n, "fals") || name_is(ar, at, n, "false") || name_is(ar, at, n, "n") || name_is(ar, at, n, "no") || name_is(ar, at, n, "of") || name_is(ar, at, n, "off") || name_is(ar, at, n, "0") {
+        return 0;
+    }
+    return 0 - 1;
+}
+
+// The decimal text of `v` into the arena: (where, length), or (-1, 0).
+fn int_text[&a, &i](v: int, ar: &!a [byte], info: &!i [int]) -> [] (int, int) {
+    var digits = 1;
+    var t = v;
+    while t >= 10 || t <= 0 - 10 {
+        t = t / 10;
+        digits = digits + 1;
+    }
+    var n = digits;
+    if v < 0 {
+        n = n + 1;
+    }
+    let start = info[0];
+    if start + n > len(ar) {
+        return (0 - 1, 0);
+    }
+    if v < 0 {
+        ar[start] = byte_of('-');
+    }
+    var k = digits;
+    t = v;
+    while k > 0 {
+        var d = t % 10;
+        if d < 0 {
+            d = 0 - d;
+        }
+        ar[start + n - digits + k - 1] = byte_of('0' + d);
+        t = t / 10;
+        k = k - 1;
+    }
+    info[0] = start + n;
+    return (start, n);
+}
+
+fn lit[&a, &i](text: &static [byte], ar: &!a [byte], info: &!i [int]) -> [] int {
+    return keep(text, 0, len(text), ar, info);
+}
+
+// Give the value at `v` the type `to`, as PostgreSQL does for a literal that meets a type, or for an explicit cast when `explicit`. 0, or a negative answer of `eval`.
+fn convert[&w, &a, &i](ws: &!w [int], v: int, to: int, explicit: bool, ar: &!a [byte], info: &!i [int]) -> [] int {
+    let from = ws[v];
+    if from == to {
+        return 0;
+    }
+    let state = ws[v + 1];
+    if state != 0 {
+        // a null or an error keeps its state and takes the type, if the conversion exists at all
+        if from == 0 || explicit && (is_int(from) && (is_int(to) || to == 3 || to == 2 && from == 5) || from == 2 && (to == 3 || to == 5) || from == 3 && (is_int(to) || to == 2) || from == 4 && to == 3) || is_int(from) && is_int(to) {
+            ws[v] = to;
+            return 0;
+        }
+        if explicit {
+            return no_cast();
+        }
+        return no_operator();
+    }
+    let a = ws[v + 2];
+    let b = ws[v + 3];
+    let constant = ws[v + 4] == 1;
+    if from == 0 || explicit && from == 3 && (is_int(to) || to == 2) {
+        // from text: read it as the target type
+        if to == 3 {
+            ws[v] = 3;
+            return 0;
+        }
+        if is_int(to) {
+            let (st, num) = parse_int(ar, a, b);
+            if st == 3 || st != 0 && constant {
+                return unsupported();
+            }
+            if st == 1 {
+                return set(ws, v, to, 2, 4, 0, 0);
+            }
+            if st == 2 || !row.int_fits(to, num) {
+                if constant {
+                    return unsupported();
+                }
+                return set(ws, v, to, 2, 3, 0, 0);
+            }
+            ws[v] = to;
+            ws[v + 2] = num;
+            ws[v + 3] = 0;
+            return 0;
+        }
+        if to == 2 {
+            let bv = parse_bool(ar, a, b);
+            if bv < 0 {
+                if constant {
+                    return unsupported();
+                }
+                return set(ws, v, 2, 2, 4, 0, 0);
+            }
+            ws[v] = 2;
+            ws[v + 2] = bv;
+            ws[v + 3] = 0;
+            return 0;
+        }
+        if to == 4 && from == 0 {
+            // a bytea literal: only the bytes themselves, with no backslash in them, are read here
+            var k = 0;
+            while k < b {
+                if int_of(ar[a + k]) == '\\' {
+                    return unsupported();
+                }
+                k = k + 1;
+            }
+            ws[v] = 4;
+            return 0;
+        }
+        return unsupported();
+    }
+    if is_int(from) && is_int(to) {
+        if !row.int_fits(to, a) {
+            if constant {
+                return unsupported();
+            }
+            return set(ws, v, to, 2, 3, 0, 0);
+        }
+        ws[v] = to;
+        return 0;
+    }
+    if !explicit {
+        return no_operator();
+    }
+    if is_int(from) && to == 3 {
+        let (at, n) = int_text(a, ar, info);
+        if at < 0 {
+            return unsupported();
+        }
+        return set(ws, v, 3, 0, at, n, ws[v + 4]);
+    }
+    if from == 2 && to == 3 {
+        var at = 0 - 1;
+        var n = 5;
+        if a == 1 {
+            at = lit("true", ar, info);
+            n = 4;
+        } else {
+            at = lit("false", ar, info);
+        }
+        if at < 0 {
+            return unsupported();
+        }
+        return set(ws, v, 3, 0, at, n, ws[v + 4]);
+    }
+    if from == 2 && to == 5 {
+        ws[v] = 5;
+        return 0;
+    }
+    if from == 5 && to == 2 {
+        var t = 0;
+        if a != 0 {
+            t = 1;
+        }
+        return set(ws, v, 2, 0, t, 0, ws[v + 4]);
+    }
+    if from == 4 && to == 3 {
+        // bytea's text form: \x and two hex digits a byte
+        let start = info[0];
+        if start + 2 + 2 * b > len(ar) {
+            return unsupported();
+        }
+        ar[start] = byte_of('\\');
+        ar[start + 1] = byte_of('x');
+        var k = 0;
+        while k < b {
+            let c = int_of(ar[a + k]);
+            var h = c / 16;
+            var l = c % 16;
+            if h < 10 {
+                h = h + '0';
+            } else {
+                h = h + 'a' - 10;
+            }
+            if l < 10 {
+                l = l + '0';
+            } else {
+                l = l + 'a' - 10;
+            }
+            ar[start + 2 + 2 * k] = byte_of(h);
+            ar[start + 3 + 2 * k] = byte_of(l);
+            k = k + 1;
+        }
+        info[0] = start + 2 + 2 * b;
+        return set(ws, v, 3, 0, start, 2 + 2 * b, ws[v + 4]);
+    }
+    return no_cast();
+}
+
+// Make the two values at `x` and `y` comparable: the type they are compared as, or a negative answer.
+fn unify[&w, &a, &i](ws: &!w [int], x: int, y: int, ar: &!a [byte], info: &!i [int]) -> [] int {
+    var tx = ws[x];
+    var ty = ws[y];
+    if tx == 0 && ty == 0 {
+        ws[x] = 3;
+        ws[y] = 3;
+        return 3;
+    }
+    if tx == 0 {
+        let r = convert(ws, x, ty, false, ar, info);
+        if r < 0 {
+            return r;
+        }
+        tx = ty;
+    }
+    if ty == 0 {
+        let r = convert(ws, y, tx, false, ar, info);
+        if r < 0 {
+            return r;
+        }
+        ty = tx;
+    }
+    if is_int(tx) && is_int(ty) {
+        return wider(tx, ty);
+    }
+    if tx == ty {
+        return tx;
+    }
+    return no_operator();
+}
+
+fn cmp_bytes[&a](ar: &a [byte], xa: int, xn: int, ya: int, yn: int) -> [] int {
+    var i = 0;
+    while i < xn && i < yn {
+        let c = int_of(ar[xa + i]);
+        let d = int_of(ar[ya + i]);
+        if c != d {
+            if c < d {
+                return 0 - 1;
+            }
+            return 1;
+        }
+        i = i + 1;
+    }
+    if xn < yn {
+        return 0 - 1;
+    }
+    if xn > yn {
+        return 1;
+    }
+    return 0;
+}
+
+// -1, 0 or 1: how the two values (not null, of one type or both integers) compare.
+fn compare[&w, &a](ws: &w [int], x: int, y: int, ar: &a [byte]) -> [] int {
+    let t = ws[x];
+    if is_int(t) || t == 2 {
+        if ws[x + 2] < ws[y + 2] {
+            return 0 - 1;
+        }
+        if ws[x + 2] > ws[y + 2] {
+            return 1;
+        }
+        return 0;
+    }
+    return cmp_bytes(ar, ws[x + 2], ws[x + 3], ws[y + 2], ws[y + 3]);
+}
+
+fn char_len(c: int) -> [] int {
+    if c < 128 {
+        return 1;
+    }
+    if c >= 240 {
+        return 4;
+    }
+    if c >= 224 {
+        return 3;
+    }
+    if c >= 192 {
+        return 2;
+    }
+    return 1;
+}
+
+fn fold(c: int, insensitive: bool) -> [] int {
+    if insensitive {
+        return low(c);
+    }
+    return c;
+}
+
+// LIKE: 1 if `s` matches the pattern `p`, 0 if not, -1 if the pattern ends in its escape character. `%` is any run of characters, `_` one character (of UTF-8), `\` takes the next one as it is.
+fn like[&a](ar: &a [byte], sa: int, sn: int, pa: int, pn: int, insensitive: bool) -> [] int {
+    // a pattern that ends in a lone backslash is an error whatever the string
+    var q = 0;
+    while q < pn {
+        if int_of(ar[pa + q]) == '\\' {
+            if q + 1 >= pn {
+                return 0 - 1;
+            }
+            q = q + 2;
+        } else {
+            q = q + 1;
+        }
+    }
+    var s = 0;
+    var p = 0;
+    var star_p = 0 - 1;
+    var star_s = 0;
+    while s < sn {
+        var step = 0;
+        if p < pn {
+            let pc = int_of(ar[pa + p]);
+            if pc == '%' {
+                star_p = p + 1;
+                star_s = s;
+                p = p + 1;
+                step = 1;
+            } else if pc == '_' {
+                s = s + char_len(int_of(ar[sa + s]));
+                p = p + 1;
+                step = 1;
+            } else {
+                var lit_at = p;
+                if pc == '\\' {
+                    lit_at = p + 1;
+                }
+                if fold(int_of(ar[pa + lit_at]), insensitive) == fold(int_of(ar[sa + s]), insensitive) {
+                    s = s + 1;
+                    p = lit_at + 1;
+                    step = 1;
+                }
+            }
+        }
+        if step == 0 {
+            if star_p < 0 {
+                return 0;
+            }
+            star_s = star_s + char_len(int_of(ar[sa + star_s]));
+            s = star_s;
+            p = star_p;
+        }
+    }
+    while p < pn && int_of(ar[pa + p]) == '%' {
+        p = p + 1;
+    }
+    if p == pn {
+        return 1;
+    }
+    return 0;
+}
+
+// Arithmetic on two integers of result type `ty`: (state, value), state 0 or the error (2 division by zero, 3 out of range).
+fn arith(op: int, ty: int, x: int, y: int) -> [] (int, int) {
+    var r = 0;
+    if op == 8 || op == 9 {
+        var yy = y;
+        if op == 9 {
+            if y == min8() {
+                // x - MIN is x + MAX + 1
+                if x >= 0 {
+                    return (3, 0);
+                }
+                return (0, x + max8() + 1);
+            }
+            yy = 0 - y;
+        }
+        if yy > 0 && x > max8() - yy || yy < 0 && x < min8() - yy {
+            return (3, 0);
+        }
+        r = x + yy;
+    } else if op == 10 {
+        if x == 0 || y == 0 {
+            r = 0;
+        } else if x == min8() || y == min8() {
+            if x == 1 {
+                r = y;
+            } else if y == 1 {
+                r = x;
+            } else {
+                return (3, 0);
+            }
+        } else {
+            var ax = x;
+            var ay = y;
+            if ax < 0 {
+                ax = 0 - ax;
+            }
+            if ay < 0 {
+                ay = 0 - ay;
+            }
+            let negative = x < 0 != y < 0;
+            if ax > max8() / ay {
+                if negative && ax == max8() / ay + 1 && max8() % ay == ay - 1 {
+                    return (0, min8());
+                }
+                return (3, 0);
+            }
+            r = ax * ay;
+            if negative {
+                r = 0 - r;
+            }
+        }
+    } else {
+        if y == 0 {
+            return (2, 0);
+        }
+        if y == 0 - 1 {
+            if op == 17 {
+                return (0, 0);
+            }
+            if x == min8() {
+                return (3, 0);
+            }
+            r = 0 - x;
+        } else if op == 11 {
+            r = x / y;
+        } else {
+            r = x % y;
+        }
+    }
+    if !row.int_fits(ty, r) {
+        return (3, 0);
+    }
+    return (0, r);
+}
+
+// Whether a note of the lowering says the `Const` at position `pos` of the statement is of kind `kind` (2 a number that is not an integer, 4 `true`, 5 `false`).
+fn noted[&k](kinds: &k [int], pos: int) -> [] int {
+    if len(kinds) < 142 {
+        return 0;
+    }
+    let n = kinds[8];
+    if n < 0 {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < n && 140 + 2 * i + 1 < len(kinds) {
+        if kinds[140 + 2 * i] == pos {
+            return kinds[141 + 2 * i];
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// The bound tables: for table j, `cx[6 * j ..]` is where its name is in `ctx` and how long, where its definition is and how long, where its row is and how long (a length of -1: no row, every column null,
+// the unmatched side of a left join).
+fn find_col[&x, &c, &i](e: &x [byte], tat: int, tn: int, cat: int, cn: int, ctx: &c [byte], cx: &i [int], ntab: int) -> [] (int, int) {
+    var j = 0;
+    while j < ntab {
+        let na = cx[6 * j];
+        let nl = cx[6 * j + 1];
+        var same = nl == tn;
+        var k = 0;
+        while same && k < tn {
+            if int_of(ctx[na + k]) != int_of(e[tat + k]) {
+                same = false;
+            }
+            k = k + 1;
+        }
+        if same {
+            let def = ctx[cx[6 * j + 2]..cx[6 * j + 2] + cx[6 * j + 3]];
+            let n = commit.be(def, 0, 2);
+            var c = 0;
+            while c < n {
+                let nm = row.col_name(def, c);
+                var eq = len(nm) == cn;
+                k = 0;
+                while eq && k < cn {
+                    if int_of(nm[k]) != int_of(e[cat + k]) {
+                        eq = false;
+                    }
+                    k = k + 1;
+                }
+                if eq {
+                    return (j, c);
+                }
+                c = c + 1;
+            }
+            return (0 - 1, 0);
+        }
+        j = j + 1;
+    }
+    return (0 - 1, 0);
+}
+
+// Whether one of the two values is a null that is a constant: PostgreSQL folds an operator that is given one to null when it plans, and never computes the other side.
+fn const_null[&w](ws: &w [int], x: int, y: int) -> [] bool {
+    return ws[x + 1] == 1 && ws[x + 4] == 1 || ws[y + 1] == 1 && ws[y + 4] == 1;
+}
+
+fn bool3[&w](ws: &!w [int], v: int, state: int, value: int, constant: int) -> [] int {
+    return set(ws, v, 2, state, value, 0, constant);
+}
+
+// Compute the node at `p` (tag `tag`, `ops` operands, the first at `top` and the next ones below it) into `out`: 0, or a negative answer.
+fn step[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], p: int, tag: int, ops: int, top: int, out: int, all_const: int, kinds: &k [int], ctx: &c [byte], cx: &i [int], ntab: int, ws: &!w [int], ar: &!a [byte], info: &!n [int]) -> [] int {
+    if tag == 0 {
+        let tn = commit.be(e, p + 1, 2);
+        let cn = commit.be(e, p + 3 + tn, 2);
+        let (tj, cj) = find_col(e, p + 3, tn, p + 5 + tn, cn, ctx, cx, ntab);
+        if tj < 0 {
+            return malformed();
+        }
+        let def = ctx[cx[6 * tj + 2]..cx[6 * tj + 2] + cx[6 * tj + 3]];
+        let ty = row.col_type(def, cj);
+        if cx[6 * tj + 5] < 0 {
+            set(ws, out, ty, 1, 0, 0, 0);
+        } else {
+            let r = ctx[cx[6 * tj + 4]..cx[6 * tj + 4] + cx[6 * tj + 5]];
+            let va = row.value_at(def, r, cj);
+            if va < 0 {
+                return malformed();
+            }
+            let vt = int_of(r[va]);
+            if vt == 0 {
+                set(ws, out, ty, 1, 0, 0, 0);
+            } else if vt == 1 {
+                set(ws, out, ty, 0, row.int_at(r, va + 1), 0, 0);
+            } else if vt == 2 {
+                set(ws, out, 2, 0, int_of(r[va + 1]), 0, 0);
+            } else {
+                let n = commit.be(r, va + 1, 2);
+                let spot = keep(r, va + 3, n, ar, info);
+                if spot < 0 {
+                    return unsupported();
+                }
+                set(ws, out, ty, 0, spot, n, 0);
+            }
+        }
+    } else if tag == 1 {
+        let vt = int_of(e[p + 1]);
+        if vt == 0 {
+            set(ws, out, 0, 1, 0, 0, 1);
+        } else if vt == 1 {
+            let v = row.int_at(e, p + 2);
+            var ty = 5;
+            if !row.int_fits(5, v) {
+                ty = 1;
+            }
+            set(ws, out, ty, 0, v, 0, 1);
+        } else {
+            let kind = noted(kinds, p);
+            if kind < 0 || kind == 2 {
+                return unsupported();
+            }
+            if kind == 4 {
+                set(ws, out, 2, 0, 1, 0, 1);
+            } else if kind == 5 {
+                set(ws, out, 2, 0, 0, 0, 1);
+            } else {
+                let n = commit.be(e, p + 2, 4);
+                let spot = keep(e, p + 6, n, ar, info);
+                if spot < 0 {
+                    return unsupported();
+                }
+                set(ws, out, 0, 0, spot, n, 1);
+            }
+        }
+    } else if tag == 5 {
+        let op = int_of(e[p + 1]);
+        let x = top;
+        let y = top - 6;
+        if op <= 5 {
+            let t = unify(ws, x, y, ar, info);
+            if t < 0 {
+                return t;
+            }
+            if const_null(ws, x, y) {
+                bool3(ws, out, 1, 0, 1);
+            } else if ws[x + 1] == 2 {
+                let code = ws[x + 2];
+                bool3(ws, out, 2, code, 0);
+            } else if ws[y + 1] == 2 {
+                let code = ws[y + 2];
+                bool3(ws, out, 2, code, 0);
+            } else if ws[x + 1] == 1 || ws[y + 1] == 1 {
+                bool3(ws, out, 1, 0, all_const);
+            } else {
+                let c = compare(ws, x, y, ar);
+                var r = 0;
+                if op == 0 && c == 0 || op == 1 && c != 0 || op == 2 && c < 0 || op == 3 && c <= 0 || op == 4 && c > 0 || op == 5 && c >= 0 {
+                    r = 1;
+                }
+                bool3(ws, out, 0, r, all_const);
+            }
+        } else if op == 6 || op == 7 {
+            var r = convert(ws, x, 2, false, ar, info);
+            if r == no_operator() {
+                return mismatch();
+            }
+            if r < 0 {
+                return r;
+            }
+            r = convert(ws, y, 2, false, ar, info);
+            if r == no_operator() {
+                return mismatch();
+            }
+            if r < 0 {
+                return r;
+            }
+            // `stop` is the value that decides alone: false for AND, true for OR
+            var stop = 0;
+            if op == 7 {
+                stop = 1;
+            }
+            let xs = ws[x + 1];
+            let xv = ws[x + 2];
+            let ys = ws[y + 1];
+            let yv = ws[y + 2];
+            if ws[y + 4] == 1 && ys == 0 && yv == stop {
+                // a constant that decides: PostgreSQL does not look at the other side, and the result is a constant
+                bool3(ws, out, 0, stop, 1);
+            } else if xs == 2 {
+                bool3(ws, out, 2, xv, 0);
+            } else if xs == 0 && xv == stop {
+                bool3(ws, out, 0, stop, ws[x + 4]);
+            } else if ys == 2 {
+                bool3(ws, out, 2, yv, 0);
+            } else if ys == 0 && yv == stop {
+                bool3(ws, out, 0, stop, all_const);
+            } else if xs == 1 || ys == 1 {
+                bool3(ws, out, 1, 0, all_const);
+            } else {
+                bool3(ws, out, 0, 1 - stop, all_const);
+            }
+        } else if op >= 8 && op <= 11 || op == 17 {
+            var tx = ws[x];
+            var ty = ws[y];
+            if tx == 0 && ty == 0 {
+                return unsupported();
+            }
+            if tx == 0 {
+                if !is_int(ty) {
+                    // a literal beside something that is not an integer: PostgreSQL has other operators of these names (on jsonb, on dates)
+                    return unsupported();
+                }
+                let r = convert(ws, x, ty, false, ar, info);
+                if r < 0 {
+                    return r;
+                }
+                tx = ty;
+            }
+            if ty == 0 {
+                if !is_int(tx) {
+                    // a literal beside something that is not an integer: PostgreSQL has other operators of these names (on jsonb, on dates)
+                    return unsupported();
+                }
+                let r = convert(ws, y, tx, false, ar, info);
+                if r < 0 {
+                    return r;
+                }
+                ty = tx;
+            }
+            if !is_int(tx) || !is_int(ty) {
+                return no_operator();
+            }
+            let t = wider(tx, ty);
+            if const_null(ws, x, y) {
+                set(ws, out, t, 1, 0, 0, 1);
+            } else if ws[x + 1] == 2 {
+                let code = ws[x + 2];
+                set(ws, out, t, 2, code, 0, 0);
+            } else if ws[y + 1] == 2 {
+                let code = ws[y + 2];
+                set(ws, out, t, 2, code, 0, 0);
+            } else if ws[x + 1] == 1 || ws[y + 1] == 1 {
+                set(ws, out, t, 1, 0, 0, all_const);
+            } else {
+                let (st, v) = arith(op, t, ws[x + 2], ws[y + 2]);
+                if st != 0 {
+                    if all_const == 1 {
+                        return unsupported();
+                    }
+                    set(ws, out, t, 2, st, 0, 0);
+                } else {
+                    set(ws, out, t, 0, v, 0, all_const);
+                }
+            }
+        } else if op >= 12 && op <= 15 {
+            var r = 0;
+            if ws[x] == 4 || ws[y] == 4 {
+                return unsupported();
+            }
+            if ws[x] == 0 {
+                r = convert(ws, x, 3, false, ar, info);
+            }
+            if r == 0 && ws[y] == 0 {
+                r = convert(ws, y, 3, false, ar, info);
+            }
+            if r < 0 {
+                return r;
+            }
+            if ws[x] == 4 || ws[y] == 4 {
+                // LIKE on bytea exists in PostgreSQL; it is not read here
+                return unsupported();
+            }
+            if ws[x] != 3 || ws[y] != 3 {
+                return no_operator();
+            }
+            if const_null(ws, x, y) {
+                bool3(ws, out, 1, 0, 1);
+            } else if ws[x + 1] == 2 {
+                let code = ws[x + 2];
+                bool3(ws, out, 2, code, 0);
+            } else if ws[y + 1] == 2 {
+                let code = ws[y + 2];
+                bool3(ws, out, 2, code, 0);
+            } else if ws[x + 1] == 1 || ws[y + 1] == 1 {
+                bool3(ws, out, 1, 0, all_const);
+            } else {
+                let m = like(ar, ws[x + 2], ws[x + 3], ws[y + 2], ws[y + 3], op == 13 || op == 15);
+                if m < 0 {
+                    if all_const == 1 {
+                        return unsupported();
+                    }
+                    bool3(ws, out, 2, 5, 0);
+                } else if op >= 14 {
+                    bool3(ws, out, 0, 1 - m, all_const);
+                } else {
+                    bool3(ws, out, 0, m, all_const);
+                }
+            }
+        } else if op == 16 {
+            // || on text alone: a text and a text or a literal
+            if ws[x] == 0 && ws[y] == 0 {
+                ws[x] = 3;
+            }
+            if ws[x] == 0 && ws[y] == 3 {
+                ws[x] = 3;
+            }
+            if ws[y] == 0 && ws[x] == 3 {
+                ws[y] = 3;
+            }
+            if ws[x] != 3 || ws[y] != 3 {
+                return unsupported();
+            }
+            if const_null(ws, x, y) {
+                set(ws, out, 3, 1, 0, 0, 1);
+            } else if ws[x + 1] == 2 {
+                let code = ws[x + 2];
+                set(ws, out, 3, 2, code, 0, 0);
+            } else if ws[y + 1] == 2 {
+                let code = ws[y + 2];
+                set(ws, out, 3, 2, code, 0, 0);
+            } else if ws[x + 1] == 1 || ws[y + 1] == 1 {
+                set(ws, out, 3, 1, 0, 0, all_const);
+            } else {
+                let xa = ws[x + 2];
+                let xn = ws[x + 3];
+                let ya = ws[y + 2];
+                let yn = ws[y + 3];
+                let start = info[0];
+                if start + xn + yn > len(ar) {
+                    return unsupported();
+                }
+                var k = 0;
+                while k < xn {
+                    ar[start + k] = ar[xa + k];
+                    k = k + 1;
+                }
+                k = 0;
+                while k < yn {
+                    ar[start + xn + k] = ar[ya + k];
+                    k = k + 1;
+                }
+                info[0] = start + xn + yn;
+                set(ws, out, 3, 0, start, xn + yn, all_const);
+            }
+        } else {
+            return malformed();
+        }
+    } else if tag == 7 {
+        let op = int_of(e[p + 1]);
+        let x = top;
+        if op == 0 {
+            let r = convert(ws, x, 2, false, ar, info);
+            if r == no_operator() {
+                return mismatch();
+            }
+            if r < 0 {
+                return r;
+            }
+            if ws[x + 1] == 0 {
+                let v = 1 - ws[x + 2];
+                bool3(ws, out, 0, v, all_const);
+            } else {
+                let st = ws[x + 1];
+                let code = ws[x + 2];
+                bool3(ws, out, st, code, all_const);
+            }
+        } else if op == 1 && p + 4 <= len(e) && int_of(e[p + 2]) == 1 && int_of(e[p + 3]) == 1 {
+            // a minus sign before an integer literal makes the literal negative before it has a type: -2147483648 is an integer, not a bigint
+            let v = 0 - ws[x + 2];
+            var t = 5;
+            if !row.int_fits(5, v) {
+                t = 1;
+            }
+            set(ws, out, t, 0, v, 0, 1);
+        } else if op == 1 {
+            if ws[x] == 0 {
+                return unsupported();
+            }
+            if !is_int(ws[x]) {
+                return no_operator();
+            }
+            let t = ws[x];
+            if ws[x + 1] == 0 {
+                let (st, v) = arith(9, t, 0, ws[x + 2]);
+                if st != 0 {
+                    if all_const == 1 {
+                        return unsupported();
+                    }
+                    set(ws, out, t, 2, st, 0, 0);
+                } else {
+                    set(ws, out, t, 0, v, 0, all_const);
+                }
+            } else {
+                let st = ws[x + 1];
+                let code = ws[x + 2];
+                set(ws, out, t, st, code, 0, all_const);
+            }
+        } else if op == 2 || op == 3 {
+            if ws[x + 1] == 2 {
+                let code = ws[x + 2];
+                bool3(ws, out, 2, code, 0);
+            } else {
+                var v = 0;
+                if ws[x + 1] == 1 == (op == 2) {
+                    v = 1;
+                }
+                bool3(ws, out, 0, v, all_const);
+            }
+        } else {
+            return malformed();
+        }
+    } else if tag == 8 {
+        // x IN (list). PostgreSQL makes an array of the members that name no column, compared at one common type, and separate equalities of the others; which it is changes the answer only when the types are
+        // mixed or a member fails, and both are refused here: the tested value and the members must be of one kind once the literals are set aside (all integers, or all one other type), and none may be an error.
+        let negated = int_of(e[p + 1]);
+        let x = top;
+        var t = 0;
+        var m = 0;
+        while m < ops {
+            let mt = ws[top - 6 * m];
+            if mt != 0 {
+                if t == 0 {
+                    t = mt;
+                } else if is_int(t) && is_int(mt) {
+                    t = wider(t, mt);
+                } else if t != mt {
+                    return unsupported();
+                }
+            }
+            m = m + 1;
+        }
+        if t == 0 {
+            t = 3;
+        }
+        m = 0;
+        while m < ops {
+            let v = top - 6 * m;
+            if ws[v] == 0 {
+                let r = convert(ws, v, t, false, ar, info);
+                if r < 0 {
+                    return unsupported();
+                }
+            }
+            if ws[v + 1] == 2 {
+                return unsupported();
+            }
+            m = m + 1;
+        }
+        var value = 0;
+        var seen_null = false;
+        m = 1;
+        while m < ops && value == 0 {
+            let y = top - 6 * m;
+            if ws[x + 1] == 1 || ws[y + 1] == 1 {
+                seen_null = true;
+            } else if compare(ws, x, y, ar) == 0 {
+                value = 1;
+            }
+            m = m + 1;
+        }
+        if value == 1 {
+            bool3(ws, out, 0, 1 - negated, all_const);
+        } else if seen_null {
+            bool3(ws, out, 1, 0, all_const);
+        } else {
+            bool3(ws, out, 0, negated, all_const);
+        }
+    } else if tag == 9 {
+        let pairs = commit.be(e, p + 1, 4);
+        let has_else = int_of(e[p + 5]);
+        // each condition is made a boolean first, in order (PostgreSQL does it as it reads them)
+        var b = 0;
+        while b < pairs {
+            let cv = top - 6 * (2 * b);
+            let r = convert(ws, cv, 2, false, ar, info);
+            if r == no_operator() {
+                return mismatch();
+            }
+            if r < 0 {
+                return r;
+            }
+            b = b + 1;
+        }
+        // the type of the result: the one type of the branches (integers widen; literals take it; all literals are text)
+        var t = 0;
+        b = 0;
+        while b < pairs + has_else {
+            var rv = top - 6 * (2 * b + 1);
+            if b == pairs {
+                rv = top - 6 * (2 * pairs);
+            }
+            let bt = ws[rv];
+            if bt != 0 {
+                if t == 0 {
+                    t = bt;
+                } else if is_int(t) && is_int(bt) {
+                    t = wider(t, bt);
+                } else if t != bt {
+                    return mismatch();
+                }
+            }
+            b = b + 1;
+        }
+        if t == 0 {
+            t = 3;
+        }
+        b = 0;
+        while b < pairs + has_else {
+            var rv = top - 6 * (2 * b + 1);
+            if b == pairs {
+                rv = top - 6 * (2 * pairs);
+            }
+            if ws[rv] == 0 || !is_int(t) {
+                let r = convert(ws, rv, t, false, ar, info);
+                if r == no_operator() {
+                    return mismatch();
+                }
+                if r < 0 {
+                    return r;
+                }
+            }
+            b = b + 1;
+        }
+        // the first condition that is true decides; an error in a condition that is reached is the error
+        var chosen = 0 - 1;
+        var failed = 0;
+        b = 0;
+        while b < pairs && chosen < 0 && failed == 0 {
+            let cv = top - 6 * (2 * b);
+            if ws[cv + 1] == 2 {
+                failed = ws[cv + 2];
+            } else if ws[cv + 1] == 0 && ws[cv + 2] == 1 {
+                chosen = top - 6 * (2 * b + 1);
+            }
+            b = b + 1;
+        }
+        // whether the result is a constant, as PostgreSQL simplifies a CASE when it plans: conditions that are constants and not true are dropped; the first that is left decides
+        var folded = 1;
+        var settled = false;
+        b = 0;
+        while b < pairs && !settled {
+            let cv = top - 6 * (2 * b);
+            if ws[cv + 4] != 1 {
+                folded = 0;
+                settled = true;
+            } else if ws[cv + 1] == 0 && ws[cv + 2] == 1 {
+                folded = ws[top - 6 * (2 * b + 1) + 4];
+                settled = true;
+            }
+            b = b + 1;
+        }
+        if !settled && has_else == 1 {
+            folded = ws[top - 6 * (2 * pairs) + 4];
+        }
+        if failed != 0 {
+            set(ws, out, t, 2, failed, 0, 0);
+        } else if chosen < 0 && has_else == 0 {
+            set(ws, out, t, 1, 0, 0, folded);
+        } else {
+            if chosen < 0 {
+                chosen = top - 6 * (2 * pairs);
+            }
+            let s1 = ws[chosen + 1];
+            let s2 = ws[chosen + 2];
+            let s3 = ws[chosen + 3];
+            set(ws, out, t, s1, s2, s3, folded);
+        }
+    } else if tag == 10 {
+        let nl = commit.be(e, p + 1, 2);
+        let to = type_of_name(e, p + 3, nl);
+        if to < 0 {
+            return unsupported();
+        }
+        let x = top;
+        let r = convert(ws, x, to, true, ar, info);
+        if r < 0 {
+            return r;
+        }
+        let s0 = ws[x];
+        let s1 = ws[x + 1];
+        let s2 = ws[x + 2];
+        let s3 = ws[x + 3];
+        if s1 == 2 && all_const == 1 {
+            return unsupported();
+        }
+        set(ws, out, s0, s1, s2, s3, all_const);
+    } else {
+        // a parameter, a value the server chooses, a call, the star of count(*): not here
+        return unsupported();
+    }
+    return 0;
+}
+
+// Evaluate the expression at `at` of the statement `e`. On 0 the value is `ws[max_nodes()..max_nodes() + 6]` (bytes in the arena `ar`), and `info[1]` is where the expression ends; otherwise a negative
+// answer (see the top). `info[0]` is the arena's fill, which the caller sets (to 0 for a new row).
+// When several parts of an expression are wrong in their types, the answer is the error of the leftmost one, as PostgreSQL analyses an expression from the left and stops at the first: a node with a wrong
+// operand is not looked at (state 3), and the last error found going backward is the first going forward. `unsupported` and `malformed` are answered at once, wherever they are.
+pub fn eval[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], at: int, kinds: &k [int], ctx: &c [byte], cx: &i [int], ntab: int, ws: &!w [int], ar: &!a [byte], info: &!n [int]) -> [] int {
+    let (count, end) = scan(e, at, ws);
+    if count < 0 {
+        return malformed();
+    }
+    info[1] = end;
+    let base = max_nodes();
+    var sp = 0;
+    var wrong = 0;
+    var i = count - 1;
+    while i >= 0 {
+        let p = ws[i];
+        let tag = int_of(e[p]);
+        let (size, ops) = node(e, p);
+        if sp < ops || sp - ops + 1 > 1024 {
+            return malformed();
+        }
+        let top = base + 6 * (sp - 1);
+        let out = base + 6 * (sp - ops);
+        var all_const = 1;
+        var poisoned = false;
+        var j = 0;
+        while j < ops {
+            if ws[top - 6 * j + 4] != 1 {
+                all_const = 0;
+            }
+            if ws[top - 6 * j + 1] == 3 {
+                poisoned = true;
+            }
+            j = j + 1;
+        }
+        if poisoned {
+            // CASE, AND and OR check that a condition is a boolean as soon as they have read it, before they read what follows it: a condition of another type that comes before the wrong operand is the
+            // error PostgreSQL reports
+            var conds = 0;
+            var stride = 1;
+            if tag == 9 {
+                conds = commit.be(e, p + 1, 4);
+                stride = 2;
+            } else if tag == 5 && (int_of(e[p + 1]) == 6 || int_of(e[p + 1]) == 7) {
+                conds = 2;
+            }
+            var m = 0;
+            var decided = false;
+            while m < ops && !decided {
+                let v = top - 6 * m;
+                if ws[v + 1] == 3 {
+                    decided = true;
+                } else if m % stride == 0 && m / stride < conds && ws[v] != 2 && ws[v] != 0 {
+                    wrong = mismatch();
+                    decided = true;
+                }
+                m = m + 1;
+            }
+            set(ws, out, 0, 3, 0, 0, 0);
+        } else {
+            let r = step(e, p, tag, ops, top, out, all_const, kinds, ctx, cx, ntab, ws, ar, info);
+            if r == unsupported() || r == malformed() {
+                return r;
+            }
+            if r < 0 {
+                wrong = r;
+                set(ws, out, 0, 3, 0, 0, 0);
+            }
+        }
+        sp = sp - ops + 1;
+        i = i - 1;
+    }
+    if sp != 1 {
+        return malformed();
+    }
+    return wrong;
+}

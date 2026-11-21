@@ -1630,6 +1630,72 @@ def run_row(cancho):
     return 1 if survivors else 0
 
 
+# ---- the engine's expression evaluator (src/eval.cho), judged by tests/eval_check.py against PostgreSQL
+EVAL = [
+    ("eval: less than is less or equal", "src/eval.cho", "op == 2 && c < 0", "op == 2 && c <= 0"),
+    ("eval: OR stops on false", "src/eval.cho", "            if op == 7 {\n                stop = 1;", "            if op == 7 {\n                stop = 0;"),
+    ("eval: division is the remainder", "src/eval.cho", "            r = x / y;", "            r = x % y;"),
+    ("eval: division by zero is out of range", "src/eval.cho", "        if y == 0 {\n            return (2, 0);", "        if y == 0 {\n            return (3, 0);"),
+    ("eval: a result need not fit its type", "src/eval.cho", "    if !row.int_fits(ty, r) {\n        return (3, 0);\n    }\n    return (0, r);", "    return (0, r);"),
+    ("eval: the narrower integer type wins", "src/eval.cho", "    if width(a) >= width(b) {", "    if width(a) <= width(b) {"),
+    ("eval: an underscore matches one byte", "src/eval.cho", "                s = s + char_len(int_of(ar[sa + s]));\n                p = p + 1;", "                s = s + 1;\n                p = p + 1;"),
+    ("eval: NOT ILIKE is case sensitive", "src/eval.cho", "op == 13 || op == 15", "op == 13"),
+    ("eval: NOT LIKE is LIKE", "src/eval.cho", "                } else if op >= 14 {\n                    bool3(ws, out, 0, 1 - m, all_const);", "                } else if op >= 14 {\n                    bool3(ws, out, 0, m, all_const);"),
+    ("eval: 'yes' is not a boolean", "src/eval.cho", 'name_is(ar, at, n, "yes")', 'name_is(ar, at, n, "yess")'),
+    ("eval: an integer literal is always an integer", "src/eval.cho", "            var ty = 5;\n            if !row.int_fits(5, v) {\n                ty = 1;", "            var ty = 5;\n            if !row.int_fits(5, v) {\n                ty = 5;"),
+    ("eval: a constant null is not folded", "src/eval.cho", "    return ws[x + 1] == 1 && ws[x + 4] == 1 || ws[y + 1] == 1 && ws[y + 4] == 1;", "    return false;"),
+    ("eval: the rightmost type error is the one reported", "src/eval.cho", "            if r < 0 {\n                wrong = r;", "            if r < 0 && wrong == 0 {\n                wrong = r;"),
+    ("eval: IN ignores NOT", "src/eval.cho", "            bool3(ws, out, 0, 1 - negated, all_const);", "            bool3(ws, out, 0, 1, all_const);"),
+    ("eval: IN with a null and no match is false", "src/eval.cho", "        } else if seen_null {\n            bool3(ws, out, 1, 0, all_const);", "        } else if seen_null {\n            bool3(ws, out, 0, negated, all_const);"),
+    ("eval: CASE takes the first condition that is false", "src/eval.cho", "            } else if ws[cv + 1] == 0 && ws[cv + 2] == 1 {\n                chosen = top - 6 * (2 * b + 1);", "            } else if ws[cv + 1] == 0 && ws[cv + 2] == 0 {\n                chosen = top - 6 * (2 * b + 1);"),
+    ("eval: IS NULL is IS NOT NULL", "src/eval.cho", "                if ws[x + 1] == 1 == (op == 2) {", "                if ws[x + 1] == 1 == (op == 3) {"),
+    ("eval: || writes the second text over the first", "src/eval.cho", "                    ar[start + xn + k] = ar[ya + k];", "                    ar[start + k] = ar[ya + k];"),
+    ("eval: only a positive integer is true", "src/eval.cho", "        if a != 0 {\n            t = 1;", "        if a > 0 {\n            t = 1;"),
+    ("eval: text after a number is ignored", "src/eval.cho", "    if i != end || digits == 0 {", "    if digits == 0 {"),
+    ("eval: a minus before a literal makes a bigint", "src/eval.cho", "            var t = 5;\n            if !row.int_fits(5, v) {\n                t = 1;\n            }\n            set(ws, out, t, 0, v, 0, 1);", "            var t = 1;\n            set(ws, out, t, 0, v, 0, 1);"),
+    ("eval: a condition's type is checked after the operand that follows it", "src/eval.cho", "                } else if m % stride == 0 && m / stride < conds && ws[v] != 2 && ws[v] != 0 {\n                    wrong = mismatch();", "                } else if false {\n                    wrong = mismatch();"),
+    ("eval: AND with a constant false still looks at the other side", "src/eval.cho", "            if ws[y + 4] == 1 && ys == 0 && yv == stop {", "            if false {"),
+    ("eval: subtraction adds", "src/eval.cho", "            yy = 0 - y;", "            yy = y;"),
+]
+
+
+def run_eval(cancho):
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in EVAL if not only or only in m[0]]
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)))
+                survivors.append(label)
+                continue
+            f.write_text(text.replace(old, new))
+            exe = work / "evalcheck"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/evalcheck.cho")] + [str(work / "src" / x) for x in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho")] + ["-o", str(exe)],
+                               capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
+                survivors.append(label)
+                continue
+            try:
+                r = subprocess.run([sys.executable, str(ROOT / "tests/eval_check.py"), str(exe), "3000", "1"], capture_output=True, text=True, timeout=900, env=dict(os.environ, E2E_DB="cdb_evalmut"))
+                rc, out = r.returncode, r.stdout
+            except subprocess.TimeoutExpired:
+                rc, out = 1, "FAIL timed out"
+            if rc == 0:
+                print("SURVIVED %-46s every expression agrees" % label)
+                survivors.append(label)
+            else:
+                first = [l for l in out.splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s by %d expression(s), e.g. %s" % (label, len(first), first[0][5:70] if first else "a crash"))
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run(kind, cancho):
     if kind == "guard":
         return run_guard(cancho)
@@ -1641,6 +1707,8 @@ def run(kind, cancho):
         return run_btree(cancho)
     if kind == "row":
         return run_row(cancho)
+    if kind == "eval":
+        return run_eval(cancho)
     if kind == "sql":
         return run_sql(cancho)
     if kind == "l3a":
