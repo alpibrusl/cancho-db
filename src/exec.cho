@@ -609,6 +609,11 @@ pub fn scan_next[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_re
             return 0 - 1;
         }
     }
+    let dl = w.dlen;
+    if !row.row_ok(contents(w.ctx)[64..64 + dl], contents(w.cur)[0..nv]) {
+        // a page that passed its CRC and does not hold a row of this table: nothing is computed from it
+        return damaged();
+    }
     copy(contents(w.key2), 0, nk, contents(w.key), 0);
     w.klen = nk;
     copy(contents(w.cur), 0, nv, contents(w.ctx), 1024);
