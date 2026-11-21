@@ -108,7 +108,7 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 | **M3g** (built, 6k and 6l: nested loop; inner and left) | joins (nested loop first) | gate 4 |
 | **M3h** (built, 6q and 6r: `add column`; an index is a recorded name, no tree is built) | `alter table`, `create index` (an index is a second tree) | gate 4 on the catalog after each |
 | **M3i** (6n and 6o: the history, `AS OF`, a fork and an erase are built in the engine and its harness; merge and the proxy's functions are not) | native `cancho_fork`, `AS OF`, `cancho_merge`, `cancho_erase` on the engine | the existing fork, as-of, merge and erase end-to-end suites pass on it |
-| **M3j** | the shadow run, then a database option to serve from the engine | gate 5, then the full gate on the engine for one database |
+| **M3j** (designed as seven slices, 6s; not built) | the shadow run, then a database option to serve from the engine | gate 5, then the full gate on the engine for one database |
 
 ## 6b. M3a, built
 
@@ -503,6 +503,44 @@ too); 14 mutants, the engine's group now 152.
 As designed in 6q, with nothing found to correct: an `add column` writes every row again; an index that is not `unique` is a name and nothing more, and a `unique` one is refused. What PostgreSQL does
 and the engine now matches: a `not null` column with no default (or a default of null) is `23502` on a table with rows and taken on an empty one; a second primary key is `42P16`; an index and a table
 share one space of names (`42P07` either way); `drop table` takes the table's indexes with it.
+
+## 6s. M3j: what stands between this engine and a client (design; none of it is built)
+
+Everything above is the engine and a harness that reads statements from a pipe. Nothing a client connects to uses it. This section is the path from one to the other, written as slices with the gate
+of each, so that what is missing is a list and not an impression.
+
+**J1. The answer as a client sees it.** A select's answer has column *names* (PostgreSQL's rules for a column without an alias, of which the lowering knows the `order by` part, 6h), type identifiers,
+and values as text (`t`/`f`, digits, bytes as they are; the wire's binary format is refused). An error is a SQLSTATE *and* a message; the engine has the first. A command has a tag (`INSERT 0 3`).
+*Gate:* the bytes after the proxy's framing equal PostgreSQL's for the random history, names and tags included; messages are compared by SQLSTATE only, and the page says so.
+
+**J2. Transactions.** `begin`, `commit`, `rollback`: a transaction is a root of its own that the statements of one connection build on, published or dropped at the end. The history's rule for a key
+written twice in a transaction (6n) is then exercised for the first time. One writer at a time: a second connection's write waits or is refused; which, and what a reader sees meanwhile (the last
+published root: snapshot isolation for free), is decided there. *Gate:* the random history cut into transactions of random length, with rollbacks, against PostgreSQL at `read committed` run one
+connection at a time; interleavings are a separate test with its own model.
+
+**J3. Parameters and the extended protocol.** `Parse`/`Bind`/`Execute` with `$n`: the evaluator refuses a parameter today. The types PostgreSQL infers for parameters are a rule of their own.
+*Gate:* `tests/ext_e2e.py`'s statements, against the engine.
+
+**J4. The facts of a commit.** The log's `changes` and `state` are hashes over facts: the table, the key, the salted hash of the image before and after, a salted commitment to the key
+(`spec/state.md`, `spec/l3a.md` section 9). The engine has the images (the history's entries and the tip); it has no salts. They go beside the values they blind: one for a key, one for each version of a
+row, made when the row is written, **erased with it** (which is the point of them, `m2g-erasure.md`). The engine's `changes` for a transaction is then computed from its entries.
+*Gate:* the three L3a verifiers accept a log whose facts the engine made, with `--delta` exported from the engine's history; and for the same statements the engine's facts equal the capture's but
+for the salts (the images are already equal, C150).
+
+**J5. The shadow run.** The proxy, serving from PostgreSQL as now, also gives each statement to the engine and compares: the answer (J1) and, at commit, the facts' images. A statement the engine
+refuses ends the comparison for that database (PostgreSQL ran a write the engine did not), and the proxy says so and goes on. Nothing the engine does can change what a client is sent.
+*Gate 5 of section 5:* a workload runs for long enough to matter with no disagreement; the measure is how much of it the engine answered.
+
+**J6. Serving.** A database option: statements are answered by the engine, PostgreSQL is not there. Needs J1 to J4, `cancho_fork`, `cancho_merge` and `cancho_erase` as functions of SQL over the engine's
+own fork, history and erase (6o), and a merge, which does not exist. *Gate:* the proxy's end-to-end suites (`proxy_e2e`, `fork_e2e`, `asof_e2e`, `merge_e2e`, `erase_e2e`, `l3a_e2e`) with the engine in
+PostgreSQL's place, for the statements the engine takes.
+
+**J7. What clients ask beside their statements** (M4's "catalog emulation"): drivers read `pg_catalog` at connect, set session parameters, and ask for the server's version. None of it is in the
+subset. Until it is, only clients that send what `psql -c` sends can be served.
+
+*An honest size:* J1 and J2 are each about what a slice above was; J3 and J4 more; J5 and J6 are integration, where the tests get slow and the surprises are in the proxy, not the engine; J7 is open-ended.
+M3's exit ("the differential suite passes on the declared subset; crash and fsync-fault tests pass") is met for the engine as a library but for the failing `fsync`; it is not met for anything a client
+can reach, and M4's ("one cancho product runs on it in daily use") cannot be met from inside this repository at all.
 
 ## 7. Taking over, safely
 
