@@ -106,7 +106,7 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 | **M3e** (built, 6h) | predicates on any column, range scans on the key, `order by`, `limit`, `offset`, `distinct`, `in`, `case`, `cast`, `like` | gate 4 |
 | **M3f** (built, 6i and 6j: `count`, `sum`, `min`, `max`) | aggregates and `group by`, `having` | gate 4 |
 | **M3g** (built, 6k and 6l: nested loop; inner and left) | joins (nested loop first) | gate 4 |
-| **M3h** | `alter table`, `create index` (an index is a second tree) | gate 4 on the catalog after each |
+| **M3h** (built, 6q and 6r: `add column`; an index is a recorded name, no tree is built) | `alter table`, `create index` (an index is a second tree) | gate 4 on the catalog after each |
 | **M3i** (6n and 6o: the history, `AS OF`, a fork and an erase are built in the engine and its harness; merge and the proxy's functions are not) | native `cancho_fork`, `AS OF`, `cancho_merge`, `cancho_erase` on the engine | the existing fork, as-of, merge and erase end-to-end suites pass on it |
 | **M3j** | the shadow run, then a database option to serve from the engine | gate 5, then the full gate on the engine for one database |
 
@@ -492,6 +492,17 @@ constraint, and holding it needs the index that is not built.
 kinds of key do not collide, and `drop table` removes its table's indexes with it (as PostgreSQL does).
 
 **Gate.** The random history of 6h gains these statements; answers and the tables afterwards equal PostgreSQL's; `AS OF` across an `add column` reads the old shape.
+
+## 6r. M3h, built
+
+`alter_add`, `create_index` and `drop_index` in `src/execw.cho` (the column definitions of `create table` and of `add column` are read by one function); index names in the catalog
+(`tables.index_key`), listed for the lowering as `index N on T`. The random history writes them (columns added with and without defaults, taken or refused; indexes made, made twice, dropped). **8
+seeds of 3,000 statements with everything since 6h: no disagreement**; 132 fixed statements answered; `AS OF` before an `add column` reads the table in its old shape (the history test adds columns
+too); 14 mutants, the engine's group now 152.
+
+As designed in 6q, with nothing found to correct: an `add column` writes every row again; an index that is not `unique` is a name and nothing more, and a `unique` one is refused. What PostgreSQL does
+and the engine now matches: a `not null` column with no default (or a default of null) is `23502` on a table with rows and taken on an empty one; a second primary key is `42P16`; an index and a table
+share one space of names (`42P07` either way); `drop table` takes the table's indexes with it.
 
 ## 7. Taking over, safely
 

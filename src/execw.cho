@@ -774,31 +774,17 @@ fn name_ok[&d](data: &d [byte], at: int, n: int) -> [] bool {
     return true;
 }
 
-// CREATE TABLE: the IR `e` names the table (ir.md section 2, `Ddl` kind 0); its columns are read from the parser's tree (`stmt` is the statement's node), which is all that has them (6e).
-pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], stmt: int) -> [file_read, file_write] int {
-    exec.start(w, root);
-    if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 0 || nodes[6 * stmt] != parse.n_create_table() {
-        return exec.malformed();
-    }
-    let nl = commit.be(e, 2, 2);
-    if 4 + nl != len(e) {
-        return exec.malformed();
-    }
-    if !name_ok(e, 4, nl) {
-        return exec.unsupported();
-    }
-    let nc = nodes[6 * stmt + 3];
-    if nc < 1 || nc > row.max_columns() {
-        return exec.too_big();
-    }
+// Read column definitions (the children of the node `list`: the first of them is column `c0` of the table, the last column `nc - 1`) into the entry being built: the definition in `ent` (the columns
+// before `c0` are there already, from 8; these go from `da0`), the marks and defaults in `tmp` from `xa0`. `keys0` of the columns before are the key. Errors are noted. The end of the definition, with
+// the end of the marks and the number of key columns left in `pos` (`exec.p_ddl`); or a refusal.
+fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], list: int, c0: int, nc: int, da0: int, xa0: int, keys0: int) -> [] int {
     let b = eval.max_nodes();
-    // the definition is built in `ent` from 6, the marks and defaults in `tmp`
-    var da = 8;
-    var xa = 0;
-    var keys = 0;
-    var c = 0;
+    var da = da0;
+    var xa = xa0;
+    var keys = keys0;
+    var c = c0;
     while c < nc {
-        let cd = kids[nodes[6 * stmt + 2] + c];
+        let cd = kids[nodes[6 * list + 2] + c - c0];
         if nodes[6 * cd] != parse.n_coldef() || nodes[6 * cd + 3] < 1 {
             return exec.malformed();
         }
@@ -905,6 +891,35 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
         }
         c = c + 1;
     }
+    contents(w.pos)[exec.p_ddl()] = xa;
+    contents(w.pos)[exec.p_ddl() + 1] = keys;
+    return da;
+}
+
+// CREATE TABLE: the IR `e` names the table (ir.md section 2, `Ddl` kind 0); its columns are read from the parser's tree (`stmt` is the statement's node), which is all that has them (6e).
+pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 0 || nodes[6 * stmt] != parse.n_create_table() {
+        return exec.malformed();
+    }
+    let nl = commit.be(e, 2, 2);
+    if 4 + nl != len(e) {
+        return exec.malformed();
+    }
+    if !name_ok(e, 4, nl) {
+        return exec.unsupported();
+    }
+    let nc = nodes[6 * stmt + 3];
+    if nc < 1 || nc > row.max_columns() {
+        return exec.too_big();
+    }
+    // the definition is built in `ent` from 6, the marks and defaults in `tmp`
+    let da = column_defs(w, sql, toks, nodes, kids, stmt, 0, nc, 8, 0, 0);
+    if da < 0 {
+        return da;
+    }
+    let xa = contents(w.pos)[exec.p_ddl()];
+    let keys = contents(w.pos)[exec.p_ddl() + 1];
     if keys == 0 {
         // a table with no primary key has no key to store its rows by
         return exec.unsupported();
@@ -917,6 +932,14 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
         exec.note(w, exec.e_table_exists());
     } else if g != btree.not_found() {
         return exec.tree_err(g);
+    }
+    // an index has a name among the tables' (PostgreSQL: one namespace for both)
+    let ikl = tables.index_key(e[4..4 + nl], contents(w.key));
+    let gi = btree.get(p, contents(w.sc), root, contents(w.key)[0..ikl], contents(w.cur));
+    if gi >= 0 {
+        exec.note(w, exec.e_table_exists());
+    } else if gi != btree.not_found() {
+        return exec.tree_err(gi);
     }
     if w.code != 0 {
         return exec.verdict(w);
@@ -968,6 +991,35 @@ pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         }
     }
     let nl = w.nlen;
+    // the table's indexes go with it
+    build.put_be(contents(w.key), 0, 0, 4);
+    contents(w.key)[4] = byte_of(1);
+    var ikl = 5;
+    more = true;
+    while more {
+        let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..ikl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return exec.tree_err(r);
+        } else {
+            let nk = r / 1024;
+            let nv = r % 1024;
+            if nk < 6 || commit.be(contents(w.key2), 0, 4) != 0 || int_of(contents(w.key2)[4]) != 1 {
+                more = false;
+            } else {
+                if exec.same(contents(w.cur), 0, nv, e, 4, nl) {
+                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);
+                    if nw < 0 {
+                        return nw;
+                    }
+                    nroot = nw;
+                }
+                exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+                ikl = nk;
+            }
+        }
+    }
     // the table's entry in the catalog is a key of the tree like any other: its history is kept, so the table is there AS OF before
     let ekl = tables.entry_key(e[4..4 + nl], contents(w.key));
     let rm = exec.remember(p, w, nroot, contents(w.key), ekl);
@@ -977,6 +1029,181 @@ pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     let nw = tables.remove(p, contents(w.sc), rm, e[4..4 + nl], contents(w.key));
     if nw < 0 {
         return exec.tree_err(nw);
+    }
+    w.root = nw;
+    return 0;
+}
+
+// ALTER TABLE ... ADD COLUMN (`Ddl` kind 1; docs/m3-engine.md 6q): the definition gains the column, and every row is written again with the column's default, or null.
+pub fn alter_add[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 1 || nodes[6 * stmt] != parse.n_alter_add() || nodes[6 * stmt + 3] != 1 {
+        return exec.malformed();
+    }
+    let r0 = exec.bind_table(p, w, root, e, 2);
+    if r0 != 0 {
+        return r0;
+    }
+    let nl = w.nlen;
+    let dl = w.dlen;
+    let el = w.elen;
+    let n0 = columns(w);
+    if n0 + 1 > row.max_columns() {
+        return exec.too_big();
+    }
+    // the marks and defaults of the columns there are go to `tmp`, where the new column's follow them; its definition follows theirs in `ent`
+    let xl = el - 6 - dl;
+    exec.copy(contents(w.ent), 6 + dl, xl, contents(w.tmp), 0);
+    let da = column_defs(w, sql, toks, nodes, kids, stmt, n0, n0 + 1, 6 + dl, xl, 1);
+    if da < 0 {
+        return da;
+    }
+    let xa = contents(w.pos)[exec.p_ddl()];
+    build.put_be(contents(w.ent), 4, da - 6, 2);
+    build.put_be(contents(w.ent), 6, n0 + 1, 2);
+    let total = exec.copy(contents(w.tmp), 0, xa, contents(w.ent), da);
+    // what a row there gets: the default, or null; which a column that takes no null refuses
+    let marks = int_of(contents(w.tmp)[xl]);
+    var nulls = marks < 2;
+    if marks >= 2 && int_of(contents(w.tmp)[xl + 1]) == 0 {
+        nulls = true;
+    }
+    var nroot = root;
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else if nulls && marks % 2 == 1 {
+            exec.note(w, exec.e_not_null());
+            more = false;
+        } else if w.code == 0 {
+            var ra = exec.copy(contents(w.cur), 0, rl, contents(w.nrow), 0);
+            if marks >= 2 {
+                if ra + xa - xl - 1 > exec.max_stored_row() {
+                    return exec.too_big();
+                }
+                ra = exec.copy(contents(w.tmp), xl + 1, xa - xl - 1, contents(w.nrow), ra);
+            } else {
+                if ra + 1 > exec.max_stored_row() {
+                    return exec.too_big();
+                }
+                contents(w.nrow)[ra] = byte_of(0);
+                ra = ra + 1;
+            }
+            let kl = w.klen;
+            let nw = exec.put_key(p, w, nroot, contents(w.key), kl, contents(w.nrow)[0..ra]);
+            if nw < 0 {
+                return nw;
+            }
+            nroot = nw;
+        }
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    let ekl = tables.entry_key(e[4..4 + nl], contents(w.key));
+    let nw = exec.put_key(p, w, nroot, contents(w.key), ekl, contents(w.ent)[0..total]);
+    if nw < 0 {
+        return nw;
+    }
+    w.root = nw;
+    return 0;
+}
+
+// CREATE INDEX (`Ddl` kind 3; 6q): the name is recorded and nothing is built. An index that is not UNIQUE changes no answer; a UNIQUE one is a constraint the engine cannot hold yet, and is refused.
+pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 3 || nodes[6 * stmt] != parse.n_create_index() {
+        return exec.malformed();
+    }
+    if nodes[6 * stmt + 4] == 1 {
+        return exec.unsupported();
+    }
+    let r0 = exec.bind_table(p, w, root, e, 2);
+    if r0 != 0 {
+        return r0;
+    }
+    let dl = w.dlen;
+    let nl = w.nlen;
+    // each column is one of the table's
+    var i = 0;
+    while i < nodes[6 * stmt + 3] {
+        let tok = nodes[6 * kids[nodes[6 * stmt + 2] + i] + 1];
+        let cl = lower.name_text(sql, toks, tok, contents(w.nrow)[0..256], 0);
+        if cl < 0 {
+            return exec.unsupported();
+        }
+        var found = false;
+        var c = 0;
+        while c < row.columns(contents(w.ctx)[64..64 + dl]) {
+            let nm = row.col_name(contents(w.ctx)[64..64 + dl], c);
+            if exec.same(nm, 0, len(nm), contents(w.nrow), 0, cl) {
+                found = true;
+            }
+            c = c + 1;
+        }
+        if !found {
+            exec.note(w, exec.e_no_column());
+        }
+        i = i + 1;
+    }
+    let il = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.nrow)[0..256], 0);
+    if il < 0 || !name_ok(contents(w.nrow), 0, il) {
+        return exec.unsupported();
+    }
+    // the name is free: no index has it, and no table
+    let kl = tables.index_key(contents(w.nrow)[0..il], contents(w.key2));
+    let g = btree.get(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.cur));
+    if g >= 0 {
+        exec.note(w, exec.e_table_exists());
+    } else if g != btree.not_found() {
+        return exec.tree_err(g);
+    }
+    let gt = tables.find(p, contents(w.sc), root, contents(w.nrow)[0..il], contents(w.key), contents(w.cur));
+    if gt >= 0 {
+        exec.note(w, exec.e_table_exists());
+    } else if gt != btree.not_found() {
+        return exec.tree_err(gt);
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    let nw = exec.put_key(p, w, root, contents(w.key2), kl, contents(w.ctx)[0..nl]);
+    if nw < 0 {
+        return nw;
+    }
+    w.root = nw;
+    return 0;
+}
+
+// DROP INDEX (`Ddl` kind 4; 6q): the name goes. The lowering has found the index in the snapshot, or refused.
+pub fn drop_index[&q, &z, &x, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], sql: &s [byte], toks: &t [int], nodes: &n [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 4 || nodes[6 * stmt] != parse.n_drop_index() {
+        return exec.malformed();
+    }
+    let il = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.nrow)[0..256], 0);
+    if il < 0 {
+        return exec.unsupported();
+    }
+    let kl = tables.index_key(contents(w.nrow)[0..il], contents(w.key2));
+    if kl < 0 {
+        return exec.unsupported();
+    }
+    let g = btree.get(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.cur));
+    if g == btree.not_found() {
+        return exec.unsupported();
+    }
+    if g < 0 {
+        return exec.tree_err(g);
+    }
+    let nw = exec.del_key(p, w, root, contents(w.key2), kl);
+    if nw < 0 {
+        return nw;
     }
     w.root = nw;
     return 0;

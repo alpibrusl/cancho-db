@@ -364,6 +364,37 @@ class Gen:
         return s, how
 
 
+def ddl_more(g, counter):
+    """ALTER TABLE ... ADD COLUMN, CREATE INDEX or DROP INDEX on the generator's table (docs/m3-engine.md 6q). An added column that is sure to be taken joins the generator's idea of the table."""
+    t = g.t
+    r = g.r.random()
+    if r < 0.5:
+        counter[0] += 1
+        name = "x%d" % counter[0]
+        ty = g.pick(["smallint", "integer", "bigint", "text", "boolean"])
+        q2 = g.r.random()
+        if q2 < 0.08:
+            return "alter table %s add column %s %s" % (t.name, g.pick(t.cols)[0], ty)
+        if q2 < 0.14:
+            return "alter table %s add column %s %s primary key" % (t.name, name, ty)
+        if q2 < 0.22:
+            return "alter table %s add column %s %s not null" % (t.name, name, ty)
+        if q2 < 0.28:
+            return "alter table %s add %s %s default %s" % (t.name, name, ty, g.pick(["'abc'", "true", "100000", "'7'"]))
+        dflt = None
+        if g.r.random() < 0.6:
+            dflt = {"smallint": "5", "integer": "- 2", "bigint": "7", "text": "'dd'", "boolean": "true"}[ty]
+        nn = dflt is not None and g.r.random() < 0.3
+        t.cols.append((name, ty, nn, dflt))
+        return "alter table %s add column %s %s%s%s" % (t.name, name, ty, " not null" if nn else "", " default " + dflt if dflt else "")
+    if r < 0.85:
+        cols = [g.pick(t.cols)[0] for _ in range(g.pick([1, 1, 2]))]
+        if g.r.random() < 0.08:
+            cols.append("nope")
+        return "create %sindex %s on %s (%s)" % ("unique " if g.r.random() < 0.08 else "", g.pick(["ix1", "ix2", "ix3", "ta", "tb"]), t.name, ", ".join(cols))
+    return "drop index %s" % g.pick(["ix1", "ix2", "ix3"])
+
+
 def _agg(g):
     t = g.t
     r = g.r.random()
@@ -749,6 +780,26 @@ FIXED = [
     ("select fx.k from fx left join fy on fy.k = 'none' where fy.k is null order by 1 limit 2", "order"),
     ("create table fq (k integer primary key, v integer)", "ddl"),
     ("insert into fq values (1, 1), (2, 2), (105, 3)", "write"),
+    ("alter table fq add column w text default 'dflt'", "ddl"),
+    ("alter table fq add u integer", "ddl"),
+    ("alter table fq add column v integer", "ddl"),
+    ("alter table fq add column nn integer not null", "ddl"),
+    ("alter table fq add column n2 smallint not null default 3", "ddl"),
+    ("alter table fq add column pk2 integer primary key", "ddl"),
+    ("alter table fq add column dn integer not null default null", "ddl"),
+    ("alter table fq add column bad integer default 'abc'", "ddl"),
+    ("select * from fq order by k", "order"),
+    ("insert into fq (k, v) values (7, 7)", "write"),
+    ("update fq set u = v + n2, w = w || 'x' where k < 100", "write"),
+    ("select k, v, w, u, n2 from fq order by 1", "order"),
+    ("delete from fq where k = 7", "write"),
+    ("create index fqi on fq (v)", "ddl"),
+    ("create index fqi on fq (k)", "ddl"),
+    ("create index fq on fq (k)", "ddl"),
+    ("create index fqj on fq (nope)", "ddl"),
+    ("create table fqi (k integer primary key)", "ddl"),
+    ("drop index fqi", "ddl"),
+    ("create index fqi on fq (w, u)", "ddl"),
     ("select count(*) from fx, fy, fq", "set"),
     ("select fx.k, fy.k, fq.k from fx, fy, fq where fq.v > 1 order by 1, 2, 3", "order"),
     ("select fx.k, fy.k, fq.v from fx left join fy on fy.a = fx.a left join fq on fq.k = fx.k order by 1, 2, 3", "order"),
@@ -807,6 +858,7 @@ UNSUP = [
     # and this one only for rows that join, so it answers
     ("select fz.k from fz join fw on fz.k = fw.wk and 10 / fw.m > fz.k", None),
     ("select a1.k from fz a1 join fz a2 on a1.k = a2.k", None),          # a table joined to itself
+    ("create unique index fzu on fz (n)", None),                         # a constraint that needs an index to hold
     ("select fw.m, count(*) from fz join fw on fz.k = fw.wk group by fw.wk", None),   # m depends on fw's key
 ]
 
@@ -856,6 +908,7 @@ def history(seed):
     rng = random.Random(seed * 7919 + 5)
     g = Gen(rng)
     names = ["ta", "tb", "tc"]
+    added = [0]
     dumps = ["select * from %s order by k" % n for n in names]
     tables = {}
     lines = []
@@ -874,6 +927,10 @@ def history(seed):
                     out.append("drop table %s" % name)
                 tables[name] = g.table(name)
                 out.append(tables[name].ddl())
+            elif r < 0.07:
+                sql = ddl_more(g, added)
+                if sql.startswith("alter"):
+                    out.append(sql)
             elif r < 0.55:
                 out.append(g.insert())
             elif r < 0.85:
@@ -1028,6 +1085,7 @@ def main():
         tables[name] = g.table(name)
         stmts.append((tables[name].ddl(), "ddl", name))
     spare = 0
+    added = [0]
     while len(stmts) < N:
         g.t = tables[rng.choice(sorted(tables))]
         r = rng.random()
@@ -1039,12 +1097,14 @@ def main():
             stmts.append(("drop table %s" % name, "ddl", name))
             tables[name] = g.table(name)
             stmts.append((tables[name].ddl(), "ddl", name))
-        elif r < 0.03:
+        elif r < 0.055:
+            stmts.append((ddl_more(g, added), "ddl", g.t.name))
+        elif r < 0.065:
             spare += 1
             bad = g.table("tz%d" % spare)
             stmts.append((bad.ddl() + rng.choice(["", "", " "]), "ddl", bad.name))
             stmts.append(("drop table %s" % bad.name, "ddl", bad.name))
-        elif r < 0.33:
+        elif r < 0.35:
             stmts.append((g.insert(), "write", g.t.name))
         elif r < 0.52:
             stmts.append((g.update(), "write", g.t.name))

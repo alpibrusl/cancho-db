@@ -11,6 +11,7 @@ import cdb.pager;
 //
 //     0x00000000                 -> the next table number to give out (`u32`); absent while no table was ever made (the first number is 1)
 //     0x00000000 then a name     -> that table's entry
+//     0x00000000 0x01 then a name -> the index of that name: the name of the table it is on (`index_key`)
 //
 // An entry: the table's number (`u32`), the length of its definition (`u16`), the definition (src/row.cho), then for each column one byte of marks (1: `not null`, 2: it has a default) and, if it has a
 // default, the default as a stored value (a tag and the value, as in a stored row). An entry is at most 800 bytes (a value of the tree).
@@ -181,7 +182,32 @@ pub fn remove[&q, &s, &n, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, nam
     return btree.del(p, sc, root, key[0..kl]);
 }
 
-// The snapshot the lowering reads (src/lower.cho): a line `name: column column ...` for each table of the tree `root`, into `out`: its length, or an error (`btree.err_big()` if `out` is too small).
+fn lit[&o](out: &!o [byte], at: int, text: &static [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        out[at + i] = text[i];
+        i = i + 1;
+    }
+    return at + len(text);
+}
+
+// The key of the index `name` in the catalog, into `out`: its length, or -1. An index is a name and the table it is on (the key's value): 0x00000000, 0x01, the name. A table's name does not begin
+// with the byte 1, so the two kinds of key are apart.
+pub fn index_key[&n, &o](name: &n [byte], out: &!o [byte]) -> [] int {
+    if len(name) < 1 || len(name) > max_name() || len(out) < 5 + len(name) {
+        return 0 - 1;
+    }
+    build.put_be(out, 0, 0, 4);
+    out[4] = byte_of(1);
+    var i = 0;
+    while i < len(name) {
+        out[5 + i] = name[i];
+        i = i + 1;
+    }
+    return 5 + len(name);
+}
+
+// The snapshot the lowering reads (src/lower.cho): a line `name: column column ...` for each table of the tree `root` and a line `index name on table` for each index, into `out`: its length, or an error (`btree.err_big()` if `out` is too small).
 // `key`, `key2` (at least 256 bytes each) and `ent` (at least 1024) are scratch.
 pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &!k [byte], key2: &!j [byte], ent: &!e [byte], out: &!o [byte]) -> [file_read] int {
     build.put_be(key, 0, 0, 4);
@@ -199,6 +225,33 @@ pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], r
             let nv = r % 1024;
             if nk < 5 || commit.be(key2, 0, 4) != 0 {
                 more = false;
+            } else if int_of(key2[4]) == 1 {
+                // an index (`index_key`): a line `index NAME on TABLE`
+                if at + 6 + (nk - 5) + 4 + nv + 1 > len(out) {
+                    return btree.err_big();
+                }
+                at = lit(out, at, "index ");
+                var i = 5;
+                while i < nk {
+                    out[at] = key2[i];
+                    at = at + 1;
+                    i = i + 1;
+                }
+                at = lit(out, at, " on ");
+                i = 0;
+                while i < nv {
+                    out[at] = ent[i];
+                    at = at + 1;
+                    i = i + 1;
+                }
+                out[at] = byte_of('\n');
+                at = at + 1;
+                i = 0;
+                while i < nk {
+                    key[i] = key2[i];
+                    i = i + 1;
+                }
+                kl = nk;
             } else {
                 if !entry_ok(ent[0..nv]) {
                     return btree.err_bad();

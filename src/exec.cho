@@ -102,6 +102,10 @@ pub fn e_grouping() -> [] int {
     return 16;
 }
 
+pub fn e_no_column() -> [] int {
+    return 17;
+}
+
 pub fn sqlstate(code: int) -> [] &static [byte] {
     if code == 1 {
         return "22012";
@@ -150,6 +154,9 @@ pub fn sqlstate(code: int) -> [] &static [byte] {
     }
     if code == 16 {
         return "42803";
+    }
+    if code == 17 {
+        return "42703";
     }
     return "XX000";
 }
@@ -326,6 +333,11 @@ pub fn p_slot() -> [] int {
 
 pub fn max_slots() -> [] int {
     return 128;
+}
+
+// Two results of reading column definitions (src/execw.cho): where the marks and defaults end in `tmp`, and how many columns are the key.
+pub fn p_ddl() -> [] int {
+    return 3300;
 }
 
 pub fn max_items() -> [] int {
