@@ -208,7 +208,7 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; justify-conten
 <section id="print"><div class="wrap">
   <h2>What it is not, yet</h2>
   <ul class="small">
-    <li><strong>A proxy, not a database.</strong> It runs in front of PostgreSQL, which still stores the data; its own storage engine (M3) is not started. The upstream role must be allowed to create triggers and event triggers, and every table needs a primary key.</li>
+    <li><strong>A proxy, not a database.</strong> It runs in front of PostgreSQL, which still stores the data; its own storage engine (M3) is being built and tested against PostgreSQL statement by statement, and nothing is served from it yet. The upstream role must be allowed to create triggers and event triggers, and every table needs a primary key.</li>
     <li><strong>A SQL subset.</strong> No subqueries, CTEs, set operations or window functions, and a closed set of DDL. A statement outside it is refused with a rule tag, never run.</li>
     <li><strong>Values bound by a client are not recorded</strong> (L3b is not built), and snapshots are not built.</li>
     <li><strong>Erasure has edges.</strong> It is by table and key; a subject who appears in other statements only in other forms, or by a number, is found by an offline tool, not by the key. PostgreSQL's own storage and any copy made outside the system are not wiped.</li>
