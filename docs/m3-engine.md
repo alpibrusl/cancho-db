@@ -155,6 +155,20 @@ Not built yet of M3c: the catalog of tables in a tree and `create table` (the IR
 IR: the executor of DDL reads the parser's tree). Stated limits: text is taken as bytes (that it is valid UTF-8 with no NUL is for the executor to check before a row is stored); a row or key that does not fit
 its buffer is refused.
 
+## 6e. A correction to D-M3-4, found before the executor is written: the IR is not enough to execute
+
+D-M3-4 says the executor interprets the IR and nothing else. Reading the lowering (`src/lower.cho`) shows three things the IR does not carry, because it was made for effect inference and inference does not need them:
+
+* **The kind of a literal.** `true`, `false`, a number that is not an integer (`1.5`) and a string are all written `Const bytes`: the boolean `true` and the string `'true'` are the same IR, as are `1.5` and
+  `'1.5'`. PostgreSQL types them differently (`select 'true' = true` is a boolean comparison because of the other side; `select 1.5 || 'x'` and `select '1.5' || 'x'` differ in how they resolve).
+* **A table's columns.** `Ddl` is a kind and a table name. The columns, types, `not null`, `primary key` and `default` of a `create table` are only in the parser's tree.
+* **The names of a select's output columns**, which a client is sent before any row.
+
+So the executor takes, beside the IR, **what the lowering knew and did not write**: for each `Const`, in order, its kind (integer, other number, string, `true`, `false`, `null`); for a `create table`, the column
+definitions read from the tree; for a select, the output names. They are produced by the same walk that writes the IR (one more output array of the lowering), so the IR stays what the log commits to and the three
+verifiers are untouched; the executor refuses a statement whose side information does not match its IR one for one. What this costs: L3b (replaying statements from the log) will need the same information
+recorded, or a later IR version that carries literal kinds; that is noted for when bound values are recorded, not solved here.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
