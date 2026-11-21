@@ -237,8 +237,13 @@ class Gen:
         pk = self.t.cols[self.t.pk]
         if r < 0.25:
             return "%s = %s" % (pk[0], self.key_lit(pk[1]))
+        if r < 0.36:
+            return "%s %s %s" % (pk[0], self.pick(["<", ">=", "<>", "<=", ">"]), self.key_lit(pk[1]))
         if r < 0.4:
-            return "%s %s %s" % (pk[0], self.pick(["<", ">=", "<>"]), self.key_lit(pk[1]))
+            # the constant first, and a range
+            return "%s %s %s and %s %s %s" % (self.key_lit(pk[1]), self.pick(["<", "<=", ">", ">=", "="]), pk[0], pk[0], self.pick(["<", "<=", ">", ">="]), self.key_lit(pk[1]))
+        if r < 0.45:
+            return "%s %s %s and %s" % (pk[0], self.pick(["=", "<", ">="]), self.key_lit(pk[1]), self.bool_(1))
         if r < 0.6:
             return "%s and %s" % (self.bool_(1), self.bool_(1))
         return self.bool_(2)
@@ -562,6 +567,8 @@ DEP = [
     # the cheaper condition is computed first, wherever it is written: the row with k = 2 never reaches the division
     ("select k from fz where k > 2 and 10 / (k - 2) > 0", None),
     ("select k from fz where 10 / (k - 2) > 0 and k > 2", None),
+    # the key is looked up and the other rows are never read: an engine that did the same would also answer, by luck (the lookup is only safe when no condition can raise)
+    ("select k from fz where k = 3 and 10 / (k - 2) > 0", None),
     # the limit is reached before the row that divides by zero
     ("select 10 / (k - 2) from fz order by k limit 1", None),
     # the row with 3 is moved first, then 2, then 1: no key is ever taken twice

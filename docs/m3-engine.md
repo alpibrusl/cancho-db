@@ -103,7 +103,7 @@ flush, a real SSD with a volatile write cache can be slower or faster, and a spi
 | **M3b** (the sweep built, 6c; the delta tree comes with the rows in M3c/M3d) | the zeroing and reuse of freed pages; the delta store as a tree; recovery from a log ahead of the superblock | gate 2 with the log; `AS OF`-style reconstruction equals the model |
 | **M3c** (built, 6d and 6h) | tables, the row encoding and image (D-M3-6), the catalog of tables inside the engine, `create table` and `drop table` | the image equals `to_jsonb` for every supported type, on the corpus |
 | **M3d** (built, 6f to 6h; the delta tree is not) | the executor for `insert`, `update`, `delete` and `select ... where <key> = <constant>`, and the engine's `changes` | gate 4 for these; `changes` equals the capture's |
-| **M3e** (built, 6h, but for the lookup and range scan by key) | predicates on any column, range scans on the key, `order by`, `limit`, `offset`, `distinct`, `in`, `case`, `cast`, `like` | gate 4 |
+| **M3e** (built, 6h) | predicates on any column, range scans on the key, `order by`, `limit`, `offset`, `distinct`, `in`, `case`, `cast`, `like` | gate 4 |
 | **M3f** | aggregates and `group by`, `having` | gate 4 |
 | **M3g** | joins (nested loop first) | gate 4 |
 | **M3h** | `alter table`, `create index` (an index is a second tree) | gate 4 on the catalog after each |
@@ -232,10 +232,10 @@ CREATE TABLE, DROP TABLE), `proxy/enginecheck.cho` (the harness: statements on s
 **The test.** A random history (create and drop table, insert, update, delete, select; many statements wrong on purpose) is run by the engine in two processes with a commit and a sweep between, then by
 PostgreSQL 16 statement by statement; a statement the engine refuses is rolled back in PostgreSQL so the two stay in step. Compared: the SQLSTATE of an error; the column types and rows of a select (in
 order where the `order by` decides it); the row count of a write and its `changes` against the table read from PostgreSQL before and after. **20 seeds of 2,000 statements: no disagreement**; of the 28,114 statements
-PostgreSQL answers the engine refuses 312 (1.1 %). Beside it: 63 fixed statements the engine must *answer* (so that a change which only refuses more cannot pass as "never wrong"), 5 statements whose outcome
-in PostgreSQL does depend on its order, each refused as such (below), and the page file read as bytes after a delete and after a drop. 59 mutants of the three files and of the assignment in `src/eval.cho`
-are all killed; two more were equivalent and are not listed (a sort that is not stable: equal rows have no order to keep; the assignment calling the conversion as an explicit cast: `assignable` has already
-left only the pairs where the two agree).
+PostgreSQL answers the engine refuses 312 (1.1 %). Beside it: 63 fixed statements the engine must *answer* (so that a change which only refuses more cannot pass as "never wrong"), 6 statements whose outcome
+in PostgreSQL does depend on its order, each refused as such (below), and the page file read as bytes after a delete and after a drop. 70 mutants of the three files and of the assignment in `src/eval.cho`
+are all killed; three more were equivalent and are not listed (a sort that is not stable: equal rows have no order to keep; the assignment calling the conversion as an explicit cast: `assignable` has already
+left only the pairs where the two agree; `<>` taken as a bound of a scan: it sets neither end).
 
 **What the differential found** (not guessed in advance):
 * **An output column without an alias has a name, and `order by` binds to it first.** `select cast(k as text) from t order by k` orders by the *text*: PostgreSQL names a cast after what is cast and a CASE
@@ -246,7 +246,8 @@ left only the pairs where the two agree).
 
 **The order dependence is real, and is PostgreSQL's cost model, not the text's order.** With rows stored 3, 2, 1: `where k > 2 and 10 / (k - 2) > 0` and the same conditions written the other way round both
 answer without an error (the cheaper condition is computed first wherever it is written); `select 10 / (k - 2) from t order by k limit 1` answers (the limit is reached first); `update t set k = k + 1`
-succeeds and `update t set k = k - 1` fails with `23505`. The engine refuses all five, and the test holds PostgreSQL to exactly these five outcomes, so a planner that changes them is noticed.
+succeeds and `update t set k = k - 1` fails with `23505`. A sixth, `where k = 3 and 10 / (k - 2) > 0`, PostgreSQL answers by looking the key up and never reading the row that would divide by zero. The engine refuses all six, and the test holds PostgreSQL to
+exactly these outcomes, so a planner that changes them is noticed.
 
 **Measured** (one process, no `fsync` between statements, a table of an integer key, an integer and a short text; `enginecheck` on this machine):
 
@@ -255,12 +256,19 @@ succeeds and `update t set k = k - 1` fails with `23505`. The engine refuses all
 | 20,000 inserts, one a statement | 4.1 s (4,900 a second) |
 | the page file after them | 192 MiB: 9.8 KiB a row |
 | a select with a predicate over the 20,000 rows | 0.67 s (30,000 rows a second) |
+| `where k = 77`, and an update of that row, among the 20,000 | 0.2 ms each (a scan before the lookup by key was built: 0.7 s) |
+| `where k >= 100 and k < 110` | 0.8 ms |
 | an update of every row | 2.7 s; the file grows by 234 MiB |
 | a sweep after it | 0.8 s, 108,517 pages (424 MiB) freed |
 
 These are the costs of what is *not built*, and they are large: **every statement copies the path of pages from the root for each row it writes and nothing is reused before a sweep** (so the file is fifty
-times the data until one runs); a scan goes down from the root for every row and checks the CRC of each page on the way, with no page cache; `where key = constant` is a scan like any other. The first two
-are M3b's page reuse within a transaction and the page cache of gate 3; the third is the key lookup of M3e. None of them changes an answer.
+times the data until one runs); a scan goes down from the root for every row and checks the CRC of each page on the way, with no page cache. They
+are M3b's page reuse within a transaction and the page cache of gate 3. Neither changes an answer.
+
+**The lookup and the range scan by key** (`bounds` in `src/exec.cho`). When the key is one column of integers or text and a top-level condition compares it with a constant, a `select`, `update` or
+`delete` reads only the keys that condition allows. *This is only done when no condition of the `where` can raise an error* (each is made of columns, constants, comparisons, `AND`, `OR`, `NOT`, `IS NULL`
+and `IN`): a row that is not read is a row whose error is not found, and the rule of 6g is that every error is found. So `where k = 77 and a / b > 1` is still a full scan, and says so here rather than
+answering by luck; every row that is read is still judged by the whole `where`.
 
 **Not built yet, as before:** the engine's delta tree and the `AS OF` reads over it, transactions over several statements (a statement is its own), the output column names a client is sent, and
 everything listed above as refused.

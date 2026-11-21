@@ -173,6 +173,8 @@ pub res struct Work {
     lit: Box[[byte]],
     lsc: Box[[int]],
     lrs: Box[[int]],
+    lo: Box[[byte]],
+    hi: Box[[byte]],
     root: int,
     count: int,
     first: int,
@@ -190,6 +192,9 @@ pub res struct Work {
     dlen: int,
     elen: int,
     klen: int,
+    lon: int,
+    hin: int,
+    fresh: bool,
 }
 
 pub fn rows_size() -> [] int {
@@ -201,11 +206,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 2048, byte_of(0)), cx: box_slice(heap, 6, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 2048, byte_of(0)), cx: box_slice(heap, 6, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, chg, lit, lsc, lrs, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -226,6 +231,8 @@ pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
     unbox_slice(heap, lit);
     unbox_slice(heap, lsc);
     unbox_slice(heap, lrs);
+    unbox_slice(heap, lo);
+    unbox_slice(heap, hi);
     return 0;
 }
 
@@ -348,6 +355,8 @@ pub fn start[&q](w: &!q Work, root: int) -> [] int {
     w.rfill = 0;
     w.nchg = 0;
     w.cfill = 0;
+    w.lon = 0 - 1;
+    w.hin = 0 - 1;
     return 0;
 }
 
@@ -565,13 +574,23 @@ pub fn bind_table[&q, &z, &x](p: &!z pager.Pager, w: &!q Work, root: int, e: &x 
 pub fn scan_start[&q](w: &!q Work) -> [] int {
     build.put_be(contents(w.key), 0, w.tid, 4);
     w.klen = 4;
+    w.fresh = false;
+    if w.lon >= 0 {
+        // from the first key the WHERE can be true at (`bounds`)
+        let n = w.lon;
+        copy(contents(w.lo), 0, n, contents(w.key), 4);
+        w.klen = 4 + n;
+        w.fresh = true;
+    }
     return 0;
 }
 
 // The next row of the bound table in the tree `root`, in key order: its length (the row is in `slot`, and bound; its key in `key`), -1 when there is no other, or a refusal.
 pub fn scan_next[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_read] int {
     let kl = w.klen;
-    let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+    let at_it = w.fresh;
+    w.fresh = false;
+    let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], at_it, contents(w.key2), contents(w.cur));
     if r == btree.not_found() {
         return 0 - 1;
     }
@@ -583,11 +602,140 @@ pub fn scan_next[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_re
     if nk < 4 || commit.be(contents(w.key2), 0, 4) != w.tid {
         return 0 - 1;
     }
+    if w.hin >= 0 {
+        // past the last key the WHERE can be true at
+        let hn = w.hin;
+        if after_key(contents(w.key2), 4, nk - 4, contents(w.hi), hn) {
+            return 0 - 1;
+        }
+    }
     copy(contents(w.key2), 0, nk, contents(w.key), 0);
     w.klen = nk;
     copy(contents(w.cur), 0, nv, contents(w.ctx), 1024);
     contents(w.cx)[5] = nv;
     return nv;
+}
+
+// Whether the key `k[ka..ka + kn]` is after the key `h[0..hn]` in the tree's order (bytes, a shorter one first).
+fn after_key[&a, &b](k: &a [byte], ka: int, kn: int, h: &b [byte], hn: int) -> [] bool {
+    var i = 0;
+    while i < kn && i < hn {
+        let d = int_of(k[ka + i]) - int_of(h[i]);
+        if d != 0 {
+            return d > 0;
+        }
+        i = i + 1;
+    }
+    return kn > hn;
+}
+
+// Whether the `Col` at `at` of `e` is column `c` of the bound table.
+fn is_col[&q, &x](w: &!q Work, e: &x [byte], at: int, c: int) -> [] bool {
+    let dl = w.dlen;
+    let tn = commit.be(e, at + 1, 2);
+    let cn = commit.be(e, at + 3 + tn, 2);
+    let nm = row.col_name(contents(w.ctx)[64..64 + dl], c);
+    return same(nm, 0, len(nm), e, at + 5 + tn, cn);
+}
+
+// The part of the table a scan has to read, from the WHERE's conditions (listed by `where_static`): if the key is one column of integers or text and a condition compares it with a constant, the rows
+// before (`lo`) or after (`hi`) what that condition allows are not read. That may only be done when no condition can raise an error, because a row that is not read is a row whose error is not found (6g):
+// so every condition must be made of columns, constants, comparisons, AND, OR, NOT, IS NULL and IN and nothing else. The bounds leave out no row the WHERE is true for, and every row read is still judged
+// by the whole WHERE. 0, or a refusal.
+fn bounds[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int]) -> [] int {
+    let dl = w.dlen;
+    let b = eval.max_nodes();
+    if row.key_columns(contents(w.ctx)[64..64 + dl]) != 1 {
+        return 0;
+    }
+    var kc = 0;
+    while row.col_pk(contents(w.ctx)[64..64 + dl], kc) != 1 {
+        kc = kc + 1;
+    }
+    let kt = row.col_type(contents(w.ctx)[64..64 + dl], kc);
+    if kt == row.t_bool() || kt == row.t_bytea() {
+        return 0;
+    }
+    var j = 0;
+    while j < w.nconj {
+        let (cnt, end) = eval.scan(e, contents(w.pos)[p_conj() + j], contents(w.ws));
+        if cnt < 0 {
+            return malformed();
+        }
+        var i = 0;
+        while i < cnt {
+            let p = contents(w.ws)[i];
+            let tag = int_of(e[p]);
+            let quiet = tag == 0 || tag == 1 || tag == 8 || tag == 5 && int_of(e[p + 1]) <= 7 || tag == 7 && int_of(e[p + 1]) != 1;
+            if !quiet {
+                return 0;
+            }
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    j = 0;
+    while j < w.nconj {
+        let a = contents(w.pos)[p_conj() + j];
+        var op = 0 - 1;
+        if int_of(e[a]) == 5 {
+            op = int_of(e[a + 1]);
+        }
+        if op == 0 || op >= 2 && op <= 5 {
+            let (c1, mid) = eval.scan(e, a + 2, contents(w.ws));
+            let (c2, end) = eval.scan(e, mid, contents(w.ws));
+            var vat = 0 - 1;
+            if c1 == 1 && c2 == 1 && int_of(e[a + 2]) == 0 && int_of(e[mid]) == 1 && is_col(w, e, a + 2, kc) {
+                vat = mid;
+            } else if c1 == 1 && c2 == 1 && int_of(e[mid]) == 0 && int_of(e[a + 2]) == 1 && is_col(w, e, mid, kc) {
+                vat = a + 2;
+                // constant < key is key > constant
+                if op == 2 || op == 3 {
+                    op = op + 2;
+                } else if op == 4 || op == 5 {
+                    op = op - 2;
+                }
+            }
+            var n = 0 - 1;
+            if vat >= 0 && ev(w, e, vat, kinds, 0) == 0 && contents(w.ws)[b + 1] == 0 {
+                // the constant as a stored key (src/row.cho), in `nrow`
+                let vt = contents(w.ws)[b];
+                if kt != row.t_text() && (vt == 1 || vt == 5 || vt == 6) {
+                    put_i64(contents(w.nrow), 0, contents(w.ws)[b + 2]);
+                    contents(w.nrow)[0] = byte_of((int_of(contents(w.nrow)[0]) + 128) % 256);
+                    n = 8;
+                } else if kt == row.t_text() && (vt == 0 || vt == 3) && contents(w.ws)[b + 3] <= 90 {
+                    let va = contents(w.ws)[b + 2];
+                    let vn = contents(w.ws)[b + 3];
+                    n = 0;
+                    var i = 0;
+                    while i < vn {
+                        let c = int_of(contents(w.ar)[va + i]);
+                        contents(w.nrow)[n] = byte_of(c);
+                        n = n + 1;
+                        if c == 0 {
+                            contents(w.nrow)[n] = byte_of(255);
+                            n = n + 1;
+                        }
+                        i = i + 1;
+                    }
+                    contents(w.nrow)[n] = byte_of(0);
+                    contents(w.nrow)[n + 1] = byte_of(0);
+                    n = n + 2;
+                }
+            }
+            if n >= 0 && (op == 0 || op == 4 || op == 5) {
+                copy(contents(w.nrow), 0, n, contents(w.lo), 0);
+                w.lon = n;
+            }
+            if n >= 0 && (op == 0 || op == 2 || op == 3) {
+                copy(contents(w.nrow), 0, n, contents(w.hi), 0);
+                w.hin = n;
+            }
+        }
+        j = j + 1;
+    }
+    return 0;
 }
 
 // The WHERE at `wpos` of `e` (0: there is none), before any row: its type is checked (an error is noted) and its top-level conditions (the operands of its ANDs) are listed. 0 or a refusal.
@@ -639,7 +787,7 @@ pub fn where_static[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int], wpos
             w.nconj = w.nconj + 1;
         }
     }
-    return 0;
+    return bounds(w, e, kinds);
 }
 
 // Whether the bound row passes the WHERE at `wpos`: 1 it does, 0 it does not, 2 it raises an error (noted), or a refusal. With several conditions, an error in one beside another that is not true is
