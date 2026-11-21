@@ -1144,50 +1144,26 @@ fn cast_name(code: int) -> [] &static [byte] {
     return parse.type_name(code);
 }
 
-// Whether `name` is the name PostgreSQL gives the output column of the expression `x0` when it has no alias: a column's name; a function's; through a cast or a CASE the name of what is cast or of the ELSE,
-// if that has one of those two; otherwise the type's name for a cast and `case` for a CASE (the outermost of them); and nothing for any other expression (`?column?`, which no name in a statement equals).
+// Whether `name` is the name PostgreSQL gives the output column of the expression `x0` when it has no alias (`write_output_name`: there is one account of that name, and this asks it).
 fn names_output[&s, &t, &n, &k](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], x0: int, name: int) -> [] bool {
-    var x = x0;
-    var weak = 0;
-    var code = 0;
-    var going = true;
-    while going {
-        let kind = nodes[6 * x];
-        if kind == parse.n_col() {
-            if nodes[6 * x + 4] >= 0 {
-                return same_name(sql, toks, name, nodes[6 * x + 4]);
+    var same = false;
+    region r {
+        let a = alloc_slice[r](256, byte_of(0));
+        let b = alloc_slice[r](256, byte_of(0));
+        let n = write_output_name(sql, toks, nodes, kids, x0, a, 0);
+        let m = name_text(sql, toks, name, b, 0);
+        if n >= 0 && m == n {
+            same = true;
+            var i = 0;
+            while i < n {
+                if int_of(a[i]) != int_of(b[i]) {
+                    same = false;
+                }
+                i = i + 1;
             }
-            return same_name(sql, toks, name, nodes[6 * x + 1]);
-        }
-        if kind == parse.n_call() {
-            return same_name(sql, toks, name, nodes[6 * x + 1]);
-        }
-        if kind == parse.n_cast() {
-            if weak == 0 {
-                weak = 1;
-                code = nodes[6 * x + 1];
-            }
-            x = kids[nodes[6 * x + 2]];
-        } else if kind == parse.n_case() {
-            if weak == 0 {
-                weak = 2;
-            }
-            if nodes[6 * x + 5] == 1 && nodes[6 * x + 3] > 0 {
-                x = kids[nodes[6 * x + 2] + nodes[6 * x + 3] - 1];
-            } else {
-                going = false;
-            }
-        } else {
-            going = false;
         }
     }
-    if weak == 1 {
-        return tok_word(sql, toks, name, cast_name(code));
-    }
-    if weak == 2 {
-        return tok_word(sql, toks, name, "case");
-    }
-    return false;
+    return same;
 }
 
 // How many DIFFERENT output columns of the select list the token names, capped at 2: an alias, the column a bare reference or a
