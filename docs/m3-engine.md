@@ -273,6 +273,25 @@ answering by luck; every row that is read is still judged by the whole `where`.
 **Not built yet, as before:** the engine's delta tree and the `AS OF` reads over it, transactions over several statements (a statement is its own), the output column names a client is sent, and
 everything listed above as refused.
 
+## 6i. M3f: aggregates, `group by`, `having` (design, written before the code)
+
+**What is answered.** `count(*)`, `count(x)`, `sum(x)` over `smallint` and `integer` (a `bigint`), `min(x)` and `max(x)` over the integer types and `text`; `group by` expressions (an integer constant is the
+place of an item, as in `order by`); `having`; and `order by`, `distinct`, `limit` over the groups. Refused (`engine-unsupported`): `sum` over `bigint` and `avg` (PostgreSQL's answer is a `numeric`, a type
+the engine does not have), any other function, an aggregate inside an aggregate, in a `where` or in a `group by` (errors in PostgreSQL, with rules of their own), `distinct` inside an aggregate.
+
+**How.** The row phase reads the rows the `where` lets through and computes, for each, the `group by` expressions and every aggregate's argument. With no `group by` the aggregates are accumulated as the rows
+are read; with one, the rows' group values and arguments are kept, sorted by group, and accumulated run by run (so a grouped query is bounded by what the engine can hold: 262,144 rows, refused beyond). The
+group phase then computes `having`, the items and the `order by` expressions once a group, **with no row bound at all**: the evaluator is given *slots*, a value for the expression that starts at a given
+place, and each aggregate and each occurrence of a `group by` expression is one. So nothing in the group phase can read a column that is not grouped, by construction.
+
+**The check PostgreSQL makes (`42803`).** Every column an item, the `having` or an `order by` names must be inside an aggregate or inside an expression that is one of the `group by` expressions. The engine
+compares expressions as bytes of the IR. A column that is not covered is `42803`, except when the table's key is among the `group by` expressions: PostgreSQL then allows every column (they depend on the
+key), and the engine refuses rather than reproduce that rule.
+
+**Errors.** As 6g: every error is found (a row's group expression or aggregate argument is computed for every row the `where` lets through, `having` for every group, the items for every group `having`
+keeps), one SQLSTATE is the answer, several are refused, and any error under a `limit` is order-dependent. A `sum` whose running total could leave the `bigint` range in some order of the rows is
+order-dependent too (it cannot happen below four thousand million rows of `integer`, and is not tested).
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

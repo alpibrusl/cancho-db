@@ -1,0 +1,518 @@
+edition 9;
+module cdb.execs;
+
+import cdb.commit;
+import cdb.row;
+import cdb.eval;
+import cdb.pager;
+import cdb.exec;
+
+// SELECT of the engine (docs/m3-engine.md 6g to 6i) over one table: the rows the WHERE lets through, their items, ORDER BY, DISTINCT, LIMIT and OFFSET; and, grouped, aggregates, GROUP BY and HAVING.
+
+// The position after the stored value at `at`.
+fn after[&r](rows: &r [byte], at: int) -> [] int {
+    let tag = int_of(rows[at]);
+    if tag == 0 {
+        return at + 1;
+    }
+    if tag == 1 {
+        return at + 9;
+    }
+    if tag == 2 {
+        return at + 2;
+    }
+    return at + 3 + commit.be(rows, at + 1, 2);
+}
+
+fn nth[&r](rows: &r [byte], at: int, k: int) -> [] int {
+    var p = at;
+    var i = 0;
+    while i < k {
+        p = after(rows, p);
+        i = i + 1;
+    }
+    return p;
+}
+
+// How the stored values at `x` and `y` (of one type, or null) compare: -1, 0, 1. A null is above every value (it comes last going up).
+fn cmpv[&r](rows: &r [byte], x: int, y: int) -> [] int {
+    let tx = int_of(rows[x]);
+    let ty = int_of(rows[y]);
+    if tx == 0 || ty == 0 {
+        if tx == ty {
+            return 0;
+        }
+        if tx == 0 {
+            return 1;
+        }
+        return 0 - 1;
+    }
+    if tx == 1 {
+        let a = row.int_at(rows, x + 1);
+        let b = row.int_at(rows, y + 1);
+        if a < b {
+            return 0 - 1;
+        }
+        if a > b {
+            return 1;
+        }
+        return 0;
+    }
+    if tx == 2 {
+        return int_of(rows[x + 1]) - int_of(rows[y + 1]);
+    }
+    let xn = commit.be(rows, x + 1, 2);
+    let yn = commit.be(rows, y + 1, 2);
+    var i = 0;
+    while i < xn && i < yn {
+        let d = int_of(rows[x + 3 + i]) - int_of(rows[y + 3 + i]);
+        if d != 0 {
+            return d;
+        }
+        i = i + 1;
+    }
+    return xn - yn;
+}
+
+// How the rows at `a` and `b` compare: by the ORDER BY (`mode` 0: `norder` expressions, their values' places and directions in `pos`), or by all the bytes of their `nitems` items (`mode` 1: any order in
+// which equal rows are neighbours, for DISTINCT).
+fn order[&r, &p](rows: &r [byte], pos: &p [int], a: int, b: int, mode: int, nitems: int, norder: int) -> [] int {
+    if mode == 1 {
+        let ea = nth(rows, a, nitems);
+        let eb = nth(rows, b, nitems);
+        var i = 0;
+        while a + i < ea && b + i < eb {
+            let d = int_of(rows[a + i]) - int_of(rows[b + i]);
+            if d != 0 {
+                return d;
+            }
+            i = i + 1;
+        }
+        return ea - a - (eb - b);
+    }
+    var j = 0;
+    while j < norder {
+        let vi = pos[exec.p_oval() + j];
+        var c = cmpv(rows, nth(rows, a, vi), nth(rows, b, vi));
+        if pos[exec.p_odir() + j] == 1 {
+            c = 0 - c;
+        }
+        if c != 0 {
+            return c;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn merge_pass[&s, &d, &r, &p](src: &s [int], dst: &!d [int], rows: &r [byte], pos: &p [int], n: int, width: int, mode: int, nitems: int, norder: int) -> [] int {
+    var lo = 0;
+    while lo < n {
+        var mid = lo + width;
+        if mid > n {
+            mid = n;
+        }
+        var hi = lo + 2 * width;
+        if hi > n {
+            hi = n;
+        }
+        var i = lo;
+        var j = mid;
+        var k = lo;
+        while k < hi {
+            var left = i < mid;
+            if i < mid && j < hi {
+                left = order(rows, pos, src[i], src[j], mode, nitems, norder) <= 0;
+            }
+            if left {
+                dst[k] = src[i];
+                i = i + 1;
+            } else {
+                dst[k] = src[j];
+                j = j + 1;
+            }
+            k = k + 1;
+        }
+        lo = hi;
+    }
+    return 0;
+}
+
+// Sort the first `n` rows of `idx` (a merge sort: rows that compare equal keep their order).
+fn sort_rows[&q](w: &!q exec.Work, n: int, mode: int) -> [] int {
+    var width = 1;
+    var flip = false;
+    let ni = w.nitems;
+    let no = w.norder;
+    while width < n {
+        if flip {
+            merge_pass(contents(w.idx2), contents(w.idx), contents(w.rows), contents(w.pos), n, width, mode, ni, no);
+        } else {
+            merge_pass(contents(w.idx), contents(w.idx2), contents(w.rows), contents(w.pos), n, width, mode, ni, no);
+        }
+        flip = !flip;
+        width = width * 2;
+    }
+    if flip {
+        var i = 0;
+        while i < n {
+            contents(w.idx)[i] = contents(w.idx2)[i];
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+// Whether a note of the lowering (a literal that is not a string or an integer) is on a `Const` between `from` and `to`.
+fn noted_in[&k](kinds: &k [int], from: int, to: int) -> [] bool {
+    if len(kinds) < 142 {
+        return false;
+    }
+    if kinds[8] < 0 {
+        return true;
+    }
+    var i = 0;
+    while i < kinds[8] && 140 + 2 * i + 1 < len(kinds) {
+        let at = kinds[140 + 2 * i];
+        if at >= from && at < to {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// A LIMIT or OFFSET at `at` of `e` (the flag of an `Opt`): the position after it, with its value in `info[2]` (-1: none), or a refusal. A negative one is an error of the statement (noted, `which`).
+fn bound[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], at: int, which: int) -> [] int {
+    contents(w.info)[2] = 0 - 1;
+    if at >= len(e) {
+        return exec.malformed();
+    }
+    if int_of(e[at]) == 0 {
+        return at + 1;
+    }
+    let r = exec.ev(w, e, at + 1, kinds, 0);
+    if r < 0 {
+        // an error of types in a LIMIT has its own rules in PostgreSQL: not answered here
+        return exec.unsupported();
+    }
+    let b = eval.max_nodes();
+    let ty = contents(w.ws)[b];
+    let st = contents(w.ws)[b + 1];
+    let end = contents(w.info)[1];
+    if st == 1 && (ty == 0 || ty == 1 || ty == 5 || ty == 6) {
+        return end;
+    }
+    if st != 0 || ty != 1 && ty != 5 && ty != 6 {
+        return exec.unsupported();
+    }
+    let v = contents(w.ws)[b + 2];
+    if v < 0 {
+        exec.note(w, which);
+        return end;
+    }
+    contents(w.info)[2] = v;
+    return end;
+}
+
+// SELECT (a `Select2`, ir.md section 6) over one table of the tree `root`. On 0: `count_of` rows of `columns_of` values (`type_of`, `row_at`, `row_byte`).
+pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read] int {
+    exec.start(w, root);
+    if len(e) < 6 || int_of(e[0]) != 6 {
+        return exec.malformed();
+    }
+    let distinct = int_of(e[1]) == 1;
+    let ni = commit.be(e, 2, 4);
+    if ni > exec.max_items() {
+        return exec.too_big();
+    }
+    if ni < 1 {
+        return exec.unsupported();
+    }
+    w.nitems = ni;
+    var at = 6;
+    var i = 0;
+    while i < ni {
+        let (cnt, end) = eval.scan(e, at, contents(w.ws));
+        if cnt < 0 {
+            return exec.malformed();
+        }
+        contents(w.pos)[exec.p_item() + i] = at;
+        contents(w.pos)[exec.p_iend() + i] = end;
+        at = end;
+        i = i + 1;
+    }
+    if at + 4 > len(e) {
+        return exec.malformed();
+    }
+    if commit.be(e, at, 4) != 1 {
+        // joins: not in this slice
+        return exec.unsupported();
+    }
+    let name_at = at + 4;
+    if name_at + 2 > len(e) {
+        return exec.malformed();
+    }
+    at = name_at + 2 + commit.be(e, name_at, 2) + 2;
+    if at >= len(e) {
+        return exec.malformed();
+    }
+    var wpos = 0;
+    if int_of(e[at]) == 1 {
+        wpos = at + 1;
+        let (cnt, end) = eval.scan(e, wpos, contents(w.ws));
+        if cnt < 0 {
+            return exec.malformed();
+        }
+        at = end;
+    } else {
+        at = at + 1;
+    }
+    if at + 5 > len(e) {
+        return exec.malformed();
+    }
+    if commit.be(e, at, 4) != 0 || int_of(e[at + 4]) != 0 {
+        // GROUP BY and HAVING: not in this slice
+        return exec.unsupported();
+    }
+    at = at + 5;
+    if at + 4 > len(e) {
+        return exec.malformed();
+    }
+    let no = commit.be(e, at, 4);
+    if no > exec.max_parts() {
+        return exec.too_big();
+    }
+    w.norder = no;
+    at = at + 4;
+    let b = eval.max_nodes();
+    var extra = 0;
+    i = 0;
+    while i < no {
+        let (cnt, end) = eval.scan(e, at, contents(w.ws));
+        if cnt < 0 || end + 2 > len(e) {
+            return exec.malformed();
+        }
+        contents(w.pos)[exec.p_ord() + i] = at;
+        contents(w.pos)[exec.p_odir() + i] = int_of(e[end]);
+        if int_of(e[end + 1]) != 0 {
+            return exec.unsupported();
+        }
+        var slot = 0 - 1;
+        if int_of(e[at]) == 1 {
+            // a bare constant: an integer is the place of an item; PostgreSQL refuses any other, with errors this slice does not reproduce
+            if int_of(e[at + 1]) != 1 || noted_in(kinds, at, at + 1) {
+                return exec.unsupported();
+            }
+            let place = row.int_at(e, at + 2);
+            if place < 1 || place > ni {
+                return exec.unsupported();
+            }
+            slot = place - 1;
+        } else if int_of(e[at]) == 7 && int_of(e[at + 1]) == 1 && int_of(e[at + 2]) == 1 {
+            return exec.unsupported();
+        } else {
+            // the same expression as an item is that item
+            var j = 0;
+            while j < ni && slot < 0 {
+                let ia = contents(w.pos)[exec.p_item() + j];
+                let ie = contents(w.pos)[exec.p_iend() + j];
+                if exec.same(e, at, end - at, e, ia, ie - ia) && !noted_in(kinds, at, end) && !noted_in(kinds, ia, ie) {
+                    slot = j;
+                }
+                j = j + 1;
+            }
+            if slot < 0 {
+                if distinct {
+                    // PostgreSQL wants it in the select list, and this file cannot tell that it is not there under another spelling
+                    return exec.unsupported();
+                }
+                slot = 0 - 1 - extra;
+                extra = extra + 1;
+            }
+        }
+        contents(w.pos)[exec.p_oval() + i] = slot;
+        at = end + 2;
+        i = i + 1;
+    }
+    // the extra ORDER BY values follow the items in a row
+    i = 0;
+    while i < no {
+        let slot = contents(w.pos)[exec.p_oval() + i];
+        if slot < 0 {
+            contents(w.pos)[exec.p_oval() + i] = ni + (0 - 1 - slot);
+        }
+        i = i + 1;
+    }
+    let r0 = exec.bind_table(p, w, root, e, name_at);
+    if r0 != 0 {
+        return r0;
+    }
+    // before any row: the types, and what is wrong with them
+    i = 0;
+    while i < ni {
+        let r = exec.ev(w, e, contents(w.pos)[exec.p_item() + i], kinds, 1);
+        if r < 0 {
+            let s = exec.stat(w, r);
+            if s < 0 {
+                return s;
+            }
+        } else {
+            var ty = contents(w.ws)[b];
+            if ty == 0 {
+                ty = 3;
+            }
+            contents(w.pos)[exec.p_itype() + i] = ty;
+        }
+        i = i + 1;
+    }
+    let rw = exec.where_static(w, e, kinds, wpos);
+    if rw < 0 {
+        return rw;
+    }
+    contents(w.cx)[5] = 0 - 1;
+    i = 0;
+    while i < no {
+        if contents(w.pos)[exec.p_oval() + i] >= ni {
+            let r = exec.ev(w, e, contents(w.pos)[exec.p_ord() + i], kinds, 1);
+            if r < 0 {
+                let s = exec.stat(w, r);
+                if s < 0 {
+                    return s;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if at >= len(e) {
+        return exec.malformed();
+    }
+    var bounded = int_of(e[at]) == 1;
+    at = bound(w, e, kinds, at, exec.e_limit());
+    if at < 0 {
+        return at;
+    }
+    let limit = contents(w.info)[2];
+    if at >= len(e) {
+        return exec.malformed();
+    }
+    if int_of(e[at]) == 1 {
+        bounded = true;
+    }
+    at = bound(w, e, kinds, at, exec.e_offset());
+    if at < 0 {
+        return at;
+    }
+    let offset = contents(w.info)[2];
+    if at != len(e) {
+        return exec.malformed();
+    }
+    if w.code != 0 {
+        return exec.verdict(w);
+    }
+    // the rows
+    var n = 0;
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else {
+            let pass = exec.passes(w, e, kinds, wpos);
+            if pass < 0 {
+                return pass;
+            }
+            if pass == 1 {
+                if n >= exec.max_rows() {
+                    return exec.too_big();
+                }
+                let begin = w.rfill;
+                var fill = begin;
+                var bad = false;
+                var k = 0;
+                while k < ni + extra {
+                    var ea = 0;
+                    if k < ni {
+                        ea = contents(w.pos)[exec.p_item() + k];
+                    } else {
+                        // the k-th extra ORDER BY expression
+                        var j = 0;
+                        while j < no {
+                            if contents(w.pos)[exec.p_oval() + j] == k {
+                                ea = contents(w.pos)[exec.p_ord() + j];
+                            }
+                            j = j + 1;
+                        }
+                    }
+                    let r = exec.ev(w, e, ea, kinds, 1);
+                    if r < 0 {
+                        return exec.unsupported();
+                    }
+                    if contents(w.ws)[b + 1] == 2 {
+                        exec.note(w, contents(w.ws)[b + 2] - 1);
+                        bad = true;
+                    } else if !bad {
+                        fill = exec.enc(contents(w.rows), fill, contents(w.ws), b, contents(w.ar));
+                        if fill == 0 - 1 {
+                            return exec.too_big();
+                        }
+                        if fill < 0 {
+                            return exec.unsupported();
+                        }
+                    }
+                    k = k + 1;
+                }
+                if !bad {
+                    contents(w.idx)[n] = begin;
+                    w.rfill = fill;
+                    n = n + 1;
+                }
+            }
+        }
+    }
+    if w.orderdep {
+        return exec.order_dependent();
+    }
+    if w.code != 0 {
+        if bounded {
+            // PostgreSQL may stop before the row that raises
+            return exec.order_dependent();
+        }
+        return exec.verdict(w);
+    }
+    if distinct {
+        sort_rows(w, n, 1);
+        var kept = 0;
+        i = 0;
+        while i < n {
+            let cur = contents(w.idx)[i];
+            if kept == 0 || order(contents(w.rows), contents(w.pos), contents(w.idx)[kept - 1], cur, 1, ni, no) != 0 {
+                contents(w.idx)[kept] = cur;
+                kept = kept + 1;
+            }
+            i = i + 1;
+        }
+        n = kept;
+    }
+    if no > 0 {
+        sort_rows(w, n, 0);
+    }
+    var first = 0;
+    if offset > 0 {
+        first = offset;
+        if first > n {
+            first = n;
+        }
+    }
+    var count = n - first;
+    if limit >= 0 && limit < count {
+        count = limit;
+    }
+    w.first = first;
+    w.count = count;
+    return 0;
+}
+

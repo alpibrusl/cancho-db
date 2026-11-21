@@ -11,6 +11,7 @@ import cdb.pager;
 import cdb.btree;
 import cdb.pstore;
 import cdb.exec;
+import cdb.execs;
 import cdb.execw;
 
 // `enginecheck PAGEFILE`: the engine's statements (src/exec.cho, src/execw.cho) over a page file, for tests/engine_check.py. PAGEFILE is made if it is missing; the branch is slot 0 of its catalog. Standard
@@ -233,7 +234,7 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                                 let e = contents(iw)[0..ln];
                                                                 kind = int_of(e[0]);
                                                                 if kind == 6 {
-                                                                    rc = exec.select(pg, w, root, e, contents(xw));
+                                                                    rc = execs.select(pg, w, root, e, contents(xw));
                                                                 } else if kind == 1 {
                                                                     rc = execw.insert(pg, w, root, e, contents(xw));
                                                                 } else if kind == 2 {
