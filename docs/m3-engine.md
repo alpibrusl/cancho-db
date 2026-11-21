@@ -472,6 +472,27 @@ every step (928 steps, 1,856 crashes). Four mutants: writing over a page a root 
 that write a page over the wrong one of the path are killed too. Switching the reuse off is not a wrong answer, so no differential sees it: `tests/engine_crash.py` holds the step count under 1,200 for
 that (a version that forgot the leaf's number took 1,422).
 
+## 6q. M3h: `alter table ... add column`, `create index`, `drop index` (design, written before the code)
+
+The parser's closed DDL is `create table`, `alter table T add [column] <column>`, `drop table`, `create [unique] index N on T (columns)` and `drop index N` (`src/stmt.cho`). What the engine does with
+the three it does not yet run:
+
+**`alter table T add column C ...`.** The table's definition gains the column and **every row is written again with the column's default, or null** (a path of pages a row, less since 6p). PostgreSQL
+does not rewrite (it remembers the default beside the definition); the answers are the same, the cost is not, and the cost is said. As PostgreSQL: a column that is `not null` with no default is an error
+(`23502`) if the table has a row and is taken if it has none; a default is checked as for `create table`; a name the table has is `42701`; `primary key` on the new column is `42P16` for a table that
+has a key, which every table of the engine does. The history keeps each row's old form and the old definition, so `AS OF` before the statement reads the table as it was, columns and all.
+
+**`create index`.** An index that is not `unique` changes no answer: the engine records its name (so that `drop index` and a second `create index` of the same name answer as PostgreSQL does: `42P07`)
+and builds nothing. That is honest only because the engine claims no speed: when it has indexes to read by, this is where they are built. **A `unique` index is refused** (`engine-unsupported`): it is a
+constraint, and holding it needs the index that is not built.
+
+**`drop index N`.** Removes the name; a name that is not an index is refused by the lowering (the snapshot it reads lists the indexes: `index N on T`), as now in front of PostgreSQL.
+
+**Where the names go.** The catalog (table number 0) gains keys of the form `0x00000000, 0x01, <index name>` whose value is the table's name: a table's name cannot begin with the byte 1, so the two
+kinds of key do not collide, and `drop table` removes its table's indexes with it (as PostgreSQL does).
+
+**Gate.** The random history of 6h gains these statements; answers and the tables afterwards equal PostgreSQL's; `AS OF` across an `add column` reads the old shape.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
