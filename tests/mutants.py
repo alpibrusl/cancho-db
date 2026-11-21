@@ -1716,6 +1716,36 @@ def run_eval(cancho):
 # The engine's statements (src/exec.cho, src/execw.cho, src/tables.cho, and the assignment of src/eval.cho), judged by tests/engine_check.py: the random history against PostgreSQL, the fixed statements that
 # must be answered, and the page file after a delete and a drop.
 ENGINE = [
+    ('answer: a bigint is announced as an integer', 'src/answer.cho',
+     '    if ty == row.t_int() {\n        return 20;',
+     '    if ty == row.t_int() {\n        return 23;'),
+    ('answer: true is sent as f', 'src/answer.cho',
+     "            out[oat] = byte_of('t');",
+     "            out[oat] = byte_of('f');"),
+    ('answer: a negative number is sent without its sign', 'src/answer.cho',
+     "        if v < 0 {\n            out[oat] = byte_of('-');\n            n = 1;\n        }",
+     ''),
+    ('answer: a number is sent as its last digit', 'src/answer.cho',
+     "            out[oat + n] = byte_of('0' - w / div % 10);\n            n = n + 1;\n            div = div / 10;",
+     "            out[oat + n] = byte_of('0' - w / div % 10);\n            n = n + 1;\n            div = 0;"),
+    ('answer: the value after a text is read from inside it', 'src/answer.cho',
+     '    return at + 3 + commit.be(rows, at + 1, 2);',
+     '    return at + 3;'),
+    ("answer: INSERT's tag has no zero", 'src/answer.cho',
+     'at = word(out, 0, "INSERT 0 ");',
+     'at = word(out, 0, "INSERT ");'),
+    ('answer: a tag counts only its last digit', 'src/answer.cho',
+     "            out[at] = byte_of('0' + n / div % 10);\n            at = at + 1;\n            div = div / 10;",
+     "            out[at] = byte_of('0' + n / div % 10);\n            at = at + 1;\n            div = 0;"),
+    ("answer: DROP TABLE's tag is CREATE TABLE's", 'src/answer.cho',
+     'at = word(out, 0, "DROP TABLE");',
+     'at = word(out, 0, "CREATE TABLE");'),
+    ('history: a key written twice in a transaction keeps its second-to-last value', 'src/exec.cho',
+     '    if g >= 0 {\n        return root;\n    }\n    if g != btree.not_found() {\n        return tree_err(g);\n    }\n    let o = btree.get(',
+     '    if false {\n        return root;\n    }\n    if g != btree.not_found() && g < 0 {\n        return tree_err(g);\n    }\n    let o = btree.get('),
+    ('history: in a transaction of several statements what is known is still not looked up', 'src/exec.cho',
+     '    if !w.once {\n        return remember(p, w, root, k, kn);\n    }',
+     ''),
     ('in place: the last byte of the entries after is not moved', 'src/btree.cho',
      '    if newlen > oldlen {\n        var m = end - 1;',
      '    if newlen > oldlen {\n        var m = end - 2;'),
@@ -2231,7 +2261,7 @@ def run_engine(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho", "execw.cho")
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho", "execw.cho", "answer.cho")
 
     def one(mutant):
         label, rel, old, new = mutant

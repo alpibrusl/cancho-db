@@ -611,7 +611,7 @@ and values as text (`t`/`f`, digits, bytes as they are; the wire's binary format
 *Gate:* the bytes after the proxy's framing equal PostgreSQL's for the random history, names and tags included; messages are compared by SQLSTATE only, and the page says so.
 *Built of it: the names.* `lower.output_names` writes, for a select, the name of each output column: an alias, or the one PostgreSQL makes up (a column's, a function's, a cast's type as the catalog
 spells it, `case`, `?column?`), a `*` giving its tables' columns. `tests/engine_check.py` now compares them with the names in PostgreSQL's row description for every select of the random history (8 seeds
-of 3,000 statements, aliases included: no disagreement; 6 mutants). The values as text, the tags and the messages are not built.
+of 3,000 statements, aliases included: no disagreement; 6 mutants). The values as text and the tags followed (6v); the messages are not built.
 
 **J2. Transactions.** `begin`, `commit`, `rollback`: a transaction is a root of its own that the statements of one connection build on, published or dropped at the end. The history's rule for a key
 written twice in a transaction (6n) is then exercised for the first time. One writer at a time: a second connection's write waits or is refused; which, and what a reader sees meanwhile (the last
@@ -641,6 +641,34 @@ subset. Until it is, only clients that send what `psql -c` sends can be served.
 *An honest size:* J1 and J2 are each about what a slice above was; J3 and J4 more; J5 and J6 are integration, where the tests get slow and the surprises are in the proxy, not the engine; J7 is open-ended.
 M3's exit ("the differential suite passes on the declared subset; crash and fsync-fault tests pass") is met for the engine as a library but for the failing `fsync`; it is not met for anything a client
 can reach, and M4's ("one cancho product runs on it in daily use") cannot be met from inside this repository at all.
+
+## 6v. J1 and J2, built: the answer as a client is sent it, and transactions
+
+**J1.** `src/answer.cho`: a column's type as PostgreSQL's identifier, a value as PostgreSQL's text (`t` and `f`, digits with a sign, text as it is, `\x` and hexadecimal for `bytea`, nothing for a null), and
+a command's tag (`INSERT 0 3`, `SELECT 2`, `CREATE TABLE`). The harness prints those and `tests/engine_check.py` compares them with **the bytes of PostgreSQL's own messages**: the tag with its
+`CommandComplete`, the identifiers and names with its `RowDescription`, each value with its `DataRow`. The test used to turn the engine's values into PostgreSQL's text itself; that translation is now the
+engine's and is what is tested. An error is still a SQLSTATE without a message.
+
+**J2.** `begin`, `commit`, `rollback`. A transaction is a tree of its own that its statements build on, one after another; `commit` makes it the branch's and gives the whole transaction one number in
+the history, `rollback` drops it. What PostgreSQL does and the engine now matches, each found or confirmed by the differential:
+* a statement that fails, fails the transaction: every statement after it is `25P02` until the transaction is ended, and its `commit` answers `ROLLBACK`;
+* `begin` inside a transaction is taken (PostgreSQL warns), **but in a transaction that has failed it is `25P02` like anything else** (the first version answered `BEGIN`; the differential found it);
+* `commit` and `rollback` outside a transaction are taken;
+* DDL is part of a transaction: a table made in one that is rolled back was never made.
+After every statement the state PostgreSQL reports to a client (`I`, `T`, `E`) is compared with the engine's.
+
+**A refusal inside a transaction fails the transaction**, as an error does. There is nothing else it could honestly do: the statement did not run, and the statements after it were written for a state
+in which it had. (The test then fails PostgreSQL's transaction too, so the two stay in step.)
+
+**The history's rule for a key written twice** (6n: what a key held *before the transaction* is its one record) was written and untested while a transaction was one statement. It is exercised now:
+the history test writes transactions of several statements on the same rows, some rolled back, and `AS OF` before each reads what was there. Inside a transaction the writer no longer trusts what it
+knows about a key (6u, point 2) and looks, as designed.
+
+**20 seeds of 3,000 statements with transactions in them: no disagreement** (the engine refuses 880 of the 37,627 statements PostgreSQL answers, 2.3 %); 172 fixed statements answered, 28 of them a
+script of transactions; 179 mutants of the engine, 10 of them new (the text of a value, the tags, the identifiers, the two history rules).
+
+**Not built:** one writer at a time is all there is (two connections with transactions open at once do not exist in the harness: that is the proxy's to arrange, J5); isolation levels and savepoints
+are refused by the parser; an error's message.
 
 ## 7. Taking over, safely
 

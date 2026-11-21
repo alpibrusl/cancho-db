@@ -1,0 +1,229 @@
+edition 9;
+module cdb.answer;
+
+import cdb.commit;
+import cdb.row;
+
+// What a client is sent for an answer of the engine (docs/m3-engine.md 6s, J1), as PostgreSQL sends it in the text format: a column's type identifier, a value as text, a command's tag. Pure functions
+// on bytes: the proxy frames them, and tests/engine_check.py holds them against the bytes of PostgreSQL's own messages.
+
+// PostgreSQL's identifier of an engine type (src/row.cho): bigint 20, integer 23, smallint 21, boolean 16, text 25, bytea 17; anything else is `unknown`, 705.
+pub fn oid(ty: int) -> [] int {
+    if ty == row.t_int() {
+        return 20;
+    }
+    if ty == row.t_int4() {
+        return 23;
+    }
+    if ty == row.t_int2() {
+        return 21;
+    }
+    if ty == row.t_bool() {
+        return 16;
+    }
+    if ty == row.t_bytea() {
+        return 17;
+    }
+    if ty == row.t_text() {
+        return 25;
+    }
+    // a literal that never met a type: PostgreSQL's `unknown`, which it does not send for a column (the executor makes it text first)
+    return 705;
+}
+
+// The position after the stored value at `at`.
+pub fn skip[&r](rows: &r [byte], at: int) -> [] int {
+    let tag = int_of(rows[at]);
+    if tag == 0 {
+        return at + 1;
+    }
+    if tag == 1 {
+        return at + 9;
+    }
+    if tag == 2 {
+        return at + 2;
+    }
+    return at + 3 + commit.be(rows, at + 1, 2);
+}
+
+fn digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+// The stored value at `at` of `rows` as text, into `out` from `oat`: its length; -1 if it is null (a client is sent a length of -1 and no bytes); -2 if `out` is too small. An integer in decimal, a
+// boolean `t` or `f`, text as it is, bytea as `\x` and two hexadecimal digits a byte.
+pub fn text[&r, &o](rows: &r [byte], at: int, out: &!o [byte], oat: int) -> [] int {
+    let tag = int_of(rows[at]);
+    if tag == 0 {
+        return 0 - 1;
+    }
+    if tag == 1 {
+        let v = row.int_at(rows, at + 1);
+        if oat + 20 > len(out) {
+            return 0 - 2;
+        }
+        var n = 0;
+        if v < 0 {
+            out[oat] = byte_of('-');
+            n = 1;
+        }
+        // the digits, taken from the negative side so that the least value has them too
+        var w = v;
+        if w > 0 {
+            w = 0 - w;
+        }
+        var div = 1;
+        while w / div <= 0 - 10 {
+            div = div * 10;
+        }
+        while div > 0 {
+            out[oat + n] = byte_of('0' - w / div % 10);
+            n = n + 1;
+            div = div / 10;
+        }
+        return n;
+    }
+    if tag == 2 {
+        if oat + 1 > len(out) {
+            return 0 - 2;
+        }
+        if int_of(rows[at + 1]) == 1 {
+            out[oat] = byte_of('t');
+        } else {
+            out[oat] = byte_of('f');
+        }
+        return 1;
+    }
+    let n = commit.be(rows, at + 1, 2);
+    if tag == 4 {
+        if oat + 2 + 2 * n > len(out) {
+            return 0 - 2;
+        }
+        out[oat] = byte_of('\\');
+        out[oat + 1] = byte_of('x');
+        var i = 0;
+        while i < n {
+            let c = int_of(rows[at + 3 + i]);
+            out[oat + 2 + 2 * i] = byte_of(digit(c / 16));
+            out[oat + 3 + 2 * i] = byte_of(digit(c % 16));
+            i = i + 1;
+        }
+        return 2 + 2 * n;
+    }
+    if oat + n > len(out) {
+        return 0 - 2;
+    }
+    var i = 0;
+    while i < n {
+        out[oat + i] = rows[at + 3 + i];
+        i = i + 1;
+    }
+    return n;
+}
+
+fn word[&o](out: &!o [byte], oat: int, text: &static [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) && oat + i < len(out) {
+        out[oat + i] = text[i];
+        i = i + 1;
+    }
+    return oat + len(text);
+}
+
+pub fn k_select() -> [] int {
+    return 6;
+}
+
+pub fn k_insert() -> [] int {
+    return 1;
+}
+
+pub fn k_update() -> [] int {
+    return 2;
+}
+
+pub fn k_delete() -> [] int {
+    return 3;
+}
+
+pub fn k_create_table() -> [] int {
+    return 7;
+}
+
+pub fn k_drop_table() -> [] int {
+    return 8;
+}
+
+pub fn k_alter_table() -> [] int {
+    return 10;
+}
+
+pub fn k_create_index() -> [] int {
+    return 11;
+}
+
+pub fn k_drop_index() -> [] int {
+    return 12;
+}
+
+pub fn k_begin() -> [] int {
+    return 20;
+}
+
+pub fn k_commit() -> [] int {
+    return 21;
+}
+
+pub fn k_rollback() -> [] int {
+    return 22;
+}
+
+// The tag of a command that is done, as PostgreSQL words it (`INSERT 0 3`, `SELECT 2`, `CREATE TABLE`), into `out` (at least 40 bytes): its length. `n` is the number of rows, for the commands that
+// say one.
+pub fn tag[&o](kind: int, n: int, out: &!o [byte]) -> [] int {
+    var at = 0;
+    var counted = true;
+    if kind == k_select() {
+        at = word(out, 0, "SELECT ");
+    } else if kind == k_insert() {
+        at = word(out, 0, "INSERT 0 ");
+    } else if kind == k_update() {
+        at = word(out, 0, "UPDATE ");
+    } else if kind == k_delete() {
+        at = word(out, 0, "DELETE ");
+    } else {
+        counted = false;
+        if kind == k_create_table() {
+            at = word(out, 0, "CREATE TABLE");
+        } else if kind == k_drop_table() {
+            at = word(out, 0, "DROP TABLE");
+        } else if kind == k_alter_table() {
+            at = word(out, 0, "ALTER TABLE");
+        } else if kind == k_create_index() {
+            at = word(out, 0, "CREATE INDEX");
+        } else if kind == k_drop_index() {
+            at = word(out, 0, "DROP INDEX");
+        } else if kind == k_begin() {
+            at = word(out, 0, "BEGIN");
+        } else if kind == k_commit() {
+            at = word(out, 0, "COMMIT");
+        } else {
+            at = word(out, 0, "ROLLBACK");
+        }
+    }
+    if counted && at + 20 <= len(out) {
+        var div = 1;
+        while n / div >= 10 {
+            div = div * 10;
+        }
+        while div > 0 {
+            out[at] = byte_of('0' + n / div % 10);
+            at = at + 1;
+            div = div / 10;
+        }
+    }
+    return at;
+}

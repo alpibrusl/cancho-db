@@ -42,6 +42,8 @@ class Pg:
         body = struct.pack(">I", 196608) + b"user\0postgres\0database\0" + db.encode() + b"\0client_encoding\0UTF8\0\0"
         self.s.sendall(struct.pack(">I", len(body) + 4) + body)
         self.buf = b""
+        self.status = "I"
+        self.names = []
         self.until_ready()
 
     def msg(self):
@@ -96,6 +98,8 @@ class Pg:
                 rows.append(row)
             elif t == b"C":
                 tag = body.rstrip(b"\0").decode()
+            elif t == b"Z":
+                self.status = body.decode()
         return err, oids, rows, tag
 
 
@@ -592,24 +596,41 @@ def compare(pg, stmts, eng, must):
         counts[k] = counts.get(k, 0) + 1
 
     for i, (sql, how, tname) in enumerate(stmts):
-        head = eng[i][0] if eng[i] else "<nothing>"
+        blk = eng[i]
+        head = blk[0] if blk else "<nothing>"
+        state = blk[-1].split()[1] if blk and blk[-1].startswith("S ") else "?"
+        body = blk[1:-1]
+        pre = pg.status
         if head.startswith("refused "):
             tag = head.split()[1]
             if must:
                 fail(i, "refused, and this statement is one the engine answers")
-            pg.query("begin")
-            err, _, _, _ = pg.query(sql)
-            pg.query("rollback")
+            if pre == "I":
+                # outside a transaction a refusal changes nothing: PostgreSQL runs the statement and takes it back
+                pg.query("begin")
+                err, _, _, _ = pg.query(sql)
+                pg.query("rollback")
+            else:
+                # inside one, a refusal fails the transaction as an error does: PostgreSQL's is failed too
+                err, _, _, _ = pg.query(sql)
+                if pg.status == "T":
+                    pg.query("select 1 / 0")
             count("refused:" + tag)
             if err is None:
                 refused_answered += 1
             if tag == "engine-ambiguous-error" and err is None:
                 fail(i, "refused as an error of several codes, and PostgreSQL has none")
+            if pg.status != state:
+                fail(i, "the transaction is %s, PostgreSQL's: %s" % (state, pg.status))
+                raise SystemExit("engine_check: the two are out of step; stopping")
             continue
-        before = snapshot(tname) if how == "write" else None
+        before = snapshot(tname) if how == "write" and pre != "E" else None
         err, oids, rows, tag = pg.query(sql)
         if err is None:
             answered += 1
+        if pg.status != state:
+            fail(i, "the transaction is %s, PostgreSQL's: %s (%s)" % (state, pg.status, err))
+            raise SystemExit("engine_check: the two are out of step; stopping")
         if head.startswith("error "):
             code = head.split()[1]
             if err == code:
@@ -625,30 +646,23 @@ def compare(pg, stmts, eng, must):
         if err is not None:
             fail(i, "answered, PostgreSQL: error %s" % err)
             raise SystemExit("engine_check: the two are out of step; stopping")
-        kind, n = head.split()[1], int(head.split()[2])
+        kind = head.split()[1]
+        # the command's tag, as a client is sent it
+        if not body or body[0] != "G " + tag:
+            fail(i, "the tag is %r, PostgreSQL's: %r" % (body[0][2:] if body else None, tag))
+            continue
         if kind == "SELECT":
-            names = [unhex(x) for x in eng[i][1].split()[1:]]
-            types = [int(x) for x in eng[i][2].split()[1:]]
+            names = [unhex(x) for x in body[1].split()[1:]]
+            types = [int(x) for x in body[2].split()[1:]]
             if names != pg.names:
                 fail(i, "the columns are named %s, PostgreSQL: %s" % (names, pg.names))
                 continue
-            erows = []
-            for line in eng[i][3:]:
-                row = []
-                for ty, v in zip(types, line.split()[1:]):
-                    if v == "-":
-                        row.append(None)
-                    elif ty in (1, 5, 6):
-                        row.append(v.encode())
-                    elif ty == 2:
-                        row.append(b"t" if v == "1" else b"f")
-                    else:
-                        row.append(unhex(v))
-                erows.append(row)
+            # the values are the text a client is sent
+            erows = [[None if v == "-" else unhex(v) for v in line.split()[1:]] for line in body[3:]]
             if how == "count":
                 ok = len(erows) == len(rows)
             else:
-                ok = [OID.get(o) for o in oids] == types
+                ok = oids == types
                 if how == "set":
                     key = lambda r: [(x is None, x or b"") for x in r]
                     ok = ok and sorted(erows, key=key) == sorted(rows, key=key)
@@ -657,23 +671,19 @@ def compare(pg, stmts, eng, must):
             if ok:
                 count("agree-rows")
             else:
-                fail(i, "rows differ (%s)" % how, "postgres: %s %s" % ([OID.get(o) for o in oids], rows[:14]))
+                fail(i, "rows differ (%s)" % how, "postgres: %s %s" % (oids, rows[:14]))
             continue
-        pn = int(tag.split()[-1]) if kind in ("INSERT", "UPDATE", "DELETE") else 0
-        if pn != n:
-            fail(i, "%d rows, PostgreSQL: %s" % (n, tag))
-            continue
-        if how == "write":
+        if how == "write" and before is not None:
             after = snapshot(tname)
             want = set()
             for k in set(before) | set(after):
                 if before.get(k) != after.get(k):
                     want.add((tname.encode(), k, before.get(k), after.get(k)))
             got = set()
-            for line in eng[i][1:]:
+            for line in body[1:]:
                 _, t, k, o, nw = line.split()
                 got.add((unhex(t), unhex(k), None if o == "-" else unhex(o), None if nw == "-" else unhex(nw)))
-            if got == want and len(got) == len(eng[i]) - 1:
+            if got == want and len(got) == len(body) - 1:
                 count("agree-changes")
             else:
                 fail(i, "changes differ", "only engine: %s\n     only postgres: %s" % (sorted(got - want, key=str)[:3], sorted(want - got, key=str)[:3]))
@@ -815,6 +825,35 @@ FIXED = [
     ("select fx.k, fy.k, fq.v from fx join fq on fq.k < fx.k join fy on fy.j is null order by 1, 2, 3", "order"),
     ("select fx.k from fx, fq where fq.k = 1 order by 1", "order"),
     ("select fx.k, fq.k from fx, fq where fq.k >= 2 and fx.k > 0 order by 1, 2", "order"),
+    # transactions: the statements between BEGIN and COMMIT build on one another; an error fails the transaction until it is ended
+    ("begin", "ddl"),
+    ("insert into fq (k, v) values (900, 1)", "write"),
+    ("update fq set v = v + 1 where k = 900", "write"),
+    ("update fq set v = v * 10 where k = 900", "write"),
+    ("select k, v from fq where k = 900", "set"),
+    ("commit", "ddl"),
+    ("select v from fq where k = 900", "set"),
+    ("begin", "ddl"),
+    ("delete from fq", "write"),
+    ("select count(*) from fq", "set"),
+    ("rollback", "ddl"),
+    ("select count(*) from fq", "set"),
+    ("begin", "ddl"),
+    ("update fq set v = 0 where k = 900", "write"),
+    ("select 1 / (k - 900) from fq", "set"),
+    ("select 1 from fq", "set"),
+    ("update fq set v = 5", "write"),
+    ("commit", "ddl"),
+    ("select v from fq where k = 900", "set"),
+    ("begin", "ddl"),
+    ("begin", "ddl"),
+    ("create table ftx (k integer primary key)", "ddl"),
+    ("insert into ftx values (1)", "ddl"),
+    ("rollback", "ddl"),
+    ("commit", "ddl"),
+    ("rollback", "ddl"),
+    ("create table ftx (k integer primary key, z text)", "ddl"),
+    ("drop table ftx", "ddl"),
     # a table of several leaves: a scan has to go from one to the next
     ("create table fwide (k integer primary key, a integer, s text)", "ddl"),
     ("insert into fwide values " + ", ".join("(%d, %d, 'row %d padded so that a leaf of the tree holds only some of them')" % (k * 37 % 601, k % 13, k) for k in range(1, 601)), "write"),
@@ -898,7 +937,7 @@ def order_dependent(pg):
         pg.query("begin")
         err, _, _, _ = pg.query(sql)
         pg.query("rollback")
-        if ans != ["refused engine-order-dependent"]:
+        if ans[:1] != ["refused engine-order-dependent"]:
             raise SystemExit("engine_check: %s: the engine says %s, and the answer depends on PostgreSQL's order" % (sql, ans))
         if err != want:
             # what PostgreSQL 16 does is written down beside each statement; another version may plan otherwise, which is the point of refusing
@@ -911,7 +950,7 @@ def order_dependent(pg):
         pg.query("begin")
         err, _, _, _ = pg.query(sql)
         pg.query("rollback")
-        if ans != ["refused engine-unsupported"]:
+        if ans[:1] != ["refused engine-unsupported"]:
             raise SystemExit("engine_check: %s: the engine says %s, and this is one it does not answer" % (sql, ans))
         if err != want:
             if PGMAJOR[0] == 16:
@@ -951,6 +990,10 @@ def history(seed):
                 sql = ddl_more(g, added)
                 if sql.startswith("alter"):
                     out.append(sql)
+            elif r < 0.13:
+                # a transaction of several writes: a key written twice in it has ONE record, of what it held before (6n); a rollback leaves none
+                g2 = [g.insert(), g.update(), g.update(), g.delete(), g.update()][:rng.randrange(2, 6)]
+                out += ["begin"] + g2 + [rng.choice(["commit", "commit", "rollback"])]
             elif r < 0.55:
                 out.append(g.insert())
             elif r < 0.85:
@@ -1106,9 +1149,24 @@ def main():
         stmts.append((tables[name].ddl(), "ddl", name))
     spare = 0
     added = [0]
+    open_txn = False
     while len(stmts) < N:
+        # a transaction now and then: a few statements, then a commit or a rollback (and, rarely, one of those out of place)
+        rt = rng.random()
+        if not open_txn and rt < 0.03:
+            stmts.append(("begin", "ddl", "ta"))
+            open_txn = True
+        elif open_txn and rt < 0.22:
+            stmts.append((rng.choice(["commit", "commit", "rollback"]), "ddl", "ta"))
+            open_txn = False
+        elif rt > 0.997:
+            stmts.append((rng.choice(["commit", "rollback", "begin"]), "ddl", "ta"))
+            open_txn = stmts[-1][0] == "begin"
         g.t = tables[rng.choice(sorted(tables))]
         r = rng.random()
+        if open_txn and r < 0.065:
+            # the generator's idea of the tables is not taken back by a rollback: no DDL inside a transaction here (the fixed statements have some)
+            r = 0.5
         if r < 0.012:
             stmts.append((g.t.ddl(), "ddl", g.t.name))
         elif r < 0.02:
@@ -1143,13 +1201,25 @@ def main():
             stmts.append((sql, how, g.t.name))
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "engine.db")
+        if open_txn:
+            stmts.append(("commit", "ddl", "ta"))
+        # the two processes part where no transaction is open
         half = len(stmts) // 2
+        inside = False
+        for j, st in enumerate(stmts):
+            if j >= half and not inside:
+                half = j
+                break
+            if st[0] == "begin":
+                inside = True
+            elif st[0] in ("commit", "rollback"):
+                inside = False
         eng = run_engine(path, [s[0] for s in stmts[:half]] + ["!commit", "!sweep"])
         eng += run_engine(path, [s[0] for s in stmts[half:]] + ["!commit"])
     counts, fails, refused_answered, answered = compare(pg, stmts, eng, False)
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), [f[0] for f in FIXED])
-    fstmts = [(sql, how, "fwide" if " fwide" in sql and how == "write" else "fq" if " fq " in sql and how == "write" else ("fy" if " fy" in sql else "fx")) for sql, how in FIXED]
+    fstmts = [(sql, how, "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fx")) for sql, how in FIXED]
     fcounts, ffails, _, _ = compare(pg, fstmts, feng, True)
     print("engine_check: %d fixed statements, none refused: %s" % (len(FIXED), ", ".join("%s=%d" % kv for kv in sorted(fcounts.items()))))
     fails += ffails

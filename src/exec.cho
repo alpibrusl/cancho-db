@@ -106,6 +106,11 @@ pub fn e_no_column() -> [] int {
     return 17;
 }
 
+// A statement in a transaction that has failed (PostgreSQL: 25P02, until the transaction is ended).
+pub fn e_aborted() -> [] int {
+    return 18;
+}
+
 pub fn sqlstate(code: int) -> [] &static [byte] {
     if code == 1 {
         return "22012";
@@ -157,6 +162,9 @@ pub fn sqlstate(code: int) -> [] &static [byte] {
     }
     if code == 17 {
         return "42703";
+    }
+    if code == 18 {
+        return "25P02";
     }
     return "XX000";
 }
@@ -374,6 +382,11 @@ pub fn type_of[&q](w: &!q Work, i: int) -> [] int {
 // Where row `r` (0 for the first) of a SELECT's answer starts in `row_bytes`: its `columns_of` values follow one another as stored values.
 pub fn row_at[&q](w: &!q Work, r: int) -> [] int {
     return contents(w.idx)[w.first + r];
+}
+
+// The bytes the rows of a SELECT's answer are in (`row_at`).
+pub fn rows_of[&q](w: &q Work) -> [] &q [byte] {
+    return contents(w.rows);
 }
 
 pub fn row_byte[&q](w: &!q Work, at: int) -> [] int {
