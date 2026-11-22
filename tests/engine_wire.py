@@ -16,7 +16,9 @@ Then, each on a server of its own:
   * the extended protocol beyond what the history sends: statements prepared and run by name, each refusal with its tag, an error skipping to the Sync;
   * an SSLRequest is answered N and the startup goes on;
   * garbage (random bytes for a startup, a message of a huge length, of no known type, half a message and a close, a query that is no string): the server answers the next
-    connection as if nothing had happened.
+    connection as if nothing had happened;
+  * more than one connection (6aq): statements interleaved, a statement that waits for another connection's transaction (to commit, to roll back, to be dropped), a
+    transaction ended for idling while another waits, a 17th connection, a message over 1 MiB, a client that does not read its answer, eight clients at once.
 
 If a PostgreSQL is reachable (PG_E2E_PORT) and `psql` is installed, a script is run with psql against both and what psql prints must be the same: a client this project did
 not write. And cancho-pg's own example client, built from its repository if it is beside this one, the same. Without them those steps are skipped, and say so.
@@ -57,9 +59,9 @@ def free_port():
 
 
 class Server:
-    def __init__(self, path):
+    def __init__(self, path, *limits):
         self.path, self.port = path, free_port()
-        self.p = subprocess.Popen([SERVER, path, str(self.port)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.p = subprocess.Popen([SERVER, path, str(self.port)] + [str(x) for x in limits], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         line = self.p.stderr.readline()
         if line != b"listening\n":
             raise SystemExit("engine_wire: the server did not start: %r (status %s)" % (line, self.p.poll()))
@@ -80,8 +82,12 @@ def message(t, body):
 class Client:
     """The simple query protocol, and the bytes of anything else."""
 
-    def __init__(self, port, ssl_first=False):
-        self.s = socket.create_connection(("127.0.0.1", port), timeout=20)
+    def __init__(self, port, ssl_first=False, rcvbuf=None):
+        self.s = socket.socket()
+        if rcvbuf:
+            self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        self.s.settimeout(20)
+        self.s.connect(("127.0.0.1", port))
         self.buf, self.status, self.names, self.params = b"", "?", [], {}
         if ssl_first:
             self.s.sendall(struct.pack(">II", 8, 80877103))
@@ -158,6 +164,20 @@ class Client:
     def query(self, sql):
         self.s.sendall(message(b"Q", sql.encode() + b"\0"))
         return self.answer(self.until_ready())
+
+    def ask(self, sql):
+        """Send a query and do not wait for its answer."""
+        self.s.sendall(message(b"Q", sql.encode() + b"\0"))
+
+    def answered(self, within):
+        """Whether an answer comes within so many seconds: the answer, or None."""
+        self.s.settimeout(within)
+        try:
+            return self.answer(self.until_ready())
+        except (socket.timeout, TimeoutError):
+            return None
+        finally:
+            self.s.settimeout(20)
 
     @staticmethod
     def bind(name, params):
@@ -532,7 +552,7 @@ def garbage(srv):
         cases.append(("random bytes after a startup", startup + bytes(rng.randrange(256) for _ in range(rng.randrange(1, 200)))))
     bad = []
     # what the server says before it closes: a message it cannot read past is a protocol violation, said so; and every whole message before the end is answered
-    says = {"a message of a huge length": b"SFATAL\0VFATAL\0C08P01\0", "a message of length 3": b"C08P01\0", "a message of no known type": b"C08P01\0", "a query that is no string": b"C08P01\0",
+    says = {"a message of a huge length": b"SERROR\0VERROR\0C54000\0", "a message of length 3": b"SFATAL\0VFATAL\0C08P01\0", "a message of no known type": b"C08P01\0", "a query that is no string": b"C08P01\0",
             "a COPY message": b"C08P01\0", "many messages at once": b"Z\0\0\0\x05I" * 51}
     for name, data in cases:
         s = socket.create_connection(("127.0.0.1", srv.port), timeout=20)
@@ -559,6 +579,160 @@ def garbage(srv):
             bad.append(name)
             break
     check("garbage (%d kinds of it): the server answers the next connection as before" % len(cases), not bad, bad)
+
+
+def several(d):
+    """More than one connection (docs/m3-engine.md 6aq)."""
+    srv = Server(os.path.join(d, "several.db"), 1500, 1500)       # a transaction may idle 1.5 s while another waits; a client may take none of its answer for 1.5 s
+    a, b = Client(srv.port), Client(srv.port)
+    a.query("create table sv (k integer primary key, who text)")
+    got = []
+    for k in range(40):
+        got.append((a if k % 2 == 0 else b).query("insert into sv values (%d, '%s')" % (k, "ab"[k % 2]))[5])
+    ra, rb = a.query("select count(*) from sv where who = 'b'")[4], b.query("select count(*) from sv where who = 'a'")[4]
+    check("two connections, their statements interleaved: each is answered, and each sees what the other wrote", got == ["INSERT 0 1"] * 40 and ra == [[b"20"]] and rb == [[b"20"]], (got[:3], ra, rb))
+    # a transaction has the database to itself: what another connection sends waits for it to end
+    a.query("begin")
+    a.query("insert into sv values (100, 'txn')")
+    b.ask("insert into sv values (101, 'waits')")
+    early = b.answered(0.4)
+    c = Client(srv.port)                                           # a third connects meanwhile, and is answered its startup
+    c.ask("select count(*) from sv")
+    early_c = c.answered(0.3)
+    done = a.query("commit")
+    late, late_c = b.answered(5), c.answered(5)
+    order = a.query("select k from sv where k >= 100 order by k")[4]
+    check("a statement of another connection waits for a transaction to commit, reads too, and is answered then; both writes are there",
+          early is None and early_c is None and done[5] == "COMMIT" and late is not None and late[5] == "INSERT 0 1" and late_c is not None and late_c[4] == [[b"42"]] and order == [[b"100"], [b"101"]], (early, early_c, late, late_c, order))
+    a.query("begin")
+    a.query("insert into sv values (200, 'undone')")
+    # the one that waits is sent by the extended protocol this time: its Parse and Bind are answered, its Execute waits
+    b.s.sendall(message(b"P", b"\0insert into sv values ($1, $2)\0" + struct.pack(">H", 0)) + Client.bind(b"", ["200", "mine"]) + message(b"E", b"\0" + struct.pack(">I", 0)) + message(b"S", b""))
+    early = b.answered(0.4)
+    a.query("rollback")
+    late = b.answered(5)
+    who = c.query("select who from sv where k = 200")[4]
+    check("the same with a rollback: the waiting insert of the same key succeeds", early is None and late is not None and late[5] == "INSERT 0 1" and who == [[b"mine"]], (early, late, who))
+    a.query("begin")
+    a.query("delete from sv")
+    b.ask("select count(*) from sv")
+    early = b.answered(0.4)
+    a.close(False)                                                 # the one in the transaction goes away
+    late = b.answered(5)
+    check("the same when the connection in the transaction is closed: it is rolled back and the other is answered", early is None and late is not None and late[4] == [[b"43"]], (early, late))
+    # a transaction that idles while another waits is ended; one that idles with nobody waiting is not
+    a = Client(srv.port)
+    a.query("begin")
+    a.query("insert into sv values (300, 'idle')")
+    time.sleep(2.2)
+    still = a.query("insert into sv values (301, 'idle')")
+    a.query("commit")
+    a.query("begin")
+    a.query("insert into sv values (302, 'ended')")
+    t0 = time.time()
+    b.ask("select count(*) from sv")
+    late = b.answered(6)
+    took = time.time() - t0
+    a.s.settimeout(3)
+    msgs = []
+    try:
+        while True:
+            msgs.append(a.msg())
+    except (EOFError, OSError):
+        pass                                                       # the server closed it after the error
+    fatal = a.answer(msgs) if msgs else None
+    check("a transaction idle for the limit while another waits is ended with 25P03 and the other is answered; idle with nobody waiting, it is left alone",
+          still[5] == "INSERT 0 1" and late is not None and late[4] == [[b"45"]] and 1.2 < took < 4 and fatal is not None and fatal[0] == "25P03", (still, late, took, fatal))
+    b.close()
+    c.close()
+    # the 17th connection
+    held = [Client(srv.port) for _ in range(16)]
+    s17 = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+    try:
+        told = s17.recv(200)
+        rest = s17.recv(200)
+    except OSError:
+        told, rest = b"", b"?"
+    s17.close()
+    alive = [h.query("select count(*) from sv")[4] for h in held]
+    held[3].close()
+    time.sleep(0.2)
+    again = Client(srv.port)
+    check("a 17th connection is told 53300 and closed; the 16 go on, and a place given back is taken",
+          b"C53300\0" in told and rest == b"" and alive == [[[b"45"]]] * 16 and again.query("select count(*) from sv")[4] == [[b"45"]], (told, rest, alive[:2]))
+    for h in held[:3] + held[4:]:
+        h.close()
+    # a message longer than a connection's buffer is refused and read past
+    long = again.query("select '" + "x" * (3 << 19) + "' from sv")
+    after = again.query("select count(*) from sv")
+    check("a query over 1 MiB is refused (54000) and the connection goes on", (long[0], long[1], again.status) == ("54000", "cancho-db: refused statement-too-long", "I") and after[4] == [[b"45"]], (long[:2], after))
+    # a client that asks for a large answer and never reads it is dropped after the limit, and the others are served
+    again.query("create table wide (k integer primary key, v text)")
+    for i in range(0, 20000, 50):
+        again.query("insert into wide values " + ", ".join("(%d, '%s')" % (k, "%08d" % k * 60) for k in range(i, i + 50)))
+    deaf = Client(srv.port, rcvbuf=4096)
+    deaf.ask("select * from wide")
+    time.sleep(0.2)
+    t0 = time.time()
+    other = again.query("select count(*) from wide")
+    took = time.time() - t0
+    deaf.s.settimeout(5)
+    n = 0
+    try:
+        while True:
+            got = deaf.s.recv(1 << 20)
+            if not got:
+                break
+            n += len(got)
+    except OSError:
+        pass
+    check("a client that does not read its answer is dropped after the limit, and another is served (it waited %.1f s; the first got %.1f of about 10 MB)" % (took, n / 1e6),
+          other[4] == [[b"20000"]] and took < 4 and 0 < n < 9500000, (other[4], took, n))
+    again.close()
+    # many clients at once, each with a table of its own, against the test program's answers for the same statements
+    import threading
+    scripts, results = [], [None] * 8
+    for i in range(8):
+        rng = random.Random(SEED * 100 + i)
+        sc = ["create table mc%d (k integer primary key, v integer, t text)" % i]
+        for _ in range(150):
+            r = rng.random()
+            k = rng.randrange(30)
+            if r < 0.4:
+                sc.append("insert into mc%d values (%d, %d, 't%d')" % (i, k, rng.randrange(100), k))
+            elif r < 0.6:
+                sc.append("update mc%d set v = v + %d where k < %d" % (i, rng.randrange(5), k))
+            elif r < 0.7:
+                sc.append("delete from mc%d where k = %d" % (i, k))
+            elif r < 0.75:
+                sc += ["begin", "update mc%d set t = 'x' where k = %d" % (i, k), rng.choice(["commit", "rollback"])]
+            else:
+                sc.append("select k, v, t from mc%d where v >= %d order by k" % (i, rng.randrange(100)))
+        scripts.append(sc)
+
+    def one(i):
+        cl = Client(srv.port)
+        out = []
+        for sql in scripts[i]:
+            r = cl.query(sql)
+            out.append((r[0], r[2], r[3], r[4], r[5], cl.status))
+        cl.close()
+        results[i] = out
+
+    threads = [threading.Thread(target=one, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(120)
+    wrong = []
+    for i in range(8):
+        blocks = ec.run_engine(os.path.join(d, "mc%d.db" % i), scripts[i])
+        want = [(v[0], v[2], v[3], v[4], v[5], v[6]) for v in (harness_view(b) for b in blocks)]
+        if results[i] != want:
+            wrong.append(i)
+    check("8 clients at once, %d statements each with transactions among them: each is answered as the test program answers its statements alone" % len(scripts[0]), not wrong and all(results), wrong)
+    check("the server is still running", srv.alive())
+    srv.stop()
 
 
 def with_psql(d):
@@ -599,6 +773,7 @@ def main():
         garbage(srv)
         check("the server is still running at the end", srv.alive())
         srv.stop()
+        several(d)
         with_psql(d)
         with_cancho_pg(d)
     if FAILED:

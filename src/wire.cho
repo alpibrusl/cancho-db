@@ -10,11 +10,6 @@ import cdb.session;
 // The messages of PostgreSQL's protocol (version 3.0) that the engine's server sends and reads (docs/m3-engine.md 6al). Each `put` writes one whole message into `out` from `at`
 // and gives where it ends, or -1 if it does not fit. Nothing here touches a socket.
 
-// The longest message a client may send: 16 MiB. A longer one cannot be skipped to find the next, so the connection ends.
-pub fn max_message() -> [] int {
-    return 16777216;
-}
-
 // The SQLSTATE of a refusal (feature not supported), and of what a client sent that the protocol does not allow.
 pub fn refused_state() -> [] &static [byte] {
     return "0A000";
@@ -257,22 +252,6 @@ pub fn error[&o, &r](out: &!o [byte], at: int, fatal: bool, state: &static [byte
     p = zero(out, text(out, be(out, p, 'C', 1), state));
     p = zero(out, build.put_bytes(out, text(out, be(out, p, 'M', 1), lead), rest));
     return shut(out, at, zero(out, p));
-}
-
-// A message a client sent, at the start of `buf[0..fill]`: its whole length (the type and what its length counts) if it is all there, 0 if more must be read, -1 if its length
-// is not one a message has (under 4, or over `max_message()`).
-pub fn frame[&b](buf: &b [byte], fill: int) -> [] int {
-    if fill < 5 {
-        return 0;
-    }
-    let n = commit.be(buf, 1, 4);
-    if n < 4 || n > max_message() {
-        return 0 - 1;
-    }
-    if fill < 1 + n {
-        return 0;
-    }
-    return 1 + n;
 }
 
 fn blank(c: int) -> [] bool {

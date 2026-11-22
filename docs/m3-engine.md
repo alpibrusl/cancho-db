@@ -1158,7 +1158,7 @@ is listed below as what it is.
 - *A connection that ends inside a transaction* rolls it back.
 - *The extended protocol* (`Parse`, `Bind`, ...) is refused, properly: one `ErrorResponse` (`0A000`, `extended-protocol`), everything up to `Sync` skipped, `ReadyForQuery`
   at `Sync`. `Terminate` ends the connection. Any other message type, a length under 4 or over 16 MiB ends the connection with an error: there is no way to find the next
-  message after it.
+  message after it. *(Corrected in 6aq: a message is at most 1 MiB, and a longer one is refused and read past; only a length under 4 and an unknown type end the connection.)*
 
 `src/wire.cho` holds the messages (pure: bytes into a buffer), so that they have mutants; the program holds the socket.
 
@@ -1237,7 +1237,8 @@ around it, not the engine.
 - A simple query drops the unnamed statement and the portal, as in PostgreSQL.
 - *Answers leave when the server next waits for the client*, not message by message: the five answers to a batch are one write (6al found what three writes cost).
 
-A connection holds at most 64 named statements and 3 MiB of their text, and a statement prepared is at most 1 MiB; more is refused (`53200`, `54000`), not truncated.
+A connection holds at most 64 named statements and 1 MiB of their text *(3 MiB as first built; 6aq gives each of 16 connections its own)*, and a statement prepared is at
+most 1 MiB; more is refused (`53200`, `54000`), not truncated.
 
 **Test** (`tests/engine_wire.py`). The differential now sends the generator's statements with parameters (about a third of the writes and reads) by the first shape, and
 holds the answer against the test program's for the same statement and values, and the order of the messages against the table above. Then: statements prepared by name
@@ -1257,7 +1258,7 @@ measured here and skipped there.**
 another, the unnamed statement and the portal closed, a portal whose statement was replaced, a closed statement's place taken again).
 
 *Found while building:* a closed statement's place was not used again, so a client that prepares and closes would have been refused at its 65th statement whatever it had
-closed; places are reused now (the text is not: 3 MiB of statements ever prepared on a connection, then `53200`).
+closed; places are reused now (the text is not: 1 MiB of statements ever prepared on a connection, 3 MiB before 6aq, then `53200`).
 
 *Not in this part:* `Describe` of a statement (so `cancho-pg`'s code generator cannot be pointed at the engine); binary values; named portals and row limits; more than one
 `Execute` to a `Sync` outside a transaction. Each is refused with a tag, and the test pins each. **`cancho-hooks` itself has not been run against the server**: its queries
@@ -1324,6 +1325,67 @@ first columns had been listed (the IR says so: it lists them). More values than 
 
 **Test.** The differential's fixed statements have it with one value fewer, with only the key, with every value, with `returning` and with `on conflict`, and the two
 refusals pinned against PostgreSQL's `42601`. The lowering's hand-written cases have the IR of two such statements byte for byte (one was the pinned refusal). 2 mutants.
+
+## 6aq. The server, third part: more than one connection
+
+6an measured it: `cancho-hooks` opens two connections and got one, and its own test reads the tables with `psql` while the service is connected. One connection at a time
+(6al) was the scope of a first part, not a design.
+
+**Design.** Still one process and one thread: the engine runs one statement at a time, and nothing here changes that. What changes is that the server no longer waits on one
+client. It waits on all of them (a poller over the listener and every connection), reads what each has sent as it comes, and runs a statement when its message is whole.
+
+- *Up to 16 connections*, each with its own buffer for what it sends (1 MiB), its own session (6aj) and its own prepared statements (6am). The 17th is told `53300` and
+  closed. A message longer than the buffer is not the end of a connection any more: it is read past and refused (`54000`, `statement-too-long`), which is what the first
+  part could not do. *(The first part took a message of 16 MiB. The engine never ran a statement near that: the longest row is 748 bytes and a statement's values 64 KiB
+  with parameters. 1 MiB a connection is what 16 connections can be given without the server holding a quarter of a gigabyte for buffers nobody fills.)*
+- *Statements outside a transaction* run in the order their last byte arrives, each its own commit, each on the disk before its answer (6al). Two clients never see half
+  of one.
+- **A transaction has the database to itself.** A transaction's statements build on a tree of their own that becomes the branch's at `commit` (6v). Two of them open at
+  once would each start from the same tree, and the second to commit would undo the first: a lost update, silently. The engine has no row locks and no way to merge two
+  trees, so the server does the one thing that is certainly right: while a connection is in a transaction, **what the other connections send waits** (unread past its
+  buffer, unanswered) until that transaction ends. Every history the server produces is then one a single client could have produced, which is also one PostgreSQL could
+  have produced; what PostgreSQL would have run side by side runs one after the other.
+  - The cost is the obvious one, and it is stated as a limit: a client that says `begin` and goes quiet stops everyone. So a transaction that has been idle for 30 s while
+    another connection waits is ended by the server: its connection is told `25P03` (PostgreSQL's code for exactly this, `idle_in_transaction_session_timeout`) and
+    closed, its transaction rolled back. With nobody waiting, a transaction may idle as long as it likes.
+  - Reads by the others wait too. They could be answered from the branch's tree as it stands (it is what is committed), and are not, yet: one rule first.
+- *Fairness:* each pass over the connections runs at most one statement of each, in turn, starting after the one that was first the pass before.
+- *Writing an answer* is the one place the server still waits on a single client: an answer is written to its connection before the next statement of anyone runs, and a
+  client that does not take it stops the others while it does not. After 10 s of a client taking nothing, its connection is closed. An answer of any size to a client
+  that reads costs the others only the time it takes to send.
+- A connection that ends, however it ends, gives back what it held: its transaction is rolled back (6al), the wait of the others ends, its place is free.
+
+*Not in this part:* more than one statement at a time (there is one engine, one page file, one thread; this part is about not making clients queue for a connection, not
+about speed); reads beside a transaction; a limit on what one address may open; the log, the login.
+
+**Test** (`tests/engine_wire.py`). Everything the first two parts test, unchanged, on the new loop. Then, with several clients: statements of two connections interleaved,
+each answered and all of it there at the end; a second client served while the first sits idle (the thing 6al could not do); a client in a transaction and another that
+writes: the second's answer comes only after the first commits, and both writes are there, in that order; the same with a rollback; the same when the first disconnects
+instead; a transaction idle for the limit while another waits is ended with `25P03` and the waiter is served, and one idle with nobody waiting is not; a 17th connection
+is told `53300` and the 16 go on; a message over 1 MiB is refused and the connection goes on; a client that sends a query and never reads is dropped after the limit and
+the others are served; many clients at once, each with its own table, against the test program's answers for the same statements. And `cancho-hooks` again (6an): both of
+its connections live.
+
+**Built.** `serve.run` (the loop), `step` (a connection's next unit of work), `accept_all`, `receive`, `finish`, `push` (`src/serve.cho`); the program allocates what 16
+connections hold (about 52 MiB) and takes the two limits as arguments, so that a test does not wait 30 s. The handlers of 6al and 6am are unchanged but for where their
+bytes go. Measured: the differential of 6al and 6am (3 seeds, 2,070 statements each) unchanged on the new loop; the cases above, with limits of 1.5 s: a waiting statement
+is answered 1.5 s after the transaction it waits for went idle and the idle connection reads `25P03`; a client that reads none of a 10 MB answer is dropped after 1.5 s
+having been sent 2.8 MB, and the other client is answered then; 8 clients at once, 161 statements each, answered as the test program answers each alone.
+
+**And `cancho-hooks` (6an), which is why this was built.** The service now says `2 of 2 connections live`. Its own test of the feature, `tests/history_test.py` of its
+repository, run against the engine unchanged (with `truncate`, 6ao, and the short insert, 6ap): **scenarios 1 to 7 pass, 22 checks** (every attempt a row; the reasons
+that are not a status; a replay's rows; a database not there at start; one that never answers; one cut in the middle; none named). It stops at scenario 8, which renames
+the table away (`alter table attempts rename to ...`) to see what the service does when its table is gone; the engine has no rename. That is the next statement, and after
+it scenarios 9 to 11 are unmeasured.
+
+*What changed from the first part and is corrected there:* a message of 16 MiB was read and one longer ended the connection; a message is now at most 1 MiB and a longer
+one is refused and read past. The named statements of a connection may hold 1 MiB of text, not 3.
+
+13 mutants added to the group `wire` (72 now: 16 of the messages, 56 of the connection); all killed. Three that survived at first were of code the new loop had
+made dead (the old function that found a message's end; a length check the smaller buffer made impossible to fail), which is removed.
+
+*Not tested, and said:* that a connection whose buffer is full is not read from (so that the loop sleeps rather than spins while it waits) is in the code and no test can
+see it, since a loop that spins gives the same answers. Fairness between connections is by construction (the pass starts one place later each time) and is not measured.
 
 ## 7. Taking over, safely
 

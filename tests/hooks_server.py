@@ -13,7 +13,7 @@ are posted to the service, and:
     stopped, with psql from the engine's page file: the same rows.
 
 The service is a binary built from cancho-hooks' repository (`scripts/build.sh --pure`); without HOOKS_BIN the test is skipped and says so. What is measured is what it
-says: one service, one endpoint, a few events. It is not hooks' own test suite, which does not run against the engine yet (6an says why).
+says: one service, one endpoint, a few events. It is not hooks' own test suite (6an and 6aq say how far that runs against the engine).
 """
 import base64
 import http.server
@@ -124,6 +124,7 @@ def main():
         written = [l for l in metrics.splitlines() if l.startswith('hooks_history_rows_total{result="written"}')]
         live = [l for l in metrics.splitlines() if l.startswith("hooks_history_connections ")]
         print("     the service says: %s; %s; %s" % (" / ".join(l.strip() for l in said if "database" in l), written, live))
+        check("both of the service's connections to the database are live", live == ["hooks_history_connections 2"] and any("2 of 2 connections live" in l for l in said), (live, said))
         check("the service counts %d rows written and none failed or dropped" % EVENTS, written == ['hooks_history_rows_total{result="written"} %d' % EVENTS]
               and 'hooks_history_rows_total{result="failed"} 0' in metrics and 'hooks_history_rows_total{result="dropped"} 0' in metrics, written)
         svc.send_signal(signal.SIGTERM)
