@@ -351,11 +351,12 @@ fn join_load[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
                 return exec.tree_err(r);
             } else {
                 let nk = r / 1024;
-                let nv = r % 1024;
+                // (a row's value begins with its two salts, docs/m3-engine.md 6ag)
+                let nv = r % 1024 - 32;
                 if nk < 4 || commit.be(contents(w.key2), 0, 4) != tid {
                     more = false;
                 } else {
-                    if !row.row_ok(contents(w.ctx)[2048 * j + 64..2048 * j + 64 + dl], contents(w.cur)[0..nv]) {
+                    if nv < 0 || !row.row_ok(contents(w.ctx)[2048 * j + 64..2048 * j + 64 + dl], contents(w.cur)[32..32 + nv]) {
                         return exec.damaged();
                     }
                     if n >= exec.max_rows() || fill + 2 + nv > exec.rows_size() {
@@ -364,7 +365,7 @@ fn join_load[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
                     contents(w.jix)[n] = fill;
                     contents(w.jbuf)[fill] = byte_of(nv / 256);
                     contents(w.jbuf)[fill + 1] = byte_of(nv % 256);
-                    fill = exec.copy(contents(w.cur), 0, nv, contents(w.jbuf), fill + 2);
+                    fill = exec.copy(contents(w.cur), 32, nv, contents(w.jbuf), fill + 2);
                     n = n + 1;
                     exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
                     kl = nk;

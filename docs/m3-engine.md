@@ -979,6 +979,46 @@ and updated, updated and put back, inserted and deleted, deleted and inserted ag
 
 *What the test program still does itself:* it decides when a transaction's facts begin and end (as it decides which tree a transaction runs on, 6v). Those lines have no mutants.
 
+## 6ag. J4, second part: salts, so that what is erased cannot be guessed back
+
+The facts of 6af commit to a row by the hash of its image and to its key in clear. A row that is erased leaves those in every commit it was part of, and an image that can be
+guessed (a name from a list, a PIN) is then found by hashing guesses (`docs/m2g-erasure.md`, C135). The log's second version blinds both: a row's hash is over a 16-byte **salt**
+and the image, the fact's key is a **commitment** over the key's own salt and the key, and erasing destroys the salts with the row (`docs/spec/l3a.md` section 9).
+
+**Design.** The salts live where the row lives, so that whatever removes the row removes them:
+
+- a row's value in its table's tree is `key salt (16) || row salt (16) || row`. The key's salt is made when the row is inserted and stays while the row is there; the row's salt is
+  made anew by every write that changes the row. A row put back under a key that was deleted is a new row with a new key salt, as in the capture (`sql/capture.sql`);
+- the history keeps the value a key held, salts included, so `AS OF` and a fork carry them, and `erase` (6o), which removes the row and every entry of its history, removes every
+  salt it ever had. Nothing else holds one;
+- an update that leaves the row as it was writes nothing and makes no salt (it is no fact); one that moves a row to another key is a delete and an insert;
+- the facts of a transaction (6af) are keyed by the table and the **commitment**, and hash each image with its salt.
+
+*Where salts come from.* cancho has no source of randomness, and a salt that could be computed again would not be destroyed by erasing it. The driver reads 32 bytes from the
+system (`/dev/urandom`) when it starts and gives them to the engine, which makes each salt as the first 16 bytes of `SHA-256(seed || counter)`. The seed is never stored; it is gone
+with the process. A statement that writes with no seed given is refused (`engine-no-entropy`).
+
+*The cost.* 32 bytes a row, so the longest row is 748 bytes where it was 780. **A page file written before this change is not readable after it** (a row's first 32 bytes would be
+taken for salts): nothing was promised about page files, and none exists outside a test.
+
+*Not decided here:* `alter table ... add column` rewrites every row with its salts as they were and no fact, which is what PostgreSQL's capture does too (no trigger fires), and
+leaves the next fact of each row starting from an image the log never committed to. That is a question for the log (what a change of definition is, there), not for the salts.
+
+**Test.** For every change the engine reports the three salts beside the key and the images. The differential (a) already holds the key and the images against PostgreSQL's; (b) now
+computes the commitment and the two hashes from those and the salts **in Python, from the formulas of the specification**, nets them by commitment and holds the engine's `changes`
+against `tools/state.py`'s; (c) follows every row through the whole history: the salt a write says the row had must be the one the write before it gave, a key's salt must stay
+while the row is there, and no salt is ever given twice. (c) runs across the two processes of the test, so it is the stored salts that are followed.
+
+**Built.** src/exec.cho (`row_put`, `row_del`, the salts read in `scan_next`), src/facts.cho (the commitment and the salted hashes), the joins' own reading of rows (src/execs.cho,
+which the first run of the test found: every join was `engine-damaged`). 20 seeds of 3,000 statements: (a), (b) and (c) hold for every change and every commit compared. The
+erasure test now follows the salts into the page file: after a key is erased, two commits and a sweep, **none of the salts it ever had (its key's, each version's) is in the file**,
+and those of the row beside it are. With no seed a statement that writes a row is refused, and one that reads, deletes or leaves a row as it is is not. 12 mutants.
+
+*A rule of 6af that salts made empty:* "a row that ends as it began is no fact". Every change gives the row a new salt, so within a transaction its two hashes never agree; the
+test for it could not be made to fail and is gone with its mutant. (A row inserted and deleted in one transaction is still no fact.) The reference nets the same way, by commitment.
+
+*Version 1 of the facts (6af) is replaced, not kept beside:* the engine makes the salted form only.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

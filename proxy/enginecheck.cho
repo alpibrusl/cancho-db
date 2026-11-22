@@ -15,6 +15,7 @@ import cdb.execs;
 import cdb.execw;
 import cdb.answer;
 import cdb.drive;
+import cdb.facts;
 
 // `enginecheck PAGEFILE [CRASH TORN]`: the engine's statements (src/exec.cho, src/execw.cho) over a page file, for tests/engine_check.py. PAGEFILE is made if it is missing; the branch is slot 0 of its catalog. Standard
 // input, a line each:
@@ -170,6 +171,29 @@ fn put_changes[&i, &q](io: &!i Io, w: &!q exec.Work) -> [io_write] int {
         at = change_run(io, w, at, 2);
         at = change_run(io, w, at, 4);
         at = change_run(io, w, at, 4);
+        // the salts (docs/m3-engine.md 6ag): the key's, the old row's, the new row's
+        putchar(io, ' ');
+        var k = 0;
+        while k < 16 {
+            hex_byte(io, exec.change_byte(w, at + k));
+            k = k + 1;
+        }
+        at = at + 16;
+        var side = 0;
+        while side < 2 {
+            putchar(io, ' ');
+            if exec.change_byte(w, at) == 1 {
+                k = 0;
+                while k < 16 {
+                    hex_byte(io, exec.change_byte(w, at + 1 + k));
+                    k = k + 1;
+                }
+            } else {
+                putchar(io, '-');
+            }
+            at = at + 17;
+            side = side + 1;
+        }
         putchar(io, '\n');
         c = c + 1;
     }
@@ -503,7 +527,7 @@ fn put_facts[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, froo
     region r {
         let h = alloc_slice[r](32, byte_of(0));
         if n >= 0 {
-            n = exec.facts_changes(pg, w, froot, h);
+            n = facts.changes(pg, w, froot, h);
         }
         if n < 0 {
             put_str(io, "F -\n");
@@ -615,6 +639,10 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                     }
                     put_int(io, r);
                     putchar(io, '\n');
+                } else if starts(all, ls, le, "!unseed") {
+                    // from here on there is no seed to make salts of: a statement that writes a row is refused
+                    exec.unseed(w);
+                    put_str(io, "unseeded\n");
                 } else if starts(all, ls, le, "!mark") {
                     put_str(io, "mark\n");
                 } else if starts(all, ls, le, "!steps") {
@@ -721,7 +749,7 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                             } else if after != rs[cur] {
                                 // the facts of the commit this statement is (docs/m3-engine.md 6af)
                                 if exec.changes_of(w) > 0 {
-                                    put_facts(io, pg, w, exec.facts_take(pg, w, 0));
+                                    put_facts(io, pg, w, facts.take(pg, w, 0));
                                 }
                                 // the statement wrote: its number is used
                                 let marked = exec.mark_txn(pg, w, after, last + 1);
@@ -800,7 +828,7 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                             } else {
                                 troot = after;
                                 if exec.changes_of(w) > 0 && tfacts >= 0 {
-                                    tfacts = exec.facts_take(pg, w, tfacts);
+                                    tfacts = facts.take(pg, w, tfacts);
                                     twrote = true;
                                 }
                             }
@@ -895,6 +923,31 @@ fn main(world: World) -> [] int {
                                 borrow mut io as &!oo in {
                                     borrow mut pg as &!pp in {
                                         borrow mut wk as &!ww in {
+                                            // the seed of the salts (docs/m3-engine.md 6ag): 32 bytes from the system, kept nowhere
+                                            region sr {
+                                                let sd = alloc_slice[sr](32, byte_of(0));
+                                                match open_read(fsr, "/dev/urandom") {
+                                                    Opened::Ok(uf) => {
+                                                        var u = uf;
+                                                        borrow mut u as &!uw in {
+                                                            match file_read(uw, sd) {
+                                                                Read::Got(n) => {
+                                                                    if n == 32 {
+                                                                        exec.seed(ww, sd);
+                                                                    }
+                                                                }
+                                                                Read::End => {
+                                                                }
+                                                                Read::Failed(e) => {
+                                                                }
+                                                            }
+                                                        }
+                                                        file_close(u);
+                                                    }
+                                                    Opened::Failed(e) => {
+                                                    }
+                                                }
+                                            }
                                             var subs = drive.new(hh);
                                             borrow mut subs as &!sb in {
                                                 status = run(hh, oo, pp, ww, sb, buffer.bytes(t));
