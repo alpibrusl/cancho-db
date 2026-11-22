@@ -46,6 +46,10 @@ fn run[&s, &t, &n, &k, &v, &o, &g, &c, &x, &r, &w](sql: &s [byte], toks: &!t [in
     if q < 0 {
         return q;
     }
+    if st[12] != 0 {
+        // a form that only the engine takes (docs/m3-engine.md 6x): the grammar tested here is the proxy's, which refuses it with the tag the parser left
+        return 0 - st[12];
+    }
     if q != n {
         return 0 - parse.e_syntax();
     }
