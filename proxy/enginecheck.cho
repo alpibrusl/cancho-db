@@ -16,6 +16,9 @@ import cdb.execw;
 import cdb.answer;
 import cdb.drive;
 import cdb.facts;
+import cdb.tables;
+import cdb.build;
+import cdb.row;
 
 // `enginecheck PAGEFILE [CRASH TORN]`: the engine's statements (src/exec.cho, src/execw.cho) over a page file, for tests/engine_check.py. PAGEFILE is made if it is missing; the branch is slot 0 of its catalog. Standard
 // input, a line each:
@@ -546,6 +549,118 @@ fn put_facts[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, froo
     return 0;
 }
 
+// The commit the facts `froot` are, as a line: `L` and the record of the log in hex (docs/m3-engine.md 6ah), `L -` if it is not to be had; nothing while no key was given (`!log`) or
+// off the first branch. The tree with the head of the log moved (`root` itself if no commit was made).
+fn put_commit[&i, &z, &q, &f](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, froot: int, fl: &f [int], cur: int) -> [io_write, file_read, file_write] int {
+    var nw = root;
+    if fl[1] == 0 || cur != 0 {
+        return nw;
+    }
+    region r {
+        let seed = alloc_slice[r](32, byte_of(0));
+        let rec = alloc_slice[r](facts.max_record(), byte_of(0));
+        var k = 0;
+        while k < 32 {
+            seed[k] = byte_of(fl[2 + k]);
+            k = k + 1;
+        }
+        var sealed = froot;
+        if sealed >= 0 {
+            sealed = facts.seal(pg, w, root, froot, seed, rec);
+        }
+        if sealed < 0 {
+            put_str(io, "L -\n");
+        } else {
+            nw = sealed;
+            put_str(io, "L ");
+            let n = 4 + commit.be(rec, 0, 4) + 64;
+            k = 0;
+            while k < n {
+                hex_byte(io, int_of(rec[k]));
+                k = k + 1;
+            }
+            putchar(io, '\n');
+        }
+    }
+    return nw;
+}
+
+// Every row of the table `name` as a line: `D`, then in hex the plain key, the key's salt, the row's image and the row's salt, as the facts have them (what a live dump holds,
+// docs/spec/l3a.md 3b); `rows N` at the end, `rows -` if there is no such table or a row cannot be shown.
+fn put_table[&i, &z, &q, &n](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, name: &n [byte]) -> [io_write, file_read] int {
+    let el = tables.find(pg, contents(w.sc), root, name, contents(w.key), contents(w.nrow));
+    if el < 0 {
+        put_str(io, "rows -\n");
+        return 0;
+    }
+    let id = tables.id_of(contents(w.nrow));
+    let dl = tables.def_len(contents(w.nrow));
+    var kl = build.put_be(contents(w.key), 0, id, 4);
+    var n = 0;
+    var more = true;
+    region g {
+        let text = alloc_slice[g](16384, byte_of(0));
+        while more {
+            let r = btree.next_after(pg, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+            if r < 0 || r / 1024 < 4 || commit.be(contents(w.key2), 0, 4) != id {
+                more = false;
+            } else {
+                let nv = r % 1024;
+                var pl = 0 - 1;
+                var il = 0 - 1;
+                if nv >= 32 {
+                    pl = row.plain_key(contents(w.nrow)[6..6 + dl], contents(w.cur)[32..nv], text[0..8192]);
+                    il = row.image(contents(w.nrow)[6..6 + dl], contents(w.cur)[32..nv], text[8192..16384]);
+                }
+                if pl < 0 || il < 0 {
+                    more = false;
+                    n = 0 - 1;
+                } else {
+                    putchar(io, 'D');
+                    var part = 0;
+                    while part < 4 {
+                        putchar(io, ' ');
+                        var a = 0;
+                        var b = pl;
+                        if part == 1 {
+                            b = 16;
+                        } else if part == 2 {
+                            a = 8192;
+                            b = 8192 + il;
+                        } else if part == 3 {
+                            a = 16;
+                            b = 32;
+                        }
+                        if a == b {
+                            putchar(io, '.');
+                        }
+                        while a < b {
+                            if part % 2 == 0 {
+                                hex_byte(io, int_of(text[a]));
+                            } else {
+                                hex_byte(io, int_of(contents(w.cur)[a]));
+                            }
+                            a = a + 1;
+                        }
+                        part = part + 1;
+                    }
+                    putchar(io, '\n');
+                    kl = exec.copy(contents(w.key2), 0, r / 1024, contents(w.key), 0);
+                    n = n + 1;
+                }
+            }
+        }
+    }
+    if n < 0 {
+        put_str(io, "rows -\n");
+    } else {
+        put_str(io, "rows ");
+        put_int(io, n);
+        putchar(io, '\n');
+    }
+    return 0;
+}
+
 // Whether the line begins with `word` and goes on.
 fn begins[&a](all: &a [byte], ls: int, le: int, word: &static [byte]) -> [] bool {
     if le - ls <= len(word) {
@@ -590,7 +705,7 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
     // the facts of the transaction that is open: their tree (below 0: they are not to be had), and whether it wrote
     var tfacts = 0;
     var twrote = false;
-    var flags = box_slice(heap, 2, 0);
+    var flags = box_slice(heap, 34, 0);
     borrow mut flags as &!fw in {
         borrow mut roots as &!rw in {
             let rs = contents(rw);
@@ -643,6 +758,43 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                     // from here on there is no seed to make salts of: a statement that writes a row is refused
                     exec.unseed(w);
                     put_str(io, "unseeded\n");
+                } else if begins(all, ls, le, "!log ") {
+                    // from here on every commit of the first branch that changed rows is a record of the log, signed with the key this is the seed of (64 hex digits)
+                    region lr {
+                        let seed = alloc_slice[lr](32, byte_of(0));
+                        let hd = alloc_slice[lr](40, byte_of(0));
+                        let pk = alloc_slice[lr](32, byte_of(0));
+                        var k = 0;
+                        var okl = le - ls == 5 + 64;
+                        while k < 32 && okl {
+                            let hi = unhex(int_of(all[ls + 5 + 2 * k]));
+                            let lo = unhex(int_of(all[ls + 6 + 2 * k]));
+                            okl = hi >= 0 && lo >= 0;
+                            seed[k] = byte_of((hi * 16 + lo) % 256);
+                            k = k + 1;
+                        }
+                        if okl {
+                            k = 0;
+                            while k < 32 {
+                                fl[2 + k] = int_of(seed[k]);
+                                k = k + 1;
+                            }
+                            fl[1] = 1;
+                            build.public_key(seed, pk);
+                            let hn = build.log_header(hd, 0, pk);
+                            put_str(io, "L ");
+                            k = 0;
+                            while k < hn {
+                                hex_byte(io, int_of(hd[k]));
+                                k = k + 1;
+                            }
+                            putchar(io, '\n');
+                        } else {
+                            put_str(io, "L -\n");
+                        }
+                    }
+                } else if begins(all, ls, le, "!rows ") {
+                    put_table(io, pg, w, rs[cur], all[ls + 6..le]);
                 } else if starts(all, ls, le, "!mark") {
                     put_str(io, "mark\n");
                 } else if starts(all, ls, le, "!steps") {
@@ -748,8 +900,11 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                 }
                             } else if after != rs[cur] {
                                 // the facts of the commit this statement is (docs/m3-engine.md 6af)
-                                if exec.changes_of(w) > 0 {
-                                    put_facts(io, pg, w, facts.take(pg, w, 0));
+                                var sfacts = 0;
+                                let swrote = exec.changes_of(w) > 0;
+                                if swrote {
+                                    sfacts = facts.take(pg, w, 0);
+                                    put_facts(io, pg, w, sfacts);
                                 }
                                 // the statement wrote: its number is used
                                 let marked = exec.mark_txn(pg, w, after, last + 1);
@@ -759,6 +914,9 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                     putchar(io, '\n');
                                 } else {
                                     rs[cur] = marked;
+                                    if swrote {
+                                        rs[cur] = put_commit(io, pg, w, marked, sfacts, fl, cur);
+                                    }
                                 }
                             }
                             if tstate == 0 {
@@ -805,6 +963,7 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                     put_str(io, "ok COMMIT 0\nG COMMIT\n");
                                     if twrote {
                                         put_facts(io, pg, w, tfacts);
+                                        rs[cur] = put_commit(io, pg, w, rs[cur], tfacts, fl, cur);
                                     }
                                     exec.seq_forget(w);
                                 } else {
