@@ -497,6 +497,31 @@ fn set_param[&q, &t](w: &!q exec.Work, tok: &t [byte]) -> [] bool {
     return ok;
 }
 
+// The facts of a commit, as a line: `F`, how many, and `changes` in hex (docs/m3-engine.md 6af); `F -` if they are not to be had (`froot` below 0).
+fn put_facts[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, froot: int) -> [io_write, file_read] int {
+    var n = froot;
+    region r {
+        let h = alloc_slice[r](32, byte_of(0));
+        if n >= 0 {
+            n = exec.facts_changes(pg, w, froot, h);
+        }
+        if n < 0 {
+            put_str(io, "F -\n");
+        } else {
+            put_str(io, "F ");
+            put_int(io, n);
+            putchar(io, ' ');
+            var k = 0;
+            while k < 32 {
+                hex_byte(io, int_of(h[k]));
+                k = k + 1;
+            }
+            putchar(io, '\n');
+        }
+    }
+    return 0;
+}
+
 // Whether the line begins with `word` and goes on.
 fn begins[&a](all: &a [byte], ls: int, le: int, word: &static [byte]) -> [] bool {
     if le - ls <= len(word) {
@@ -538,6 +563,9 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
     var view = 0 - 1;
     var tstate = 0;
     var troot = 0;
+    // the facts of the transaction that is open: their tree (below 0: they are not to be had), and whether it wrote
+    var tfacts = 0;
+    var twrote = false;
     var flags = box_slice(heap, 2, 0);
     borrow mut flags as &!fw in {
         borrow mut roots as &!rw in {
@@ -691,6 +719,10 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                     rs[cur] = sr;
                                 }
                             } else if after != rs[cur] {
+                                // the facts of the commit this statement is (docs/m3-engine.md 6af)
+                                if exec.changes_of(w) > 0 {
+                                    put_facts(io, pg, w, exec.facts_take(pg, w, 0));
+                                }
                                 // the statement wrote: its number is used
                                 let marked = exec.mark_txn(pg, w, after, last + 1);
                                 if marked < 0 {
@@ -743,6 +775,9 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                         }
                                     }
                                     put_str(io, "ok COMMIT 0\nG COMMIT\n");
+                                    if twrote {
+                                        put_facts(io, pg, w, tfacts);
+                                    }
                                     exec.seq_forget(w);
                                 } else {
                                     // a rollback, or the commit of a transaction that failed: what its statements drew from counters stays drawn
@@ -757,11 +792,17 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                     put_str(io, "ok ROLLBACK 0\nG ROLLBACK\n");
                                 }
                                 tstate = 0;
+                                tfacts = 0;
+                                twrote = false;
                             } else if fl[0] != 0 {
                                 // an error, or a refusal: the transaction has failed
                                 tstate = 2;
                             } else {
                                 troot = after;
+                                if exec.changes_of(w) > 0 && tfacts >= 0 {
+                                    tfacts = exec.facts_take(pg, w, tfacts);
+                                    twrote = true;
+                                }
                             }
                         }
                         if tstate == 0 {

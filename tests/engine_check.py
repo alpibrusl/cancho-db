@@ -16,6 +16,7 @@ answers, the answer is PostgreSQL's:
 A refusal `engine-ambiguous-error` is a claim too (PostgreSQL fails, with one of several codes) and is checked. A disagreement is a failure; so is an engine that refuses more than half of what PostgreSQL
 answers.
 """
+import hashlib
 import os
 import random
 import re
@@ -24,6 +25,9 @@ import struct
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+import state as refstate  # noqa: E402  (the reference for docs/spec/state.md: facts and `changes`)
 
 EXE = sys.argv[1]
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 1500
@@ -808,6 +812,33 @@ def compare(pg, stmts, eng, must):
     def count(k):
         counts[k] = counts.get(k, 0) + 1
 
+    tx = {}          # (table, key) -> [image before the transaction, image now]: what PostgreSQL's tables show the open transaction changed
+    tx_ddl = [False]
+
+    def facts_agree(i, body, rows):
+        """The engine's `changes` for the commit (its F line) against the reference's (tools/state.py), over the net facts of `rows`."""
+        line = [x for x in body if x.startswith("F ")]
+        facts = []
+        for (t, k), (o, nw) in sorted(rows.items()):
+            if o == nw:
+                continue
+            h = lambda im: None if im is None else hashlib.sha256(b"cancho-db/row/v1\x00" + im).digest()
+            facts.append((0 if o is None else 2 if nw is None else 1, t, k, h(o), h(nw)))
+        if not line:
+            if rows:
+                fail(i, "no facts for a commit that changed rows")
+            return
+        if line[0] == "F -":
+            if must:
+                fail(i, "the facts of this commit are not to be had")
+            count("facts-refused")
+            return
+        ok, want = refstate.changes(facts)
+        if ok != "ok" or line[0] != "F %d %s" % (len(facts), want.hex()):
+            fail(i, "the facts differ", "reference: %d %s" % (len(facts), want.hex() if ok == "ok" else want))
+        else:
+            count("agree-facts")
+
     for i, (sql, how, tname) in enumerate(stmts):
         blk = eng[i]
         head = blk[0] if blk else "<nothing>"
@@ -913,8 +944,29 @@ def compare(pg, stmts, eng, must):
                 count("agree-changes")
             else:
                 fail(i, "changes differ", "only engine: %s\n     only postgres: %s" % (sorted(got - want, key=str)[:3], sorted(want - got, key=str)[:3]))
+            # the facts of the commit (docs/m3-engine.md 6af): from what PostgreSQL's table shows the statement changed
+            for t, k, o, nw in want:
+                if (t, k) in tx:
+                    tx[(t, k)][1] = nw
+                else:
+                    tx[(t, k)] = [o, nw]
+            if pre == "I":
+                facts_agree(i, body, tx)
+                tx.clear()
         else:
             count("agree-ddl")
+            if sql == "commit" and pre == "T":
+                if not tx_ddl[0]:
+                    facts_agree(i, body, tx)
+            elif sql not in ("begin", "commit", "rollback") and pre == "T":
+                # DDL in a transaction: its commit's facts are not compared
+                tx_ddl[0] = True
+            if pg.status == "I":
+                tx.clear()
+                tx_ddl[0] = False
+        if pg.status == "I":
+            tx.clear()
+            tx_ddl[0] = False
     return counts, fails, refused_answered, answered
 
 
@@ -1386,6 +1438,40 @@ FIXED += [
     ("select * from fe order by id", "order"),
 ]
 
+# the facts of a commit (6af): what a transaction did to a row is one fact, from what the row was to what it is
+FIXED += [
+    ("create table ff (k integer primary key, v text)", "ddl"),
+    ("create table ff2 (a text, b integer, v integer, primary key (a, b))", "ddl"),
+    ("insert into ff values (1, 'one'), (2, 'two'), (3, 'three')", "write"),
+    ("begin", "ddl"),
+    ("insert into ff values (4, 'four')", "write"),
+    ("update ff set v = 'FOUR' where k = 4", "write"),
+    ("update ff set v = 'x' where k = 1", "write"),
+    ("update ff set v = 'one' where k = 1", "write"),
+    ("delete from ff where k = 2", "write"),
+    ("insert into ff values (9, 'gone')", "write"),
+    ("delete from ff where k = 9", "write"),
+    ("update ff set v = 'y' where k = 3", "write"),
+    ("delete from ff where k = 3", "write"),
+    ("insert into ff2 values ('b', 2, 1), ('a', 10, 2), ('a', 9, 3), ('', 1, 4)", "write"),
+    ("update ff2 set v = v + 1 where a = 'a'", "write"),
+    ("commit", "ddl"),
+    ("begin", "ddl"),
+    ("insert into ff values (2, 'again')", "write"),
+    ("delete from ff where k = 2", "write"),
+    ("commit", "ddl"),
+    ("begin", "ddl"),
+    ("delete from ff where k = 1", "write"),
+    ("insert into ff values (1, 'one')", "write"),
+    ("commit", "ddl"),
+    ("begin", "ddl"),
+    ("update ff2 set b = b + 100 where a = 'a'", "write"),
+    ("rollback", "ddl"),
+    ("update ff2 set b = b + 100 where a = 'a'", "write"),
+    ("select * from ff order by k", "order"),
+    ("select * from ff2 order by a, b", "order"),
+]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)",
              "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
@@ -1820,7 +1906,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (f[ksonmrce]\d?|fq2)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (f[ksonmrcef]\d?|fq2)\b", sql)
         if m:
             return m.group(1)
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")

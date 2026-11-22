@@ -9,6 +9,7 @@ import cdb.btree;
 import cdb.pager;
 import cdb.tables;
 import cdb.lex;
+import cdb.state;
 
 // The executor of the engine (docs/m3-engine.md 6g): what the statements share. SELECT is in src/execs.cho, the statements that write in src/execw.cho.
 //
@@ -278,6 +279,117 @@ pub fn draw_id[&q](w: &q Work) -> [] int {
 
 pub fn draw_value[&q](w: &q Work) -> [] int {
     return w.dval;
+}
+
+// The facts of a transaction (docs/m3-engine.md 6af). Fold the changes the statement just made (`chg`) into the tree `froot` (0: none yet): a key is the table, a zero byte and the
+// plain key; a value is 66 bytes, for each of "when the transaction first touched the row" and "now" a byte (1: there is an image) and the hash of the image. The new root, or an error
+// (`too_big()` for a key the tree does not hold).
+pub fn facts_take[&q, &z](p: &!z pager.Pager, w: &!q Work, froot: int) -> [file_read, file_write] int {
+    var root = froot;
+    var at = 0;
+    var c = 0;
+    while c < w.nchg {
+        let nl = commit.be(contents(w.chg), at, 2);
+        let kl = commit.be(contents(w.chg), at + 2 + nl, 2);
+        if nl + 1 + kl > 184 {
+            return too_big();
+        }
+        var fk = copy(contents(w.chg), at + 2, nl, contents(w.key), 0);
+        contents(w.key)[fk] = byte_of(0);
+        fk = copy(contents(w.chg), at + 4 + nl, kl, contents(w.key), fk + 1);
+        at = at + 4 + nl + kl;
+        var side = 0;
+        while side < 2 {
+            let il = commit.be(contents(w.chg), at, 4);
+            at = at + 4;
+            let o = 33 * side;
+            if il == 4294967295 {
+                contents(w.uval)[o] = byte_of(0);
+                var z = 0;
+                while z < 32 {
+                    contents(w.uval)[o + 1 + z] = byte_of(0);
+                    z = z + 1;
+                }
+            } else {
+                contents(w.uval)[o] = byte_of(1);
+                state.row_hash(contents(w.chg)[at..at + il], contents(w.uval)[o + 1..o + 33]);
+                at = at + il;
+            }
+            side = side + 1;
+        }
+        let g = btree.get(p, contents(w.sc), root, contents(w.key)[0..fk], contents(w.cur));
+        if g == 66 {
+            // touched before in this transaction: what it was then stays
+            copy(contents(w.cur), 0, 33, contents(w.uval), 0);
+        } else if g != btree.not_found() {
+            return damaged();
+        }
+        var nw = 0;
+        if int_of(contents(w.uval)[0]) == 0 && int_of(contents(w.uval)[33]) == 0 {
+            // made and removed in the transaction: no fact
+            nw = root;
+            if g == 66 {
+                nw = btree.del(p, contents(w.sc), root, contents(w.key)[0..fk]);
+            }
+        } else {
+            nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..fk], contents(w.uval)[0..66]);
+        }
+        if nw < 0 {
+            return tree_err(nw);
+        }
+        root = nw;
+        c = c + 1;
+    }
+    return root;
+}
+
+// `changes` (docs/spec/state.md section 3) of the facts in the tree `froot`, into the 32 bytes of `out`: how many facts, or an error.
+pub fn facts_changes[&q, &z, &o](p: &!z pager.Pager, w: &!q Work, froot: int, out: &!o [byte]) -> [file_read] int {
+    var n = 0;
+    var kl = 0;
+    var more = froot != 0;
+    while more {
+        let r = btree.next_after(p, contents(w.sc), froot, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return tree_err(r);
+        } else {
+            let nk = r / 1024;
+            if r % 1024 != 66 || n >= 4096 {
+                return too_big();
+            }
+            kl = copy(contents(w.key2), 0, nk, contents(w.key), 0);
+            let was = int_of(contents(w.cur)[0]) == 1;
+            let is = int_of(contents(w.cur)[33]) == 1;
+            // a row that ends as it began is no fact
+            if !(was && is && same(contents(w.cur), 1, 32, contents(w.cur), 34, 32)) {
+                var z = 0;
+                while z < nk && int_of(contents(w.key2)[z]) != 0 {
+                    z = z + 1;
+                }
+                var kind = 1;
+                var ol = 32;
+                var nl = 32;
+                if !was {
+                    kind = 0;
+                    ol = 0;
+                } else if !is {
+                    kind = 2;
+                    nl = 0;
+                }
+                let el = state.put_fact(contents(w.nrow), 0, kind, contents(w.key2)[0..z], contents(w.key2)[z + 1..nk], contents(w.cur)[1..1 + ol], contents(w.cur)[34..34 + nl]);
+                if el < 0 {
+                    return unsupported();
+                }
+                state.leaf(contents(w.nrow)[0..el], contents(w.tmp)[32 * n..32 * n + 32]);
+                n = n + 1;
+            }
+        }
+    }
+    state.merkle(contents(w.tmp)[0..32 * n], n, contents(w.uval)[0..32]);
+    state.changes(n, contents(w.uval)[0..32], out);
+    return n;
 }
 
 // The row of an INSERT at which it failed (from 0).
