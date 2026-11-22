@@ -1163,7 +1163,8 @@ pub fn expr[&s, &t, &n, &k, &v, &o, &x](sql: &s [byte], toks: &t [int], from: in
                 } else if word_is(sql, a, l, "cast") && punct(sql, toks, pos + 1, end, '(') {
                     r = opush(os, st, f_cast(), 0 - 1, st[4], 0);
                     pos = pos + 2;
-                } else if is_reserved(sql, a, l) {
+                } else if is_reserved(sql, a, l) && !(punct(sql, toks, pos + 1, end, '(') && (word_is(sql, a, l, "coalesce") || word_is(sql, a, l, "greatest") || word_is(sql, a, l, "least"))) {
+                    // (COALESCE, GREATEST and LEAST are reserved words that are read as calls)
                     return fail(st, pos, e_reserved_word());
                 } else if punct(sql, toks, pos + 1, end, '(') {
                     if punct(sql, toks, pos + 2, end, ')') {

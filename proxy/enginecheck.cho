@@ -13,6 +13,7 @@ import cdb.pstore;
 import cdb.exec;
 import cdb.execs;
 import cdb.execw;
+import cdb.answer;
 
 // `enginecheck PAGEFILE [CRASH TORN]`: the engine's statements (src/exec.cho, src/execw.cho) over a page file, for tests/engine_check.py. PAGEFILE is made if it is missing; the branch is slot 0 of its catalog. Standard
 // input, a line each:
@@ -27,12 +28,13 @@ import cdb.execw;
 //     !branch S      statements go to slot S (the branch is slot 0 at start)   -> `branch`
 //     !mark          nothing                                                  -> `mark` (a separator for a test that reads the output)
 //     anything else  one SQL statement, which is run and, if it is done, becomes the state the next one sees
+//                    (`begin`, `commit` and `rollback` are answered here: the statements between them build on the transaction's own tree)
 //
 // With CRASH and TORN the process stops being able to write at step CRASH (TORN bytes of that write happen): it prints `crashed` and ends with status 6, leaving the file as a kill there would.
 //
 // For a statement: `refused TAG` (the lexer, the parser, the lowering or the engine refuses it), `error SQLSTATE`, or `ok KIND N` (N rows) followed by, for a SELECT, a line `N` with the name of each column (hex), a line `T` with the type of each column
 // and a line `R` for each row with each value (`-` null, a number, 0 or 1, or the bytes in hex, `.` if there are none); for a statement that writes, a line `C TABLE KEY BEFORE AFTER` for each change (hex,
-// `-` for no image). Then a line `.`.
+// `-` for no image). After `ok`, a line `G` with the command's tag as a client is sent it. Then a line `S` with the transaction's state as PostgreSQL reports it (`I` none, `T` in one, `E` in one that has failed), and a line `.`. Types are PostgreSQL's identifiers and values its text (src/answer.cho).
 
 fn digit(v: int) -> [] int {
     if v < 10 {
@@ -97,53 +99,40 @@ fn put_rows[&i, &q](io: &!i Io, w: &!q exec.Work) -> [io_write] int {
     var c = 0;
     while c < nc {
         putchar(io, ' ');
-        put_int(io, exec.type_of(w, c));
+        put_int(io, answer.oid(exec.type_of(w, c)));
         c = c + 1;
     }
     putchar(io, '\n');
-    var r = 0;
-    while r < exec.count_of(w) {
-        var at = exec.row_at(w, r);
-        putchar(io, 'R');
-        c = 0;
-        while c < nc {
-            putchar(io, ' ');
-            let tag = exec.row_byte(w, at);
-            if tag == 0 {
-                putchar(io, '-');
-                at = at + 1;
-            } else if tag == 1 {
-                // eight bytes, two's complement
-                var v = exec.row_byte(w, at + 1);
-                if v >= 128 {
-                    v = v - 256;
-                }
-                var k = 1;
-                while k < 8 {
-                    v = v * 256 + exec.row_byte(w, at + 1 + k);
-                    k = k + 1;
-                }
-                put_int(io, v);
-                at = at + 9;
-            } else if tag == 2 {
-                put_int(io, exec.row_byte(w, at + 1));
-                at = at + 2;
-            } else {
-                let n = exec.row_byte(w, at + 1) * 256 + exec.row_byte(w, at + 2);
-                var k = 0;
-                while k < n {
-                    hex_byte(io, exec.row_byte(w, at + 3 + k));
-                    k = k + 1;
-                }
-                if n == 0 {
+    region r {
+        let buf = alloc_slice[r](4096, byte_of(0));
+        var k = 0;
+        while k < exec.count_of(w) {
+            var at = exec.row_at(w, k);
+            putchar(io, 'R');
+            c = 0;
+            while c < nc {
+                putchar(io, ' ');
+                // the value as a client is sent it (src/answer.cho); one longer than this buffer is not printed whole here
+                let n = answer.text(exec.rows_of(w), at, buf, 0);
+                if n == 0 - 1 {
+                    putchar(io, '-');
+                } else if n == 0 {
                     putchar(io, '.');
+                } else if n < 0 {
+                    putchar(io, '?');
+                } else {
+                    var j = 0;
+                    while j < n {
+                        hex_byte(io, int_of(buf[j]));
+                        j = j + 1;
+                    }
                 }
-                at = at + 3 + n;
+                at = answer.skip(exec.rows_of(w), at);
+                c = c + 1;
             }
-            c = c + 1;
+            putchar(io, '\n');
+            k = k + 1;
         }
-        putchar(io, '\n');
-        r = r + 1;
     }
     return 0;
 }
@@ -187,7 +176,7 @@ fn put_changes[&i, &q](io: &!i Io, w: &!q exec.Work) -> [io_write] int {
 }
 
 // Run one statement over the tree `root`: the tree after it (`root` itself unless the statement is done).
-fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, sql: &s [byte], root: int, mode: int) -> [heap, io_write, file_read, file_write] int {
+fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, sql: &s [byte], root: int, mode: int, flag: &!f [int]) -> [heap, io_write, file_read, file_write] int {
     let cap = len(sql) + 4;
     var tb = box_slice(heap, 4 * cap, 0);
     var nb = box_slice(heap, 6 * (cap + 64), 0);
@@ -217,6 +206,8 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                     var rc = 0;
                                                     var kind = 0 - 1;
                                                     var named = false;
+                                                    var ctl = 0;
+                                                    var returned = 0 - 1;
                                                     let sl = exec.schema(pg, w, root, contents(mw));
                                                     let n = lex.tokenize(sql, contents(tw));
                                                     if sl < 0 {
@@ -225,6 +216,8 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                         put_str(io, "refused ");
                                                         put_str(io, lex.error_name(0 - n));
                                                         named = true;
+                                                    } else if !exec.params_fit(w, sql, contents(tw), n) {
+                                                        rc = exec.unsupported();
                                                     } else {
                                                         parse.reset(contents(sw));
                                                         let q0 = stmt.statement(sql, contents(tw), 0, n, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(cw), contents(sw));
@@ -232,6 +225,18 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                             put_str(io, "refused ");
                                                             put_str(io, parse.error_name(0 - q0));
                                                             named = true;
+                                                        } else if contents(nw)[6 * contents(sw)[2]] == parse.n_begin() || contents(nw)[6 * contents(sw)[2]] == parse.n_commit() || contents(nw)[6 * contents(sw)[2]] == parse.n_rollback() {
+                                                            // the transaction's own statements are the caller's to answer
+                                                            ctl = 20;
+                                                            if contents(nw)[6 * contents(sw)[2]] == parse.n_commit() {
+                                                                ctl = 21;
+                                                            } else if contents(nw)[6 * contents(sw)[2]] == parse.n_rollback() {
+                                                                ctl = 22;
+                                                            }
+                                                            named = true;
+                                                        } else if mode == 3 {
+                                                            // the transaction has failed: nothing runs until it is ended
+                                                            rc = exec.e_aborted();
                                                         } else {
                                                             let top = contents(sw)[2];
                                                             let ln = lower.lower(sql, contents(tw), contents(nw), contents(kw), top, contents(mw)[0..sl], contents(rw), contents(iw), contents(xw));
@@ -242,7 +247,10 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                             } else {
                                                                 let e = contents(iw)[0..ln];
                                                                 kind = int_of(e[0]);
-                                                                if mode == 1 && kind != 6 {
+                                                                if exec.params_bound(w) > 0 && kind != 6 && kind != 1 && kind != 2 && kind != 3 {
+                                                                    // PostgreSQL takes no parameters in a statement that is not a query
+                                                                    rc = exec.unsupported();
+                                                                } else if mode == 1 && kind != 6 {
                                                                     // the tree read AS OF a transaction is not one to write to
                                                                     put_str(io, "refused engine-as-of-write");
                                                                     named = true;
@@ -251,8 +259,42 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                                     kind = 9;
                                                                 } else if kind == 6 {
                                                                     rc = execs.select(pg, w, root, e, contents(xw));
+                                                                } else if (kind == 1 || kind == 2 || kind == 3) && contents(nw)[6 * top + 5] >= 0 {
+                                                                    // RETURNING (docs/m3-engine.md 6aa): the items are a SELECT over the table, read before the statement over no rows (what is
+                                                                    // wrong with them is known before anything is written) and after it over the rows it wrote
+                                                                    let rn = contents(nw)[6 * top + 5];
+                                                                    region rr {
+                                                                        let ir2 = alloc_slice[rr](32768, byte_of(0));
+                                                                        let sc2 = alloc_slice[rr](1024, 0);
+                                                                        let l2 = lower.lower(sql, contents(tw), contents(nw), contents(kw), rn, contents(mw)[0..sl], contents(rw), ir2, sc2);
+                                                                        if l2 < 0 {
+                                                                            put_str(io, "refused ");
+                                                                            put_str(io, lower.error_name(0 - l2));
+                                                                            named = true;
+                                                                        } else {
+                                                                            exec.ret_set(w, 3);
+                                                                            rc = execs.select(pg, w, root, ir2[0..l2], sc2);
+                                                                            if rc == 0 {
+                                                                                exec.ret_set(w, 1);
+                                                                                if kind == 1 {
+                                                                                    rc = execw.insert(pg, w, root, e, contents(xw), contents(nw)[6 * top + 4] == 1);
+                                                                                } else if kind == 2 {
+                                                                                    rc = execw.update(pg, w, root, e, contents(xw));
+                                                                                } else {
+                                                                                    rc = execw.delete(pg, w, root, e, contents(xw));
+                                                                                }
+                                                                                if rc == 0 {
+                                                                                    let r1 = exec.root_of(w);
+                                                                                    exec.ret_set(w, 2);
+                                                                                    rc = execs.select(pg, w, r1, ir2[0..l2], sc2);
+                                                                                    returned = rn;
+                                                                                }
+                                                                            }
+                                                                            exec.ret_set(w, 0);
+                                                                        }
+                                                                    }
                                                                 } else if kind == 1 {
-                                                                    rc = execw.insert(pg, w, root, e, contents(xw));
+                                                                    rc = execw.insert(pg, w, root, e, contents(xw), contents(nw)[6 * top + 4] == 1);
                                                                 } else if kind == 2 {
                                                                     rc = execw.update(pg, w, root, e, contents(xw));
                                                                 } else if kind == 3 {
@@ -310,9 +352,23 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                             }
                                                             put_int(io, exec.count_of(w));
                                                             putchar(io, '\n');
-                                                            if kind == 6 {
+                                                            if kind != 9 {
+                                                                // the command's tag, as a client is sent it
+                                                                putchar(io, 'G');
+                                                                putchar(io, ' ');
+                                                                region tr {
+                                                                    let tb2 = alloc_slice[tr](64, byte_of(0));
+                                                                    let tn = answer.tag(kind, exec.count_of(w), tb2);
+                                                                    put_str(io, tb2[0..tn]);
+                                                                }
+                                                                putchar(io, '\n');
+                                                            }
+                                                            if kind == 6 || returned >= 0 {
                                                                 // the names of the columns, as a client is sent them: what the lowering knows and the IR does not carry
-                                                                let top2 = contents(sw)[2];
+                                                                var top2 = contents(sw)[2];
+                                                                if returned >= 0 {
+                                                                    top2 = returned;
+                                                                }
                                                                 let nn = lower.output_names(sql, contents(tw), contents(nw), contents(kw), top2, contents(mw)[0..sl], contents(xw), contents(iw));
                                                                 putchar(io, 'N');
                                                                 var na = 0;
@@ -331,17 +387,20 @@ fn run_sql[&h, &i, &z, &q, &s](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                                                 }
                                                                 putchar(io, '\n');
                                                                 put_rows(io, w);
-                                                            } else if kind < 9 {
+                                                            }
+                                                            if kind != 6 && kind < 9 {
                                                                 put_changes(io, w);
                                                             }
-                                                            put_str(io, ".");
                                                             out = exec.root_of(w);
                                                         }
                                                     }
-                                                    if named || rc != 0 {
-                                                        put_str(io, "\n.");
+                                                    flag[0] = 0;
+                                                    if ctl != 0 {
+                                                        out = 0 - ctl;
+                                                    } else if named || rc != 0 {
+                                                        putchar(io, '\n');
+                                                        flag[0] = 1;
                                                     }
-                                                    putchar(io, '\n');
                                                 }
                                             }
                                         }
@@ -383,6 +442,48 @@ fn starts[&a](all: &a [byte], ls: int, le: int, word: &static [byte]) -> [] bool
     return true;
 }
 
+fn unhex(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0 - 1;
+}
+
+// One value of a `!params` line, as the next parameter: false if it is not hex, or there is no room.
+fn set_param[&q, &t](w: &!q exec.Work, tok: &t [byte]) -> [] bool {
+    if len(tok) == 1 && int_of(tok[0]) == '-' {
+        return exec.param_add(w, tok[0..0], true);
+    }
+    if len(tok) == 1 && int_of(tok[0]) == '.' {
+        return exec.param_add(w, tok[0..0], false);
+    }
+    if len(tok) < 2 || len(tok) % 2 != 0 {
+        return false;
+    }
+    var ok = true;
+    region r {
+        let b = alloc_slice[r](len(tok) / 2, byte_of(0));
+        var i = 0;
+        while i < len(b) {
+            let hi = unhex(int_of(tok[2 * i]));
+            let lo = unhex(int_of(tok[2 * i + 1]));
+            if hi < 0 || lo < 0 {
+                ok = false;
+            } else {
+                b[i] = byte_of(hi * 16 + lo);
+            }
+            i = i + 1;
+        }
+        if ok {
+            ok = exec.param_add(w, b, false);
+        }
+    }
+    return ok;
+}
+
 // Whether the line begins with `word` and goes on.
 fn begins[&a](all: &a [byte], ls: int, le: int, word: &static [byte]) -> [] bool {
     if le - ls <= len(word) {
@@ -422,133 +523,240 @@ fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &
     var status = 0;
     var cur = 0;
     var view = 0 - 1;
-    borrow mut roots as &!rw in {
-        let rs = contents(rw);
-        seq = pstore.load(pg, exec.scratch(w), rs);
-        if seq == pstore.no_database() {
-            seq = pstore.init(pg, exec.scratch(w));
-        }
-        if seq < 0 {
-            put_str(io, "err ");
-            put_int(io, seq);
-            putchar(io, '\n');
-            status = 5;
-        }
-        var ls = 0;
-        while ls < len(all) && status == 0 {
-            var le = ls;
-            while le < len(all) && int_of(all[le]) != '\n' {
-                le = le + 1;
+    var tstate = 0;
+    var troot = 0;
+    var flags = box_slice(heap, 2, 0);
+    borrow mut flags as &!fw in {
+        borrow mut roots as &!rw in {
+            let rs = contents(rw);
+            let fl = contents(fw);
+            seq = pstore.load(pg, exec.scratch(w), rs);
+            if seq == pstore.no_database() {
+                seq = pstore.init(pg, exec.scratch(w));
             }
-            // each line is a window of the pager: the pages a statement hands out are its own until it is done
-            let wr = pager.begin(pg);
-            if wr < 0 && !pager.crashed(pg) {
+            if seq < 0 {
                 put_str(io, "err ");
-                put_int(io, wr);
+                put_int(io, seq);
                 putchar(io, '\n');
                 status = 5;
             }
-            if starts(all, ls, le, "!commit") {
-                let r = pstore.commit(pg, exec.scratch(w), rs, seq);
-                if r < 0 {
-                    put_str(io, "err ");
-                    put_int(io, r);
-                } else {
-                    seq = r;
-                    put_str(io, "committed ");
-                    put_int(io, r);
+            var ls = 0;
+            while ls < len(all) && status == 0 {
+                var le = ls;
+                while le < len(all) && int_of(all[le]) != '\n' {
+                    le = le + 1;
                 }
-                putchar(io, '\n');
-            } else if starts(all, ls, le, "!sweep") {
-                let r = pstore.sweep(heap, pg, exec.scratch(w), rs);
-                if r < 0 {
+                // each line is a window of the pager: the pages a statement hands out are its own until it is done
+                let wr = pager.begin(pg);
+                if wr < 0 && !pager.crashed(pg) {
                     put_str(io, "err ");
-                } else {
-                    put_str(io, "swept ");
+                    put_int(io, wr);
+                    putchar(io, '\n');
+                    status = 5;
                 }
-                put_int(io, r);
-                putchar(io, '\n');
-            } else if starts(all, ls, le, "!mark") {
-                put_str(io, "mark\n");
-            } else if starts(all, ls, le, "!steps") {
-                put_str(io, "steps ");
-                put_int(io, pager.steps(pg));
-                putchar(io, '\n');
-            } else if starts(all, ls, le, "!txn") {
-                put_str(io, "txn ");
-                put_int(io, exec.last_txn(pg, w, rs[cur]));
-                putchar(io, '\n');
-            } else if begins(all, ls, le, "!asof ") {
-                if int_of(all[ls + 6]) == '-' {
-                    view = 0 - 1;
-                    put_str(io, "asof -\n");
-                } else {
-                    let t = number(all, ls + 6, le);
-                    view = exec.as_of(pg, w, rs[cur], t);
-                    if view < 0 {
+                if starts(all, ls, le, "!commit") {
+                    let r = pstore.commit(pg, exec.scratch(w), rs, seq);
+                    if r < 0 {
                         put_str(io, "err ");
-                        put_int(io, view);
-                        view = 0 - 1;
+                        put_int(io, r);
                     } else {
-                        put_str(io, "asof ");
-                        put_int(io, t);
+                        seq = r;
+                        put_str(io, "committed ");
+                        put_int(io, r);
                     }
                     putchar(io, '\n');
-                }
-            } else if begins(all, ls, le, "!erase ") {
-                // the row a `delete from T where KEY = CONSTANT` names, and its past
-                if view < 0 {
-                    rs[cur] = run_sql(heap, io, pg, w, all[ls + 7..le], rs[cur], 2);
-                }
-            } else if begins(all, ls, le, "!fork ") {
-                let to = number(all, ls + 6, le);
-                if to >= 0 && to < 16 {
-                    rs[to] = rs[cur];
-                    put_str(io, "forked\n");
-                }
-            } else if begins(all, ls, le, "!branch ") {
-                let to = number(all, ls + 8, le);
-                if to >= 0 && to < 16 {
-                    cur = to;
-                    view = 0 - 1;
-                    put_str(io, "branch\n");
-                }
-            } else if le > ls {
-                if view >= 0 {
-                    run_sql(heap, io, pg, w, all[ls..le], view, 1);
-                } else {
-                    // a statement that writes is the branch's next transaction (one that fails leaves the tree, and so the number, as they were)
-                    let last = exec.last_txn(pg, w, rs[cur]);
-                    if last < 0 {
+                } else if starts(all, ls, le, "!sweep") {
+                    let r = pstore.sweep(heap, pg, exec.scratch(w), rs);
+                    if r < 0 {
                         put_str(io, "err ");
-                        put_int(io, last);
-                        putchar(io, '\n');
                     } else {
-                        exec.set_txn(w, last + 1);
-                        let after = run_sql(heap, io, pg, w, all[ls..le], rs[cur], 0);
-                        if after != rs[cur] {
-                            // the statement wrote: its number is used
-                            let marked = exec.mark_txn(pg, w, after, last + 1);
-                            if marked < 0 {
-                                put_str(io, "err ");
-                                put_int(io, marked);
-                                putchar(io, '\n');
-                            } else {
-                                rs[cur] = marked;
+                        put_str(io, "swept ");
+                    }
+                    put_int(io, r);
+                    putchar(io, '\n');
+                } else if starts(all, ls, le, "!mark") {
+                    put_str(io, "mark\n");
+                } else if starts(all, ls, le, "!steps") {
+                    put_str(io, "steps ");
+                    put_int(io, pager.steps(pg));
+                    putchar(io, '\n');
+                } else if starts(all, ls, le, "!txn") {
+                    put_str(io, "txn ");
+                    put_int(io, exec.last_txn(pg, w, rs[cur]));
+                    putchar(io, '\n');
+                } else if begins(all, ls, le, "!asof ") {
+                    if int_of(all[ls + 6]) == '-' {
+                        view = 0 - 1;
+                        put_str(io, "asof -\n");
+                    } else {
+                        let t = number(all, ls + 6, le);
+                        view = exec.as_of(pg, w, rs[cur], t);
+                        if view < 0 {
+                            put_str(io, "err ");
+                            put_int(io, view);
+                            view = 0 - 1;
+                        } else {
+                            put_str(io, "asof ");
+                            put_int(io, t);
+                        }
+                        putchar(io, '\n');
+                    }
+                } else if begins(all, ls, le, "!erase ") {
+                    // the row a `delete from T where KEY = CONSTANT` names, and its past
+                    if view < 0 {
+                        rs[cur] = run_sql(heap, io, pg, w, all[ls + 7..le], rs[cur], 2, fl);
+                        put_str(io, "S I\n.\n");
+                    }
+                } else if begins(all, ls, le, "!fork ") {
+                    let to = number(all, ls + 6, le);
+                    if to >= 0 && to < 16 {
+                        rs[to] = rs[cur];
+                        put_str(io, "forked\n");
+                    }
+                } else if begins(all, ls, le, "!branch ") {
+                    let to = number(all, ls + 8, le);
+                    if to >= 0 && to < 16 {
+                        cur = to;
+                        view = 0 - 1;
+                        put_str(io, "branch\n");
+                    }
+                } else if begins(all, ls, le, "!params ") {
+                    // the values bound to the parameters of the next statement: each in hex, `.` for an empty one, `-` for a null
+                    exec.params_clear(w);
+                    var okp = true;
+                    var a = ls + 8;
+                    while a < le && okp {
+                        var b = a;
+                        while b < le && int_of(all[b]) != ' ' {
+                            b = b + 1;
+                        }
+                        okp = set_param(w, all[a..b]);
+                        a = b + 1;
+                    }
+                    if !okp {
+                        put_str(io, "err params\n");
+                        status = 5;
+                    }
+                } else if le > ls {
+                    if view >= 0 {
+                        run_sql(heap, io, pg, w, all[ls..le], view, 1, fl);
+                        put_str(io, "S I\n.\n");
+                    } else {
+                        // a statement outside a transaction is one of its own; inside one (BEGIN ... COMMIT) the statements build on the transaction's tree, which becomes the branch's at COMMIT
+                        let last = exec.last_txn(pg, w, rs[cur]);
+                        if last < 0 {
+                            put_str(io, "err ");
+                            put_int(io, last);
+                            putchar(io, '\n');
+                        } else if tstate == 0 {
+                            exec.set_txn(w, last + 1);
+                            exec.set_once(w, true);
+                            let after = run_sql(heap, io, pg, w, all[ls..le], rs[cur], 0, fl);
+                            if after == 0 - 20 {
+                                tstate = 1;
+                                troot = rs[cur];
+                                put_str(io, "ok BEGIN 0\nG BEGIN\n");
+                            } else if after == 0 - 21 {
+                                put_str(io, "ok COMMIT 0\nG COMMIT\n");
+                            } else if after == 0 - 22 {
+                                put_str(io, "ok ROLLBACK 0\nG ROLLBACK\n");
+                            } else if fl[0] != 0 {
+                                // the statement failed, or was refused: what it drew from a counter stays drawn (docs/m3-engine.md 6y)
+                                let sr = exec.seq_replay(pg, w, rs[cur]);
+                                if sr < 0 {
+                                    put_str(io, "err ");
+                                    put_int(io, sr);
+                                    putchar(io, '\n');
+                                } else {
+                                    rs[cur] = sr;
+                                }
+                            } else if after != rs[cur] {
+                                // the statement wrote: its number is used
+                                let marked = exec.mark_txn(pg, w, after, last + 1);
+                                if marked < 0 {
+                                    put_str(io, "err ");
+                                    put_int(io, marked);
+                                    putchar(io, '\n');
+                                } else {
+                                    rs[cur] = marked;
+                                }
                             }
+                            if tstate == 0 {
+                                // nothing is left to roll back: the tree that stays has what was drawn
+                                exec.seq_forget(w);
+                            }
+                        } else {
+                            exec.set_txn(w, last + 1);
+                            // a key may be written more than once in a transaction: what it held before the transaction is its first record (6n)
+                            exec.set_once(w, false);
+                            var mode = 0;
+                            if tstate == 2 {
+                                mode = 3;
+                            }
+                            let after = run_sql(heap, io, pg, w, all[ls..le], troot, mode, fl);
+                            if after == 0 - 20 && tstate == 2 {
+                                // in a transaction that has failed BEGIN is refused like any other statement
+                                put_str(io, "error 25P02\n");
+                            } else if after == 0 - 20 {
+                                // PostgreSQL warns and goes on
+                                put_str(io, "ok BEGIN 0\nG BEGIN\n");
+                            } else if after == 0 - 21 || after == 0 - 22 {
+                                if after == 0 - 21 && tstate == 1 {
+                                    if troot != rs[cur] {
+                                        let marked = exec.mark_txn(pg, w, troot, last + 1);
+                                        if marked < 0 {
+                                            put_str(io, "err ");
+                                            put_int(io, marked);
+                                            putchar(io, '\n');
+                                        } else {
+                                            rs[cur] = marked;
+                                        }
+                                    }
+                                    put_str(io, "ok COMMIT 0\nG COMMIT\n");
+                                    exec.seq_forget(w);
+                                } else {
+                                    // a rollback, or the commit of a transaction that failed: what its statements drew from counters stays drawn
+                                    let sr = exec.seq_replay(pg, w, rs[cur]);
+                                    if sr < 0 {
+                                        put_str(io, "err ");
+                                        put_int(io, sr);
+                                        putchar(io, '\n');
+                                    } else {
+                                        rs[cur] = sr;
+                                    }
+                                    put_str(io, "ok ROLLBACK 0\nG ROLLBACK\n");
+                                }
+                                tstate = 0;
+                            } else if fl[0] != 0 {
+                                // an error, or a refusal: the transaction has failed
+                                tstate = 2;
+                            } else {
+                                troot = after;
+                            }
+                        }
+                        if tstate == 0 {
+                            put_str(io, "S I\n.\n");
+                        } else if tstate == 1 {
+                            put_str(io, "S T\n.\n");
+                        } else {
+                            put_str(io, "S E\n.\n");
                         }
                     }
                 }
+                if !begins(all, ls, le, "!params ") {
+                    exec.params_clear(w);
+                }
+                if pager.crashed(pg) {
+                    // the crash point was reached (the test hook of src/pager.cho): nothing more is written, as if the process had died there
+                    put_str(io, "crashed\n");
+                    status = 6;
+                }
+                ls = le + 1;
             }
-            if pager.crashed(pg) {
-                // the crash point was reached (the test hook of src/pager.cho): nothing more is written, as if the process had died there
-                put_str(io, "crashed\n");
-                status = 6;
-            }
-            ls = le + 1;
         }
     }
     unbox_slice(heap, roots);
+    unbox_slice(heap, flags);
     return status;
 }
 

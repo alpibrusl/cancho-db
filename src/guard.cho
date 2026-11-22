@@ -201,7 +201,12 @@ pub fn check[&h, &k, &m, &q, &o, &r, &d, &x, &f](heap: &!h Heap, tk: &k [byte], 
                                                             let from = contents(cw)[2 * i];
                                                             let to = contents(cw)[2 * i + 1];
                                                             parse.reset(contents(sw));
-                                                            let pq = stmt.statement(sql, toks, from, to, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(lw), contents(sw));
+                                                            var pq = stmt.statement(sql, toks, from, to, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(lw), contents(sw));
+                                                            if pq >= 0 && contents(sw)[12] != 0 {
+                                                                // a form that only the engine takes (docs/m3-engine.md 6x): nothing was promised about it behind the proxy
+                                                                contents(sw)[3] = from;
+                                                                pq = 0 - contents(sw)[12];
+                                                            }
                                                             var txn = 0;
                                                             if pq >= 0 {
                                                                 let rk = contents(nw)[6 * contents(sw)[2]];

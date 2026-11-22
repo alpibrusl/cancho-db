@@ -84,6 +84,9 @@ class Gen:
         k = r.random()
         if d <= 0 or k < .3:
             return r.choice(["i2", "i4", "i8", "i4", "id", "0", "1", "2", "3", "7", "10", "100", "32767", "2147483647", "2147483648", "9223372036854775807", "'5'", "'12'"])
+        if k < .37:
+            # COALESCE, GREATEST, LEAST (docs/m3-engine.md 6ab): a null among the arguments now and then
+            return "%s(%s)" % (r.choice(["coalesce", "coalesce", "greatest", "least"]), ", ".join(r.choice([self.int_(d - 1), self.int_(d - 1), self.int_(d - 1), "null"]) for _ in range(r.choice([1, 2, 2, 3]))))
         if k < .62:
             return "(%s %s %s)" % (self.int_(d - 1), r.choice(["+", "-", "*", "/", "%", "+", "-"]), self.int_(d - 1))
         if k < .68:
@@ -125,6 +128,8 @@ class Gen:
         k = r.random()
         if d <= 0 or k < .4:
             return r.choice(["s", "s", "'a'", "'abc'", "'%'", "'a%'", "'_b_'", "'ABC'", "''", "'12'", "' 42 '", "'x'", "'true'", "'a\\%b'", "'%b\\_c'", "'ñ%'", "'_andú'"])
+        if k < .46:
+            return "%s(%s)" % (r.choice(["coalesce", "coalesce", "greatest", "least"]), ", ".join(r.choice([self.text_(d - 1), self.text_(d - 1), "null"]) for _ in range(r.choice([1, 2, 2, 3]))))
         if k < .65:
             return "(%s || %s)" % (self.text_(d - 1), self.text_(d - 1))
         if k < .80:
@@ -148,8 +153,10 @@ class Gen:
             return "(- %s)" % self.wild(d - 1)
         if k < .8:
             return "cast(%s as %s)" % (self.wild(d - 1), r.choice(["integer", "text", "boolean", "bigint", "smallint", "bytea", "varchar"]))
-        if k < .9:
+        if k < .88:
             return "case when %s then %s else %s end" % (self.wild(d - 1), self.wild(d - 1), self.wild(d - 1))
+        if k < .94:
+            return "%s(%s, %s)" % (r.choice(["coalesce", "greatest", "least"]), self.wild(d - 1), self.wild(d - 1))
         return "(%s in (%s, %s))" % (self.wild(d - 1), self.wild(d - 1), self.wild(d - 1))
 
     def expr(self):

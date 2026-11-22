@@ -73,7 +73,7 @@ fn tree_key[&q, &r](w: &!q exec.Work, r: &r [byte]) -> [] int {
 // Evaluate the expression at `at` of `e` for column `c` and stage its stored value in `tmp` at `fill`: the position after it; -1 if it raised an error (noted); or a refusal (below -1).
 fn staged[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], ntab: int, c: int, fill: int) -> [] int {
     let b = eval.max_nodes();
-    let r = exec.ev(w, e, at, kinds, ntab);
+    let r = exec.ev_open(w, e, at, kinds, ntab);
     if r < 0 {
         return exec.unsupported();
     }
@@ -98,7 +98,7 @@ fn staged[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], 
 // Before any row: the expression at `at` for column `c` is checked. An error of its types, or an error of a constant (which PostgreSQL raises when it plans, whatever the rows), is noted. 0 or a refusal.
 fn checked[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], ntab: int, c: int) -> [] int {
     let b = eval.max_nodes();
-    let r = exec.ev(w, e, at, kinds, ntab);
+    let r = exec.ev_open(w, e, at, kinds, ntab);
     if r < 0 {
         return exec.stat(w, r);
     }
@@ -122,7 +122,7 @@ fn checked[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int],
 // ---- INSERT
 
 // INSERT (ir.md section 2): the rows as written, each stored before the next is checked.
-pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read, file_write] int {
+pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int], skip: bool) -> [file_read, file_write] int {
     exec.start(w, root);
     if len(e) < 3 || int_of(e[0]) != 1 {
         return exec.malformed();
@@ -141,6 +141,17 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         return exec.too_big();
     }
     let n = columns(w);
+    // an identity column takes its values from the table's counter
+    let el0 = w.elen;
+    let ic = tables.identity_col(contents(w.ent)[0..el0]);
+    let tid = w.tid;
+    var last = 0;
+    if ic >= 0 {
+        last = exec.seq_last(p, w, root, tid);
+        if last < 0 {
+            return exec.damaged();
+        }
+    }
     var i = 0;
     while i < nc {
         if at + 2 > len(e) || at + 2 + commit.be(e, at, 2) > len(e) {
@@ -149,6 +160,10 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         let c = column(w, e, at);
         if c < 0 {
             return exec.malformed();
+        }
+        if c == ic {
+            // a value given to an identity column: PostgreSQL's error (428C9) is not reproduced
+            return exec.unsupported();
         }
         var j = 0;
         while j < i {
@@ -218,7 +233,14 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                     }
                     i = i + 1;
                 }
-                if from >= 0 {
+                if c == ic {
+                    if ra + 9 > exec.max_stored_row() {
+                        return exec.too_big();
+                    }
+                    contents(w.nrow)[ra] = byte_of(1);
+                    exec.put_i64(contents(w.nrow), ra + 1, last + 1 + r);
+                    ra = ra + 9;
+                } else if from >= 0 {
                     let l = tables.stored_len(contents(w.tmp), from);
                     if ra + l > exec.max_stored_row() {
                         return exec.too_big();
@@ -257,11 +279,53 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if w.code != 0 {
         return exec.verdict(w);
     }
-    return store_rows(p, w, root, nr);
+    let sr = store_rows(p, w, root, nr, skip);
+    if ic >= 0 && sr >= 0 {
+        // the values drawn are drawn for good (PostgreSQL draws one for each row it reaches): every row's, or those up to the row that failed
+        var drawn = nr;
+        if sr > 0 {
+            drawn = exec.failed_row(w) + 1;
+        }
+        if drawn > 0 {
+            if !exec.seq_note(w, tid, last + drawn) {
+                return exec.too_big();
+            }
+            if sr == 0 {
+                let nroot = w.root;
+                let pr = exec.seq_put(p, w, nroot, tid, last + drawn);
+                if pr < 0 {
+                    return pr;
+                }
+                w.root = pr;
+            }
+        }
+    }
+    return sr;
+}
+
+// Whether the row `r` has a value outside the range its column was given (a check; a null is inside).
+fn range_out[&q, &r](w: &!q exec.Work, r: &r [byte]) -> [] bool {
+    let el = w.elen;
+    let n = columns(w);
+    var at = 0;
+    var c = 0;
+    while c < n {
+        let ra = tables.range_at(contents(w.ent)[0..el], c);
+        if ra >= 0 && int_of(r[at]) == 1 {
+            let v = row.int_at(r, at + 1);
+            if v < row.int_at(contents(w.ent), ra) || v > row.int_at(contents(w.ent), ra + 8) {
+                return true;
+            }
+        }
+        at = at + tables.stored_len(r, at);
+        c = c + 1;
+    }
+    return false;
 }
 
 // Store the `nr` rows staged in `rows` (a `u16` length before each), in order: the first row that has a null where none is taken, or whose key is there already, is the statement's error.
-fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int) -> [file_read, file_write] int {
+// With `skip` (ON CONFLICT DO NOTHING) a row whose key is there, or was stored by an earlier row, is left out and is no error; its nulls and its ranges are tested all the same, as PostgreSQL tests them first.
+fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int, skip: bool) -> [file_read, file_write] int {
     var nroot = root;
     var ra = 0;
     var r = 0;
@@ -270,30 +334,40 @@ fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int) 
         exec.copy(contents(w.rows), ra + 2, rl, contents(w.nrow), 0);
         ra = ra + 2 + rl;
         exec.copy(contents(w.nrow), 0, rl, contents(w.cur), 0);
+        exec.set_failed_row(w, r);
         if null_in(w, contents(w.cur)[0..rl]) {
             return exec.e_not_null();
+        }
+        if range_out(w, contents(w.cur)[0..rl]) {
+            return exec.e_check();
         }
         let kl = tree_key(w, contents(w.cur)[0..rl]);
         if kl < 0 {
             return exec.too_big();
         }
         let g = btree.get(p, contents(w.sc), nroot, contents(w.key2)[0..kl], contents(w.nrow));
-        if g >= 0 {
+        if g >= 0 && !skip {
             return exec.e_unique();
         }
-        if g != btree.not_found() {
+        if g < 0 && g != btree.not_found() {
             return exec.tree_err(g);
         }
-        let nw = exec.put_known(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl], contents(w.cur)[0..0], false);
-        if nw < 0 {
-            return nw;
+        if g < 0 {
+            let nw = exec.put_known(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl], contents(w.cur)[0..0], false);
+            if nw < 0 {
+                return nw;
+            }
+            nroot = nw;
+            let cr = exec.change(w, contents(w.cur)[0..0], false, contents(w.cur)[0..rl], true);
+            if cr < 0 {
+                return cr;
+            }
+            let rr = exec.ret_row(w, contents(w.cur)[0..rl]);
+            if rr < 0 {
+                return rr;
+            }
+            w.count = w.count + 1;
         }
-        nroot = nw;
-        let cr = exec.change(w, contents(w.cur)[0..0], false, contents(w.cur)[0..rl], true);
-        if cr < 0 {
-            return cr;
-        }
-        w.count = w.count + 1;
         r = r + 1;
     }
     w.root = nroot;
@@ -339,6 +413,11 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         let c = column(w, e, at);
         if c < 0 {
             return exec.malformed();
+        }
+        let el0 = w.elen;
+        if c == tables.identity_col(contents(w.ent)[0..el0]) {
+            // an identity column is not set: PostgreSQL's error (428C9) is not reproduced
+            return exec.unsupported();
         }
         var j = 0;
         while j < i {
@@ -458,6 +537,15 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                     if null_in(w, contents(w.nrow)[0..ra]) {
                         exec.note(w, exec.e_not_null());
                         bad = true;
+                    } else if range_out(w, contents(w.nrow)[0..ra]) {
+                        exec.note(w, exec.e_check());
+                        bad = true;
+                    } else {
+                        // the row as it is after the update, changed or not: what RETURNING reads
+                        let rr = exec.ret_row(w, contents(w.nrow)[0..ra]);
+                        if rr < 0 {
+                            return rr;
+                        }
                     }
                 }
                 if !bad && !exec.same(contents(w.cur), 0, rl, contents(w.nrow), 0, ra) {
@@ -674,6 +762,10 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                 if cr < 0 {
                     return cr;
                 }
+                let rr = exec.ret_row(w, contents(w.cur)[0..rl]);
+                if rr < 0 {
+                    return rr;
+                }
                 w.count = w.count + 1;
             }
         }
@@ -777,18 +869,40 @@ fn name_ok[&d](data: &d [byte], at: int, n: int) -> [] bool {
 // Read column definitions (the children of the node `list`: the first of them is column `c0` of the table, the last column `nc - 1`) into the entry being built: the definition in `ent` (the columns
 // before `c0` are there already, from 8; these go from `da0`), the marks and defaults in `tmp` from `xa0`. `keys0` of the columns before are the key. Errors are noted. The end of the definition, with
 // the end of the marks and the number of key columns left in `pos` (`exec.p_ddl`); or a refusal.
-fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], list: int, c0: int, nc: int, da0: int, xa0: int, keys0: int) -> [] int {
+fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], list: int, c0: int, nc: int, da0: int, xa0: int, keys0: int, skip: int) -> [] int {
     let b = eval.max_nodes();
     var da = da0;
     var xa = xa0;
     var keys = keys0;
     var c = c0;
+    contents(w.pos)[exec.p_ddl() + 2] = 0;
     while c < nc {
-        let cd = kids[nodes[6 * list + 2] + c - c0];
+        // `skip` is the child of the list that is no column (a table's PRIMARY KEY (...)), or -1
+        var ci = c - c0;
+        if skip >= 0 && ci >= skip {
+            ci = ci + 1;
+        }
+        let cd = kids[nodes[6 * list + 2] + ci];
         if nodes[6 * cd] != parse.n_coldef() || nodes[6 * cd + 3] < 1 {
             return exec.malformed();
         }
         let flags = nodes[6 * cd + 4];
+        if flags / 32 % 2 == 1 && (c0 != 0 || flags / 8 % 2 == 1 || nodes[6 * cd + 3] - 1 - flags / 16 % 2 > 0) {
+            // an identity column added to a table that has rows, or one with a default: not built
+            return exec.unsupported();
+        }
+        // the children after the type: the default and the check, in the order the flags say (src/stmt.cho)
+        let has_check = flags / 16 % 2;
+        let has_default = nodes[6 * cd + 3] - 1 - has_check;
+        var def_kid = 1;
+        var chk_kid = 1 + has_default;
+        if flags / 64 % 2 == 1 {
+            def_kid = 2;
+            chk_kid = 1;
+        }
+        if has_default < 0 || has_default > 1 {
+            return exec.malformed();
+        }
         let tyn = kids[nodes[6 * cd + 2]];
         let code = nodes[6 * tyn + 1];
         var ty = 0;
@@ -841,14 +955,20 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
         build.put_be(contents(w.ent), da + 2, cl, 2);
         da = da + 4 + cl;
         var marks = flags % 2;
-        if nodes[6 * cd + 3] >= 2 {
-            let dn = kids[nodes[6 * cd + 2] + 1];
+        let ma = xa;
+        xa = xa + 1;
+        if has_default == 1 {
+            let dn = kids[nodes[6 * cd + 2] + def_kid];
             let ln = lower.literal(sql, toks, nodes, kids, dn, contents(w.lrs), contents(w.lit), contents(w.lsc));
             if ln < 0 {
                 return exec.unsupported();
             }
-            contents(w.info)[0] = 0;
+            contents(w.info)[0] = exec.arena_start(w);
             let r = eval.eval(contents(w.lit)[0..ln], 0, contents(w.lsc), contents(w.ctx), contents(w.cx), 0, contents(w.ws), contents(w.ar), contents(w.info));
+            if r > 0 {
+                // a parameter: PostgreSQL takes none in a definition
+                return exec.unsupported();
+            }
             if r < 0 {
                 let s = exec.stat(w, r);
                 if s < 0 {
@@ -870,8 +990,7 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
                     exec.note(w, contents(w.ws)[b + 2] - 1);
                 } else {
                     marks = marks + 2;
-                    contents(w.tmp)[xa] = byte_of(marks);
-                    let f = exec.enc(contents(w.tmp), xa + 1, contents(w.ws), b, contents(w.ar));
+                    let f = exec.enc(contents(w.tmp), xa, contents(w.ws), b, contents(w.ar));
                     if f == 0 - 1 {
                         return exec.too_big();
                     }
@@ -882,10 +1001,57 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
                 }
             }
         }
-        if marks < 2 {
-            contents(w.tmp)[xa] = byte_of(marks);
-            xa = xa + 1;
+        if has_check == 1 {
+            // a range: `check (c between lo and hi)`, c this column and an integer, lo and hi integer literals (docs/m3-engine.md 6x)
+            let cn = kids[nodes[6 * cd + 2] + chk_kid];
+            if nodes[6 * cn] != parse.n_between() || nodes[6 * cn + 1] != 0 || nodes[6 * cn + 3] != 3 || ty != row.t_int() && ty != row.t_int4() && ty != row.t_int2() {
+                return exec.unsupported();
+            }
+            let subj = kids[nodes[6 * cn + 2]];
+            if nodes[6 * subj] != parse.n_col() || nodes[6 * subj + 4] >= 0 {
+                return exec.unsupported();
+            }
+            let sl = lower.name_text(sql, toks, nodes[6 * subj + 1], contents(w.nrow)[0..256], 0);
+            if sl < 0 || !exec.same(contents(w.nrow), 0, sl, contents(w.ent), da - cl, cl) {
+                return exec.unsupported();
+            }
+            var which = 1;
+            while which <= 2 {
+                var bn = kids[nodes[6 * cn + 2] + which];
+                var sign = 1;
+                if nodes[6 * bn] == parse.n_neg() {
+                    sign = 0 - 1;
+                    bn = kids[nodes[6 * bn + 2]];
+                }
+                let tok = nodes[6 * bn + 1];
+                if nodes[6 * bn] != parse.n_num() || parse.tlen(toks, tok) > 18 {
+                    return exec.unsupported();
+                }
+                var v = 0;
+                var q = parse.tstart(toks, tok);
+                while q < parse.tstart(toks, tok) + parse.tlen(toks, tok) {
+                    let d = int_of(sql[q]);
+                    if d < '0' || d > '9' {
+                        return exec.unsupported();
+                    }
+                    v = v * 10 + d - '0';
+                    q = q + 1;
+                }
+                exec.put_i64(contents(w.tmp), xa, sign * v);
+                xa = xa + 8;
+                which = which + 1;
+            }
+            marks = marks + 4;
         }
+        if flags / 32 % 2 == 1 {
+            // an identity column: an integer, one a table (PostgreSQL takes several; hooks has one)
+            if ty != row.t_int() && ty != row.t_int4() && ty != row.t_int2() || contents(w.pos)[exec.p_ddl() + 2] != 0 {
+                return exec.unsupported();
+            }
+            contents(w.pos)[exec.p_ddl() + 2] = 1;
+            marks = marks + 8;
+        }
+        contents(w.tmp)[ma] = byte_of(marks);
         if da + xa > exec.max_stored_row() {
             return exec.too_big();
         }
@@ -909,17 +1075,87 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     if !name_ok(e, 4, nl) {
         return exec.unsupported();
     }
-    let nc = nodes[6 * stmt + 3];
+    // IF NOT EXISTS, and a table or an index has the name: PostgreSQL says so in a notice and does not read the definition
+    if nodes[6 * stmt + 4] == 1 {
+        let g0 = tables.find(p, contents(w.sc), root, e[4..4 + nl], contents(w.key), contents(w.cur));
+        let ikl0 = tables.index_key(e[4..4 + nl], contents(w.key));
+        var g1 = btree.not_found();
+        if g0 == btree.not_found() {
+            g1 = btree.get(p, contents(w.sc), root, contents(w.key)[0..ikl0], contents(w.cur));
+        }
+        if g0 >= 0 || g1 >= 0 {
+            return 0;
+        }
+        if g0 != btree.not_found() {
+            return exec.tree_err(g0);
+        }
+        if g1 != btree.not_found() {
+            return exec.tree_err(g1);
+        }
+    }
+    // a PRIMARY KEY (column, ...) among the children is no column
+    var tk = 0 - 1;
+    var i = 0;
+    while i < nodes[6 * stmt + 3] {
+        if nodes[6 * kids[nodes[6 * stmt + 2] + i]] == parse.n_cols() {
+            tk = i;
+        }
+        i = i + 1;
+    }
+    var nc = nodes[6 * stmt + 3];
+    if tk >= 0 {
+        nc = nc - 1;
+    }
     if nc < 1 || nc > row.max_columns() {
         return exec.too_big();
     }
     // the definition is built in `ent` from 6, the marks and defaults in `tmp`
-    let da = column_defs(w, sql, toks, nodes, kids, stmt, 0, nc, 8, 0, 0);
+    let da = column_defs(w, sql, toks, nodes, kids, stmt, 0, nc, 8, 0, 0, tk);
     if da < 0 {
         return da;
     }
     let xa = contents(w.pos)[exec.p_ddl()];
-    let keys = contents(w.pos)[exec.p_ddl() + 1];
+    var keys = contents(w.pos)[exec.p_ddl() + 1];
+    if tk >= 0 {
+        // the table's key: each name is a column (42703), once (42701), and no column says it is the key too (42P16); its place in the key is its place in the list
+        let kn = kids[nodes[6 * stmt + 2] + tk];
+        if keys > 0 {
+            exec.note(w, exec.e_two_keys());
+        }
+        var j = 0;
+        while j < nodes[6 * kn + 3] {
+            let tok = nodes[6 * kids[nodes[6 * kn + 2] + j] + 1];
+            let cl = lower.name_text(sql, toks, tok, contents(w.nrow)[0..256], 0);
+            if cl < 0 {
+                return exec.unsupported();
+            }
+            var oa = 8;
+            var found = false;
+            var c = 0;
+            while c < nc {
+                let ol = commit.be(contents(w.ent), oa + 2, 2);
+                if exec.same(contents(w.ent), oa + 4, ol, contents(w.nrow), 0, cl) {
+                    found = true;
+                    if keys > 0 {
+                        // a note was made
+                    } else if int_of(contents(w.ent)[oa + 1]) != 0 {
+                        exec.note(w, exec.e_column_twice());
+                    } else {
+                        contents(w.ent)[oa + 1] = byte_of(j + 1);
+                    }
+                }
+                oa = oa + 4 + ol;
+                c = c + 1;
+            }
+            if !found {
+                exec.note(w, exec.e_no_column());
+            }
+            j = j + 1;
+        }
+        if keys == 0 {
+            keys = nodes[6 * kn + 3];
+        }
+    }
     if keys == 0 {
         // a table with no primary key has no key to store its rows by
         return exec.unsupported();
@@ -959,6 +1195,14 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
         return exec.tree_err(nw);
     }
     w.root = nw;
+    if contents(w.pos)[exec.p_ddl() + 2] != 0 {
+        // the counter of its identity column: there from the start, so that a draw in a transaction that is rolled back has somewhere to stay
+        let sr = exec.seq_put(p, w, nw, tables.id_of(contents(w.ent)), 0);
+        if sr < 0 {
+            return sr;
+        }
+        w.root = sr;
+    }
     return 0;
 }
 
@@ -1020,6 +1264,19 @@ pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
             }
         }
     }
+    // its counter, if it has one
+    let tid = w.tid;
+    let ckl = tables.counter_key(tid, contents(w.key));
+    let cg = btree.get(p, contents(w.sc), nroot, contents(w.key)[0..ckl], contents(w.uval));
+    if cg >= 0 {
+        let cd = btree.del(p, contents(w.sc), nroot, contents(w.key)[0..ckl]);
+        if cd < 0 {
+            return exec.tree_err(cd);
+        }
+        nroot = cd;
+    } else if cg != btree.not_found() {
+        return exec.tree_err(cg);
+    }
     // the table's entry in the catalog is a key of the tree like any other: its history is kept, so the table is there AS OF before
     let ekl = tables.entry_key(e[4..4 + nl], contents(w.key));
     let rm = exec.remember(p, w, nroot, contents(w.key), ekl);
@@ -1048,13 +1305,48 @@ pub fn alter_add[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Wor
     let dl = w.dlen;
     let el = w.elen;
     let n0 = columns(w);
+    let how = nodes[6 * stmt + 4];
+    if how == 1 || how == 2 {
+        // ADD COLUMN IF NOT EXISTS, or ALTER COLUMN ... TYPE: is the column there, and of which type
+        let cd = kids[nodes[6 * stmt + 2]];
+        let cl = lower.name_text(sql, toks, nodes[6 * cd + 1], contents(w.nrow)[0..256], 0);
+        if cl < 0 || nodes[6 * cd + 3] < 1 {
+            return exec.unsupported();
+        }
+        var at = 0 - 1;
+        var c = 0;
+        while c < n0 {
+            let nm = row.col_name(contents(w.ctx)[64..64 + dl], c);
+            if exec.same(nm, 0, len(nm), contents(w.nrow), 0, cl) {
+                at = c;
+            }
+            c = c + 1;
+        }
+        if how == 1 && at >= 0 {
+            // PostgreSQL says so in a notice and does not read the definition
+            return 0;
+        }
+        if how == 2 {
+            if at < 0 {
+                exec.note(w, exec.e_no_column());
+                return exec.verdict(w);
+            }
+            // to the type it has: nothing changes. Any other type is a rewrite of the table, which is not built
+            let code = nodes[6 * kids[nodes[6 * cd + 2]] + 1];
+            let ty = row.col_type(contents(w.ctx)[64..64 + dl], at);
+            if code == 1 && ty == row.t_int2() || code == 2 && ty == row.t_int4() || code == 3 && ty == row.t_int() || code == 4 && ty == row.t_text() || code == 5 && ty == row.t_bool() {
+                return 0;
+            }
+            return exec.unsupported();
+        }
+    }
     if n0 + 1 > row.max_columns() {
         return exec.too_big();
     }
     // the marks and defaults of the columns there are go to `tmp`, where the new column's follow them; its definition follows theirs in `ent`
     let xl = el - 6 - dl;
     exec.copy(contents(w.ent), 6 + dl, xl, contents(w.tmp), 0);
-    let da = column_defs(w, sql, toks, nodes, kids, stmt, n0, n0 + 1, 6 + dl, xl, 1);
+    let da = column_defs(w, sql, toks, nodes, kids, stmt, n0, n0 + 1, 6 + dl, xl, 1, 0 - 1);
     if da < 0 {
         return da;
     }
@@ -1064,9 +1356,20 @@ pub fn alter_add[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Wor
     let total = exec.copy(contents(w.tmp), 0, xa, contents(w.ent), da);
     // what a row there gets: the default, or null; which a column that takes no null refuses
     let marks = int_of(contents(w.tmp)[xl]);
-    var nulls = marks < 2;
-    if marks >= 2 && int_of(contents(w.tmp)[xl + 1]) == 0 {
-        nulls = true;
+    let has_default = marks / 2 % 2 == 1;
+    var nulls = !has_default;
+    var dlen2 = 0;
+    if has_default {
+        dlen2 = tables.stored_len(contents(w.tmp), xl + 1);
+        if int_of(contents(w.tmp)[xl + 1]) == 0 {
+            nulls = true;
+        }
+    }
+    // the default is outside the column's range: an error if a row gets it
+    var outside = false;
+    if marks / 4 == 1 && has_default && int_of(contents(w.tmp)[xl + 1]) == 1 {
+        let dv = row.int_at(contents(w.tmp), xl + 2);
+        outside = dv < row.int_at(contents(w.tmp), xl + 1 + dlen2) || dv > row.int_at(contents(w.tmp), xl + 9 + dlen2);
     }
     var nroot = root;
     exec.scan_start(w);
@@ -1080,13 +1383,16 @@ pub fn alter_add[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Wor
         } else if nulls && marks % 2 == 1 {
             exec.note(w, exec.e_not_null());
             more = false;
+        } else if outside {
+            exec.note(w, exec.e_check());
+            more = false;
         } else if w.code == 0 {
             var ra = exec.copy(contents(w.cur), 0, rl, contents(w.nrow), 0);
-            if marks >= 2 {
-                if ra + xa - xl - 1 > exec.max_stored_row() {
+            if has_default {
+                if ra + dlen2 > exec.max_stored_row() {
                     return exec.too_big();
                 }
-                ra = exec.copy(contents(w.tmp), xl + 1, xa - xl - 1, contents(w.nrow), ra);
+                ra = exec.copy(contents(w.tmp), xl + 1, dlen2, contents(w.nrow), ra);
             } else {
                 if ra + 1 > exec.max_stored_row() {
                     return exec.too_big();
@@ -1120,7 +1426,8 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 3 || nodes[6 * stmt] != parse.n_create_index() {
         return exec.malformed();
     }
-    if nodes[6 * stmt + 4] == 1 {
+    let iflags = nodes[6 * stmt + 4];
+    if iflags % 2 == 1 {
         return exec.unsupported();
     }
     let r0 = exec.bind_table(p, w, root, e, 2);
@@ -1129,9 +1436,34 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     }
     let dl = w.dlen;
     let nl = w.nlen;
+    var ncols = nodes[6 * stmt + 3];
+    if iflags / 4 % 2 == 1 {
+        // the condition of a partial index: a boolean column of the table and nothing else (docs/m3-engine.md 6x)
+        ncols = ncols - 1;
+        let cn = kids[nodes[6 * stmt + 2] + ncols];
+        if nodes[6 * cn] != parse.n_col() || nodes[6 * cn + 4] >= 0 {
+            return exec.unsupported();
+        }
+        let cl = lower.name_text(sql, toks, nodes[6 * cn + 1], contents(w.nrow)[0..256], 0);
+        if cl < 0 {
+            return exec.unsupported();
+        }
+        var isbool = false;
+        var c = 0;
+        while c < row.columns(contents(w.ctx)[64..64 + dl]) {
+            let nm = row.col_name(contents(w.ctx)[64..64 + dl], c);
+            if exec.same(nm, 0, len(nm), contents(w.nrow), 0, cl) && row.col_type(contents(w.ctx)[64..64 + dl], c) == row.t_bool() {
+                isbool = true;
+            }
+            c = c + 1;
+        }
+        if !isbool {
+            return exec.unsupported();
+        }
+    }
     // each column is one of the table's
     var i = 0;
-    while i < nodes[6 * stmt + 3] {
+    while i < ncols {
         let tok = nodes[6 * kids[nodes[6 * stmt + 2] + i] + 1];
         let cl = lower.name_text(sql, toks, tok, contents(w.nrow)[0..256], 0);
         if cl < 0 {
@@ -1157,20 +1489,29 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     }
     // the name is free: no index has it, and no table
     let kl = tables.index_key(contents(w.nrow)[0..il], contents(w.key2));
+    // IF NOT EXISTS: a name that is taken is a notice, once the condition and the columns have been read (PostgreSQL's order: src/backend/commands/indexcmds.c)
+    let ine = iflags / 2 % 2 == 1;
+    var there = false;
     let g = btree.get(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.cur));
     if g >= 0 {
-        exec.note(w, exec.e_table_exists());
+        there = true;
     } else if g != btree.not_found() {
         return exec.tree_err(g);
     }
     let gt = tables.find(p, contents(w.sc), root, contents(w.nrow)[0..il], contents(w.key), contents(w.cur));
     if gt >= 0 {
-        exec.note(w, exec.e_table_exists());
+        there = true;
     } else if gt != btree.not_found() {
         return exec.tree_err(gt);
     }
+    if there && !ine {
+        exec.note(w, exec.e_table_exists());
+    }
     if w.code != 0 {
         return exec.verdict(w);
+    }
+    if there {
+        return 0;
     }
     let nw = exec.put_key(p, w, root, contents(w.key2), kl, contents(w.ctx)[0..nl]);
     if nw < 0 {

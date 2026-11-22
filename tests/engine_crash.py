@@ -130,9 +130,9 @@ def main():
                 if rc != 0 or "committed" not in out:
                     raise SystemExit("engine_crash: step %d torn %d: no write after the restart: %s" % (n, torn, out[-200:]))
                 rc, out = run(path, ["select * from zz"] + DUMP)
-                if rc != 0 or "R %d" % n not in out:
+                if rc != 0 or "R %s" % str(n).encode().hex() not in out:
                     raise SystemExit("engine_crash: step %d torn %d: the write after the restart is not there" % (n, torn))
-                rest = [line for line in out.split("\n")[5:] if line]
+                rest = [line for line in out.split("\n")[7:] if line]
                 if rest != [e for e in exp if e]:
                     raise SystemExit("engine_crash: step %d torn %d: the write after the restart changed the other tables" % (n, torn))
                 runs += 1

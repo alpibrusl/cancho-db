@@ -203,7 +203,7 @@ fn bound[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], at: int, w
     if int_of(e[at]) == 0 {
         return at + 1;
     }
-    let r = exec.ev(w, e, at + 1, kinds, 0);
+    let r = exec.ev_open(w, e, at + 1, kinds, 0);
     if r < 0 {
         // an error of types in a LIMIT has its own rules in PostgreSQL: not answered here
         return exec.unsupported();
@@ -213,6 +213,20 @@ fn bound[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], at: int, w
     let st = contents(w.ws)[b + 1];
     let end = contents(w.info)[1];
     if st == 1 && (ty == 0 || ty == 1 || ty == 5 || ty == 6) {
+        return end;
+    }
+    if st == 0 && ty == 0 {
+        // a parameter, or a string: read as the bigint a LIMIT is
+        let ra = eval.assign(contents(w.ws), b, 1, contents(w.ar), contents(w.info));
+        if ra < 0 || contents(w.ws)[b + 1] != 0 {
+            return exec.unsupported();
+        }
+        let v0 = contents(w.ws)[b + 2];
+        if v0 < 0 {
+            exec.note(w, which);
+            return end;
+        }
+        contents(w.info)[2] = v0;
         return end;
     }
     if st != 0 || ty != 1 && ty != 5 && ty != 6 {
@@ -447,7 +461,8 @@ fn p_marks() -> [] int {
 fn has_call[&x](e: &x [byte], from: int, to: int) -> [] bool {
     var at = from;
     while at < to {
-        if int_of(e[at]) == 4 {
+        if int_of(e[at]) == 4 && eval.scalar_fn(e, at) == 0 {
+            // (COALESCE, GREATEST and LEAST are computed for a row like any operator, src/eval.cho)
             return true;
         }
         let n = eval.node_size(e, at);
@@ -521,7 +536,7 @@ fn cover[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], from: int,
                 return r;
             }
             at = end;
-        } else if tag == 4 {
+        } else if tag == 4 && eval.scalar_fn(e, at) == 0 {
             let which = agg_code(e, at);
             let nl = commit.be(e, at + 1, 2);
             let arg = at + 3 + nl + 4;
@@ -595,7 +610,7 @@ fn decode[&s, &c, &a](src: &s [byte], off: int, cx: &!c [int], c: int, ar: &!a [
 // types of the expressions around them. The arena's fill after the values, or a refusal.
 fn set_slots[&q](w: &!q exec.Work, rec: int, real: bool) -> [] int {
     let ns = contents(w.pos)[p_marks() + 1];
-    var af = 0;
+    var af = exec.arena_start(w);
     contents(w.cx)[eval.slots_at()] = ns;
     var s = 0;
     while s < ns && af >= 0 {
@@ -641,7 +656,11 @@ fn gev[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int], af:
     contents(w.info)[0] = af;
     exec.no_rows(w);
     let n = w.ntab;
-    return eval.eval(e, at, kinds, contents(w.ctx), contents(w.cx), n, contents(w.ws), contents(w.ar), contents(w.info));
+    let r = eval.eval(e, at, kinds, contents(w.ctx), contents(w.cx), n, contents(w.ws), contents(w.ar), contents(w.info));
+    if r > 0 {
+        return exec.unsupported();
+    }
+    return r;
 }
 
 // How two stored values that are not null, of one type, in two buffers, compare.
@@ -799,6 +818,14 @@ fn emit_group[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], rec: 
 }
 
 // Sort the `m` records of `chg` listed in `idx2` by their first `ng` values, so that the rows of a group are neighbours.
+// Whether the expression at `at`, just computed over the aggregates' values, is a constant that has an aggregate in it: `max(1 % c) - null` is null to PostgreSQL when it plans, and the
+// aggregate is then never computed (nor its errors raised). The engine computes every aggregate it reads, so it does not answer.
+fn folded_away[&q, &x](w: &!q exec.Work, e: &x [byte], at: int) -> [] bool {
+    let constant = contents(w.ws)[eval.max_nodes() + 4] == 1;
+    let (cnt, end) = eval.scan(e, at, contents(w.ws));
+    return constant && cnt > 0 && has_call(e, at, end);
+}
+
 fn sort_groups[&q](w: &!q exec.Work, m: int, ng: int) -> [] int {
     var width = 1;
     var flip = false;
@@ -1006,6 +1033,8 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
             return exec.unsupported();
         } else if contents(w.ws)[b] != 2 {
             exec.note(w, 6);
+        } else if folded_away(w, e, hpos) {
+            return exec.unsupported();
         }
     }
     i = 0;
@@ -1016,6 +1045,8 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
             if s < 0 {
                 return s;
             }
+        } else if folded_away(w, e, expr_at(w, i)) {
+            return exec.unsupported();
         } else if i < ni {
             var ty = contents(w.ws)[b];
             if ty == 0 {
@@ -1388,6 +1419,20 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         }
         i = i + 1;
     }
+    if exec.ret_mode(w) >= 2 {
+        // the items of a RETURNING: over the one table, nothing else, and nothing that can raise an error for a row (PostgreSQL would raise it at that row, with the rows before it written and
+        // their identity values drawn; here the statement has run whole by then). An aggregate is not such an item
+        if distinct || nt != 1 || wpos != 0 || ng != 0 || hpos != 0 || no != 0 {
+            return exec.unsupported();
+        }
+        i = 0;
+        while i < ni {
+            if !quiet(e, contents(w.pos)[exec.p_item() + i], contents(w.pos)[exec.p_iend() + i]) {
+                return exec.unsupported();
+            }
+            i = i + 1;
+        }
+    }
     if ng > 0 || hpos != 0 || calls {
         return grouped(p, w, root, e, kinds, wpos, ng, hpos, at, distinct, extra);
     }
@@ -1462,6 +1507,9 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     let offset = contents(w.info)[2];
     if at != len(e) {
         return exec.malformed();
+    }
+    if exec.ret_mode(w) >= 2 && bounded {
+        return exec.unsupported();
     }
     if w.code != 0 {
         return exec.verdict(w);

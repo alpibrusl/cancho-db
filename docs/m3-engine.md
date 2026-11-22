@@ -611,7 +611,7 @@ and values as text (`t`/`f`, digits, bytes as they are; the wire's binary format
 *Gate:* the bytes after the proxy's framing equal PostgreSQL's for the random history, names and tags included; messages are compared by SQLSTATE only, and the page says so.
 *Built of it: the names.* `lower.output_names` writes, for a select, the name of each output column: an alias, or the one PostgreSQL makes up (a column's, a function's, a cast's type as the catalog
 spells it, `case`, `?column?`), a `*` giving its tables' columns. `tests/engine_check.py` now compares them with the names in PostgreSQL's row description for every select of the random history (8 seeds
-of 3,000 statements, aliases included: no disagreement; 6 mutants). The values as text, the tags and the messages are not built.
+of 3,000 statements, aliases included: no disagreement; 6 mutants). The values as text and the tags followed (6v); the messages are not built.
 
 **J2. Transactions.** `begin`, `commit`, `rollback`: a transaction is a root of its own that the statements of one connection build on, published or dropped at the end. The history's rule for a key
 written twice in a transaction (6n) is then exercised for the first time. One writer at a time: a second connection's write waits or is refused; which, and what a reader sees meanwhile (the last
@@ -641,6 +641,218 @@ subset. Until it is, only clients that send what `psql -c` sends can be served.
 *An honest size:* J1 and J2 are each about what a slice above was; J3 and J4 more; J5 and J6 are integration, where the tests get slow and the surprises are in the proxy, not the engine; J7 is open-ended.
 M3's exit ("the differential suite passes on the declared subset; crash and fsync-fault tests pass") is met for the engine as a library but for the failing `fsync`; it is not met for anything a client
 can reach, and M4's ("one cancho product runs on it in daily use") cannot be met from inside this repository at all.
+
+## 6v. J1 and J2, built: the answer as a client is sent it, and transactions
+
+**J1.** `src/answer.cho`: a column's type as PostgreSQL's identifier, a value as PostgreSQL's text (`t` and `f`, digits with a sign, text as it is, `\x` and hexadecimal for `bytea`, nothing for a null), and
+a command's tag (`INSERT 0 3`, `SELECT 2`, `CREATE TABLE`). The harness prints those and `tests/engine_check.py` compares them with **the bytes of PostgreSQL's own messages**: the tag with its
+`CommandComplete`, the identifiers and names with its `RowDescription`, each value with its `DataRow`. The test used to turn the engine's values into PostgreSQL's text itself; that translation is now the
+engine's and is what is tested. An error is still a SQLSTATE without a message.
+
+**J2.** `begin`, `commit`, `rollback`. A transaction is a tree of its own that its statements build on, one after another; `commit` makes it the branch's and gives the whole transaction one number in
+the history, `rollback` drops it. What PostgreSQL does and the engine now matches, each found or confirmed by the differential:
+* a statement that fails, fails the transaction: every statement after it is `25P02` until the transaction is ended, and its `commit` answers `ROLLBACK`;
+* `begin` inside a transaction is taken (PostgreSQL warns), **but in a transaction that has failed it is `25P02` like anything else** (the first version answered `BEGIN`; the differential found it);
+* `commit` and `rollback` outside a transaction are taken;
+* DDL is part of a transaction: a table made in one that is rolled back was never made.
+After every statement the state PostgreSQL reports to a client (`I`, `T`, `E`) is compared with the engine's.
+
+**A refusal inside a transaction fails the transaction**, as an error does. There is nothing else it could honestly do: the statement did not run, and the statements after it were written for a state
+in which it had. (The test then fails PostgreSQL's transaction too, so the two stay in step.)
+
+**The history's rule for a key written twice** (6n: what a key held *before the transaction* is its one record) was written and untested while a transaction was one statement. It is exercised now:
+the history test writes transactions of several statements on the same rows, some rolled back, and `AS OF` before each reads what was there. Inside a transaction the writer no longer trusts what it
+knows about a key (6u, point 2) and looks, as designed.
+
+**20 seeds of 3,000 statements with transactions in them: no disagreement** (the engine refuses 880 of the 37,627 statements PostgreSQL answers, 2.3 %); 172 fixed statements answered, 28 of them a
+script of transactions; 179 mutants of the engine, 10 of them new (the text of a value, the tags, the identifiers, the two history rules).
+
+**Not built:** one writer at a time is all there is (two connections with transactions open at once do not exist in the harness: that is the proxy's to arrange, J5); isolation levels and savepoints
+are refused by the parser; an error's message.
+
+## 6w. The first user: `cancho-hooks`, and what it asks for
+
+All the `cancho-*` repositories were read for what they store in PostgreSQL. Four talk to it at all; one fits. `cancho-hooks` (the webhook delivery service) keeps three tables and sixteen
+queries (`sql/schema.sql`, `sql/queries.sql` there), **every column of which is a type the engine has** (`bigint`, `integer`, `smallint`, `text`, `boolean`; its times are integers), its database is optional
+and is not its source of truth (its log files are), and it is a product somebody runs, which is what M4's exit asks for. The others: `cancho-ota` (seventeen migrations: `timestamptz`, regular
+expressions in checks, foreign keys that cascade), `cancho-web` (an example with a `json` column), `cancho-sheets` (a browser *of* PostgreSQL).
+
+So the order of work from here is hooks' sixteen queries, and the measure is how many of them the engine answers as PostgreSQL does. What they need that was not built when this was written:
+
+| | queries that need it |
+|---|---|
+| parameters (`$1`, `$1::bigint`) | all 16 |
+| `returning` | 6 |
+| `coalesce`, `greatest` | 4 |
+| a subquery (a scalar one, a `count(*)` guard, `ctid in (select ...)`) | 3 |
+| `on conflict do nothing` | 2 |
+| sequences (`nextval`, `setval`), an identity column | 2, and one table |
+| a `with` whose body is a `delete ... returning` | 1 |
+| a primary key of several columns; `check`; `if not exists`; a partial index | the schema |
+
+**Parameters first (design).** A parameter is, to PostgreSQL's analysis, what a string literal is: a value of no type yet, which takes its type from what it meets (the other side of a comparison, a
+cast, the column it is stored in), and whose text is then read as that type. So the evaluator gives a `Param` node the text bound to it as a literal of unknown type, or a null, and everything already
+built for literals applies: `$1::bigint`, `where k = $1`, `values ($1, $2)`, `limit $1`. A parameter also makes the lookup by key (6h) possible, since `k = $1` compares the key with a constant.
+*The oracle:* PostgreSQL's extended protocol (`Parse` with no types given, `Bind` with text values), which is what `cancho-pg` sends.
+
+**Built, and where the design was wrong.** "What a string literal is" was false in three ways, each found by the differential within its first 2,500 statements and each now a refusal:
+
+1. *A parameter has one type in a statement, a literal has one at each place it is written.* PostgreSQL gives a parameter the type of its first use and reads the later uses as that type
+   (`n > $1 or s = $1` is an error where two literals would not be). The engine reads each use alone, so it answers only where that cannot differ: a parameter used once, or one whose every use
+   carries the same cast (`$1::bigint`, which is how hooks writes all of its repeated ones). `$1 between a and b` is two uses (it is `$1 >= a and $1 <= b`), and so is `$1 in (...)`.
+2. *A parameter that meets no type is an error (42P18), where a literal is read as text*: `$1 is null`. The evaluator marks a parameter's value until something gives it a type (a comparison
+   with a typed value, a cast, the column it is stored in, `||` beside text, `limit`) and refuses a node that leaves one unmet. This refuses more than PostgreSQL does (`$1 = $2`, which
+   PostgreSQL reads as two texts).
+3. *The statement must name every parameter that is bound, and no other*, and a statement that is not a query takes none.
+
+One rule of literals was wrong too and is corrected with it: in `x in (...)` a string (or a parameter) among integers of several widths is read by PostgreSQL at a width the engine did not
+reproduce (out of range at one, in range at another); that is refused now.
+
+An error in reading a parameter's text (`'abc'` bound where an integer is stored) is answered as the error it is, as for a literal.
+
+**Measured.** 20 seeds of 3,000 statements against PostgreSQL 16.15, three in ten of the queries with some of their literals made parameters (bare or cast, now and then one used twice, a null,
+text that is no number), sent by the extended protocol: no disagreement; of 13,355 statements with parameters the engine answers 7,140 (rows, changes or the error). 29 fixed statements with
+parameters must be answered, 9 are pinned as refused with PostgreSQL's own outcome beside them. 13 mutants, all killed (one survived until a grouped query with text parameters was added: the
+arena's start); the engine's group is 192.
+
+**The checklist** (`tests/hooks_check.py`; `tests/hooks/` holds hooks' own `schema.sql` and `queries.sql`). The schema, then 54 calls of the sixteen queries with values, on PostgreSQL and on
+the engine; after each call the answers are compared and so is every table. When this was written: **0 of 15 schema statements, 0 of 16 queries**. Six queries are refused only because their
+table is not there (`attempts_of`, `endpoints_all`, `schedule_by_id`, `schedules_all`, `schedules_due`, `advance_schedule`), so the schema comes next, before `returning`: a key of several
+columns, `if not exists`, `check`, an identity column, a sequence, an index with a condition, and `alter column ... type` to the type it has.
+
+## 6x. The schema of hooks (built; the identity column is 6y, the sequence is not built)
+
+Fifteen statements (`tests/hooks/schema.sql`), none answered when 6w was written, and six of the sixteen queries wait only for their tables. What the statements need, and what each is in the engine:
+
+| in the schema | in the engine | refused |
+|---|---|---|
+| `create table if not exists`, `create index if not exists`, `add column if not exists` | if the name is there, nothing changes and the answer is the statement's own tag (PostgreSQL adds a notice, which is not an answer) | - (*corrected:* the design refused a definition that would have raised an error had the name not been there. PostgreSQL's source says when it looks: for a table and a column, never, the name is tested first; for an index, the condition and the columns are read first and their errors raised, `src/backend/commands/indexcmds.c`. The engine does the same, and the differential found the index's order before the source was read) |
+| `primary key (endpoint, event, replay, attempt)` | the place of each column in the key, which the stored definition and the stored key have had since M3c (src/row.cho): only the statement was missing | - |
+| `check (id between 0 and 999999)` on a column | a range: two integers kept with the column's marks in the catalog; a row written with a value outside it (a null is inside) is error 23514 | every other check: not a `between` of the column itself and two integer literals, or a column that is not an integer |
+| `alter table attempts alter column endpoint type bigint` | nothing, if that is the column's type | any change of type |
+| `create index schedules_due on schedules (next_fire) where enabled` | an index is a name (6l); the condition is taken if it is a boolean column of the table | any other condition |
+| `bigint generated always as identity`, `create sequence` | *the next slice*: a counter that a failed statement and a rollback do not take back, which is not what the tree does with anything else | - |
+
+**Not for the proxy.** The guard (src/guard.cho) reads statements with the same parser, and what it lets through goes to PostgreSQL with the proxy's promises about it. None of these forms was
+examined for that (an identity column makes an insert's row something the statement does not say). So the parser marks a statement that uses any of them (`st[12]`), and the guard refuses it as
+before (`unsupported-statement`); only the engine's harness reads past the mark. *Test:* the guard's own tests, and one case for each form.
+
+**Errors.** 23514 joins the errors of a row (not null 23502, the key 23505): several different ones in a statement are `engine-ambiguous-error`, as everywhere.
+
+**Tests.** The random history gets tables with a key of two or three columns, columns with a range, and the `if not exists` forms (so that the skip and the create are both met); the fixed
+statements pin each form; the checklist's schema count goes from 0 to 14 (the sequence stays), and the six queries that waited for tables are answered if parameters (6w) were enough for them.
+
+**Built.** The grammar is in src/stmt.cho, the catalog's marks carry the range (src/tables.cho), a row is tested where its nulls are (src/execw.cho). `tests/hooks_check.py`: **12 of the 15
+schema statements** (what is left: the identity column of `schedules`, the sequence, and the index on the table that was not made) and **2 of the 16 queries** (`attempts_of`, `endpoints_all`;
+the four others that waited for a table wait for `schedules`). The test's floors are now those numbers.
+
+*Measured:* 20 seeds of 3,000 statements against PostgreSQL 16.15 with three tables in ten keyed by two columns (in either order, the key written for the table), ranges on integer columns,
+the `if not exists` forms on names that are and are not there, indexes with a condition, changes of type: no disagreement. 61 fixed statements pin the forms, 8 are refused on purpose with
+PostgreSQL's outcome beside them. The guard refuses each form (9 cases). 27 mutants (20 of the engine, 7 of the mark and the guard), all killed; 13 older mutants were moved to the code as it
+is now.
+
+*Found on the way, and not new:* `insert into t values (...)` with fewer values than the table has columns is refused as `syntax`, where PostgreSQL fills the rest with defaults. It is a
+refusal, so it is safe; the tag is wrong and the statement is common. Not fixed here.
+
+## 6y. An identity column: the one thing a rollback does not take back
+
+`id bigint generated always as identity` is how `schedules` gets its ids, and four of hooks' queries waited for that table.
+
+**What PostgreSQL does.** An identity column is a sequence. Each row an insert reaches draws the next value, before the row is tested: a row that fails its constraints has drawn, and so has
+every row before it; the rows after it have not. A value drawn is drawn for good: the statement failing does not give it back, and neither does the transaction being rolled back. A value
+cannot be given to the column, in an insert or an update (428C9).
+
+**Why that is a problem here, and the design.** Everything else in the engine is in the tree, and a statement that fails, or a transaction that is rolled back, leaves the tree it started
+from (that is the whole of their implementation). A counter kept in the tree would be given back. So:
+
+- the counter is in the tree (the catalog: `0x00000000 0x02` and the table's number, the last value drawn), where a commit keeps it, a fork copies it and a crash leaves it as of a commit;
+- every draw is *also* noted outside the tree (`exec.seq_note`), and whoever drives the statements writes the notes into the tree that stays when the tree that has them is thrown away
+  (`exec.seq_replay`: after a statement that failed, at a rollback), or drops them (`seq_forget`) when it is the one that stays;
+- an insert that fails before any row is stored (an error of a constant, which PostgreSQL raises when it plans) has drawn nothing; one that fails at row r has drawn r + 1 values;
+- the counter is no part of the history: `AS OF` reads, and never draws.
+
+*Refused:* a value given to the column (428C9 is not reproduced), an identity column added to a table (each row there would draw), a second one in a table, one that is not an integer.
+*A limit of the fork:* a branch has its own counter from the fork on, so two branches give the same ids; a merge of such rows is M4's.
+
+**Built and measured.** 20 seeds of 3,000 statements against PostgreSQL 16.15, three tables in ten with an identity column (whose values show what every insert drew, the failed and the
+rolled-back ones too): no disagreement. 41 fixed statements (failures at the first, a middle and no row; rollbacks; a table made and rolled back and made again). In the test a statement
+the engine refuses is run by PostgreSQL and taken back *with its sequences set back* (`take_back`), since PostgreSQL would otherwise have drawn where the engine did nothing. 11 mutants.
+`tests/hooks_check.py`: **14 of 15 schema statements** (the sequence is left) and **6 of 16 queries**.
+
+## 6z. `on conflict do nothing`; and a wrong answer the new values found
+
+**`insert ... on conflict do nothing`** (no target; hooks writes it on both its inserts, so that a repeat is harmless). A row whose key is there, or was stored by an earlier row of the same
+statement, is left out and is no error; its nulls and its ranges are tested first all the same, as PostgreSQL tests them before it looks for the conflict; a row that is left out has still
+drawn from an identity column. The tag counts the rows stored. A conflict with a target (`on conflict (k) do ...`) and `do update` are refused by the parser, as before. One of the engine's
+forms: the guard refuses it. 13 fixed statements; two in ten of the random inserts carry it; 20 seeds, no disagreement; 3 mutants. `tests/hooks_check.py`: **8 of 16 queries**.
+
+**A wrong answer, there since M3d.** With more kinds of text in the tables (the parameters' values, 6w) the differential met `cast(b as integer)` where `b` is `'3000000000 7abc'`: the engine
+said 22P02 (not a number), PostgreSQL 22003 (out of range). PostgreSQL reads the digits first and stops with "out of range" as soon as they pass what the type holds, before it sees what
+follows them. The evaluator read the whole text and then judged it. *Corrected by refusing:* digits and then something else is answered (22P02) only when the digits are fewer than five, which
+is in range of every integer type; for more it depends on the type and on how PostgreSQL's reader is written, and nothing is answered. Pinned both ways (3 refused with PostgreSQL's outcome
+beside them, 5 fixed), 2 mutants. The claim that was false for these texts was C149 ("when the evaluator answers, its answer is PostgreSQL's"): its twelve test rows held no such text. It is true again by saying less, and says so.
+
+## 6aa. `returning`
+
+Six of hooks' queries end in `returning id` (or a list of columns): it is how the service learns that an update or a delete found its row.
+
+**Design.** The items of a `returning` are a select list over the statement's table, read for each row the statement stored (insert, update: the row as it now is, whether or not the update
+changed it) or removed (delete). So the parser builds, beside the statement, a `select <items> from <the table>` (the same nodes a SELECT has), and the engine runs that SELECT:
+
+1. *before the statement, over no rows*: its types, its column names, and what is wrong with them. A wrong item is PostgreSQL's error before anything is written or drawn from a counter;
+2. the statement, which keeps each row it stores or removes (`exec.ret_row`);
+3. *after it, over the rows it kept* instead of over the table.
+
+Nothing of the SELECT was written again for this: the row source is the only thing that differs (`exec.scan_next`).
+
+*Refused:* an item that can raise an error for a row (arithmetic, a cast, `||`): PostgreSQL raises it at that row, with the rows before it written and their identity values drawn, and
+here the statement has run whole by then. The items must be "quiet" in the sense of 6k (columns, constants, comparisons, `and`/`or`/`not`, `is null`, `in`). An aggregate is refused too.
+*Order:* PostgreSQL returns the rows in the order it wrote them, which for an update or a delete is the order it found them; nobody is promised that order, and the test compares the rows
+as a set.
+
+**The guard's tags.** A statement of the proxy that has a `returning` or an `on conflict` was refused with those words as its tag. The mark of 6x would have made both
+`unsupported-statement`; the mark now carries the refusal the guard gives (`engine_form` in src/stmt.cho: the first form's, which is what the parser said before it could read on), so the
+proxy answers these exactly as it did. `proxy/stmtcheck.cho` and `proxy/lowercheck.cho`, which test the proxy's grammar, refuse the engine's forms the same way.
+
+**Built and measured.** 20 seeds of 3,000 statements against PostgreSQL 16.15 with `returning` on two in ten of the random inserts, updates and deletes: no disagreement on the rows returned
+(as a set), their names and their types, nor on the changes. 26 fixed statements (with identity columns, `on conflict`, parameters, a key that an update moves), 4 pinned refusals; 5 mutants
+of the engine and 2 of the mark (a sixth, of the refusal of an aggregate, was of a test the test before it already made: removed with the test). `tests/hooks_check.py`: **10 of 16 queries** (`patch_address`, `delete_schedule`).
+
+**What is left of the sixteen**, and what each needs: `patch_endpoint`, `patch_schedule` (`coalesce`, `greatest`, and a `case` over parameters); `prune_attempts` (`ctid in (select ...
+limit)`: a row's place has no meaning here, and this one is better rewritten in hooks by key); `create_endpoint`, `create_schedule` (`insert ... select` with a scalar subquery);
+`delete_endpoint` (a `with` whose body is a `delete ... returning`); and the sequence (`nextval`, `setval`) that two of those use.
+
+## 6ab. `coalesce`, `greatest`, `least`
+
+Hooks' two patch queries are `set c = coalesce($n::type, c)` throughout: "change this column if a value was given". The three are reserved words that PostgreSQL's grammar reads as
+expressions of their own, not as functions; the parser refused them as reserved words.
+
+**Design.** The parser reads the three as calls when a `(` follows (a column of such a name stays refused). They are no engine-only form: they have no effect of their own, the lowering
+writes them as the `Call` it writes for any function, and the proxy lets them through as it does `upper(x)`. The evaluator computes them:
+
+- the type is the one type of the arguments, as for the branches of a `case` (integers widen, a literal or a parameter takes it, all literals are text);
+- `coalesce`: the first argument that is not null, and PostgreSQL does not compute the ones after it, so an error in a later argument is no error (the evaluator computes every node and
+  carries an error as a value, which is how `case` already skips what PostgreSQL skips);
+- `greatest`, `least`: every argument is computed in order, nulls are left out, the answer is null only if all are;
+- *refused:* a constant argument that is an error (`coalesce(c, 1 / 0)`, `coalesce(c, 'abc')` for an integer): PostgreSQL raises it when it plans, or does not reach it, depending on
+  what stands before it. (Nothing was written for this: the evaluator already refuses a constant that is an error wherever it is made. Two tests written for it here tested nothing,
+  as their mutants showed, and were removed; the refusals are pinned.)
+
+In a grouped select the three are ordinary nodes over the aggregates' values (`coalesce(max(a), 0)`), not aggregates.
+
+**Built, and what the differential corrected.** Two rules were missing from the design, and each was a wrong answer until the random history met it:
+
+1. *`coalesce` of a constant is that constant, to the planner.* PostgreSQL drops the constant nulls and, if what is then first is a constant, takes it as the whole expression and never
+   looks at the rest: `coalesce(null, 3000000000, x)` is `3000000000`, and `x = - coalesce(...)` into a smaller column is error 22003 when the statement is planned, whatever the rows
+   (the engine answered `UPDATE 0`). A parameter is a constant in the same way. The evaluator now marks the result a constant by that rule.
+2. *An aggregate under an operator that folds to null is never computed.* `max(1 % c) - $1` with a null parameter is null to the planner (the operator is strict), so the aggregate is
+   gone and its division by zero with it; the engine computed it and answered the error. This was there since the grouped select was written (6i) and needed a null constant beside an
+   aggregate to show. Refused now: a grouped expression that comes out a constant and has an aggregate in it.
+
+*Measured:* the evaluator's differential on four seeds of 4,000 expressions with the three functions in them, no disagreement; 20 seeds of 3,000 statements, no disagreement; 22 fixed
+statements, 7 pinned refusals; 7 mutants (5 of the functions, 1 of the folded aggregate, 1 of the parser). `tests/hooks_check.py`: **12 of 16 queries** (`patch_endpoint`, `patch_schedule`).
+
+**For the proxy** the three are new statements it lets through (they were refused as reserved words): the hand-written parser cases pin them, and `nullif`, which is not built, stays refused.
 
 ## 7. Taking over, safely
 

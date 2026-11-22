@@ -21,7 +21,8 @@ def run(path, lines):
     if r.returncode != 0 or "\nerr " in r.stdout or "refused" in r.stdout or "error" in r.stdout:
         bad = [l for l in r.stdout.split("\n") if l.startswith(("err", "refused", "error"))]
         raise SystemExit("engine_big: status %d: %s" % (r.returncode, bad[:3]))
-    return [l.split()[1:] for l in r.stdout.split("\n") if l.startswith("R ")]
+    # a value is printed as the text a client is sent, in hex
+    return [[bytes.fromhex(v).decode() for v in l.split()[1:]] for l in r.stdout.split("\n") if l.startswith("R ")]
 
 
 def main():
