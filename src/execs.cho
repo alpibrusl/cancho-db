@@ -1406,6 +1406,20 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         }
         i = i + 1;
     }
+    if exec.ret_mode(w) >= 2 {
+        // the items of a RETURNING: over the one table, nothing else, and nothing that can raise an error for a row (PostgreSQL would raise it at that row, with the rows before it written and
+        // their identity values drawn; here the statement has run whole by then). An aggregate is not such an item
+        if distinct || nt != 1 || wpos != 0 || ng != 0 || hpos != 0 || no != 0 {
+            return exec.unsupported();
+        }
+        i = 0;
+        while i < ni {
+            if !quiet(e, contents(w.pos)[exec.p_item() + i], contents(w.pos)[exec.p_iend() + i]) {
+                return exec.unsupported();
+            }
+            i = i + 1;
+        }
+    }
     if ng > 0 || hpos != 0 || calls {
         return grouped(p, w, root, e, kinds, wpos, ng, hpos, at, distinct, extra);
     }
@@ -1480,6 +1494,9 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     let offset = contents(w.info)[2];
     if at != len(e) {
         return exec.malformed();
+    }
+    if exec.ret_mode(w) >= 2 && bounded {
+        return exec.unsupported();
     }
     if w.code != 0 {
         return exec.verdict(w);

@@ -185,6 +185,32 @@ pub fn seq_replay[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_r
     return nroot;
 }
 
+// RETURNING (docs/m3-engine.md 6aa). The items are a SELECT over the statement's table, which is run twice: before the statement over no rows (mode 3: its types, and what is wrong with them,
+// before anything is written or drawn), and after it over the rows the statement wrote or removed (mode 2), which the statement kept as it went (mode 1, `ret_row`). 0: no RETURNING.
+pub fn ret_set[&q](w: &!q Work, mode: int) -> [] int {
+    w.ret = mode;
+    return 0;
+}
+
+pub fn ret_mode[&q](w: &q Work) -> [] int {
+    return w.ret;
+}
+
+// A row the statement stored (INSERT, UPDATE: the new row) or removed (DELETE): kept for its RETURNING. 0, or a refusal.
+pub fn ret_row[&q, &r](w: &!q Work, r: &r [byte]) -> [] int {
+    if w.ret != 1 {
+        return 0;
+    }
+    if w.retn >= max_rows() || w.retfill + 2 + len(r) > rows_size() {
+        return too_big();
+    }
+    contents(w.jix)[w.retn] = w.retfill;
+    build.put_be(contents(w.jbuf), w.retfill, len(r), 2);
+    w.retfill = copy(r, 0, len(r), contents(w.jbuf), w.retfill + 2);
+    w.retn = w.retn + 1;
+    return 0;
+}
+
 // The row of an INSERT at which it failed (from 0).
 pub fn failed_row[&q](w: &q Work) -> [] int {
     return w.frow;
@@ -328,6 +354,10 @@ pub res struct Work {
     sq: Box[[int]],
     nsq: int,
     frow: int,
+    ret: int,
+    retn: int,
+    retfill: int,
+    retcur: int,
 }
 
 pub fn rows_size() -> [] int {
@@ -339,11 +369,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -523,7 +553,6 @@ pub fn tree_err(r: int) -> [] int {
 
 pub fn start[&q](w: &!q Work, root: int) -> [] int {
     w.root = root;
-    w.count = 0;
     w.first = 0;
     w.code = 0;
     w.multi = false;
@@ -532,8 +561,17 @@ pub fn start[&q](w: &!q Work, root: int) -> [] int {
     w.norder = 0;
     w.nconj = 0;
     w.rfill = 0;
-    w.nchg = 0;
-    w.cfill = 0;
+    if w.ret < 2 {
+        // (the SELECT that reads a statement's RETURNING leaves what the statement counted and changed)
+        w.count = 0;
+        w.nchg = 0;
+        w.cfill = 0;
+    }
+    if w.ret == 1 {
+        w.retn = 0;
+        w.retfill = 0;
+    }
+    w.retcur = 0;
     w.lon = 0 - 1;
     w.hin = 0 - 1;
     w.ntab = 1;
@@ -1001,6 +1039,23 @@ pub fn scan_start[&q](w: &!q Work) -> [] int {
 
 // The next row of the bound table in the tree `root`, in key order: its length (the row is in `slot`, and bound; its key in `key`), -1 when there is no other, or a refusal.
 pub fn scan_next[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_read] int {
+    if w.ret >= 2 {
+        // the rows a statement with RETURNING wrote (2), or none: the statement has not run yet (3)
+        if w.ret == 3 || w.retcur >= w.retn {
+            return 0 - 1;
+        }
+        let off = contents(w.jix)[w.retcur];
+        let nv = commit.be(contents(w.jbuf), off, 2);
+        w.retcur = w.retcur + 1;
+        let dl = w.dlen;
+        copy(contents(w.jbuf), off + 2, nv, contents(w.cur), 0);
+        if !row.row_ok(contents(w.ctx)[64..64 + dl], contents(w.cur)[0..nv]) {
+            return damaged();
+        }
+        copy(contents(w.cur), 0, nv, contents(w.ctx), 1024);
+        contents(w.cx)[5] = nv;
+        return nv;
+    }
     let kl = w.klen;
     let at_it = w.fresh;
     w.fresh = false;

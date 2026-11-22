@@ -792,6 +792,36 @@ follows them. The evaluator read the whole text and then judged it. *Corrected b
 is in range of every integer type; for more it depends on the type and on how PostgreSQL's reader is written, and nothing is answered. Pinned both ways (3 refused with PostgreSQL's outcome
 beside them, 5 fixed), 2 mutants. The claim that was false for these texts was C149 ("when the evaluator answers, its answer is PostgreSQL's"): its twelve test rows held no such text. It is true again by saying less, and says so.
 
+## 6aa. `returning`
+
+Six of hooks' queries end in `returning id` (or a list of columns): it is how the service learns that an update or a delete found its row.
+
+**Design.** The items of a `returning` are a select list over the statement's table, read for each row the statement stored (insert, update: the row as it now is, whether or not the update
+changed it) or removed (delete). So the parser builds, beside the statement, a `select <items> from <the table>` (the same nodes a SELECT has), and the engine runs that SELECT:
+
+1. *before the statement, over no rows*: its types, its column names, and what is wrong with them. A wrong item is PostgreSQL's error before anything is written or drawn from a counter;
+2. the statement, which keeps each row it stores or removes (`exec.ret_row`);
+3. *after it, over the rows it kept* instead of over the table.
+
+Nothing of the SELECT was written again for this: the row source is the only thing that differs (`exec.scan_next`).
+
+*Refused:* an item that can raise an error for a row (arithmetic, a cast, `||`): PostgreSQL raises it at that row, with the rows before it written and their identity values drawn, and
+here the statement has run whole by then. The items must be "quiet" in the sense of 6k (columns, constants, comparisons, `and`/`or`/`not`, `is null`, `in`). An aggregate is refused too.
+*Order:* PostgreSQL returns the rows in the order it wrote them, which for an update or a delete is the order it found them; nobody is promised that order, and the test compares the rows
+as a set.
+
+**The guard's tags.** A statement of the proxy that has a `returning` or an `on conflict` was refused with those words as its tag. The mark of 6x would have made both
+`unsupported-statement`; the mark now carries the refusal the guard gives (`engine_form` in src/stmt.cho: the first form's, which is what the parser said before it could read on), so the
+proxy answers these exactly as it did. `proxy/stmtcheck.cho` and `proxy/lowercheck.cho`, which test the proxy's grammar, refuse the engine's forms the same way.
+
+**Built and measured.** 20 seeds of 3,000 statements against PostgreSQL 16.15 with `returning` on two in ten of the random inserts, updates and deletes: no disagreement on the rows returned
+(as a set), their names and their types, nor on the changes. 26 fixed statements (with identity columns, `on conflict`, parameters, a key that an update moves), 4 pinned refusals; 5 mutants
+of the engine and 2 of the mark (a sixth, of the refusal of an aggregate, was of a test the test before it already made: removed with the test). `tests/hooks_check.py`: **10 of 16 queries** (`patch_address`, `delete_schedule`).
+
+**What is left of the sixteen**, and what each needs: `patch_endpoint`, `patch_schedule` (`coalesce`, `greatest`, and a `case` over parameters); `prune_attempts` (`ctid in (select ...
+limit)`: a row's place has no meaning here, and this one is better rewritten in hooks by key); `create_endpoint`, `create_schedule` (`insert ... select` with a scalar subquery);
+`delete_endpoint` (a `with` whose body is a `delete ... returning`); and the sequence (`nextval`, `setval`) that two of those use.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

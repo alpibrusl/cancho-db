@@ -21,7 +21,7 @@ import engine_check as ec
 
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks")
 SCHEMA_FLOOR = 14
-QUERY_FLOOR = 8
+QUERY_FLOOR = 10
 DUMPS = ["select * from attempts order by endpoint, event, replay, attempt", "select * from endpoints order by id", "select * from schedules order by id"]
 
 # (query, values): text as the service's driver sends it, None for a null

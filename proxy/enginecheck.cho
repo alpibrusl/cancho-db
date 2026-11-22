@@ -207,6 +207,7 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
                                                     var kind = 0 - 1;
                                                     var named = false;
                                                     var ctl = 0;
+                                                    var returned = 0 - 1;
                                                     let sl = exec.schema(pg, w, root, contents(mw));
                                                     let n = lex.tokenize(sql, contents(tw));
                                                     if sl < 0 {
@@ -258,6 +259,40 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
                                                                     kind = 9;
                                                                 } else if kind == 6 {
                                                                     rc = execs.select(pg, w, root, e, contents(xw));
+                                                                } else if (kind == 1 || kind == 2 || kind == 3) && contents(nw)[6 * top + 5] >= 0 {
+                                                                    // RETURNING (docs/m3-engine.md 6aa): the items are a SELECT over the table, read before the statement over no rows (what is
+                                                                    // wrong with them is known before anything is written) and after it over the rows it wrote
+                                                                    let rn = contents(nw)[6 * top + 5];
+                                                                    region rr {
+                                                                        let ir2 = alloc_slice[rr](32768, byte_of(0));
+                                                                        let sc2 = alloc_slice[rr](1024, 0);
+                                                                        let l2 = lower.lower(sql, contents(tw), contents(nw), contents(kw), rn, contents(mw)[0..sl], contents(rw), ir2, sc2);
+                                                                        if l2 < 0 {
+                                                                            put_str(io, "refused ");
+                                                                            put_str(io, lower.error_name(0 - l2));
+                                                                            named = true;
+                                                                        } else {
+                                                                            exec.ret_set(w, 3);
+                                                                            rc = execs.select(pg, w, root, ir2[0..l2], sc2);
+                                                                            if rc == 0 {
+                                                                                exec.ret_set(w, 1);
+                                                                                if kind == 1 {
+                                                                                    rc = execw.insert(pg, w, root, e, contents(xw), contents(nw)[6 * top + 4] == 1);
+                                                                                } else if kind == 2 {
+                                                                                    rc = execw.update(pg, w, root, e, contents(xw));
+                                                                                } else {
+                                                                                    rc = execw.delete(pg, w, root, e, contents(xw));
+                                                                                }
+                                                                                if rc == 0 {
+                                                                                    let r1 = exec.root_of(w);
+                                                                                    exec.ret_set(w, 2);
+                                                                                    rc = execs.select(pg, w, r1, ir2[0..l2], sc2);
+                                                                                    returned = rn;
+                                                                                }
+                                                                            }
+                                                                            exec.ret_set(w, 0);
+                                                                        }
+                                                                    }
                                                                 } else if kind == 1 {
                                                                     rc = execw.insert(pg, w, root, e, contents(xw), contents(nw)[6 * top + 4] == 1);
                                                                 } else if kind == 2 {
@@ -328,9 +363,12 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
                                                                 }
                                                                 putchar(io, '\n');
                                                             }
-                                                            if kind == 6 {
+                                                            if kind == 6 || returned >= 0 {
                                                                 // the names of the columns, as a client is sent them: what the lowering knows and the IR does not carry
-                                                                let top2 = contents(sw)[2];
+                                                                var top2 = contents(sw)[2];
+                                                                if returned >= 0 {
+                                                                    top2 = returned;
+                                                                }
                                                                 let nn = lower.output_names(sql, contents(tw), contents(nw), contents(kw), top2, contents(mw)[0..sl], contents(xw), contents(iw));
                                                                 putchar(io, 'N');
                                                                 var na = 0;
@@ -349,7 +387,8 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
                                                                 }
                                                                 putchar(io, '\n');
                                                                 put_rows(io, w);
-                                                            } else if kind < 9 {
+                                                            }
+                                                            if kind != 6 && kind < 9 {
                                                                 put_changes(io, w);
                                                             }
                                                             out = exec.root_of(w);

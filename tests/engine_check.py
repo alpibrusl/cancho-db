@@ -438,6 +438,7 @@ class Gen:
             rows.append("(%s)" % ", ".join(self.value(t.cols[i], i == t.pk) for i in idx))
         # ON CONFLICT DO NOTHING (docs/m3-engine.md 6z): the rows whose key is there are left out, the others stored
         tail = " on conflict do nothing" if self.r.random() < 0.2 else ""
+        tail += self.returning()
         return "insert into %s%s values %s%s" % (t.name, " (%s)" % ", ".join(t.cols[i][0] for i in idx) if listed else "", ", ".join(rows), tail)
 
     def update(self):
@@ -462,13 +463,38 @@ class Gen:
         s = "update %s set %s" % (t.name, ", ".join(sets))
         if self.r.random() < 0.8:
             s += " where " + self.where()
-        return s
+        return s + self.returning()
 
     def delete(self):
         s = "delete from %s" % self.t.name
         if self.r.random() < 0.9:
             s += " where " + self.where()
-        return s
+        return s + self.returning()
+
+    def returning(self):
+        """RETURNING on two statements in ten (docs/m3-engine.md 6aa): columns, `*`, a comparison, a name; now and then something that is refused or wrong."""
+        if self.r.random() > 0.2:
+            return ""
+        t = self.t
+        items = []
+        for _ in range(self.pick([1, 1, 2, 3])):
+            r = self.r.random()
+            c = self.pick(t.cols)[0]
+            if r < 0.15:
+                items.append("*")
+            elif r < 0.7:
+                items.append(c + (" as %s" % self.pick(["z1", "k", "\"Zed\""]) if self.r.random() < 0.2 else ""))
+            elif r < 0.8:
+                items.append("%s is null" % c)
+            elif r < 0.88:
+                items.append("%s.%s" % (t.name, c))
+            elif r < 0.93:
+                items.append(self.pick(["1", "'x'", "null", "true"]))
+            elif r < 0.97:
+                items.append(self.any_(1))
+            else:
+                items.append(self.pick(["nope", "count(*)", "%s / 0" % c]))
+        return " returning " + ", ".join(items)
 
     def select(self):
         """(sql, how to compare: 'order', 'set' or 'count')"""
@@ -837,6 +863,18 @@ def compare(pg, stmts, eng, must):
             else:
                 fail(i, "rows differ (%s)" % how, "postgres: %s %s" % (oids, rows[:14]))
             continue
+        returned = [line for line in body[1:] if line[:2] in ("N ", "T ", "R ") or line in ("N", "T")]
+        if returned or oids:
+            # RETURNING: the rows the statement wrote, in no order that is promised
+            names = [unhex(x) for x in returned[0].split()[1:]] if returned else None
+            types = [int(x) for x in returned[1].split()[1:]] if len(returned) > 1 else None
+            erows = [[None if v == "-" else unhex(v) for v in line.split()[1:]] for line in returned[2:]]
+            key = lambda r: [(x is None, x or b"") for x in r]
+            if names != pg.names or types != oids or sorted(erows, key=key) != sorted(rows, key=key):
+                fail(i, "the rows returned differ", "postgres: %s %s %s" % (pg.names, oids, rows[:10]))
+                continue
+            count("agree-returning")
+        changes = [line for line in body[1:] if line.startswith("C ")]
         if how == "write" and before is not None:
             after = snapshot(tname)
             want = set()
@@ -844,10 +882,10 @@ def compare(pg, stmts, eng, must):
                 if before.get(k) != after.get(k):
                     want.add((tname.encode(), k, before.get(k), after.get(k)))
             got = set()
-            for line in body[1:]:
+            for line in changes:
                 _, t, k, o, nw = line.split()
                 got.add((unhex(t), unhex(k), None if o == "-" else unhex(o), None if nw == "-" else unhex(nw)))
-            if got == want and len(got) == len(body) - 1:
+            if got == want and len(got) == len(changes):
                 count("agree-changes")
             else:
                 fail(i, "changes differ", "only engine: %s\n     only postgres: %s" % (sorted(got - want, key=str)[:3], sorted(want - got, key=str)[:3]))
@@ -1212,6 +1250,36 @@ FIXED += [
     ("select k / 3, min(s), max(s) from fm group by k / 3 order by 1", "order"),
 ]
 
+# RETURNING (6aa)
+FIXED += [
+    ("create table fr (id bigint generated always as identity primary key, e text not null, n integer default 1 check (n between 0 and 9))", "ddl"),
+    ("insert into fr (e) values ('a'), ('b') returning id, e", "write"),
+    ("insert into fr (e, n) values ('c', 5) returning *", "write"),
+    ("insert into fr (e, n) values ('d', 5), (null, 1) returning id", "write"),
+    ("insert into fr (e, n) values ('e', 50) returning id", "write"),
+    ("insert into fr (e) values ('f') returning id, n, e, fr.id as again, n is null, 7, 'x'", "write"),
+    ("update fr set n = n + 1 where id < 3 returning id, n", "write"),
+    ("update fr set n = n where id = 3 returning n as \"N\", id", "write"),
+    ("update fr set n = n + 4 where id = 3 returning n", "write"),
+    ("update fr set n = n + 4 where id = 3 returning n", "write"),
+    ("update fr set e = 'none' where id = 99 returning *", "write"),
+    ("delete from fr where id = 2 returning id, e, n", "write"),
+    ("delete from fr where id = 2 returning id", "write"),
+    ("insert into fr (e) values ('g') on conflict do nothing returning id", "write"),
+    (P("insert into fr (e, n) values ($1, $2) returning id, e", "h", "3"), "write"),
+    (P("update fr set e = $2::text where id = $1::bigint returning id", "1", "one"), "write"),
+    (P("update fr set e = $2::text where id = $1::bigint returning id", "77", "none"), "write"),
+    (P("delete from fr where id = $1::bigint returning id", "1"), "write"),
+    ("select * from fr order by id", "order"),
+    ("create table fr2 (a integer, b integer, v text, primary key (a, b))", "ddl"),
+    ("insert into fr2 values (1, 1, 'x'), (1, 2, 'y'), (2, 1, 'z') returning b, a", "write"),
+    ("insert into fr2 values (1, 1, 'dup'), (3, 3, 'new') on conflict do nothing returning a, b, v", "write"),
+    ("update fr2 set b = b + 10 where a = 1 returning a, b, v", "write"),
+    ("update fr2 set v = v where a > 0 returning v", "write"),
+    ("delete from fr2 returning *", "write"),
+    ("select * from fr2", "order"),
+]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)",
              "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
@@ -1273,6 +1341,10 @@ UNSUP = [
     ("create table fzc (k integer primary key, a bigint generated always as identity, b bigint generated always as identity)", None),   # two identity columns
     ("create table fzc (k integer primary key, a text generated always as identity)", "22023"),
     ("alter table fz add column idn bigint generated always as identity", None),                     # the rows there would each draw a value
+    ("insert into fz values (7, 7) returning n / 0", "22012"),                                        # an item that can raise an error for a row
+    ("insert into fz values (7, 7) returning n + 1", None),
+    ("delete from fz returning count(*)", "42803"),
+    ("update fz set n = 1 returning k || 'x'", None),
     ("update fi set c = 7", "428C9"),                                                                # an identity column is given no value
     ("insert into fi values (2, 9)", "428C9"),
     ("insert into fi (c, k) values (9, 2)", "428C9"),
@@ -1596,7 +1668,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (f[ksonm]\d?)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (f[ksonmr]\d?)\b", sql)
         if m:
             return m.group(1)
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")

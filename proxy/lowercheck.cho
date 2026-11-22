@@ -93,7 +93,11 @@ fn main(world: World) -> [] int {
                                                                 tag = 1;
                                                             } else {
                                                                 parse.reset(contents(sw));
-                                                                let q = stmt.statement(sql, contents(tw), 0, n, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(cw), contents(sw));
+                                                                var q = stmt.statement(sql, contents(tw), 0, n, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(cw), contents(sw));
+                                                                if q >= 0 && contents(sw)[12] != 0 {
+                                                                    // a form that only the engine takes: not part of the grammar this program tests
+                                                                    q = 0 - contents(sw)[12];
+                                                                }
                                                                 if q < 0 {
                                                                     answer = q;
                                                                     tag = 2;

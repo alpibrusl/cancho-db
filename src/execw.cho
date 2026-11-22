@@ -362,6 +362,10 @@ fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int, 
             if cr < 0 {
                 return cr;
             }
+            let rr = exec.ret_row(w, contents(w.cur)[0..rl]);
+            if rr < 0 {
+                return rr;
+            }
             w.count = w.count + 1;
         }
         r = r + 1;
@@ -536,6 +540,12 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                     } else if range_out(w, contents(w.nrow)[0..ra]) {
                         exec.note(w, exec.e_check());
                         bad = true;
+                    } else {
+                        // the row as it is after the update, changed or not: what RETURNING reads
+                        let rr = exec.ret_row(w, contents(w.nrow)[0..ra]);
+                        if rr < 0 {
+                            return rr;
+                        }
                     }
                 }
                 if !bad && !exec.same(contents(w.cur), 0, rl, contents(w.nrow), 0, ra) {
@@ -751,6 +761,10 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                 let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);
                 if cr < 0 {
                     return cr;
+                }
+                let rr = exec.ret_row(w, contents(w.cur)[0..rl]);
+                if rr < 0 {
+                    return rr;
                 }
                 w.count = w.count + 1;
             }

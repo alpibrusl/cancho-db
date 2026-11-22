@@ -173,22 +173,9 @@ fn close_list[&n, &k, &g, &x](nodes: &!n [int], kids: &!k [int], tmp: &!g [int],
     return id;
 }
 
-// Parses the SELECT in tokens [from, end). On success st[2] is the root and the answer is `end`; otherwise `0 - code`, with
-// st[3] the token. `tmp` stages children while lists are built; `clauses` collects a SELECT's own children. `st` is the state
-// `parse.reset` made, and at least 12 ints.
-pub fn select[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], st: &!x [int]) -> [] int {
-    if !parse.kw(sql, toks, from, end, "select") {
-        return parse.fail(st, from, parse.e_unsupported_statement());
-    }
-    st[10] = 0;
-    st[11] = 0;
-    var pos = from + 1;
-    var distinct = 0;
-    if parse.kw(sql, toks, pos, end, "distinct") {
-        distinct = 1;
-        pos = pos + 1;
-    }
-    // the items
+// The items of a select list from `from` (`*`, `t.*`, or an expression and its alias), each staged: the position after the last.
+fn item_list[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    var pos = from;
     var more = true;
     while more {
         if pos >= end {
@@ -242,6 +229,67 @@ pub fn select[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
             more = false;
         }
     }
+    return pos;
+}
+
+// RETURNING items, the word at `pos`, after an INSERT, UPDATE or DELETE of the table whose TABLE node is `table`: a SELECT of the items FROM that table is built beside the statement (its node in
+// `st[13]`), which is how the engine reads them (docs/m3-engine.md 6aa). One of the engine's forms. The position after the items.
+fn returning[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, table: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    engine_form(st, parse.e_returning());
+    st[10] = 0;
+    let q = item_list(sql, toks, pos + 1, end, nodes, kids, vs, os, tmp, st);
+    if q < 0 {
+        return q;
+    }
+    let items = close_list(nodes, kids, tmp, st, parse.n_items(), 0, 0);
+    if items < 0 {
+        return parse.fail(st, pos, 0 - items);
+    }
+    var r = stage(tmp, st, table);
+    if r < 0 {
+        return parse.fail(st, pos, 0 - r);
+    }
+    let source = close_list(nodes, kids, tmp, st, parse.n_from(), 0, 0);
+    if source < 0 {
+        return parse.fail(st, pos, 0 - source);
+    }
+    r = stage(tmp, st, items);
+    if r >= 0 {
+        r = stage(tmp, st, source);
+    }
+    if r < 0 {
+        return parse.fail(st, pos, 0 - r);
+    }
+    let sel = parse.mk(nodes, kids, st, parse.n_select(), 0, tmp[0..2], 2, 0 - 1, 0 - 1);
+    st[10] = 0;
+    if sel < 0 {
+        return parse.fail(st, pos, 0 - sel);
+    }
+    st[13] = sel;
+    return q;
+}
+
+// Parses the SELECT in tokens [from, end). On success st[2] is the root and the answer is `end`; otherwise `0 - code`, with
+// st[3] the token. `tmp` stages children while lists are built; `clauses` collects a SELECT's own children. `st` is the state
+// `parse.reset` made, and at least 12 ints.
+pub fn select[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], st: &!x [int]) -> [] int {
+    if !parse.kw(sql, toks, from, end, "select") {
+        return parse.fail(st, from, parse.e_unsupported_statement());
+    }
+    st[10] = 0;
+    st[11] = 0;
+    var pos = from + 1;
+    var distinct = 0;
+    if parse.kw(sql, toks, pos, end, "distinct") {
+        distinct = 1;
+        pos = pos + 1;
+    }
+    // the items
+    pos = item_list(sql, toks, pos, end, nodes, kids, vs, os, tmp, st);
+    if pos < 0 {
+        return pos;
+    }
+    var more = true;
     var items = close_list(nodes, kids, tmp, st, parse.n_items(), 0, 0);
     if items < 0 {
         return parse.fail(st, pos, 0 - items);
@@ -626,13 +674,21 @@ pub fn insert[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
     var oc = 0 - 1;
     if parse.kw(sql, toks, pos, end, "on") && parse.kw(sql, toks, pos + 1, end, "conflict") && parse.kw(sql, toks, pos + 2, end, "do") && parse.kw(sql, toks, pos + 3, end, "nothing") {
         oc = 1;
-        st[12] = 1;
+        engine_form(st, parse.e_on_conflict());
         pos = pos + 4;
+    }
+    var ret = 0 - 1;
+    if parse.kw(sql, toks, pos, end, "returning") {
+        pos = returning(sql, toks, pos, end, clauses[0], nodes, kids, vs, os, tmp, st);
+        if pos < 0 {
+            return pos;
+        }
+        ret = st[13];
     }
     if pos < end {
         return leftover(sql, toks, pos, end, st);
     }
-    let root = parse.mk(nodes, kids, st, parse.n_insert(), 0, clauses[0..n], n, oc, 0 - 1);
+    let root = parse.mk(nodes, kids, st, parse.n_insert(), 0, clauses[0..n], n, oc, ret);
     if root < 0 {
         return parse.fail(st, pos, 0 - root);
     }
@@ -697,10 +753,18 @@ pub fn update[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
         return pos;
     }
     let n = st[11];
+    var ret = 0 - 1;
+    if parse.kw(sql, toks, pos, end, "returning") {
+        pos = returning(sql, toks, pos, end, clauses[0], nodes, kids, vs, os, tmp, st);
+        if pos < 0 {
+            return pos;
+        }
+        ret = st[13];
+    }
     if pos < end {
         return leftover(sql, toks, pos, end, st);
     }
-    let root = parse.mk(nodes, kids, st, parse.n_update(), 0, clauses[0..n], n, 0 - 1, 0 - 1);
+    let root = parse.mk(nodes, kids, st, parse.n_update(), 0, clauses[0..n], n, 0 - 1, ret);
     if root < 0 {
         return parse.fail(st, pos, 0 - root);
     }
@@ -726,13 +790,21 @@ pub fn delete[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
         return pos;
     }
     let n = st[11];
+    var ret = 0 - 1;
+    if parse.kw(sql, toks, pos, end, "returning") {
+        pos = returning(sql, toks, pos, end, clauses[0], nodes, kids, vs, os, tmp, st);
+        if pos < 0 {
+            return pos;
+        }
+        ret = st[13];
+    }
     if pos < end {
         if parse.kw(sql, toks, pos, end, "using") {
             return parse.fail(st, pos, parse.e_unknown_construct());
         }
         return leftover(sql, toks, pos, end, st);
     }
-    let root = parse.mk(nodes, kids, st, parse.n_delete(), 0, clauses[0..n], n, 0 - 1, 0 - 1);
+    let root = parse.mk(nodes, kids, st, parse.n_delete(), 0, clauses[0..n], n, 0 - 1, ret);
     if root < 0 {
         return parse.fail(st, pos, 0 - root);
     }
@@ -820,7 +892,7 @@ fn coldef[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: i
                 flags = flags + 64;
             }
             flags = flags + 16;
-            st[12] = 1;
+            engine_form(st, parse.e_unsupported_statement());
             p = q;
         } else if bit == 8 {
             // the default is a literal: a number (optionally negative), a string, NULL, TRUE or FALSE
@@ -846,7 +918,7 @@ fn coldef[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: i
             p = q;
         } else {
             if bit == 32 {
-                st[12] = 1;
+                engine_form(st, parse.e_unsupported_statement());
             }
             flags = flags + bit;
         }
@@ -868,10 +940,19 @@ fn coldef[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: i
     return p;
 }
 
+// The statement uses a form that only the engine takes (docs/m3-engine.md 6x): `st[12]` is the refusal the guard gives for it, the first such form's (what the parser said of it before it read it,
+// where that was more than `syntax`).
+fn engine_form[&x](st: &!x [int], code: int) -> [] int {
+    if st[12] == 0 {
+        st[12] = code;
+    }
+    return 0;
+}
+
 // `IF NOT EXISTS` at `pos`: 1 (and the statement is marked as one of the engine's forms), or 0.
 fn if_not_exists[&s, &t, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, st: &!x [int]) -> [] int {
     if parse.kw(sql, toks, pos, end, "if") && parse.kw(sql, toks, pos + 1, end, "not") && parse.kw(sql, toks, pos + 2, end, "exists") {
-        st[12] = 1;
+        engine_form(st, parse.e_unsupported_statement());
         return 1;
     }
     return 0;
@@ -920,7 +1001,7 @@ fn create_table[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], 
                 return parse.fail(st, pos, parse.e_syntax());
             }
             keyed = true;
-            st[12] = 1;
+            engine_form(st, parse.e_unsupported_statement());
             let mark = st[10];
             pos = name_list(sql, toks, pos + 3, end, nodes, kids, tmp, st);
             if pos < 0 {
@@ -974,7 +1055,7 @@ fn alter_table[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], f
     if parse.kw(sql, toks, pos, end, "alter") {
         // ALTER [COLUMN] c [SET DATA] TYPE type: a column definition of the name and the type
         how = 2;
-        st[12] = 1;
+        engine_form(st, parse.e_unsupported_statement());
         pos = pos + 1;
         if parse.kw(sql, toks, pos, end, "column") {
             pos = pos + 1;
@@ -1072,7 +1153,7 @@ fn create_index[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], 
     if parse.kw(sql, toks, pos, end, "where") {
         // the condition of a partial index: staged after the columns
         cond = 1;
-        st[12] = 1;
+        engine_form(st, parse.e_unsupported_statement());
         let at = pos;
         pos = parse.expr(sql, toks, pos + 1, end, nodes, kids, vs, os, st);
         if pos < 0 {
@@ -1150,9 +1231,9 @@ fn txn_control[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int
     return end;
 }
 
-// One statement: the first word says which. Anything else is `unsupported-statement`. `st` is at least 13 ints.
+// One statement: the first word says which. Anything else is `unsupported-statement`. `st` is at least 14 ints.
 pub fn statement[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], clauses: &!c [int], st: &!x [int]) -> [] int {
-    // `st[12]` is set by a form that only the engine takes (docs/m3-engine.md 6x): the guard refuses a statement that has one
+    // `st[12]` is set by a form that only the engine takes (`engine_form`): the guard refuses a statement that has one
     st[12] = 0;
     if parse.kw(sql, toks, from, end, "select") {
         return select(sql, toks, from, end, nodes, kids, vs, os, tmp, clauses, st);
