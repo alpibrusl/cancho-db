@@ -141,6 +141,14 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         return exec.too_big();
     }
     let n = columns(w);
+    // `insert ... select ... where` with no table: no row if the condition does not hold. It is read first: what is wrong with it is PostgreSQL's error before what is wrong with the row
+    var held = 1;
+    if exec.guard_len(w) > 0 {
+        held = exec.guard_holds(w);
+        if held < 0 {
+            return held;
+        }
+    }
     // an identity column takes its values from the table's counter
     let el0 = w.elen;
     let ic = tables.identity_col(contents(w.ent)[0..el0]);
@@ -279,10 +287,14 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if w.code != 0 {
         return exec.verdict(w);
     }
-    let sr = store_rows(p, w, root, nr, skip);
+    var stored = nr;
+    if held == 0 {
+        stored = 0;
+    }
+    let sr = store_rows(p, w, root, stored, skip);
     if ic >= 0 && sr >= 0 {
         // the values drawn are drawn for good (PostgreSQL draws one for each row it reaches): every row's, or those up to the row that failed
-        var drawn = nr;
+        var drawn = stored;
         if sr > 0 {
             drawn = exec.failed_row(w) + 1;
         }
@@ -1203,6 +1215,17 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
         }
         w.root = sr;
     }
+    return 0;
+}
+
+// Lower the condition of an `insert ... select ... where` (the SELECT of it at `node`, src/stmt.cho) for `insert` to read: 0, or a refusal.
+pub fn guard_lower[&q, &s, &t, &n, &k, &m](w: &!q exec.Work, sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], node: int, schema: &m [byte]) -> [] int {
+    let ln = lower.lower(sql, toks, nodes, kids, node, schema, contents(w.lrs), contents(w.lit), contents(w.lsc));
+    if ln < 0 {
+        exec.set_guard(w, 0);
+        return exec.unsupported();
+    }
+    exec.set_guard(w, ln);
     return 0;
 }
 

@@ -854,6 +854,41 @@ statements, 7 pinned refusals; 7 mutants (5 of the functions, 1 of the folded ag
 
 **For the proxy** the three are new statements it lets through (they were refused as reserved words): the hand-written parser cases pin them, and `nullif`, which is not built, stays refused.
 
+## 6ac. A scalar subquery, and `insert ... select` with no table
+
+`create_schedule` in hooks is `insert into schedules (...) select $1::text, ... where (select count(*) from schedules) < 64 returning ...`: one row, if there are fewer than 64.
+
+**The subquery (design).** `(select ...)` where a value is expected, with nothing of the statement around it in it, is computed once by PostgreSQL and is then a value. The engine does
+the same *before* the statement, and in the statement's text: the driver finds the subquery, runs it as the SELECT it is, and puts a parameter with a cast in its place
+(`($3::bigint) < 64`), bound to the value's text. Nothing of the parser, the lowering or the IR changes, and the proxy refuses a subquery as before.
+
+- The value is no constant to PostgreSQL's planner (it is known when the statement runs, not when it is planned), so the evaluator does not treat such a parameter as one: an error made
+  of it is an error of a row, not of the statement.
+- PostgreSQL computes the subquery only if it is reached; the engine always. So a subquery that raises an error, or is refused, or has more than one row, refuses the statement.
+- A subquery that names a column of the statement around it is not this (it is computed for each row): its SELECT does not lower alone, and the statement is refused.
+
+**`insert ... select` with no `from` (design).** It is one row of expressions with a condition: the parser reads it as the `values` row it is, and keeps the condition beside the
+statement as a SELECT of it (as `returning` keeps its items, 6aa); the engine computes the condition first, over nothing, and stores the row or no row. An engine form (the proxy keeps
+its `insert-select` refusal). `insert ... select ... from` stays refused.
+
+**Built, and what the differential corrected.**
+
+1. *A subquery in a list of output columns gives its column its name*, and not only when it is the whole item: under a cast (`cast((select count(*) ...) as text)` is named `count`) and
+   as the `else` of a `case`. The parameter in its place would name it otherwise. Refused: any subquery among the items of a SELECT that is the statement, or of a `returning`.
+2. *What is wrong with the condition comes before what is wrong with the row*: PostgreSQL reads the SELECT, its `where` included, before it fits the items to the table's columns. The
+   condition is computed first.
+3. *"No constant" was half right.* An error made of a subquery's value in an assignment is a row's (`update ... set n = cast((select ...) as bigint) where` no row: no error; pinned).
+   But a condition with no column in it is computed once before any row, so there the error is raised whatever the rows. The engine refuses that case as it refuses every error whose
+   moment it does not know (`engine-order-dependent`); pinned with PostgreSQL's 22P02 beside it.
+
+*Where the code is, and what that means:* finding the subqueries and writing the statement again is done by the program that drives the engine (`prepare` in proxy/enginecheck.cho), as
+transactions are (6v). It is tested by everything below and has **no mutants of its own**: the mutant runner changes src/ only. It moves into src/ with the serving of clients (J6).
+
+*Measured:* 20 seeds of 3,000 statements with scalar subqueries among the integer operands (of this table or another, some with several rows, some of a column of the statement around
+them) and a quarter of the one-row inserts written as `insert ... select` with a condition: no disagreement. 22 fixed statements, 16 pinned refusals; 6 mutants (4 of the engine, 2 of
+the parser), 5 statement cases and 4 guard cases. `tests/hooks_check.py`: **13 of 16 queries** (`create_schedule`), and the four `schedules` queries that were answered over an empty
+table are now answered over the rows it makes.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

@@ -616,14 +616,70 @@ pub fn insert[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
         clauses[n] = id;
         n = n + 1;
     }
-    if parse.kw(sql, toks, pos, end, "select") || parse.kw(sql, toks, pos, end, "with") {
-        return parse.fail(st, pos, parse.e_insert_select());
-    }
-    if !parse.kw(sql, toks, pos, end, "values") {
-        return parse.fail(st, pos, parse.e_syntax());
-    }
-    pos = pos + 1;
+    var guard = 0 - 1;
     var rows = true;
+    if parse.kw(sql, toks, pos, end, "select") {
+        // SELECT expression, ... [WHERE condition], with no FROM: the one row of a VALUES, stored if the condition holds (docs/m3-engine.md 6ac). One of the engine's forms; with a FROM it
+        // is refused as it was. The condition is kept as a SELECT of it, whose node is the root's data, plus one
+        engine_form(st, parse.e_insert_select());
+        let at = pos;
+        let mark = st[10];
+        pos = pos + 1;
+        var items = true;
+        while items {
+            pos = expr_item(sql, toks, pos, end, nodes, kids, vs, os, tmp, st);
+            if pos < 0 {
+                return pos;
+            }
+            if parse.punct(sql, toks, pos, end, ',') {
+                pos = pos + 1;
+            } else {
+                items = false;
+            }
+        }
+        let row = close_list(nodes, kids, tmp, st, parse.n_row(), mark, 0);
+        if row < 0 {
+            return parse.fail(st, at, 0 - row);
+        }
+        let r = stage(tmp, st, row);
+        if r < 0 {
+            return parse.fail(st, at, 0 - r);
+        }
+        if parse.kw(sql, toks, pos, end, "where") {
+            pos = parse.expr(sql, toks, pos + 1, end, nodes, kids, vs, os, st);
+            if pos < 0 {
+                return pos;
+            }
+            // a SELECT of the one item FROM the statement's table (the lowering knows no SELECT without a table; the engine computes the item over no row), built in the last two places
+            // of `clauses`
+            clauses[14] = st[2];
+            clauses[14] = parse.mk(nodes, kids, st, parse.n_item(), 0 - 1, clauses[14..15], 1, 0 - 1, 0 - 1);
+            if clauses[14] >= 0 {
+                clauses[14] = parse.mk(nodes, kids, st, parse.n_items(), 0, clauses[14..15], 1, 0 - 1, 0 - 1);
+            }
+            clauses[15] = clauses[0];
+            clauses[15] = parse.mk(nodes, kids, st, parse.n_from(), 0, clauses[15..16], 1, 0 - 1, 0 - 1);
+            if clauses[14] < 0 || clauses[15] < 0 {
+                return parse.fail(st, at, parse.e_too_big());
+            }
+            guard = parse.mk(nodes, kids, st, parse.n_select(), 0, clauses[14..16], 2, 0 - 1, 0 - 1);
+            if guard < 0 {
+                return parse.fail(st, at, 0 - guard);
+            }
+        }
+        if pos < end && !parse.kw(sql, toks, pos, end, "on") && !parse.kw(sql, toks, pos, end, "returning") {
+            return parse.fail(st, at, parse.e_insert_select());
+        }
+        rows = false;
+    } else {
+        if parse.kw(sql, toks, pos, end, "with") {
+            return parse.fail(st, pos, parse.e_insert_select());
+        }
+        if !parse.kw(sql, toks, pos, end, "values") {
+            return parse.fail(st, pos, parse.e_syntax());
+        }
+        pos = pos + 1;
+    }
     while rows {
         if !parse.punct(sql, toks, pos, end, '(') {
             return parse.fail(st, pos, parse.e_syntax());
@@ -688,7 +744,7 @@ pub fn insert[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
     if pos < end {
         return leftover(sql, toks, pos, end, st);
     }
-    let root = parse.mk(nodes, kids, st, parse.n_insert(), 0, clauses[0..n], n, oc, ret);
+    let root = parse.mk(nodes, kids, st, parse.n_insert(), guard + 1, clauses[0..n], n, oc, ret);
     if root < 0 {
         return parse.fail(st, pos, 0 - root);
     }
