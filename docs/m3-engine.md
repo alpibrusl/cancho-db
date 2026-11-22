@@ -1200,6 +1200,70 @@ PostgreSQL 16.15. 54 kinds of garbage; the server answers the next connection af
 *What the test cannot reach:* the page file failing under the server (`58030` and the stop): there is no way to make it fail from outside. The crash test (C156) covers the
 page file's own behaviour at every step; the server's two lines around it are read, not run.
 
+## 6am. The server, second part: the extended protocol, as `cancho-pg` speaks it
+
+`cancho-pg` (`src/pg.cho`, read at its commit of this date) sends four shapes, and `cancho-hooks` reaches the database through three of them:
+
+| | what is sent | what PostgreSQL answers |
+|---|---|---|
+| a statement with values (`execute`) | `Parse` (unnamed, no types), `Bind` (text), `Describe` the portal, `Execute`, `Sync` | `1 2 T D.. C Z`, or `1 2 n C Z` with no rows |
+| prepare under a name (`parse_named`) | `Parse` (named), `Sync` | `1 Z` |
+| run a prepared one (`bind_named`) | `Bind` (text), `Execute`, `Sync` | `2 D.. C Z` |
+| ask what a statement takes and gives (`describe`) | `Parse`, `Describe` the statement, `Sync` | `1 t T Z` |
+
+The engine already runs a statement with values bound as text and no types given (6w, C166): that is exactly what the first and third send. So this part is the protocol
+around it, not the engine.
+
+**Design.**
+
+- *`Parse`* keeps the statement's text under its name (the unnamed one is replaced by the next; a name twice is `42P05`) and reads none of it: **what PostgreSQL finds at
+  `Parse`** (a syntax error, a table that is not there, a type that does not fit) **the engine finds when it runs the statement, and says then.** A client that prepares
+  its statements when it connects, to learn early that one is wrong, learns it at the first use instead. (The text pass of 6ae rewrites some statements before they are
+  read, with the values in hand; reading the text at `Parse` would refuse statements the engine runs.) Parameter types given by the client are refused unless they are all
+  0 ("infer"), which is what `cancho-pg` sends.
+- *`Bind`* keeps the values (text only: a binary format is refused; at most 64 values and 64 KiB, the engine's limit of 6w) for the unnamed portal (a named portal is
+  refused). A statement that was never prepared is `26000`.
+- *`Describe` of the portal* sends nothing yet: the columns are known when the statement has run. *`Execute`* runs it, through the same code a simple query goes through
+  (`session`, `drive`), and then sends the description if one was asked for (`RowDescription`, or `NoData` for a command with no rows), the rows, and `CommandComplete`.
+  **For a statement that succeeds the bytes are in PostgreSQL's order** (the description and the rows are next to each other either way). For one that fails at run
+  time, PostgreSQL has already sent the description and the engine has not; a client that reads to `ReadyForQuery`, as `cancho-pg` does, sees the error either way. A client
+  that asks for the description and waits for it before `Execute` (a `Flush` between them) would wait for ever, so that `Flush` is refused (`describe-before-execute`).
+- *One `Execute` to a `Sync` outside a transaction.* PostgreSQL runs everything up to a `Sync` as one transaction; the engine commits each statement. So a second
+  `Execute` before the `Sync` is refused (`pipeline`) unless a transaction is open, rather than answered with a different meaning.
+- *`Execute` with a row limit* is refused (`row-limit`: a portal is not kept half read). *`Describe` of a statement* is refused (`describe-statement`): the types of the
+  parameters are not known before values are bound (6w). That is the fourth shape, which `cancho-pg`'s generator of typed code uses at build time; it needs a PostgreSQL.
+- *`Close`* forgets a statement or the portal. *`Sync`* answers `ReadyForQuery` and ends what an error started: after any error everything up to the `Sync` is skipped, as
+  the protocol says.
+- A simple query drops the unnamed statement and the portal, as in PostgreSQL.
+- *Answers leave when the server next waits for the client*, not message by message: the five answers to a batch are one write (6al found what three writes cost).
+
+A connection holds at most 64 named statements and 3 MiB of their text, and a statement prepared is at most 1 MiB; more is refused (`53200`, `54000`), not truncated.
+
+**Test** (`tests/engine_wire.py`). The differential now sends the generator's statements with parameters (about a third of the writes and reads) by the first shape, and
+holds the answer against the test program's for the same statement and values, and the order of the messages against the table above. Then: statements prepared by name
+and run by name several times with other values, against the test program; a name twice, a name never prepared, a statement closed and prepared again; each refusal above
+with its tag; an error in a batch skips to the `Sync` and the next batch is answered; a transaction opened by a simple `begin` and written to by prepared statements.
+And **`cancho-pg` itself**: a program written with it (its own example, built from its repository beside this one) logs in to the server, creates a table, writes and reads
+with parameters, and prints what it prints against PostgreSQL. That step needs the repository and is skipped, and says so, where it is not there.
+
+**Built.** The handlers in `src/serve.cho` (`parse_message`, `bind_message`, `describe_message`, `execute_message`, `close_message`; `answer` is the one path a simple query
+and an `Execute` both take), four readers in `src/wire.cho`. Measured, 3 seeds: 2,070 statements each, 360 to 369 of them with parameters by the extended protocol, answered
+by the server as by the test program, the messages in the order of the table above. `cancho-pg`'s example client (`examples/psql.cho` at its commit `2068e4e`, built here)
+prints the same 34 lines for 13 statements (inserts, selects, an update and a delete with values bound, `returning`, a null, a value with a quote and a semicolon in it, a
+duplicate key) against the server and against PostgreSQL 16.15, an error compared by its SQLSTATE. **The gate does not have `cancho-pg`'s repository, so that step is
+measured here and skipped there.**
+
+29 mutants added to the group `wire` (60 now: 18 of the messages, 42 of the connection), all killed; they needed five more cases (an error at an `Execute` followed by
+another, the unnamed statement and the portal closed, a portal whose statement was replaced, a closed statement's place taken again).
+
+*Found while building:* a closed statement's place was not used again, so a client that prepares and closes would have been refused at its 65th statement whatever it had
+closed; places are reused now (the text is not: 3 MiB of statements ever prepared on a connection, then `53200`).
+
+*Not in this part:* `Describe` of a statement (so `cancho-pg`'s code generator cannot be pointed at the engine); binary values; named portals and row limits; more than one
+`Execute` to a `Sync` outside a transaction. Each is refused with a tag, and the test pins each. **`cancho-hooks` itself has not been run against the server**: its queries
+are answered by the engine (14 of 16, C167) and its driver's messages are served, but a program is more than its queries (what it does at connect, in what order, under
+what timeouts), and that is the next thing to measure, not to assume.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

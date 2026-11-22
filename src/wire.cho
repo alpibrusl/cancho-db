@@ -92,6 +92,71 @@ pub fn empty_query[&o](out: &!o [byte], at: int) -> [] int {
     return shut(out, at, open(out, at, 'I'));
 }
 
+// A message with no body: ParseComplete `1`, BindComplete `2`, CloseComplete `3`, NoData `n`.
+pub fn bare[&o](out: &!o [byte], at: int, t: int) -> [] int {
+    return shut(out, at, open(out, at, t));
+}
+
+// Where the string that starts at `at` of `body` ends (the place of its zero byte), or -1 if it does not end.
+pub fn string_end[&b](body: &b [byte], at: int) -> [] int {
+    var e = at;
+    if at < 0 {
+        return 0 - 1;
+    }
+    while e < len(body) {
+        if int_of(body[e]) == 0 {
+            return e;
+        }
+        e = e + 1;
+    }
+    return 0 - 1;
+}
+
+// A list of format codes or of type oids at `at` of `body` (a `u16` count, then that many numbers of `size` bytes): where it ends if every one is 0 (text; a type to
+// infer), -2 if one is not, -1 if the list is not whole.
+pub fn zeros_end[&b](body: &b [byte], at: int, size: int) -> [] int {
+    if at < 0 || at + 2 > len(body) {
+        return 0 - 1;
+    }
+    let n = commit.be(body, at, 2);
+    if at + 2 + size * n > len(body) {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < n {
+        if commit.be(body, at + 2 + size * i, size) != 0 {
+            return 0 - 2;
+        }
+        i = i + 1;
+    }
+    return at + 2 + size * n;
+}
+
+// The values of a Bind at `at` of `body` (a `u16` count, then for each a length and the bytes; a length of -1 is a null): where they end, or -1 if they are not whole.
+pub fn values_end[&b](body: &b [byte], at: int) -> [] int {
+    if at < 0 || at + 2 > len(body) {
+        return 0 - 1;
+    }
+    let n = commit.be(body, at, 2);
+    var p = at + 2;
+    var i = 0;
+    while i < n {
+        if p + 4 > len(body) {
+            return 0 - 1;
+        }
+        let l = commit.be(body, p, 4);
+        p = p + 4;
+        if l != 4294967295 {
+            if l > len(body) || p + l > len(body) {
+                return 0 - 1;
+            }
+            p = p + l;
+        }
+        i = i + 1;
+    }
+    return p;
+}
+
 // CommandComplete with the tag of a command of `kind` over `n` rows (src/answer.cho).
 pub fn complete[&o](out: &!o [byte], at: int, kind: int, n: int) -> [] int {
     let b = open(out, at, 'C');

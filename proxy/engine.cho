@@ -37,6 +37,8 @@ fn listen_on[&h, &n, &o, &z, &q, &b](heap: &!h Heap, io: &!o Io, net: &n Net("")
     var state = box_slice(heap, 16, 0);
     var inb = box_slice(heap, wire.max_message() + 8, byte_of(0));
     var outb = box_slice(heap, 1048576, byte_of(0));
+    var arena = box_slice(heap, serve.arena_size(), byte_of(0));
+    var index = box_slice(heap, serve.index_size(), 0);
     var status = 0;
     borrow mut roots as &!rw in {
         borrow mut state as &!sw in {
@@ -57,26 +59,30 @@ fn listen_on[&h, &n, &o, &z, &q, &b](heap: &!h Heap, io: &!o Io, net: &n Net("")
                         borrow mut listener as &!lh in {
                             borrow mut inb as &!ib in {
                                 borrow mut outb as &!ob in {
-                                    while status == 0 {
-                                        match tcp_accept(lh) {
-                                            Accepted::Ok(c) => {
-                                                var conn = c;
-                                                var here = false;
-                                                borrow conn as &cr in {
-                                                    here = serve.from_here(cr);
-                                                }
-                                                if here {
-                                                    borrow mut conn as &!cw in {
-                                                        serve.connection(heap, cw, pg, w, sub, contents(ib), contents(ob), rs, st);
+                                    borrow mut arena as &!ab in {
+                                        borrow mut index as &!xb in {
+                                            while status == 0 {
+                                                match tcp_accept(lh) {
+                                                    Accepted::Ok(c) => {
+                                                        var conn = c;
+                                                        var here = false;
+                                                        borrow conn as &cr in {
+                                                            here = serve.from_here(cr);
+                                                        }
+                                                        if here {
+                                                            borrow mut conn as &!cw in {
+                                                                serve.connection(heap, cw, pg, w, sub, contents(ib), contents(ob), rs, st, contents(ab), contents(xb));
+                                                            }
+                                                        }
+                                                        conn_close(conn);
+                                                        status = st[1];
+                                                    }
+                                                    Accepted::Again => {
+                                                    }
+                                                    Accepted::Failed(e) => {
+                                                        status = 3;
                                                     }
                                                 }
-                                                conn_close(conn);
-                                                status = st[1];
-                                            }
-                                            Accepted::Again => {
-                                            }
-                                            Accepted::Failed(e) => {
-                                                status = 3;
                                             }
                                         }
                                     }
@@ -96,6 +102,8 @@ fn listen_on[&h, &n, &o, &z, &q, &b](heap: &!h Heap, io: &!o Io, net: &n Net("")
     unbox_slice(heap, state);
     unbox_slice(heap, inb);
     unbox_slice(heap, outb);
+    unbox_slice(heap, arena);
+    unbox_slice(heap, index);
     return status;
 }
 

@@ -3,8 +3,9 @@
 
     python3 tests/engine_wire.py ENGINE_SERVER ENGINECHECK STATEMENTS SEED
 
-The oracle is the test program (build/enginecheck), whose answers tests/engine_check.py holds against PostgreSQL's. A history (the differential's fixed statements that
-have no parameters, then random ones from its generator) is run through the test program and, by PostgreSQL's simple query protocol, through the server. For every statement
+The oracle is the test program (build/enginecheck), whose answers tests/engine_check.py holds against PostgreSQL's. A history (the differential's fixed statements, then
+random ones from its generator) is run through the test program and through the server: a statement with parameters by the extended protocol as cancho-pg sends it
+(Parse, Bind, Describe, Execute, Sync), the others as simple queries. For every statement
 the two must agree: the command's tag, or the SQLSTATE, or the refusal's tag; the names and type oids of the columns; every row's text; the transaction's state. Then the
 server is stopped and the test program reads THE SERVER'S page file: every table must answer as the test program's own file does.
 
@@ -12,13 +13,13 @@ Then, each on a server of its own:
 
   * killed (SIGKILL) right after a commit was acknowledged, restarted: the rows are there;
   * a connection closed inside a transaction: nothing of it is there, and the next connection writes what it wrote;
-  * the extended protocol: refused with one error, the connection goes on;
+  * the extended protocol beyond what the history sends: statements prepared and run by name, each refusal with its tag, an error skipping to the Sync;
   * an SSLRequest is answered N and the startup goes on;
   * garbage (random bytes for a startup, a message of a huge length, of no known type, half a message and a close, a query that is no string): the server answers the next
     connection as if nothing had happened.
 
 If a PostgreSQL is reachable (PG_E2E_PORT) and `psql` is installed, a script is run with psql against both and what psql prints must be the same: a client this project did
-not write. Without one that step is skipped, and says so.
+not write. And cancho-pg's own example client, built from its repository if it is beside this one, the same. Without them those steps are skipped, and say so.
 """
 import difflib
 import os
@@ -158,6 +159,32 @@ class Client:
         self.s.sendall(message(b"Q", sql.encode() + b"\0"))
         return self.answer(self.until_ready())
 
+    @staticmethod
+    def bind(name, params):
+        body = b"\0" + name + b"\0" + struct.pack(">HH", 0, len(params))
+        for v in params:
+            body += struct.pack(">i", -1) if v is None else struct.pack(">i", len(v.encode())) + v.encode()
+        return message(b"B", body + struct.pack(">H", 0))
+
+    def extended(self, sql, params):
+        """As cancho-pg's `execute`: Parse (unnamed, no types), Bind (text), Describe the portal, Execute, Sync."""
+        self.s.sendall(message(b"P", b"\0" + sql.encode() + b"\0" + struct.pack(">H", 0)) + self.bind(b"", params) + message(b"D", b"P\0") + message(b"E", b"\0" + struct.pack(">I", 0)) + message(b"S", b""))
+        return self.answer(self.until_ready())
+
+    def prepare(self, name, sql):
+        """As cancho-pg's `parse_named`: Parse under a name, Sync."""
+        self.s.sendall(message(b"P", name + b"\0" + sql.encode() + b"\0" + struct.pack(">H", 0)) + message(b"S", b""))
+        return self.answer(self.until_ready())
+
+    def run_named(self, name, params):
+        """As cancho-pg's `bind_named`: Bind, Execute, Sync; no Describe."""
+        self.s.sendall(self.bind(name, params) + message(b"E", b"\0" + struct.pack(">I", 0)) + message(b"S", b""))
+        return self.answer(self.until_ready())
+
+    def raw(self, data):
+        self.s.sendall(data)
+        return self.answer(self.until_ready())
+
     def close(self, terminate=True):
         if terminate:
             self.s.sendall(message(b"X", b""))
@@ -185,28 +212,39 @@ def harness_view(block):
 
 
 def differential(d):
-    fixed = [sql for sql, _ in ec.FIXED if not isinstance(sql, ec.P)]
-    rnd = [st[0] for st in ec.generate(random.Random(SEED), COUNT, params=False)]
+    # the statements with parameters go as cancho-pg sends them (the extended protocol), the others as simple queries
+    fixed = [sql for sql, _ in ec.FIXED]
+    rnd = [st[0] for st in ec.generate(random.Random(SEED), COUNT)]
     history = fixed + rnd
-    blocks = ec.run_engine(os.path.join(d, "harness.db"), history + ["!commit"])
+    blocks = ec.run_engine(os.path.join(d, "harness.db"), ec.lines(history) + ["!commit"])
     if len(blocks) != len(history):
         raise SystemExit("engine_wire: %d answers of the test program for %d statements" % (len(blocks), len(history)))
     srv = Server(os.path.join(d, "server.db"))
     c = Client(srv.port)
     check("the startup is answered: AuthenticationOk, the parameters, a key, ReadyForQuery", b"".join(t for t, _ in c.first) == b"RSSSSSSKZ" and c.status == "I" and c.params.get("client_encoding") == "UTF8"
           and c.params.get("server_version", "").startswith("16."), (c.first, c.params))
-    kinds, bad = {}, 0
+    kinds, bad, sent = {}, 0, 0
     for i, sql in enumerate(history):
-        err, text, names, oids, rows, tag, seen = c.query(sql)
+        params = getattr(sql, "params", None)
+        if params is None:
+            err, text, names, oids, rows, tag, seen = c.query(str(sql))
+        else:
+            sent += 1
+            err, text, names, oids, rows, tag, seen = c.extended(str(sql), params)
         want = harness_view(blocks[i])
         got = (err, text if err == "0A000" else None, names, oids, rows, tag, c.status)
         k = "refused" if want[0] == "0A000" else "error" if want[0] else "rows" if want[2] is not None else "command"
         kinds[k] = kinds.get(k, 0) + 1
+        if params is not None:
+            # the order of the messages: PostgreSQL's for a statement that succeeds (6am)
+            order = b"12EZ" if err else b"12T" + b"D" * len(rows) + b"CZ" if names is not None else b"12nCZ"
+            if seen != order:
+                got = (got, seen)
         if got != want:
             bad += 1
             if bad <= 5:
                 print("FAIL %d: %s\n     server:       %s\n     test program: %s" % (i, sql[:200], str(got)[:500], str(want)[:500]))
-    check("%d statements: the server answers as the test program does (%s)" % (len(history), ", ".join("%s %d" % kv for kv in sorted(kinds.items()))), bad == 0, "%d differ" % bad)
+    check("%d statements, %d of them with parameters by the extended protocol: the server answers as the test program does (%s)" % (len(history), sent, ", ".join("%s %d" % kv for kv in sorted(kinds.items()))), bad == 0 and sent > 50, "%d differ" % bad)
     c.close()
     srv.stop()
     # the server's page file, read by the test program
@@ -272,13 +310,6 @@ def durability(d):
     time.sleep(0.3)
     c.s.sendall(whole[-1:])
     check("a message in two pieces is read when it is whole", c.answer(c.until_ready())[4] == [[b"41"]])
-    # the extended protocol is refused, once, and the connection goes on
-    c.s.sendall(message(b"P", b"\0select 1\0" + struct.pack(">H", 0)) + message(b"B", b"\0\0" + struct.pack(">HHH", 0, 0, 0)) + message(b"E", b"\0" + struct.pack(">I", 0)) + message(b"S", b""))
-    err, text, _, _, _, _, seen = c.answer(c.until_ready())
-    c.s.sendall(message(b"P", b"\0select 1\0" + struct.pack(">H", 0)) + message(b"D", b"S\0") + message(b"S", b""))
-    again = c.answer(c.until_ready())[6]
-    after = c.query("select count(*) from dur")
-    check("the extended protocol: one error for each batch, ReadyForQuery at its Sync, and the connection goes on", (err, text, seen, again) == ("0A000", "cancho-db: refused extended-protocol", b"EZ", b"EZ") and after[4] == [[b"41"]], (err, text, seen, again, after))
     # an empty query, and a statement that ends with a semicolon
     c.s.sendall(message(b"Q", b"  ;  \0"))
     seen = b"".join(t for t, _ in c.until_ready())
@@ -303,6 +334,7 @@ def durability(d):
     print("     500 inserts, each committed to the disk before its answer: %.2f s; 500 selects of a row: %.2f s" % (t1 - t0, t2 - t1))
     check("500 selects of one row take under 5 s", t2 - t1 < 5, t2 - t1)
     c.close()
+    extended_protocol(srv)
     # an SSLRequest first
     c = Client(srv.port, ssl_first=True)
     check("an SSLRequest is answered N and the startup goes on", c.ssl_answer == b"N" and c.query("select count(*) from dur")[4] == [[b"41"]])
@@ -328,6 +360,154 @@ def durability(d):
             got = b""
         check("a client from another address (%s) is closed unread" % mine, got == b"", got)
     return srv
+
+
+def extended_protocol(srv):
+    """The extended protocol beyond what the differential sends: statements prepared by name, and what is refused (docs/m3-engine.md 6am)."""
+    def M(t, body=b""):
+        return message(t, body)
+    parse = lambda name, sql: M(b"P", name + b"\0" + sql.encode() + b"\0" + struct.pack(">H", 0))
+    execute = M(b"E", b"\0" + struct.pack(">I", 0))
+    sync = M(b"S")
+    c = Client(srv.port)
+    c.query("create table ext (k integer primary key, v text, n integer)")
+    a = c.prepare(b"ins", "insert into ext values ($1, $2, $3)")
+    b = c.prepare(b"get", "select v, n from ext where k = $1")
+    cc = c.prepare(b"upd", "update ext set n = n + $1 where k = $2 returning k, n")
+    ok = [x[6] for x in (a, b, cc)] == [b"1Z"] * 3
+    got = []
+    for k in range(1, 6):
+        got.append(c.run_named(b"ins", [str(k), None if k == 3 else "v%d" % k, str(k * 10)]))
+    ok = ok and all(g[5] == "INSERT 0 1" and g[6] == b"2CZ" for g in got)
+    r1 = c.run_named(b"get", ["3"])
+    r2 = c.run_named(b"get", ["5"])
+    r3 = c.run_named(b"upd", ["7", "5"])
+    r4 = c.run_named(b"get", ["99"])
+    dup = c.run_named(b"ins", ["1", "again", "0"])
+    check("statements prepared by name and run by name: ParseComplete; then BindComplete, the rows with no description, the tag",
+          ok and (r1[4], r1[6], r1[2]) == ([[None, b"30"]], b"2DCZ", None) and r2[4] == [[b"v5", b"50"]] and (r3[4], r3[5]) == ([[b"5", b"57"]], "UPDATE 1") and (r4[4], r4[5], r4[6]) == ([], "SELECT 0", b"2CZ")
+          and (dup[0], dup[6]) == ("23505", b"2EZ"), (a, got[:1], r1, r2, r3, r4, dup))
+    twice = c.prepare(b"get", "select 1 from ext")
+    never = c.run_named(b"nope", [])
+    closed = c.raw(M(b"C", b"Sget\0") + sync)
+    gone = c.run_named(b"get", ["1"])
+    again = c.prepare(b"get", "select n from ext where k = $1")
+    back = c.run_named(b"get", ["2"])
+    check("a name twice is 42P05, a name never prepared 26000; a statement closed is gone and its name free",
+          (twice[0], twice[6]) == ("42P05", b"EZ") and (never[0], never[6]) == ("26000", b"EZ") and closed[6] == b"3Z" and gone[0] == "26000" and again[6] == b"1Z" and back[4] == [[b"20"]], (twice, never, closed, gone, again, back))
+    # an error skips to the Sync; the next batch is answered
+    skipped = c.raw(parse(b"", "select v from ext where k = $1") + Client.bind(b"nope", ["1"]) + M(b"D", b"P\0") + execute + parse(b"late", "select 1 from ext") + sync)
+    after = c.run_named(b"late", [])
+    fine = c.extended("select count(*) from ext", [])
+    check("an error skips everything up to the Sync, and the next batch is answered", (skipped[0], skipped[6]) == ("26000", b"1EZ") and after[0] == "26000" and fine[4] == [[b"5"]] and fine[6] == b"12TDCZ", (skipped, after, fine))
+    # what is refused, each with its tag
+    refusals = [("describe-statement", parse(b"", "select 1 from ext") + M(b"D", b"S\0") + sync, b"1EZ"),
+                ("parameter-types", M(b"P", b"\0select $1 from ext\0" + struct.pack(">HI", 1, 23)) + sync, b"EZ"),
+                ("binary-format", parse(b"", "select v from ext where k = $1") + M(b"B", b"\0\0" + struct.pack(">HHHi", 1, 1, 1, 4) + struct.pack(">i", 1) + struct.pack(">H", 0)) + execute + sync, b"1EZ"),
+                ("binary-format", parse(b"", "select v from ext") + M(b"B", b"\0\0" + struct.pack(">HHHH", 0, 0, 1, 1)) + execute + sync, b"1EZ"),
+                ("named-portal", parse(b"", "select v from ext") + M(b"B", b"cur\0\0" + struct.pack(">HHH", 0, 0, 0)) + execute + sync, b"1EZ"),
+                ("row-limit", parse(b"", "select v from ext") + Client.bind(b"", []) + M(b"E", b"\0" + struct.pack(">I", 2)) + sync, b"12EZ"),
+                ("pipeline", parse(b"", "insert into ext values (50, 'p', 0)") + Client.bind(b"", []) + execute + Client.bind(b"", []) + execute + sync, b"12C2EZ"),
+                ("describe-before-execute", parse(b"", "select v from ext") + Client.bind(b"", []) + M(b"D", b"P\0") + M(b"H") + execute + sync, b"12EZ"),
+                ("function-call", M(b"F", struct.pack(">IHHH", 1, 0, 0, 0)) + sync, b"EZ"),
+                ("too-many-values", parse(b"", "select v from ext") + Client.bind(b"", ["1"] * 65) + execute + sync, b"1EZ")]
+    wrong = []
+    for tag, data, order in refusals:
+        r = c.raw(data)
+        want_state = "54000" if tag == "too-many-values" else "0A000"
+        if (r[0], r[1], r[6]) != (want_state, "cancho-db: refused " + tag, order):
+            wrong.append((tag, r[0], r[1], r[6]))
+    still = c.query("select count(*) from ext")
+    check("refused with its tag, the connection going on: %s" % ", ".join(sorted(set(t for t, _, _ in refusals))), not wrong and still[4] == [[b"6"]], (wrong, still))
+    # a portal is run once; with none bound an Execute is 34000; an empty statement is EmptyQueryResponse
+    once = c.raw(parse(b"", "select count(*) from ext") + Client.bind(b"", []) + execute + sync + execute + sync)
+    rest = c.answer(c.until_ready())
+    empty = c.raw(parse(b"", " ; ") + Client.bind(b"", []) + M(b"D", b"P\0") + execute + sync)
+    check("a portal is run once; an empty statement is NoData and EmptyQueryResponse", once[6] == b"12DCZ" and (rest[0], rest[6]) == ("34000", b"EZ") and empty[6] == b"12nIZ", (once, rest, empty))
+    # a transaction opened by a simple query, written to by prepared statements; two Executes to a Sync are allowed inside it
+    c.query("begin")
+    t1 = c.raw(Client.bind(b"ins", ["60", "t", "1"]) + execute + Client.bind(b"ins", ["61", "t", "2"]) + execute + sync)
+    t2 = c.run_named(b"ins", ["60", "t", "3"])
+    t3 = c.run_named(b"ins", ["62", "t", "3"])
+    c.query("rollback")
+    t4 = c.query("select count(*) from ext")
+    check("in a transaction: two Executes to a Sync; an error fails it and the next statement is 25P02; a rollback takes it all back",
+          (t1[6], c.status) == (b"2C2CZ", "I") and t2[0] == "23505" and t3[0] == "25P02" and t4[4] == [[b"6"]], (t1, t2, t3, t4))
+    # an error at an Execute skips what follows it too
+    c.query("begin")
+    t5 = c.raw(Client.bind(b"ins", ["1", "dup", "0"]) + execute + Client.bind(b"ins", ["63", "t", "0"]) + execute + sync)
+    c.query("rollback")
+    # Close of the unnamed statement, and of the portal
+    k1 = c.raw(parse(b"", "select count(*) from ext") + M(b"C", b"S\0") + Client.bind(b"", []) + sync)
+    k2 = c.raw(parse(b"", "select count(*) from ext") + Client.bind(b"", []) + M(b"C", b"P\0") + execute + sync)
+    k3 = c.raw(parse(b"", "select count(*) from ext") + Client.bind(b"", []) + parse(b"", "select 1 from ext") + execute + sync)
+    check("an error at an Execute skips to the Sync; the unnamed statement closed is gone, the portal closed is gone, and a portal does not outlive its statement",
+          (t5[0], t5[6]) == ("23505", b"2EZ") and (k1[0], k1[6]) == ("26000", b"13EZ") and (k2[0], k2[6]) == ("34000", b"123EZ") and (k3[0], k3[6]) == ("34000", b"121EZ"), (t5, k1, k2, k3))
+    # a simple query drops the unnamed statement
+    c.raw(parse(b"", "select count(*) from ext") + sync)
+    c.query("select 1 from ext")
+    dropped = c.raw(Client.bind(b"", []) + execute + sync)
+    # a statement longer than a prepared statement may be, and more named statements than a connection holds
+    long = c.raw(parse(b"", "select '" + "x" * (1 << 20) + "' from ext") + sync)
+    # three are prepared (ins, get, upd); a closed one's place is free again
+    c.raw(M(b"C", b"Sget\0") + sync)
+    c.prepare(b"get", "select n from ext where k = $1")
+    many = [c.prepare(b"s%d" % i, "select %d from ext" % i) for i in range(70)]
+    full = [m[1] for m in many if m[0]]
+    for i in range(0, 40):
+        c.raw(M(b"C", b"Ss%d\0" % i) + sync)
+    churn = [c.prepare(b"r%d" % i, "select %d from ext" % i)[6] for i in range(40)]
+    check("a simple query drops the unnamed statement; a statement over 1 MiB and a 65th name are refused, not cut; a closed statement's place is used again",
+          dropped[0] == "26000" and (long[0], long[1]) == ("54000", "cancho-db: refused statement-too-long") and [m[6] for m in many].count(b"1Z") == 64 - 3 and full == ["cancho-db: refused too-many-statements"] * 9
+          and many[-1][0] == "53200" and churn == [b"1Z"] * 40, (dropped, long[:2], [m[6] for m in many].count(b"1Z"), full[:2], churn.count(b"1Z")))
+    c.close()
+    # the statements of a connection end with it
+    c = Client(srv.port)
+    check("a new connection has none of the last one's statements", c.run_named(b"ins", ["70", "x", "1"])[0] == "26000")
+    c.query("drop table ext")
+    c.close()
+
+
+def with_cancho_pg(d):
+    """cancho-pg's own example client (examples/psql.cho, built from its repository beside this one) against the server and against PostgreSQL."""
+    repo = os.environ.get("CANCHO_PG", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "cancho-pg"))
+    cancho = os.environ.get("CANCHO", "cancho")
+    port = int(os.environ.get("PG_E2E_PORT", "5532"))
+    if not os.path.exists(os.path.join(repo, "examples", "psql.cho")) or shutil.which(cancho) is None or subprocess.run(["pg_isready", "-h", "127.0.0.1", "-p", str(port)], capture_output=True).returncode != 0:
+        print("skip cancho-pg's client against the server: its repository is not beside this one (CANCHO_PG), or there is no compiler or no PostgreSQL")
+        return
+    exe = os.path.join(d, "cpsql")
+    b = subprocess.run([cancho, "build", "--std", os.path.join(repo, "examples", "psql.cho"), os.path.join(repo, "src", "pg.cho"), "-o", exe], capture_output=True, text=True)
+    if b.returncode != 0:
+        check("cancho-pg's example client builds", False, b.stdout + b.stderr)
+        return
+    db = os.environ.get("E2E_DB", "cdb_e2e") + "_wire"
+    subprocess.run(["psql", "-h", "127.0.0.1", "-p", str(port), "-U", "postgres", "-d", "postgres", "-q", "-c", "drop database if exists %s" % db, "-c", "create database %s" % db], capture_output=True)
+    script = [["create table cp (k integer primary key, name text, n bigint, ok boolean)"],
+              ["insert into cp values ($1, $2, $3, $4)", "1", "ana", "10", "true"],
+              ["insert into cp values ($1, $2, $3, $4)", "2", "bo", "\\N", "f"],
+              ["insert into cp values ($1, $2, $3, $4) returning k, name", "3", "c'y; drop table cp", "7", "\\N"],
+              ["select k, name, n, ok from cp where k >= $1 order by k", "2"],
+              ["update cp set n = n + $1 where k = $2", "5", "1"],
+              ["select * from cp where name = $1", "ana"],
+              ["select count(*) from cp where n > $1 or ok", "6"],
+              ["delete from cp where k = $1 returning name", "2"],
+              ["insert into cp values ($1, $2, $3, $4) on conflict do nothing", "1", "dup", "0", "t"],
+              ["select k, name from cp order by k"],
+              ["insert into cp values ($1, $2, $3, $4)", "1", "dup", "0", "t"],
+              ["drop table cp"]]
+    out = {}
+    srv = Server(os.path.join(d, "cpg.db"))
+    for name, p in (("server", srv.port), ("postgres", port)):
+        lines = []
+        for st in script:
+            r = subprocess.run([exe, "127.0.0.1", str(p), "postgres", db, "-"] + st, capture_output=True, text=True)
+            # an error's words are PostgreSQL's own; its SQLSTATE is what is compared
+            lines += [l[:11] if l.startswith("ERROR ") else l for l in r.stdout.splitlines()] + ["status %d" % r.returncode]
+        out[name] = lines
+    srv.stop()
+    check("cancho-pg's own client prints for the server what it prints for PostgreSQL (%d statements, %d lines)" % (len(script), len(out["postgres"])),
+          out["server"] == out["postgres"] and len(out["postgres"]) > 25 and "ERROR 23505" in out["postgres"], "\n".join(difflib.unified_diff(out["server"], out["postgres"], "server", "postgres", lineterm="")))
 
 
 def garbage(srv):
@@ -420,6 +600,7 @@ def main():
         check("the server is still running at the end", srv.alive())
         srv.stop()
         with_psql(d)
+        with_cancho_pg(d)
     if FAILED:
         print("FAIL engine wire: %d failed" % len(FAILED))
         return 1

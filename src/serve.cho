@@ -3,6 +3,7 @@ module cdb.serve;
 
 import std.addr;
 import cdb.login;
+import cdb.commit;
 import cdb.pager;
 import cdb.pstore;
 import cdb.exec;
@@ -71,6 +72,10 @@ pub fn from_here[&c](conn: &c Conn) -> [] bool {
     return yes;
 }
 
+fn copy[&s, &d](src: &s [byte], sa: int, n: int, dst: &!d [byte], da: int) -> [] int {
+    return exec.copy(src, sa, n, dst, da);
+}
+
 // Drop the first `n` of the `fill` bytes `buf` holds: how many it holds then, from its start.
 fn shift[&b](buf: &!b [byte], n: int, fill: int) -> [] int {
     var j = 0;
@@ -134,25 +139,211 @@ fn startup[&c, &b, &o](conn: &!c Conn, buf: &!b [byte], out: &!o [byte]) -> [con
     return 0 - 1;
 }
 
-// Answer one statement: false if the connection is gone, or (`st[1]` set) the server must stop.
-fn query[&h, &c, &z, &q, &b, &s, &o, &r, &t](heap: &!h Heap, conn: &!c Conn, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, sql: &s [byte], out: &!o [byte], roots: &!r [int], st: &!t [int]) -> [heap, conn_write, file_read, file_write] bool {
+// What a connection keeps for the extended protocol (docs/m3-engine.md 6am), in `ar` and `xi`. `ar`: the unnamed statement's text from 0, the named statements' names and texts
+// from `named_at()`, the values of the last Bind from `values_at()`. `xi[0]`: the unnamed statement's length (-1: none); `xi[1]`: how many places for named statements are in use
+// (`max_named()` at most; a closed statement's place is taken by the next); `xi[2]`: where the next name goes; `xi[3]`: the statement the portal is bound to (-2: none, -1: the unnamed, else a named one's number); `xi[4]`:
+// whether the portal's description was asked for; `xi[5]`: how many statements ran since the last Sync; `xi[6]` and `xi[7]`: how many values are bound, and their bytes.
+// A named statement is four ints from `xi[8 + 4 * k]`: where its name is and how long (-1: it was closed), where its text is and how long.
+pub fn named_at() -> [] int {
+    return 1048576;
+}
+
+pub fn values_at() -> [] int {
+    return 4194304;
+}
+
+pub fn arena_size() -> [] int {
+    return 4194304 + 65536;
+}
+
+pub fn max_named() -> [] int {
+    return 64;
+}
+
+pub fn index_size() -> [] int {
+    return 8 + 4 * 64;
+}
+
+fn forget[&x](xi: &!x [int]) -> [] int {
+    xi[0] = 0 - 1;
+    xi[1] = 0;
+    xi[2] = named_at();
+    xi[3] = 0 - 2;
+    xi[4] = 0;
+    xi[5] = 0;
+    xi[6] = 0;
+    xi[7] = 0;
+    return 0;
+}
+
+// The named statement `name`: its number, or -1.
+fn named[&a, &x, &n](ar: &a [byte], xi: &x [int], name: &n [byte]) -> [] int {
+    var k = 0;
+    while k < xi[1] {
+        let e = 8 + 4 * k;
+        if xi[e + 1] == len(name) {
+            var same = true;
+            var i = 0;
+            while i < len(name) && same {
+                same = int_of(ar[xi[e] + i]) == int_of(name[i]);
+                i = i + 1;
+            }
+            if same {
+                return k;
+            }
+        }
+        k = k + 1;
+    }
+    return 0 - 1;
+}
+
+// An error of the extended protocol into `out` at `at`: what follows is skipped up to the Sync (`st[2]`).
+fn fails[&o, &t](out: &!o [byte], at: int, st: &!t [int], state: &static [byte], lead: &static [byte], rest: &static [byte]) -> [] int {
+    st[2] = 1;
+    return wire.error(out, at, false, state, lead, rest);
+}
+
+// A message that cannot be read: the connection ends after the error is sent (`st[3]`).
+fn broken[&o, &t](out: &!o [byte], at: int, st: &!t [int]) -> [] int {
+    st[3] = 1;
+    return wire.error(out, at, true, wire.violation_state(), "cancho-db: a message that is not whole", "");
+}
+
+// Parse: the statement's text is kept under its name, and not read (6am).
+fn parse_message[&b, &a, &x, &o, &t](body: &b [byte], ar: &!a [byte], xi: &!x [int], out: &!o [byte], at: int, st: &!t [int]) -> [] int {
+    let ne = wire.string_end(body, 0);
+    let se = wire.string_end(body, ne + 1);
+    if ne < 0 || se < 0 {
+        return broken(out, at, st);
+    }
+    let te = wire.zeros_end(body, se + 1, 4);
+    if te == 0 - 2 {
+        return fails(out, at, st, wire.refused_state(), "cancho-db: refused ", "parameter-types");
+    }
+    if te != len(body) {
+        return broken(out, at, st);
+    }
+    let sl = wire.query_end(body[ne + 1..se + 1]);
+    if sl > named_at() {
+        return fails(out, at, st, "54000", "cancho-db: refused ", "statement-too-long");
+    }
+    if ne == 0 {
+        // the unnamed statement: the one before it is gone, and the portal with it
+        xi[0] = copy(body, ne + 1, sl, ar, 0);
+        if xi[3] == 0 - 1 {
+            xi[3] = 0 - 2;
+        }
+    } else {
+        if named(ar, xi, body[0..ne]) >= 0 {
+            return fails(out, at, st, "42P05", "cancho-db: a prepared statement of that name is there already", "");
+        }
+        // the place of a statement that was closed is taken again; its text is not (it stays until the connection ends)
+        var k = 0;
+        while k < xi[1] && xi[8 + 4 * k + 1] >= 0 {
+            k = k + 1;
+        }
+        if k >= max_named() || xi[2] + ne + sl > values_at() {
+            return fails(out, at, st, "53200", "cancho-db: refused ", "too-many-statements");
+        }
+        let e = 8 + 4 * k;
+        xi[e] = xi[2];
+        xi[e + 1] = ne;
+        xi[e + 2] = copy(body, 0, ne, ar, xi[2]);
+        xi[e + 3] = sl;
+        xi[2] = copy(body, ne + 1, sl, ar, xi[e + 2]);
+        if k == xi[1] {
+            xi[1] = xi[1] + 1;
+        }
+    }
+    return wire.bare(out, at, '1');
+}
+
+// Bind: the values are kept for the unnamed portal, bound to the statement named.
+fn bind_message[&b, &a, &x, &o, &t](body: &b [byte], ar: &!a [byte], xi: &!x [int], out: &!o [byte], at: int, st: &!t [int]) -> [] int {
+    let pe = wire.string_end(body, 0);
+    let se = wire.string_end(body, pe + 1);
+    if pe < 0 || se < 0 {
+        return broken(out, at, st);
+    }
+    let fe = wire.zeros_end(body, se + 1, 2);
+    if fe == 0 - 1 {
+        return broken(out, at, st);
+    }
+    var ve = 0 - 1;
+    var re = 0 - 1;
+    if fe >= 0 {
+        ve = wire.values_end(body, fe);
+        if ve < 0 {
+            return broken(out, at, st);
+        }
+        re = wire.zeros_end(body, ve, 2);
+        if re == 0 - 1 || re >= 0 && re != len(body) {
+            return broken(out, at, st);
+        }
+    }
+    xi[3] = 0 - 2;
+    xi[4] = 0;
+    if pe != 0 {
+        return fails(out, at, st, wire.refused_state(), "cancho-db: refused ", "named-portal");
+    }
+    if fe < 0 || re < 0 {
+        return fails(out, at, st, wire.refused_state(), "cancho-db: refused ", "binary-format");
+    }
+    var which = 0 - 1;
+    if se > pe + 1 {
+        which = named(ar, xi, body[pe + 1..se]);
+    }
+    if which < 0 && (se > pe + 1 || xi[0] < 0) {
+        return fails(out, at, st, "26000", "cancho-db: no prepared statement of that name", "");
+    }
+    let nv = commit.be(body, fe, 2);
+    if nv > 64 || ve - fe - 2 - 4 * nv > 65536 - 256 {
+        return fails(out, at, st, "54000", "cancho-db: refused ", "too-many-values");
+    }
+    xi[6] = nv;
+    xi[7] = copy(body, fe + 2, ve - fe - 2, ar, values_at()) - values_at();
+    xi[3] = which;
+    return wire.bare(out, at, '2');
+}
+
+// Run one statement and write its answer into `out` from `at`, sending what does not fit: how much of `out` is still to send, or -1 if the connection is gone or the server
+// must stop (`st[1]`). `vals` are `nv` values to bind (as a Bind has them). `ext` 0: a simple query (a description before its rows, ReadyForQuery after); 1: an Execute whose
+// portal was described (a description, or NoData); 2: an Execute (the rows alone). An error or a refusal of an Execute sets `st[2]`: what follows is skipped up to the Sync.
+fn answer[&h, &c, &z, &q, &b, &s, &v, &o, &r, &t](heap: &!h Heap, conn: &!c Conn, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, sql: &s [byte], vals: &v [byte], nv: int, ext: int, out: &!o [byte], at: int, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, file_read, file_write] int {
     exec.params_clear(w);
+    var va = 0;
+    var i = 0;
+    var bound = true;
+    while i < nv && bound {
+        let l = commit.be(vals, va, 4);
+        va = va + 4;
+        if l == 4294967295 {
+            bound = exec.param_add(w, vals[0..0], true);
+        } else {
+            bound = exec.param_add(w, vals[va..va + l], false);
+            va = va + l;
+        }
+        i = i + 1;
+    }
     let wr = pager.begin(pg);
     let on = session.open(pg, w, st[8..16], roots[0]);
     if wr < 0 || on < 0 {
         st[1] = 7;
-        return send(conn, out[0..wire.error(out, 0, true, "58030", "cancho-db: the page file cannot be read", "")]);
+        send(conn, out[0..wire.error(out, at, true, "58030", "cancho-db: the page file cannot be read", "")]);
+        return 0 - 1;
     }
     let mode = session.mode(st[8..16]);
     var pl = 0 - 1;
-    if mode == 0 {
+    if mode == 0 && bound {
         pl = drive.prepare(pg, w, sub, sql, on);
     }
     var run = drive.run_new(heap, len(sql) + 256);
-    var alive = true;
+    var p = at;
     borrow mut run as &!m in {
-        var after = 0;
-        if pl >= 0 {
+        var after = on;
+        if !bound {
+            // more values than the engine binds (6w): the statement does not run
+        } else if pl >= 0 {
             after = drive.run(pg, w, m, drive.text(sub)[0..pl], on, mode, true);
         } else {
             after = drive.run(pg, w, m, sql, on, mode, false);
@@ -163,9 +354,8 @@ fn query[&h, &c, &z, &q, &b, &s, &o, &r, &t](heap: &!h Heap, conn: &!c Conn, pg:
             // no log is written yet (6al): no key, no record
             let key = alloc_slice[kr](0, byte_of(0));
             let rec = alloc_slice[kr](1, byte_of(0));
-            nr = session.close(pg, w, st[8..16], roots[0], after, o != drive.o_ok() && o != drive.o_control(), key, rec);
+            nr = session.close(pg, w, st[8..16], roots[0], after, !bound || o != drive.o_ok() && o != drive.o_control(), key, rec);
         }
-        var p = 0;
         if nr >= 0 && nr != roots[0] {
             // durable before it is acknowledged: the page file's commit comes before the answer
             roots[0] = nr;
@@ -180,60 +370,168 @@ fn query[&h, &c, &z, &q, &b, &s, &o, &r, &t](heap: &!h Heap, conn: &!c Conn, pg:
         }
         if nr < 0 {
             st[1] = 7;
-            p = wire.error(out, 0, true, "58030", "cancho-db: the page file cannot be written", "");
-            alive = send(conn, out[0..p]);
+            send(conn, out[0..wire.error(out, p, true, "58030", "cancho-db: the page file cannot be written", "")]);
+            p = 0 - 1;
         } else {
             let said = session.said(st[8..16]);
-            if said == 1 {
-                p = wire.complete_as(out, 0, "BEGIN");
-            } else if said == 2 {
-                p = wire.complete_as(out, 0, "COMMIT");
-            } else if said == 3 {
-                p = wire.complete_as(out, 0, "ROLLBACK");
-            } else if said == 4 {
-                p = wire.error(out, 0, false, "25P02", "current transaction is aborted, commands ignored until end of transaction block", "");
-            } else if o == drive.o_error() {
-                p = wire.error(out, 0, false, exec.sqlstate(drive.code(m)), "cancho-db: error ", exec.sqlstate(drive.code(m)));
-            } else if o != drive.o_ok() {
-                p = wire.error(out, 0, false, wire.refused_state(), "cancho-db: refused ", drive.refusal(m));
+            var failed = true;
+            if said == 4 {
+                p = wire.error(out, p, false, "25P02", "current transaction is aborted, commands ignored until end of transaction block", "");
+            } else if !bound {
+                p = wire.error(out, p, false, wire.refused_state(), "cancho-db: refused ", "too-many-values");
+            } else if said == 0 && o == drive.o_error() {
+                p = wire.error(out, p, false, exec.sqlstate(drive.code(m)), "cancho-db: error ", exec.sqlstate(drive.code(m)));
+            } else if said == 0 && o != drive.o_ok() {
+                p = wire.error(out, p, false, wire.refused_state(), "cancho-db: refused ", drive.refusal(m));
             } else {
-                if drive.has_rows(m) {
-                    p = wire.row_description(out, 0, drive.names(m), w);
+                failed = false;
+                if said == 0 && drive.has_rows(m) {
+                    if ext != 2 {
+                        p = wire.row_description(out, p, drive.names(m), w);
+                    }
                     var k = 0;
-                    while k < exec.count_of(w) && p >= 0 && alive {
+                    while k < exec.count_of(w) && p >= 0 {
                         // as many rows to a write as the buffer holds: the answer may be larger than any buffer, and a write for each message would wait on the client's
                         // acknowledgement of the one before
                         var next = wire.data_row(out, p, w, k);
                         if next < 0 && p > 0 {
-                            alive = send(conn, out[0..p]);
-                            next = wire.data_row(out, 0, w, k);
+                            if !send(conn, out[0..p]) {
+                                next = 0 - 1;
+                                k = exec.count_of(w);
+                            } else {
+                                next = wire.data_row(out, 0, w, k);
+                            }
                         }
                         p = next;
                         k = k + 1;
                     }
+                } else if ext == 1 {
+                    p = wire.bare(out, p, 'n');
                 }
-                p = wire.complete(out, p, drive.kind(m), exec.count_of(w));
+                if said == 1 {
+                    p = wire.complete_as(out, p, "BEGIN");
+                } else if said == 2 {
+                    p = wire.complete_as(out, p, "COMMIT");
+                } else if said == 3 {
+                    p = wire.complete_as(out, p, "ROLLBACK");
+                } else {
+                    p = wire.complete(out, p, drive.kind(m), exec.count_of(w));
+                }
             }
-            p = wire.ready(out, p, session.state(st[8..16]));
-            if p < 0 {
-                // an answer that does not fit a message this server can build: the connection ends rather than send half of one
-                alive = false;
-            } else if alive {
-                alive = send(conn, out[0..p]);
+            if ext == 0 {
+                p = wire.ready(out, p, session.state(st[8..16]));
+            } else if failed {
+                st[2] = 1;
             }
         }
     }
     drive.run_free(heap, run);
-    return alive && st[1] == 0;
+    return p;
+}
+
+// Execute: the statement the portal is bound to is run with the values bound.
+fn execute_message[&h, &c, &z, &q, &b, &i, &a, &x, &o, &r, &t](heap: &!h Heap, conn: &!c Conn, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, body: &i [byte], ar: &a [byte], xi: &!x [int], out: &!o [byte], at: int, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, file_read, file_write] int {
+    let pe = wire.string_end(body, 0);
+    if pe < 0 || pe + 5 != len(body) {
+        return broken(out, at, st);
+    }
+    if pe != 0 || xi[3] == 0 - 2 {
+        return fails(out, at, st, "34000", "cancho-db: no portal of that name", "");
+    }
+    if commit.be(body, pe + 1, 4) != 0 {
+        return fails(out, at, st, wire.refused_state(), "cancho-db: refused ", "row-limit");
+    }
+    if xi[5] > 0 && session.state(st[8..16]) == session.idle() {
+        // PostgreSQL would run this and the statement before it as one transaction; here each is its own, so it is not run
+        return fails(out, at, st, wire.refused_state(), "cancho-db: refused ", "pipeline");
+    }
+    var sa = 0;
+    var sl = xi[0];
+    if xi[3] >= 0 {
+        sa = xi[8 + 4 * xi[3] + 2];
+        sl = xi[8 + 4 * xi[3] + 3];
+    }
+    var ext = 2;
+    if xi[4] == 1 {
+        ext = 1;
+    }
+    // the portal is run once
+    xi[3] = 0 - 2;
+    xi[4] = 0;
+    xi[5] = xi[5] + 1;
+    if sl == 0 {
+        // an empty statement: nothing to describe, nothing to run
+        var p = at;
+        if ext == 1 {
+            p = wire.bare(out, p, 'n');
+        }
+        return wire.empty_query(out, p);
+    }
+    return answer(heap, conn, pg, w, sub, ar[sa..sa + sl], ar[values_at()..values_at() + xi[7]], xi[6], ext, out, at, roots, st);
+}
+
+// Describe and Close: a letter (`S` a statement, `P` a portal) and a name.
+fn describe_message[&b, &x, &o, &t](body: &b [byte], xi: &!x [int], out: &!o [byte], at: int, st: &!t [int]) -> [] int {
+    if len(body) < 2 || wire.string_end(body, 1) != len(body) - 1 || int_of(body[0]) != 'S' && int_of(body[0]) != 'P' {
+        return broken(out, at, st);
+    }
+    if int_of(body[0]) == 'S' {
+        // the types of a statement's parameters are not known before values are bound (6w)
+        return fails(out, at, st, wire.refused_state(), "cancho-db: refused ", "describe-statement");
+    }
+    if len(body) != 2 || xi[3] == 0 - 2 {
+        return fails(out, at, st, "34000", "cancho-db: no portal of that name", "");
+    }
+    // the columns are known when the statement has run: the description goes out with the Execute's answer
+    xi[4] = 1;
+    return at;
+}
+
+fn close_message[&b, &a, &x, &o, &t](body: &b [byte], ar: &a [byte], xi: &!x [int], out: &!o [byte], at: int, st: &!t [int]) -> [] int {
+    if len(body) < 2 || wire.string_end(body, 1) != len(body) - 1 || int_of(body[0]) != 'S' && int_of(body[0]) != 'P' {
+        return broken(out, at, st);
+    }
+    if int_of(body[0]) == 'P' {
+        if len(body) == 2 {
+            xi[3] = 0 - 2;
+            xi[4] = 0;
+        }
+    } else if len(body) == 2 {
+        xi[0] = 0 - 1;
+        if xi[3] == 0 - 1 {
+            xi[3] = 0 - 2;
+        }
+    } else {
+        let k = named(ar, xi, body[1..len(body) - 1]);
+        if k >= 0 {
+            // its name is free again; its text stays where it is until the connection ends
+            xi[8 + 4 * k + 1] = 0 - 1;
+            if xi[3] == k {
+                xi[3] = 0 - 2;
+            }
+        }
+    }
+    return wire.bare(out, at, '3');
 }
 
 // Serve one connection to its end. `roots` are the page file's trees (the first is the branch's); `st[0]` is the number of its last commit, `st[1]` becomes the status the
-// server must stop with if the page file fails, and `st[8..16]` is the session's.
-pub fn connection[&h, &c, &z, &q, &b, &i, &o, &r, &t](heap: &!h Heap, conn: &!c Conn, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, buf: &!i [byte], out: &!o [byte], roots: &!r [int], st: &!t [int]) -> [heap, conn_read, conn_write, file_read, file_write] int {
+// server must stop with if the page file fails, and `st[8..16]` is the session's. `ar` (`arena_size()` bytes) and `xi` (`index_size()` ints) hold what the extended
+// protocol keeps. Answers are sent when the server next waits for the client, or when they fill `out`.
+pub fn connection[&h, &c, &z, &q, &b, &i, &o, &r, &t, &a, &x](heap: &!h Heap, conn: &!c Conn, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, buf: &!i [byte], out: &!o [byte], roots: &!r [int], st: &!t [int], ar: &!a [byte], xi: &!x [int]) -> [heap, conn_read, conn_write, file_read, file_write] int {
     var fill = startup(conn, buf, out);
-    var skipping = false;
+    var op = 0;
+    forget(xi);
+    st[2] = 0;
+    st[3] = 0;
     while fill >= 0 && st[1] == 0 {
         var n = wire.frame(buf, fill);
+        if n == 0 && op > 0 {
+            // about to wait for the client: it gets what was answered so far
+            if !send(conn, out[0..op]) {
+                fill = 0 - 1;
+            }
+            op = 0;
+        }
         while n == 0 && fill >= 0 {
             fill = fill_to(conn, buf, fill, fill + 1);
             if fill >= 0 {
@@ -243,43 +541,75 @@ pub fn connection[&h, &c, &z, &q, &b, &i, &o, &r, &t](heap: &!h Heap, conn: &!c 
         if fill < 0 {
             n = 0;
         } else if n < 0 {
-            send(conn, out[0..wire.error(out, 0, true, wire.violation_state(), "cancho-db: a message of no length a message has", "")]);
+            send(conn, out[0..wire.error(out, op, true, wire.violation_state(), "cancho-db: a message of no length a message has", "")]);
             fill = 0 - 1;
         }
         if n > 0 {
             let t = int_of(buf[0]);
-            if t == 'X' {
+            if len(out) - op < 65536 {
+                // room for an answer that is not rows
+                if !send(conn, out[0..op]) {
+                    fill = 0 - 1;
+                }
+                op = 0;
+            }
+            if fill < 0 {
+            } else if t == 'X' {
+                send(conn, out[0..op]);
                 fill = 0 - 1;
             } else if t == 'Q' {
+                // a simple query drops the unnamed statement and the portal
+                xi[0] = 0 - 1;
+                xi[3] = 0 - 2;
+                xi[4] = 0;
                 let e = wire.query_end(buf[5..n]);
-                var alive = true;
                 if e < 0 {
-                    send(conn, out[0..wire.error(out, 0, true, wire.violation_state(), "cancho-db: a query that is no string", "")]);
-                    alive = false;
+                    op = wire.error(out, op, true, wire.violation_state(), "cancho-db: a query that is no string", "");
+                    st[3] = 1;
                 } else if e == 0 {
-                    alive = send(conn, out[0..wire.ready(out, wire.empty_query(out, 0), session.state(st[8..16]))]);
+                    op = wire.ready(out, wire.empty_query(out, op), session.state(st[8..16]));
                 } else {
-                    alive = query(heap, conn, pg, w, sub, buf[5..5 + e], out, roots, st);
-                }
-                if !alive {
-                    fill = 0 - 1;
+                    op = answer(heap, conn, pg, w, sub, buf[5..5 + e], buf[0..0], 0, 0, out, op, roots, st);
                 }
             } else if t == 'S' {
-                // Sync: what was skipped since the refusal of the extended protocol ends here
-                skipping = false;
-                if !send(conn, out[0..wire.ready(out, 0, session.state(st[8..16]))]) {
-                    fill = 0 - 1;
-                }
+                // Sync: what an error started skipping ends here
+                st[2] = 0;
+                xi[5] = 0;
+                op = wire.ready(out, op, session.state(st[8..16]));
             } else if t == 'P' || t == 'B' || t == 'D' || t == 'E' || t == 'C' || t == 'H' || t == 'F' {
-                // the extended protocol (and a function call) is not served yet: refused once, then skipped up to the Sync
-                if !skipping {
-                    skipping = true;
-                    if !send(conn, out[0..wire.error(out, 0, false, wire.refused_state(), "cancho-db: refused ", "extended-protocol")]) {
-                        fill = 0 - 1;
+                if st[2] == 0 {
+                    if t == 'P' {
+                        op = parse_message(buf[5..n], ar, xi, out, op, st);
+                    } else if t == 'B' {
+                        op = bind_message(buf[5..n], ar, xi, out, op, st);
+                    } else if t == 'D' {
+                        op = describe_message(buf[5..n], xi, out, op, st);
+                    } else if t == 'E' {
+                        op = execute_message(heap, conn, pg, w, sub, buf[5..n], ar, xi, out, op, roots, st);
+                    } else if t == 'C' {
+                        op = close_message(buf[5..n], ar, xi, out, op, st);
+                    } else if t == 'H' {
+                        if xi[4] == 1 {
+                            // a client that waits for the description before it sends the Execute would wait for ever (6am)
+                            op = fails(out, op, st, wire.refused_state(), "cancho-db: refused ", "describe-before-execute");
+                        }
+                        if !send(conn, out[0..op]) {
+                            fill = 0 - 1;
+                        }
+                        op = 0;
+                    } else {
+                        op = fails(out, op, st, wire.refused_state(), "cancho-db: refused ", "function-call");
                     }
                 }
             } else {
-                send(conn, out[0..wire.error(out, 0, true, wire.violation_state(), "cancho-db: a message of no type this server reads", "")]);
+                op = wire.error(out, op, true, wire.violation_state(), "cancho-db: a message of no type this server reads", "");
+                st[3] = 1;
+            }
+            if op < 0 || st[3] != 0 {
+                // the connection is gone, or what it sent cannot be read past: it ends, after what there is to say
+                if op > 0 {
+                    send(conn, out[0..op]);
+                }
                 fill = 0 - 1;
             }
             if fill >= 0 {
