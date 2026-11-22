@@ -209,266 +209,87 @@ fn put_changes[&i, &q](io: &!i Io, w: &!q exec.Work) -> [io_write] int {
 
 // Run one statement over the tree `root`: the tree after it (`root` itself unless the statement is done).
 fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, sql: &s [byte], root: int, mode: int, flag: &!f [int], part: bool) -> [heap, io_write, file_read, file_write] int {
-    let cap = len(sql) + 4;
-    var tb = box_slice(heap, 4 * cap, 0);
-    var nb = box_slice(heap, 6 * (cap + 64), 0);
-    var kb = box_slice(heap, cap + 64, 0);
-    var vb = box_slice(heap, 64, 0);
-    var ob = box_slice(heap, 4 * 64, 0);
-    var rb = box_slice(heap, 2 * 256, 0);
-    var st = box_slice(heap, 16, 0);
-    var gb = box_slice(heap, cap, 0);
-    var cb = box_slice(heap, 16, 0);
-    var schema = box_slice(heap, 65536, byte_of(0));
-    var ir = box_slice(heap, 65536, byte_of(0));
-    var sc = box_slice(heap, 1024, 0);
+    var run = drive.run_new(heap, len(sql));
     var out = root;
-    borrow mut tb as &!tw in {
-        borrow mut nb as &!nw in {
-            borrow mut kb as &!kw in {
-                borrow mut vb as &!vw in {
-                    borrow mut ob as &!ow in {
-                        borrow mut rb as &!rw in {
-                            borrow mut st as &!sw in {
-                                borrow mut gb as &!gw in {
-                                    borrow mut cb as &!cw in {
-                                        borrow mut schema as &!mw in {
-                                            borrow mut ir as &!iw in {
-                                                borrow mut sc as &!xw in {
-                                                    var rc = 0;
-                                                    var kind = 0 - 1;
-                                                    var named = false;
-                                                    var ctl = 0;
-                                                    var returned = 0 - 1;
-                                                    exec.set_guard(w, 0);
-                                                    let sl = exec.schema(pg, w, root, contents(mw));
-                                                    let n = lex.tokenize(sql, contents(tw));
-                                                    if sl < 0 {
-                                                        rc = sl;
-                                                    } else if n < 0 {
-                                                        put_str(io, "refused ");
-                                                        put_str(io, lex.error_name(0 - n));
-                                                        named = true;
-                                                    } else if !exec.params_fit(w, sql, contents(tw), n, part) {
-                                                        rc = exec.unsupported();
-                                                    } else {
-                                                        parse.reset(contents(sw));
-                                                        let q0 = stmt.statement(sql, contents(tw), 0, n, contents(nw), contents(kw), contents(vw), contents(ow), contents(gw), contents(cw), contents(sw));
-                                                        if q0 < 0 {
-                                                            put_str(io, "refused ");
-                                                            put_str(io, parse.error_name(0 - q0));
-                                                            named = true;
-                                                        } else if contents(nw)[6 * contents(sw)[2]] == parse.n_begin() || contents(nw)[6 * contents(sw)[2]] == parse.n_commit() || contents(nw)[6 * contents(sw)[2]] == parse.n_rollback() {
-                                                            // the transaction's own statements are the caller's to answer
-                                                            ctl = 20;
-                                                            if contents(nw)[6 * contents(sw)[2]] == parse.n_commit() {
-                                                                ctl = 21;
-                                                            } else if contents(nw)[6 * contents(sw)[2]] == parse.n_rollback() {
-                                                                ctl = 22;
-                                                            }
-                                                            named = true;
-                                                        } else if mode == 3 {
-                                                            // the transaction has failed: nothing runs until it is ended
-                                                            rc = exec.e_aborted();
-                                                        } else if contents(nw)[6 * contents(sw)[2]] == parse.n_create_seq() {
-                                                            // CREATE SEQUENCE has no IR: it is the engine's alone
-                                                            if mode != 0 || exec.params_bound(w) > 0 {
-                                                                rc = exec.unsupported();
-                                                            } else {
-                                                                rc = execw.create_sequence(pg, w, root, sql, contents(tw), contents(nw), contents(sw)[2]);
-                                                            }
-                                                            kind = 13;
-                                                        } else {
-                                                            let top = contents(sw)[2];
-                                                            let ln = lower.lower(sql, contents(tw), contents(nw), contents(kw), top, contents(mw)[0..sl], contents(rw), contents(iw), contents(xw));
-                                                            if ln < 0 {
-                                                                put_str(io, "refused ");
-                                                                put_str(io, lower.error_name(0 - ln));
-                                                                named = true;
-                                                            } else {
-                                                                let e = contents(iw)[0..ln];
-                                                                kind = int_of(e[0]);
-                                                                if exec.params_bound(w) > 0 && kind != 6 && kind != 1 && kind != 2 && kind != 3 {
-                                                                    // PostgreSQL takes no parameters in a statement that is not a query
-                                                                    rc = exec.unsupported();
-                                                                } else if mode == 1 && kind != 6 {
-                                                                    // the tree read AS OF a transaction is not one to write to
-                                                                    put_str(io, "refused engine-as-of-write");
-                                                                    named = true;
-                                                                } else if mode == 2 {
-                                                                    rc = execw.erase(pg, w, root, e, contents(xw));
-                                                                    kind = 9;
-                                                                } else if kind == 6 {
-                                                                    rc = execs.select(pg, w, root, e, contents(xw));
-                                                                } else if kind == 1 && contents(nw)[6 * top + 1] > 0 && execw.guard_lower(w, sql, contents(tw), contents(nw), contents(kw), contents(nw)[6 * top + 1] - 1, contents(mw)[0..sl]) < 0 {
-                                                                    // the condition of an `insert ... select ... where` does not lower
-                                                                    rc = exec.unsupported();
-                                                                } else if (kind == 1 || kind == 2 || kind == 3) && contents(nw)[6 * top + 5] >= 0 {
-                                                                    // RETURNING (docs/m3-engine.md 6aa): the items are a SELECT over the table, read before the statement over no rows (what is
-                                                                    // wrong with them is known before anything is written) and after it over the rows it wrote
-                                                                    let rn = contents(nw)[6 * top + 5];
-                                                                    region rr {
-                                                                        let ir2 = alloc_slice[rr](32768, byte_of(0));
-                                                                        let sc2 = alloc_slice[rr](1024, 0);
-                                                                        let l2 = lower.lower(sql, contents(tw), contents(nw), contents(kw), rn, contents(mw)[0..sl], contents(rw), ir2, sc2);
-                                                                        if l2 < 0 {
-                                                                            put_str(io, "refused ");
-                                                                            put_str(io, lower.error_name(0 - l2));
-                                                                            named = true;
-                                                                        } else {
-                                                                            exec.ret_set(w, 3);
-                                                                            rc = execs.select(pg, w, root, ir2[0..l2], sc2);
-                                                                            if rc == 0 {
-                                                                                exec.ret_set(w, 1);
-                                                                                if kind == 1 {
-                                                                                    rc = execw.insert(pg, w, root, e, contents(xw), contents(nw)[6 * top + 4] == 1);
-                                                                                } else if kind == 2 {
-                                                                                    rc = execw.update(pg, w, root, e, contents(xw));
-                                                                                } else {
-                                                                                    rc = execw.delete(pg, w, root, e, contents(xw));
-                                                                                }
-                                                                                if rc == 0 {
-                                                                                    let r1 = exec.root_of(w);
-                                                                                    exec.ret_set(w, 2);
-                                                                                    rc = execs.select(pg, w, r1, ir2[0..l2], sc2);
-                                                                                    returned = rn;
-                                                                                }
-                                                                            }
-                                                                            exec.ret_set(w, 0);
-                                                                        }
-                                                                    }
-                                                                } else if kind == 1 {
-                                                                    rc = execw.insert(pg, w, root, e, contents(xw), contents(nw)[6 * top + 4] == 1);
-                                                                } else if kind == 2 {
-                                                                    rc = execw.update(pg, w, root, e, contents(xw));
-                                                                } else if kind == 3 {
-                                                                    rc = execw.delete(pg, w, root, e, contents(xw));
-                                                                } else if kind == 4 && ln > 1 && int_of(e[1]) == 0 {
-                                                                    rc = execw.create_table(pg, w, root, e, sql, contents(tw), contents(nw), contents(kw), top);
-                                                                    kind = 7;
-                                                                } else if kind == 4 && ln > 1 && int_of(e[1]) == 2 {
-                                                                    rc = execw.drop_table(pg, w, root, e);
-                                                                    kind = 8;
-                                                                } else if kind == 4 && ln > 1 && int_of(e[1]) == 1 {
-                                                                    rc = execw.alter_add(pg, w, root, e, sql, contents(tw), contents(nw), contents(kw), top);
-                                                                    kind = 10;
-                                                                } else if kind == 4 && ln > 1 && int_of(e[1]) == 3 {
-                                                                    rc = execw.create_index(pg, w, root, e, sql, contents(tw), contents(nw), contents(kw), top);
-                                                                    kind = 11;
-                                                                } else if kind == 4 && ln > 1 && int_of(e[1]) == 4 {
-                                                                    rc = execw.drop_index(pg, w, root, e, sql, contents(tw), contents(nw), top);
-                                                                    kind = 12;
-                                                                } else {
-                                                                    rc = exec.unsupported();
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    if !named {
-                                                        if rc < 0 {
-                                                            put_str(io, "refused ");
-                                                            put_str(io, exec.refusal_name(rc));
-                                                        } else if rc > 0 {
-                                                            put_str(io, "error ");
-                                                            put_str(io, exec.sqlstate(rc));
-                                                        } else {
-                                                            put_str(io, "ok ");
-                                                            if kind == 6 {
-                                                                put_str(io, "SELECT ");
-                                                            } else if kind == 1 {
-                                                                put_str(io, "INSERT ");
-                                                            } else if kind == 2 {
-                                                                put_str(io, "UPDATE ");
-                                                            } else if kind == 3 {
-                                                                put_str(io, "DELETE ");
-                                                            } else if kind == 9 {
-                                                                put_str(io, "ERASE ");
-                                                            } else if kind == 10 {
-                                                                put_str(io, "ALTER ");
-                                                            } else if kind == 11 {
-                                                                put_str(io, "INDEX ");
-                                                            } else if kind == 12 {
-                                                                put_str(io, "DROPINDEX ");
-                                                            } else if kind == 7 || kind == 13 {
-                                                                put_str(io, "CREATE ");
-                                                            } else {
-                                                                put_str(io, "DROP ");
-                                                            }
-                                                            put_int(io, exec.count_of(w));
-                                                            putchar(io, '\n');
-                                                            if kind != 9 {
-                                                                // the command's tag, as a client is sent it
-                                                                putchar(io, 'G');
-                                                                putchar(io, ' ');
-                                                                region tr {
-                                                                    let tb2 = alloc_slice[tr](64, byte_of(0));
-                                                                    let tn = answer.tag(kind, exec.count_of(w), tb2);
-                                                                    put_str(io, tb2[0..tn]);
-                                                                }
-                                                                putchar(io, '\n');
-                                                            }
-                                                            if kind == 6 || returned >= 0 {
-                                                                // the names of the columns, as a client is sent them: what the lowering knows and the IR does not carry
-                                                                var top2 = contents(sw)[2];
-                                                                if returned >= 0 {
-                                                                    top2 = returned;
-                                                                }
-                                                                let nn = lower.output_names(sql, contents(tw), contents(nw), contents(kw), top2, contents(mw)[0..sl], contents(xw), contents(iw));
-                                                                putchar(io, 'N');
-                                                                var na = 0;
-                                                                while na + 2 <= nn {
-                                                                    let l = int_of(contents(iw)[na]) * 256 + int_of(contents(iw)[na + 1]);
-                                                                    putchar(io, ' ');
-                                                                    var j = 0;
-                                                                    while j < l {
-                                                                        hex_byte(io, int_of(contents(iw)[na + 2 + j]));
-                                                                        j = j + 1;
-                                                                    }
-                                                                    if l == 0 {
-                                                                        putchar(io, '.');
-                                                                    }
-                                                                    na = na + 2 + l;
-                                                                }
-                                                                putchar(io, '\n');
-                                                                put_rows(io, w);
-                                                            }
-                                                            if kind != 6 && kind < 9 || kind == answer.k_drop_table() || kind == answer.k_alter_table() {
-                                                                put_changes(io, w);
-                                                            }
-                                                            out = exec.root_of(w);
-                                                        }
-                                                    }
-                                                    flag[0] = 0;
-                                                    if ctl != 0 {
-                                                        out = 0 - ctl;
-                                                    } else if named || rc != 0 {
-                                                        putchar(io, '\n');
-                                                        flag[0] = 1;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    borrow mut run as &!m in {
+        // the statement is read, lowered and run by the engine (src/drive.cho); what is here is how its answer is written for a test to read
+        out = drive.run(pg, w, m, sql, root, mode, part);
+        let o = drive.outcome(m);
+        flag[0] = 0;
+        if o == drive.o_ok() {
+            let kind = drive.kind(m);
+            put_str(io, "ok ");
+            if kind == 6 {
+                put_str(io, "SELECT ");
+            } else if kind == 1 {
+                put_str(io, "INSERT ");
+            } else if kind == 2 {
+                put_str(io, "UPDATE ");
+            } else if kind == 3 {
+                put_str(io, "DELETE ");
+            } else if kind == 9 {
+                put_str(io, "ERASE ");
+            } else if kind == 10 {
+                put_str(io, "ALTER ");
+            } else if kind == 11 {
+                put_str(io, "INDEX ");
+            } else if kind == 12 {
+                put_str(io, "DROPINDEX ");
+            } else if kind == 7 || kind == 13 {
+                put_str(io, "CREATE ");
+            } else {
+                put_str(io, "DROP ");
             }
+            put_int(io, exec.count_of(w));
+            putchar(io, '\n');
+            if kind != 9 {
+                // the command's tag, as a client is sent it
+                putchar(io, 'G');
+                putchar(io, ' ');
+                region tr {
+                    let tb2 = alloc_slice[tr](64, byte_of(0));
+                    let tn = answer.tag(kind, exec.count_of(w), tb2);
+                    put_str(io, tb2[0..tn]);
+                }
+                putchar(io, '\n');
+            }
+            if drive.has_rows(m) {
+                // the names of the columns, as a client is sent them
+                let nm = drive.names(m);
+                putchar(io, 'N');
+                var na = 0;
+                while na + 2 <= len(nm) {
+                    let l = int_of(nm[na]) * 256 + int_of(nm[na + 1]);
+                    putchar(io, ' ');
+                    var j = 0;
+                    while j < l {
+                        hex_byte(io, int_of(nm[na + 2 + j]));
+                        j = j + 1;
+                    }
+                    if l == 0 {
+                        putchar(io, '.');
+                    }
+                    na = na + 2 + l;
+                }
+                putchar(io, '\n');
+                put_rows(io, w);
+            }
+            if kind != 6 && kind < 9 || kind == answer.k_drop_table() || kind == answer.k_alter_table() {
+                put_changes(io, w);
+            }
+        } else if o != drive.o_control() {
+            if o == drive.o_error() {
+                put_str(io, "error ");
+                put_str(io, exec.sqlstate(drive.code(m)));
+            } else {
+                put_str(io, "refused ");
+                put_str(io, drive.refusal(m));
+            }
+            putchar(io, '\n');
+            flag[0] = 1;
         }
     }
-    unbox_slice(heap, tb);
-    unbox_slice(heap, nb);
-    unbox_slice(heap, kb);
-    unbox_slice(heap, vb);
-    unbox_slice(heap, ob);
-    unbox_slice(heap, rb);
-    unbox_slice(heap, st);
-    unbox_slice(heap, gb);
-    unbox_slice(heap, cb);
-    unbox_slice(heap, schema);
-    unbox_slice(heap, ir);
-    unbox_slice(heap, sc);
+    drive.run_free(heap, run);
     return out;
 }
 

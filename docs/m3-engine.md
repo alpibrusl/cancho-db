@@ -1111,6 +1111,27 @@ still handed over by it. A server will have to decide where each comes from.
 **Test.** Nothing new is claimed: every test that ran through the test program's lines runs through `session` (the differential's transactions, C165; the facts, C175; the
 log, C177). What is new is that a fault in those decisions is now caught: 20 mutants in `src/session.cho` judged by the differential and 1 by the log's verifiers.
 
+## 6ak. Running a statement is the engine's too
+
+After 6ae (the text pass) and 6aj (the session), what the test program still did itself was the middle: read a statement, lower it, decide which of the engine's functions runs
+it (a SELECT, a write, a write with RETURNING and its two reads, a table made or dropped, a sequence, an erase), and turn what came back into "answered", "an error with this
+code" or "refused with this tag". 250 lines, none with a mutant, and all of it what a server does for every message.
+
+**Design.** `drive.run` (`src/drive.cho`) does that for one statement over one tree and leaves how it went in a `Run`: the outcome (answered; refused where it was read, where
+it was lowered, or by the engine, each with its tag; an error with its SQLSTATE; or `begin`, `commit`, `rollback`, which are the session's to answer), the statement's kind,
+whether the answer has rows, and the names of its columns. The rows and the changes stay where they were (`exec`). The driver's part is what is left: the bytes in and the
+bytes out. The test program writes the answer as lines for a test to read; a server will write PostgreSQL's messages from the same `Run` (`src/answer.cho`, C164).
+
+*One check was found dead and removed.* The test program refused a statement that is not a query if it had parameters bound. With the check gone, every such statement is
+still refused: a parameter in a default or in a sequence's start is refused where the statement is lowered or read (`unknown-construct`, `syntax`), one in an index's
+condition by the index (`engine-unsupported`), one bound and not named by `params_fit`. The test now pins those tags, so the day a form of DDL takes a parameter it is seen.
+
+**Test.** As for 6aj, nothing new is claimed and every test runs through the moved code. 13 mutants in `drive.run`; they needed two new cases: a sequence made on a tree
+read `AS OF` (refused), and the exact tag of a refusal at each stage (the lexer's, the parser's, the lowering's, the engine's).
+
+*The test program is now 874 lines where it was 1,155 before 6aj.* What it still decides: which branch, which point `AS OF`, when to commit the page file, and the lines
+of its own protocol.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

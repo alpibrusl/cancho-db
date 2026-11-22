@@ -1824,6 +1824,9 @@ def history(seed):
         r = subprocess.run([EXE, path], input="!asof %d\ninsert into ta (k) values (1)\n" % points[0][0], capture_output=True, text=True)
         if "refused engine-as-of-write" not in r.stdout:
             raise SystemExit("engine_check: history: a write AS OF a past transaction: %s" % r.stdout[-200:])
+        r = subprocess.run([EXE, path], input="!asof %d\ncreate sequence hsq\n!asof -\nselect nextval('hsq')\n" % points[0][0], capture_output=True, text=True)
+        if "refused engine-unsupported" not in r.stdout or "ok " in r.stdout:
+            raise SystemExit("engine_check: history: a sequence made AS OF a past transaction: %s" % r.stdout[-200:])
         return len(points), len(forked)
 
 
@@ -1897,6 +1900,14 @@ def erasure():
                                 "update ns set k = 7 where k = 2", "update ns set v = 1 where k = 1", "delete from ns where k = 2", "select count(*) from ns", "alter table ns add column z integer default 0"])
         if heads(out) != ["ok CREATE 0", "ok INSERT 2", "refused engine-no-entropy", "refused engine-no-entropy", "refused engine-no-entropy", "ok UPDATE 1", "ok DELETE 1", "ok SELECT 1", "refused engine-no-entropy"]:
             raise SystemExit("engine_check: with no seed the statements answered %s" % heads(out))
+        # where a statement is refused is said by its tag: where it is read (the lexer's, the parser's), where it is lowered, or by the engine; and a parameter in a statement that
+        # is no query is refused where the statement is lowered or made (docs/m3-engine.md 6ak)
+        out = run_engine(os.path.join(d, "tags.db"), ["create table q (k integer primary key, v integer)", "select 'abc", "select from where", "select nosuch from q", "select k from q where k in (select k from q)",
+                                                      "!params 35", "create table zz (k integer primary key, v integer default $1)", "!params 35", "alter table q add column c integer default $1",
+                                                      "!params 35", "create index qi on q (v) where k = $1", "!params 35", "create sequence sq start $1", "select count(*) from q"])
+        want = ["ok CREATE 0", "refused unterminated", "refused reserved-word", "refused unknown-column", "refused subquery", "refused unknown-construct", "refused unknown-construct", "refused engine-unsupported", "refused syntax", "ok SELECT 1"]
+        if [h for h in heads(out) if h and not h.startswith("params")] != want:
+            raise SystemExit("engine_check: the tags of refusals are %s" % heads(out))
         # text that is not UTF-8 is refused (PostgreSQL would not take it either), and the engine goes on
         r = subprocess.run([EXE, path], input=b"create table u8 (k integer primary key, s text)\ninsert into u8 values (1, '\xff\xfe')\ninsert into u8 values (2, 'a\xc3')\ninsert into u8 values (3, '\xc3\xb1')\nselect k from u8\n", capture_output=True)
         heads = [b.split(b"\n")[0] for b in r.stdout.split(b"\n.\n")]
