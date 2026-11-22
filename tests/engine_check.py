@@ -280,6 +280,9 @@ class Gen:
             if cols and self.r.random() < 0.65:
                 return self.pick(cols)
             return self.lit_int()
+        if r < 0.37:
+            # COALESCE, GREATEST, LEAST (docs/m3-engine.md 6ab)
+            return "%s(%s)" % (self.pick(["coalesce", "coalesce", "greatest", "least"]), ", ".join(self.pick([self.int_(d - 1), self.int_(d - 1), "null"]) for _ in range(self.pick([1, 2, 2, 3]))))
         if r < 0.75:
             return "(%s %s %s)" % (self.int_(d - 1), self.pick(["+", "-", "*", "/", "%", "+", "-"]), self.int_(d - 1))
         if r < 0.8:
@@ -297,6 +300,8 @@ class Gen:
             if cols and self.r.random() < 0.6:
                 return self.pick(cols)
             return q(self.pick(TEXTS))
+        if r < 0.51:
+            return "%s(%s)" % (self.pick(["coalesce", "coalesce", "greatest", "least"]), ", ".join(self.pick([self.text_(d - 1), self.text_(d - 1), "null"]) for _ in range(self.pick([1, 2, 2, 3]))))
         if r < 0.75:
             return "(%s || %s)" % (self.text_(d - 1), self.text_(d - 1))
         if r < 0.88:
@@ -310,6 +315,8 @@ class Gen:
             if cols and self.r.random() < 0.7:
                 return self.pick(cols)
             return self.pick(["true", "false"])
+        if r < 0.15:
+            return "coalesce(%s, %s)" % (self.bool_(d - 1), self.bool_(d - 1))
         if r < 0.45:
             return "(%s %s %s)" % (self.int_(d - 1), self.pick(["=", "<>", "<", "<=", ">", ">="]), self.int_(d - 1))
         if r < 0.58:
@@ -1248,6 +1255,29 @@ FIXED += [
     ("select min(s), max(s) from fm", "order"),
     ("select min(s), max(s) from fm where k > 1 and k < 5", "order"),
     ("select k / 3, min(s), max(s) from fm group by k / 3 order by 1", "order"),
+    # COALESCE, GREATEST, LEAST (6ab)
+    ("create table fc (k integer primary key, a smallint, b bigint, s text, f boolean)", "ddl"),
+    ("insert into fc values (1, 5, null, 'x', true), (2, null, 7, null, null), (3, null, null, 'abc', false), (4, -2, -9, '', null)", "write"),
+    ("select k, coalesce(a, b), coalesce(a, b, 0), greatest(a, b, k), least(a, b, k), coalesce(s, 'none'), greatest(s, 'b'), least(s, 'b'), coalesce(f, false) from fc order by k", "order"),
+    ("select coalesce(a, k / (k - 1)) from fc order by k", "order"),
+    ("select greatest(a, k / (k - 1)) from fc where k > 1 order by k", "order"),
+    ("select greatest(a, k / (k - 1)) from fc order by k", "order"),
+    ("select coalesce(null, null), greatest(null, null), coalesce('a', 'b'), least(3, 2, 1), greatest('a', 'ab'), coalesce(null, 7) from fc where k = 1", "order"),
+    ("select max(coalesce(a, 0)), coalesce(max(b), 0), least(count(*), 2), coalesce(sum(a), min(k)) from fc", "order"),
+    ("select coalesce(a, 0), count(*) from fc group by coalesce(a, 0) order by 1", "order"),
+    ("select coalesce(a, s) from fc", "order"),
+    ("select greatest(f, true), least(f, false) from fc order by k", "order"),
+    ("select k from fc where coalesce(b, a, 0) > 0 order by k", "order"),
+    ("update fc set a = coalesce(a, 9) + 1, s = coalesce(s, 'was null') where k < 4", "write"),
+    ("update fc set b = greatest(b, k), a = least(a, 3)", "write"),
+    ("select * from fc order by k", "order"),
+    # COALESCE of a constant is that constant, and an error made of it is raised whatever the rows
+    ("update fc set k = - coalesce(null, 3000000000, k) where k < 0", "write"),
+    ("update fc set k = - coalesce(k, 3000000000) where k < 0", "write"),
+    (P("update fc set s = coalesce($1::text, s), a = coalesce($2::smallint, a) where k = $3::integer", None, "7", "1"), "write"),
+    (P("update fc set s = coalesce($1::text, s), a = coalesce($2::smallint, a) where k = $3::integer", "new", None, "2"), "write"),
+    (P("select case when $1::text is not null then coalesce($2::bigint, 0) else greatest(b, $2::bigint) end from fc order by k", None, "3"), "order"),
+    ("select * from fc order by k", "order"),
 ]
 
 # RETURNING (6aa)
@@ -1333,6 +1363,9 @@ UNSUP = [
     ("select cast(s as integer) from ft", "22003"),
     ("select cast(s as smallint) from ft", "22003"),
     ("select cast(s as bigint) from ft", "22P02"),
+    # an aggregate under an operator that PostgreSQL folds to null when it plans: the aggregate is never computed, nor its error raised
+    ("select max(1 / (k - 1)) - null from fz", None),
+    ("select count(*) from fz having max(1 / (k - 1)) > null", None),
     # the schema's forms (6x)
     ("create table fzc (k integer primary key, n integer check (n > 0))", None),                     # a check that is no range
     ("create table fzc (k integer primary key, n integer check (n not between 0 and 3))", None),
@@ -1345,6 +1378,11 @@ UNSUP = [
     ("insert into fz values (7, 7) returning n + 1", None),
     ("delete from fz returning count(*)", "42803"),
     ("update fz set n = 1 returning k || 'x'", None),
+    ("select coalesce(n, 1 / 0) from fz", "22012"),                                                    # a constant that is an error: raised when PostgreSQL plans, or never reached
+    ("update fz set n = coalesce(n, 1 / 0)", "22012"),                                               # (and no row has a null there: the rows would not show it)
+    ("select coalesce(n, 'abc') from fz", "22P02"),                                                   # a literal that is not of the type
+    ("select coalesce() from fz", "42601"),
+    ("select upper('a') || coalesce('b', 'c') from fz", None),
     ("update fi set c = 7", "428C9"),                                                                # an identity column is given no value
     ("insert into fi values (2, 9)", "428C9"),
     ("insert into fi (c, k) values (9, 2)", "428C9"),
@@ -1668,7 +1706,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (f[ksonmr]\d?)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (f[ksonmrc]\d?)\b", sql)
         if m:
             return m.group(1)
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")

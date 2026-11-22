@@ -461,7 +461,8 @@ fn p_marks() -> [] int {
 fn has_call[&x](e: &x [byte], from: int, to: int) -> [] bool {
     var at = from;
     while at < to {
-        if int_of(e[at]) == 4 {
+        if int_of(e[at]) == 4 && eval.scalar_fn(e, at) == 0 {
+            // (COALESCE, GREATEST and LEAST are computed for a row like any operator, src/eval.cho)
             return true;
         }
         let n = eval.node_size(e, at);
@@ -535,7 +536,7 @@ fn cover[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], from: int,
                 return r;
             }
             at = end;
-        } else if tag == 4 {
+        } else if tag == 4 && eval.scalar_fn(e, at) == 0 {
             let which = agg_code(e, at);
             let nl = commit.be(e, at + 1, 2);
             let arg = at + 3 + nl + 4;
@@ -817,6 +818,14 @@ fn emit_group[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], rec: 
 }
 
 // Sort the `m` records of `chg` listed in `idx2` by their first `ng` values, so that the rows of a group are neighbours.
+// Whether the expression at `at`, just computed over the aggregates' values, is a constant that has an aggregate in it: `max(1 % c) - null` is null to PostgreSQL when it plans, and the
+// aggregate is then never computed (nor its errors raised). The engine computes every aggregate it reads, so it does not answer.
+fn folded_away[&q, &x](w: &!q exec.Work, e: &x [byte], at: int) -> [] bool {
+    let constant = contents(w.ws)[eval.max_nodes() + 4] == 1;
+    let (cnt, end) = eval.scan(e, at, contents(w.ws));
+    return constant && cnt > 0 && has_call(e, at, end);
+}
+
 fn sort_groups[&q](w: &!q exec.Work, m: int, ng: int) -> [] int {
     var width = 1;
     var flip = false;
@@ -1024,6 +1033,8 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
             return exec.unsupported();
         } else if contents(w.ws)[b] != 2 {
             exec.note(w, 6);
+        } else if folded_away(w, e, hpos) {
+            return exec.unsupported();
         }
     }
     i = 0;
@@ -1034,6 +1045,8 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
             if s < 0 {
                 return s;
             }
+        } else if folded_away(w, e, expr_at(w, i)) {
+            return exec.unsupported();
         } else if i < ni {
             var ty = contents(w.ws)[b];
             if ty == 0 {

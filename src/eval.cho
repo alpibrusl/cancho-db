@@ -1402,9 +1402,112 @@ fn step[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], p: int, tag: int, ops: int, to
             return unsupported();
         }
         set(ws, out, s0, s1, s2, s3, all_const);
+    } else if tag == 4 {
+        // COALESCE, GREATEST, LEAST (docs/m3-engine.md 6ab); any other call is not here
+        let which = scalar_fn(e, p);
+        if which == 0 || ops < 1 {
+            return unsupported();
+        }
+        // the type of the result: the one type of the arguments, as for the branches of a CASE
+        var t = 0;
+        var m = 0;
+        while m < ops {
+            let v = top - 6 * m;
+            let mt = ws[v];
+            if mt == 4 {
+                // bytea
+                return unsupported();
+            }
+            if mt != 0 {
+                if t == 0 {
+                    t = mt;
+                } else if is_int(t) && is_int(mt) {
+                    t = wider(t, mt);
+                } else if t != mt {
+                    return mismatch();
+                }
+            }
+            m = m + 1;
+        }
+        if t == 0 {
+            t = 3;
+        }
+        m = 0;
+        while m < ops {
+            let v = top - 6 * m;
+            if ws[v] == 0 || !is_int(t) {
+                let r = convert(ws, v, t, false, ar, info);
+                if r == no_operator() {
+                    return mismatch();
+                }
+                if r < 0 {
+                    return r;
+                }
+            }
+            m = m + 1;
+        }
+        var chosen = 0 - 1;
+        var failed = 0;
+        m = 0;
+        while m < ops && failed == 0 && (which != 1 || chosen < 0) {
+            let v = top - 6 * m;
+            if ws[v + 1] == 2 {
+                failed = ws[v + 2];
+            } else if ws[v + 1] == 0 {
+                if chosen < 0 {
+                    chosen = v;
+                } else {
+                    let c = compare(ws, v, chosen, ar);
+                    if which == 2 && c > 0 || which == 3 && c < 0 {
+                        chosen = v;
+                    }
+                }
+            }
+            m = m + 1;
+        }
+        // whether the result is a constant, as PostgreSQL simplifies it when it plans. GREATEST and LEAST: if every argument is. COALESCE: the constant nulls are dropped, and if what is then
+        // first is a constant, that is the result and the rest is never looked at (so `coalesce(null, 7, c)` is the constant 7, and an error made of it is raised whatever the rows)
+        var folded = all_const;
+        if which == 1 {
+            folded = 1;
+            var settled = false;
+            m = 0;
+            while m < ops && !settled {
+                let v = top - 6 * m;
+                if !(ws[v + 4] == 1 && ws[v + 1] == 1) {
+                    folded = ws[v + 4];
+                    settled = true;
+                }
+                m = m + 1;
+            }
+        }
+        if failed != 0 {
+            set(ws, out, t, 2, failed, 0, 0);
+        } else if chosen < 0 {
+            set(ws, out, t, 1, 0, 0, folded);
+        } else {
+            let s2 = ws[chosen + 2];
+            let s3 = ws[chosen + 3];
+            set(ws, out, t, 0, s2, s3, folded);
+        }
     } else {
-        // a parameter, a value the server chooses, a call, the star of count(*): not here
+        // a parameter, a value the server chooses, the star of count(*): not here
         return unsupported();
+    }
+    return 0;
+}
+
+// Whether the call at `at` of `e` is one the evaluator computes: 1 COALESCE, 2 GREATEST, 3 LEAST; 0 any other (an aggregate, a function that is not built).
+pub fn scalar_fn[&x](e: &x [byte], at: int) -> [] int {
+    let nl = commit.be(e, at + 1, 2);
+    if name_is(e, at + 3, nl, "coalesce") {
+        return 1;
+    }
+    if name_is(e, at + 3, nl, "greatest") {
+        return 2;
+    }
+    if name_is(e, at + 3, nl, "least") {
+        return 3;
     }
     return 0;
 }

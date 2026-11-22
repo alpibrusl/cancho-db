@@ -4,7 +4,7 @@ module cdb.parse_cases;
 // generator. Inputs and renderings are hex.
 
 pub fn n_parse() -> [] int {
-    return 279;
+    return 285;
 }
 
 pub fn parse_input(i: int) -> [] &static [byte] {
@@ -807,42 +807,60 @@ pub fn parse_input(i: int) -> [] &static [byte] {
         return "636f616c6573636528612c203129";
     }
     if i == 266 {
-        return "63757272656e745f74696d657374616d70";
+        return "475245415445535428612c2062202b20312c203329";
     }
     if i == 267 {
-        return "6578747261637428796561722066726f6d206129";
+        return "6c6561737428636f616c6573636528612c2062292c203129";
     }
     if i == 268 {
-        return "2828282828282828312929292929292929";
+        return "636f616c65736365";
     }
     if i == 269 {
-        return "2d202d202d202d202d202d202d2031";
+        return "636f616c65736365202b2031";
     }
     if i == 270 {
-        return "6628312c20322c20332c20342c20352c203629";
+        return "742e636f616c65736365";
     }
     if i == 271 {
-        return "312b322b332b34";
+        return "6e756c6c696628612c203129";
     }
     if i == 272 {
-        return "6628312c20322c20332c20342c20352c203629";
+        return "63757272656e745f74696d657374616d70";
     }
     if i == 273 {
-        return "31202b2032";
+        return "6578747261637428796561722066726f6d206129";
     }
     if i == 274 {
-        return "6628312c20322c20332c203429";
+        return "2828282828282828312929292929292929";
     }
     if i == 275 {
-        return "6628312c20322c203329";
+        return "2d202d202d202d202d202d202d2031";
     }
     if i == 276 {
-        return "2d282d282d312929";
+        return "6628312c20322c20332c20342c20352c203629";
     }
     if i == 277 {
-        return "282828283129292929";
+        return "312b322b332b34";
     }
     if i == 278 {
+        return "6628312c20322c20332c20342c20352c203629";
+    }
+    if i == 279 {
+        return "31202b2032";
+    }
+    if i == 280 {
+        return "6628312c20322c20332c203429";
+    }
+    if i == 281 {
+        return "6628312c20322c203329";
+    }
+    if i == 282 {
+        return "2d282d282d312929";
+    }
+    if i == 283 {
+        return "282828283129292929";
+    }
+    if i == 284 {
         return "312b322b33";
     }
     return "";
@@ -1645,13 +1663,13 @@ pub fn parse_ok(i: int) -> [] int {
         return 0;
     }
     if i == 265 {
-        return 0;
+        return 1;
     }
     if i == 266 {
-        return 0;
+        return 1;
     }
     if i == 267 {
-        return 0;
+        return 1;
     }
     if i == 268 {
         return 0;
@@ -1675,15 +1693,33 @@ pub fn parse_ok(i: int) -> [] int {
         return 0;
     }
     if i == 275 {
-        return 1;
+        return 0;
     }
     if i == 276 {
         return 0;
     }
     if i == 277 {
-        return 1;
+        return 0;
     }
     if i == 278 {
+        return 0;
+    }
+    if i == 279 {
+        return 0;
+    }
+    if i == 280 {
+        return 0;
+    }
+    if i == 281 {
+        return 1;
+    }
+    if i == 282 {
+        return 0;
+    }
+    if i == 283 {
+        return 1;
+    }
+    if i == 284 {
         return 1;
     }
     return 0;
@@ -2486,13 +2522,13 @@ pub fn parse_want(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 265 {
-        return "";
+        return "636f616c65736365282261222c203129";
     }
     if i == 266 {
-        return "";
+        return "6772656174657374282261222c2028226222202b2031292c203329";
     }
     if i == 267 {
-        return "";
+        return "6c6561737428636f616c65736365282261222c20226222292c203129";
     }
     if i == 268 {
         return "";
@@ -2516,15 +2552,33 @@ pub fn parse_want(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 275 {
-        return "6628312c20322c203329";
+        return "";
     }
     if i == 276 {
         return "";
     }
     if i == 277 {
-        return "31";
+        return "";
     }
     if i == 278 {
+        return "";
+    }
+    if i == 279 {
+        return "";
+    }
+    if i == 280 {
+        return "";
+    }
+    if i == 281 {
+        return "6628312c20322c203329";
+    }
+    if i == 282 {
+        return "";
+    }
+    if i == 283 {
+        return "31";
+    }
+    if i == 284 {
         return "282831202b203229202b203329";
     }
     return "";
@@ -3327,45 +3381,63 @@ pub fn parse_tag(i: int) -> [] &static [byte] {
         return "reserved-word";
     }
     if i == 265 {
-        return "reserved-word";
+        return "";
     }
     if i == 266 {
-        return "reserved-word";
+        return "";
     }
     if i == 267 {
-        return "reserved-word";
+        return "";
     }
     if i == 268 {
-        return "nested-too-deep";
+        return "reserved-word";
     }
     if i == 269 {
-        return "nested-too-deep";
+        return "reserved-word";
     }
     if i == 270 {
-        return "nested-too-deep";
+        return "reserved-word";
     }
     if i == 271 {
-        return "too-big";
+        return "reserved-word";
     }
     if i == 272 {
-        return "too-big";
+        return "reserved-word";
     }
     if i == 273 {
-        return "too-big";
+        return "reserved-word";
     }
     if i == 274 {
-        return "too-big";
+        return "nested-too-deep";
     }
     if i == 275 {
-        return "";
+        return "nested-too-deep";
     }
     if i == 276 {
         return "nested-too-deep";
     }
     if i == 277 {
-        return "";
+        return "too-big";
     }
     if i == 278 {
+        return "too-big";
+    }
+    if i == 279 {
+        return "too-big";
+    }
+    if i == 280 {
+        return "too-big";
+    }
+    if i == 281 {
+        return "";
+    }
+    if i == 282 {
+        return "nested-too-deep";
+    }
+    if i == 283 {
+        return "";
+    }
+    if i == 284 {
         return "";
     }
     return "";
@@ -4177,10 +4249,10 @@ pub fn parse_oscap(i: int) -> [] int {
         return 64;
     }
     if i == 268 {
-        return 4;
+        return 64;
     }
     if i == 269 {
-        return 4;
+        return 64;
     }
     if i == 270 {
         return 64;
@@ -4195,18 +4267,36 @@ pub fn parse_oscap(i: int) -> [] int {
         return 64;
     }
     if i == 274 {
-        return 64;
+        return 4;
     }
     if i == 275 {
-        return 64;
+        return 4;
     }
     if i == 276 {
         return 64;
     }
     if i == 277 {
-        return 4;
+        return 64;
     }
     if i == 278 {
+        return 64;
+    }
+    if i == 279 {
+        return 64;
+    }
+    if i == 280 {
+        return 64;
+    }
+    if i == 281 {
+        return 64;
+    }
+    if i == 282 {
+        return 64;
+    }
+    if i == 283 {
+        return 4;
+    }
+    if i == 284 {
         return 64;
     }
     return 0;
@@ -5024,7 +5114,7 @@ pub fn parse_vcap(i: int) -> [] int {
         return 64;
     }
     if i == 270 {
-        return 4;
+        return 64;
     }
     if i == 271 {
         return 64;
@@ -5042,12 +5132,30 @@ pub fn parse_vcap(i: int) -> [] int {
         return 64;
     }
     if i == 276 {
-        return 64;
+        return 4;
     }
     if i == 277 {
         return 64;
     }
     if i == 278 {
+        return 64;
+    }
+    if i == 279 {
+        return 64;
+    }
+    if i == 280 {
+        return 64;
+    }
+    if i == 281 {
+        return 64;
+    }
+    if i == 282 {
+        return 64;
+    }
+    if i == 283 {
+        return 64;
+    }
+    if i == 284 {
         return 64;
     }
     return 0;
@@ -5868,7 +5976,7 @@ pub fn parse_ncap(i: int) -> [] int {
         return 100;
     }
     if i == 271 {
-        return 4;
+        return 100;
     }
     if i == 272 {
         return 100;
@@ -5886,9 +5994,27 @@ pub fn parse_ncap(i: int) -> [] int {
         return 100;
     }
     if i == 277 {
-        return 100;
+        return 4;
     }
     if i == 278 {
+        return 100;
+    }
+    if i == 279 {
+        return 100;
+    }
+    if i == 280 {
+        return 100;
+    }
+    if i == 281 {
+        return 100;
+    }
+    if i == 282 {
+        return 100;
+    }
+    if i == 283 {
+        return 100;
+    }
+    if i == 284 {
         return 6;
     }
     return 0;
@@ -6712,16 +6838,16 @@ pub fn parse_kcap(i: int) -> [] int {
         return 100;
     }
     if i == 272 {
-        return 3;
+        return 100;
     }
     if i == 273 {
         return 100;
     }
     if i == 274 {
-        return 3;
+        return 100;
     }
     if i == 275 {
-        return 3;
+        return 100;
     }
     if i == 276 {
         return 100;
@@ -6730,6 +6856,24 @@ pub fn parse_kcap(i: int) -> [] int {
         return 100;
     }
     if i == 278 {
+        return 3;
+    }
+    if i == 279 {
+        return 100;
+    }
+    if i == 280 {
+        return 3;
+    }
+    if i == 281 {
+        return 3;
+    }
+    if i == 282 {
+        return 100;
+    }
+    if i == 283 {
+        return 100;
+    }
+    if i == 284 {
         return 100;
     }
     return 0;
@@ -7556,7 +7700,7 @@ pub fn parse_ocap(i: int) -> [] int {
         return 1024;
     }
     if i == 273 {
-        return 3;
+        return 1024;
     }
     if i == 274 {
         return 1024;
@@ -7571,6 +7715,24 @@ pub fn parse_ocap(i: int) -> [] int {
         return 1024;
     }
     if i == 278 {
+        return 1024;
+    }
+    if i == 279 {
+        return 3;
+    }
+    if i == 280 {
+        return 1024;
+    }
+    if i == 281 {
+        return 1024;
+    }
+    if i == 282 {
+        return 1024;
+    }
+    if i == 283 {
+        return 1024;
+    }
+    if i == 284 {
         return 1024;
     }
     return 0;
@@ -8406,12 +8568,30 @@ pub fn parse_rcap(i: int) -> [] int {
         return 64;
     }
     if i == 276 {
-        return 2;
+        return 64;
     }
     if i == 277 {
         return 64;
     }
     if i == 278 {
+        return 64;
+    }
+    if i == 279 {
+        return 64;
+    }
+    if i == 280 {
+        return 64;
+    }
+    if i == 281 {
+        return 64;
+    }
+    if i == 282 {
+        return 2;
+    }
+    if i == 283 {
+        return 64;
+    }
+    if i == 284 {
         return 64;
     }
     return 0;

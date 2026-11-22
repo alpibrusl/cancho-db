@@ -822,6 +822,38 @@ of the engine and 2 of the mark (a sixth, of the refusal of an aggregate, was of
 limit)`: a row's place has no meaning here, and this one is better rewritten in hooks by key); `create_endpoint`, `create_schedule` (`insert ... select` with a scalar subquery);
 `delete_endpoint` (a `with` whose body is a `delete ... returning`); and the sequence (`nextval`, `setval`) that two of those use.
 
+## 6ab. `coalesce`, `greatest`, `least`
+
+Hooks' two patch queries are `set c = coalesce($n::type, c)` throughout: "change this column if a value was given". The three are reserved words that PostgreSQL's grammar reads as
+expressions of their own, not as functions; the parser refused them as reserved words.
+
+**Design.** The parser reads the three as calls when a `(` follows (a column of such a name stays refused). They are no engine-only form: they have no effect of their own, the lowering
+writes them as the `Call` it writes for any function, and the proxy lets them through as it does `upper(x)`. The evaluator computes them:
+
+- the type is the one type of the arguments, as for the branches of a `case` (integers widen, a literal or a parameter takes it, all literals are text);
+- `coalesce`: the first argument that is not null, and PostgreSQL does not compute the ones after it, so an error in a later argument is no error (the evaluator computes every node and
+  carries an error as a value, which is how `case` already skips what PostgreSQL skips);
+- `greatest`, `least`: every argument is computed in order, nulls are left out, the answer is null only if all are;
+- *refused:* a constant argument that is an error (`coalesce(c, 1 / 0)`, `coalesce(c, 'abc')` for an integer): PostgreSQL raises it when it plans, or does not reach it, depending on
+  what stands before it. (Nothing was written for this: the evaluator already refuses a constant that is an error wherever it is made. Two tests written for it here tested nothing,
+  as their mutants showed, and were removed; the refusals are pinned.)
+
+In a grouped select the three are ordinary nodes over the aggregates' values (`coalesce(max(a), 0)`), not aggregates.
+
+**Built, and what the differential corrected.** Two rules were missing from the design, and each was a wrong answer until the random history met it:
+
+1. *`coalesce` of a constant is that constant, to the planner.* PostgreSQL drops the constant nulls and, if what is then first is a constant, takes it as the whole expression and never
+   looks at the rest: `coalesce(null, 3000000000, x)` is `3000000000`, and `x = - coalesce(...)` into a smaller column is error 22003 when the statement is planned, whatever the rows
+   (the engine answered `UPDATE 0`). A parameter is a constant in the same way. The evaluator now marks the result a constant by that rule.
+2. *An aggregate under an operator that folds to null is never computed.* `max(1 % c) - $1` with a null parameter is null to the planner (the operator is strict), so the aggregate is
+   gone and its division by zero with it; the engine computed it and answered the error. This was there since the grouped select was written (6i) and needed a null constant beside an
+   aggregate to show. Refused now: a grouped expression that comes out a constant and has an aggregate in it.
+
+*Measured:* the evaluator's differential on four seeds of 4,000 expressions with the three functions in them, no disagreement; 20 seeds of 3,000 statements, no disagreement; 22 fixed
+statements, 7 pinned refusals; 7 mutants (5 of the functions, 1 of the folded aggregate, 1 of the parser). `tests/hooks_check.py`: **12 of 16 queries** (`patch_endpoint`, `patch_schedule`).
+
+**For the proxy** the three are new statements it lets through (they were refused as reserved words): the hand-written parser cases pin them, and `nullif`, which is not built, stays refused.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
