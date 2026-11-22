@@ -183,6 +183,9 @@ ok("select total as id from orders order by id",
 # ---- INSERT, UPDATE, DELETE
 ok("insert into orders values (1, 2, 3)",
    Insert("orders", ["id", "customer", "total"], [[Int(1), Int(2), Int(3)]]), [(W, "orders")])
+# no columns listed and fewer values than the table has columns: the values are for its first columns (docs/m3-engine.md 6ap)
+ok("insert into orders values (1)", Insert("orders", ["id"], [[Int(1)]]), [(W, "orders")])
+ok("insert into orders values (1, 2), (3, 4)", Insert("orders", ["id", "customer"], [[Int(1), Int(2)], [Int(3), Int(4)]]), [(W, "orders")])
 ok("insert into orders (total, id) values (3, 1), (4, 2)",
    Insert("orders", ["total", "id"], [[Int(3), Int(1)], [Int(4), Int(2)]]), [(W, "orders")])
 ok("insert into orders as o (id) values (now())", Insert("orders", ["id"], [[Nondet("now")]]), [(W, "orders"), (N, "now")])
@@ -255,7 +258,8 @@ no("select random()", "nondeterministic")
 no("select *", "cannot-lower")
 no("insert into nowhere values (1)", "unknown-table")
 no("insert into orders (nope) values (1)", "unknown-column")
-no("insert into orders values (1)", "syntax")
+no("insert into orders values (1, 2, 3, 4)", "syntax")       # more values than the table has columns
+no("insert into orders values (1, 2), (3)", "syntax")        # rows of different lengths
 no("insert into orders (id) values (id)", "unknown-column")
 no("update orders set nope = 1", "unknown-column")
 no("update orders set total = nope", "unknown-column")

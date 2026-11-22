@@ -1312,6 +1312,19 @@ transaction rolled back and in one committed, and before an insert that must dra
 engine reports are held against PostgreSQL's table read before and after, and the commit's `changes` against the reference's. The three options are pinned as refused.
 `tests/engine_log.py` has it in both histories. 20 seeds of 3,000 statements; 6 mutants; 6 cases of the statement test.
 
+## 6ap. An insert with fewer values than the table has columns
+
+The second thing `cancho-hooks`' own test asks (6an): `insert into endpoints values (0, '127.0.0.1', 9100, '...')` into a table of more columns. The lowering refused it
+(`syntax`): with no columns listed it wanted a value for every column. That was a limit of the lowering since M2, written down and never lifted, and it held for the proxy
+too: a statement PostgreSQL accepts was refused before it reached PostgreSQL.
+
+**Design.** With no columns listed, the values of a row are for the table's first columns, as many as the row has; the others take their defaults, exactly as if those
+first columns had been listed (the IR says so: it lists them). More values than the table has columns, and rows of different lengths, stay refused (`syntax`; PostgreSQL:
+`42601`). Nothing else changes: a column with no value and no default that takes no null is `23502`, as it is when columns are listed.
+
+**Test.** The differential's fixed statements have it with one value fewer, with only the key, with every value, with `returning` and with `on conflict`, and the two
+refusals pinned against PostgreSQL's `42601`. The lowering's hand-written cases have the IR of two such statements byte for byte (one was the pinned refusal). 2 mutants.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

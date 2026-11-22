@@ -1568,6 +1568,19 @@ FIXED += [
     ("drop table ftr", "ddl"),
 ]
 
+FIXED += [
+    # an insert that lists no columns and has fewer values than the table has columns: the values are for its first columns (6ap)
+    ("create table ffv (k integer primary key, a text not null, b integer not null default 7, c text)", "ddl"),
+    ("insert into ffv values (1, 'one')", "write"),
+    ("insert into ffv values (2, 'two', 2), (3, 'three', 3)", "write"),
+    ("insert into ffv values (4)", "write"),
+    ("insert into ffv values (5, 'five', 5, 'c')", "write"),
+    ("insert into ffv values (6, 'six') returning k, b, c", "write"),
+    ("insert into ffv values (1, 'dup') on conflict do nothing", "write"),
+    ("select * from ffv order by k", "order"),
+    ("drop table ffv", "ddl"),
+]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)",
              "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
@@ -1678,6 +1691,8 @@ UNSUP = [
     ("update fz set n = nextval('fzs')", None),
     ("create sequence fzt start 0", "22023"),
     ("create sequence fzt increment 2", None),
+    ("insert into fz values (9, 9, 9)", "42601"),                                                     # more values than the table has columns
+    ("insert into fz values (8, 8), (7)", "42601"),                                                  # rows of different lengths
     ("truncate fz restart identity", None),                                                          # the options of TRUNCATE are not the engine's
     ("truncate fz, fw", None),
     ("truncate fz cascade", None),
@@ -1727,7 +1742,7 @@ def order_dependent(pg):
         pg.query("begin")
         err, _, _, _ = pg.query(sql)
         pg.query("rollback")
-        if ans[:1] not in (["refused engine-unsupported"], ["refused subquery"], ["refused insert-select"], ["refused nondeterministic"], ["refused unsupported-statement"]):
+        if ans[:1] not in (["refused engine-unsupported"], ["refused subquery"], ["refused insert-select"], ["refused nondeterministic"], ["refused unsupported-statement"], ["refused syntax"]):
             raise SystemExit("engine_check: %s: the engine says %s, and this is one it does not answer" % (sql, ans))
         if err != want:
             if PGMAJOR[0] == 16:
@@ -2045,7 +2060,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (ftr|fid\d*|f[ksonmrcef]\d?|fq2)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (ffv|ftr|fid\d*|f[ksonmrcef]\d?|fq2)\b", sql)
         if m:
             return m.group(1)
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")

@@ -1623,7 +1623,7 @@ fn lower_select[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], 
     return emit_opt(sql, toks, nodes, kids, offset, schema, rs, out, sc);
 }
 
-// INSERT: Insert (ir.md section 2): the table, the columns (the snapshot's, in order, if none were listed) and the rows.
+// INSERT: Insert (ir.md section 2): the table, the columns (if none were listed, the snapshot's first ones in order, as many as a row has values) and the rows.
 fn lower_insert[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
     let target = kids[nodes[6 * root + 2]];
     let cols = clause_of(nodes, kids, root, parse.n_cols(), 1);
@@ -1646,7 +1646,15 @@ fn lower_insert[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], 
     }
     var width = 0;
     if cols == 0 {
+        // no columns listed: the values are for the table's first columns, as many as the first row has (the others take their defaults); more than the table has is an error
         width = column_count(schema, line, sc);
+        if nodes[6 * values + 3] > 0 {
+            let first = nodes[6 * kids[nodes[6 * values + 2]] + 3];
+            if first > width {
+                return fail(sc, 0, parse.e_syntax());
+            }
+            width = first;
+        }
         r0 = w32(out, sc, width);
         var c = 0;
         while c < width && r0 >= 0 {
