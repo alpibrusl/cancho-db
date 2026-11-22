@@ -622,10 +622,17 @@ pub fn insert[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
     }
     clauses[n] = values;
     n = n + 1;
+    // ON CONFLICT DO NOTHING, with no target: `ex` of the root is 1 (one of the engine's forms, docs/m3-engine.md 6z)
+    var oc = 0 - 1;
+    if parse.kw(sql, toks, pos, end, "on") && parse.kw(sql, toks, pos + 1, end, "conflict") && parse.kw(sql, toks, pos + 2, end, "do") && parse.kw(sql, toks, pos + 3, end, "nothing") {
+        oc = 1;
+        st[12] = 1;
+        pos = pos + 4;
+    }
     if pos < end {
         return leftover(sql, toks, pos, end, st);
     }
-    let root = parse.mk(nodes, kids, st, parse.n_insert(), 0, clauses[0..n], n, 0 - 1, 0 - 1);
+    let root = parse.mk(nodes, kids, st, parse.n_insert(), 0, clauses[0..n], n, oc, 0 - 1);
     if root < 0 {
         return parse.fail(st, pos, 0 - root);
     }

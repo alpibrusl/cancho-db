@@ -259,7 +259,7 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
                                                                 } else if kind == 6 {
                                                                     rc = execs.select(pg, w, root, e, contents(xw));
                                                                 } else if kind == 1 {
-                                                                    rc = execw.insert(pg, w, root, e, contents(xw));
+                                                                    rc = execw.insert(pg, w, root, e, contents(xw), contents(nw)[6 * top + 4] == 1);
                                                                 } else if kind == 2 {
                                                                     rc = execw.update(pg, w, root, e, contents(xw));
                                                                 } else if kind == 3 {
@@ -621,6 +621,16 @@ fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &
                                 put_str(io, "ok COMMIT 0\nG COMMIT\n");
                             } else if after == 0 - 22 {
                                 put_str(io, "ok ROLLBACK 0\nG ROLLBACK\n");
+                            } else if fl[0] != 0 {
+                                // the statement failed, or was refused: what it drew from a counter stays drawn (docs/m3-engine.md 6y)
+                                let sr = exec.seq_replay(pg, w, rs[cur]);
+                                if sr < 0 {
+                                    put_str(io, "err ");
+                                    put_int(io, sr);
+                                    putchar(io, '\n');
+                                } else {
+                                    rs[cur] = sr;
+                                }
                             } else if after != rs[cur] {
                                 // the statement wrote: its number is used
                                 let marked = exec.mark_txn(pg, w, after, last + 1);
@@ -631,6 +641,10 @@ fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &
                                 } else {
                                     rs[cur] = marked;
                                 }
+                            }
+                            if tstate == 0 {
+                                // nothing is left to roll back: the tree that stays has what was drawn
+                                exec.seq_forget(w);
                             }
                         } else {
                             exec.set_txn(w, last + 1);
@@ -660,8 +674,17 @@ fn run[&h, &i, &z, &q, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, w: &
                                         }
                                     }
                                     put_str(io, "ok COMMIT 0\nG COMMIT\n");
+                                    exec.seq_forget(w);
                                 } else {
-                                    // a rollback, or the commit of a transaction that failed
+                                    // a rollback, or the commit of a transaction that failed: what its statements drew from counters stays drawn
+                                    let sr = exec.seq_replay(pg, w, rs[cur]);
+                                    if sr < 0 {
+                                        put_str(io, "err ");
+                                        put_int(io, sr);
+                                        putchar(io, '\n');
+                                    } else {
+                                        rs[cur] = sr;
+                                    }
                                     put_str(io, "ok ROLLBACK 0\nG ROLLBACK\n");
                                 }
                                 tstate = 0;

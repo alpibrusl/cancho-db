@@ -107,6 +107,94 @@ pub fn e_no_column() -> [] int {
     return 17;
 }
 
+// The counters of identity columns (docs/m3-engine.md 6y). A value drawn from one is drawn for good: a statement that fails and a transaction that is rolled back do not give it back, in
+// PostgreSQL. The tree a failed statement or a rolled-back transaction leaves behind does not have the draw, so each draw is also noted here (the table's number and the counter's new value), and
+// whoever drives the statements writes the notes into the tree that stays (`seq_replay`) or drops them when the tree that has them is the one that stays (`seq_forget`).
+
+// The last value the counter of table `id` gave in the tree `root`: 0 if none yet, or an error (below 0; `btree.not_found()` if the table has no counter).
+pub fn seq_last[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, id: int) -> [file_read] int {
+    let kl = tables.counter_key(id, contents(w.key2));
+    let g = btree.get(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.uval));
+    if g == btree.not_found() {
+        return g;
+    }
+    if g != 8 {
+        return damaged();
+    }
+    return row.int_at(contents(w.uval), 0);
+}
+
+// Set the counter of table `id` to `v` in the tree `root`: the new root, or an error.
+pub fn seq_put[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, id: int, v: int) -> [file_read, file_write] int {
+    let kl = tables.counter_key(id, contents(w.key2));
+    put_i64(contents(w.uval), 0, v);
+    let nw = btree.put(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.uval)[0..8]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// Note that the counter of table `id` is now `v`. False if there is no room for the note (32 tables in a transaction).
+pub fn seq_note[&q](w: &!q Work, id: int, v: int) -> [] bool {
+    var i = 0;
+    while i < w.nsq {
+        if contents(w.sq)[2 * i] == id {
+            contents(w.sq)[2 * i + 1] = v;
+            return true;
+        }
+        i = i + 1;
+    }
+    if w.nsq >= 32 {
+        return false;
+    }
+    contents(w.sq)[2 * w.nsq] = id;
+    contents(w.sq)[2 * w.nsq + 1] = v;
+    w.nsq = w.nsq + 1;
+    return true;
+}
+
+pub fn seq_forget[&q](w: &!q Work) -> [] int {
+    w.nsq = 0;
+    return 0;
+}
+
+// Write the draws noted into the tree `root`, which did not get them (the statement failed, or its transaction was rolled back), and forget them: the new root, or an error. A counter that is not in
+// `root` (its table was made in the transaction that was rolled back) is left out.
+pub fn seq_replay[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_read, file_write] int {
+    var nroot = root;
+    var i = 0;
+    while i < w.nsq {
+        let id = contents(w.sq)[2 * i];
+        let v = contents(w.sq)[2 * i + 1];
+        let last = seq_last(p, w, nroot, id);
+        if last >= 0 && last < v {
+            let nw = seq_put(p, w, nroot, id, v);
+            if nw < 0 {
+                w.nsq = 0;
+                return nw;
+            }
+            nroot = nw;
+        } else if last < 0 && last != btree.not_found() {
+            w.nsq = 0;
+            return last;
+        }
+        i = i + 1;
+    }
+    w.nsq = 0;
+    return nroot;
+}
+
+// The row of an INSERT at which it failed (from 0).
+pub fn failed_row[&q](w: &q Work) -> [] int {
+    return w.frow;
+}
+
+pub fn set_failed_row[&q](w: &!q Work, r: int) -> [] int {
+    w.frow = r;
+    return 0;
+}
+
 // A row with a value outside its column's range (a check, docs/m3-engine.md 6x).
 pub fn e_check() -> [] int {
     return 19;
@@ -237,6 +325,9 @@ pub res struct Work {
     txn: int,
     once: bool,
     pend: int,
+    sq: Box[[int]],
+    nsq: int,
+    frow: int,
 }
 
 pub fn rows_size() -> [] int {
@@ -248,11 +339,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -282,6 +373,7 @@ pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
     unbox_slice(heap, lrs);
     unbox_slice(heap, lo);
     unbox_slice(heap, hi);
+    unbox_slice(heap, sq);
     return 0;
 }
 

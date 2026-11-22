@@ -115,6 +115,26 @@ class Pg:
         return err, oids, rows, tag
 
 
+def sequences(pg):
+    """Where every sequence of the database is: [(name, last value or None)]."""
+    return [(r[0].decode(), None if r[1] is None else r[1].decode()) for r in pg.query("select quote_ident(sequencename), last_value from pg_sequences where schemaname = 'public'")[2]]
+
+
+def take_back(pg, sql):
+    """Run `sql` and take it back, sequences included (PostgreSQL does not roll those back, and the engine, which refused the statement, drew nothing): the statement's error, or None."""
+    seqs = sequences(pg)
+    pg.query("begin")
+    err = pg.query(sql)[0]
+    pg.query("rollback")
+    for name, last in seqs:
+        if last is None:
+            # never drawn from: back to its start
+            pg.query("select setval('%s', (select start_value from pg_sequences where schemaname = 'public' and quote_ident(sequencename) = '%s'), false)" % (name, name))
+        else:
+            pg.query("select setval('%s', %s, true)" % (name, last))
+    return err
+
+
 def admin(sql):
     r = subprocess.run(["psql", "-h", "127.0.0.1", "-p", str(PORT), "-U", "postgres", "-At", "-q", "-d", "postgres", "-c", sql], capture_output=True, text=True)
     return r
@@ -196,6 +216,7 @@ class Table:
         self.key2_first = False
         self.checks = {}     # column -> (low, high): `check (c between low and high)`
         self.spoil = ""      # a table key that PostgreSQL refuses, now and then
+        self.identity = None # a column whose values the table's counter gives (`generated always as identity`)
 
     def key_cols(self):
         k = self.cols[self.pk][0]
@@ -212,6 +233,8 @@ class Table:
         parts = []
         for i, (name, ty, nn, dflt) in enumerate(self.cols):
             s = "%s %s" % (name, ty)
+            if name == self.identity:
+                s += " generated always as identity"
             if i == self.pk and (self.key2 is None or self.spoil == "two"):
                 s += " primary key"
             if name in self.checks and i % 2 == 0:
@@ -390,22 +413,32 @@ class Gen:
         for cname, ty, _, _ in cols:
             if ty in INTS and self.r.random() < 0.15:
                 t.checks[cname] = self.pick([(0, 10), (-5, 100), (1, 65535), (0, 0), (5, 1)])
+        if self.r.random() < 0.3:
+            # an identity column (docs/m3-engine.md 6y): its values show what every insert drew, the failed and the rolled back too
+            t.identity = "idn"
+            t.cols.insert(self.r.randrange(len(t.cols) + 1), ("idn", self.pick(["bigint", "bigint", "integer"]), False, None))
+            t.pk = [c[0] for c in t.cols].index("k")
         return t
 
     def insert(self):
         t = self.t
         idx = list(range(len(t.cols)))
-        listed = self.r.random() < 0.5
+        listed = self.r.random() < 0.5 or (t.identity is not None and self.r.random() < 0.95)
         if listed:
             self.r.shuffle(idx)
             keep = [i for i in idx if i == t.pk or self.r.random() < 0.7]
             if self.r.random() < 0.05:
                 keep = [i for i in keep if i != t.pk] or keep
+            if self.r.random() < 0.95:
+                # a value is not given to an identity column (PostgreSQL: 428C9), but now and then
+                keep = [i for i in keep if t.cols[i][0] != t.identity] or keep
             idx = keep
         rows = []
         for _ in range(self.pick([1, 1, 1, 2, 3, 4])):
             rows.append("(%s)" % ", ".join(self.value(t.cols[i], i == t.pk) for i in idx))
-        return "insert into %s%s values %s" % (t.name, " (%s)" % ", ".join(t.cols[i][0] for i in idx) if listed else "", ", ".join(rows))
+        # ON CONFLICT DO NOTHING (docs/m3-engine.md 6z): the rows whose key is there are left out, the others stored
+        tail = " on conflict do nothing" if self.r.random() < 0.2 else ""
+        return "insert into %s%s values %s%s" % (t.name, " (%s)" % ", ".join(t.cols[i][0] for i in idx) if listed else "", ", ".join(rows), tail)
 
     def update(self):
         t = self.t
@@ -737,11 +770,12 @@ def compare(pg, stmts, eng, must):
                 fail(i, "refused, and this statement is one the engine answers")
             if pre == "I":
                 # outside a transaction a refusal changes nothing: PostgreSQL runs the statement and takes it back
-                pg.query("begin")
-                err, _, _, _ = pg.query(sql)
-                pg.query("rollback")
+                err = take_back(pg, sql)
+            elif pre == "T" and sequences(pg):
+                # inside one, a refusal fails the transaction as an error does. PostgreSQL's is failed without running the statement, which might draw from a sequence that no rollback gives back
+                err = "skipped"
+                pg.query("select 1 / 0")
             else:
-                # inside one, a refusal fails the transaction as an error does: PostgreSQL's is failed too
                 err, _, _, _ = pg.query(sql)
                 if pg.status == "T":
                     pg.query("select 1 / 0")
@@ -1099,8 +1133,89 @@ FIXED += [
     ("select * from fk5 order by k", "order"),
 ]
 
+# an identity column (6y): the counter is drawn from by every row an insert reaches, and a failed statement and a rollback do not give the values back
+FIXED += [
+    ("create table fs (id bigint generated always as identity primary key, e text not null, n integer default 1 check (n between 0 and 5))", "ddl"),
+    ("insert into fs (e) values ('a'), ('b')", "write"),
+    ("insert into fs (e, n) values ('c', 2), (null, 3), ('d', 4)", "write"),
+    ("insert into fs (e, n) values ('e', 2), ('f', 9), ('g', 4)", "write"),
+    ("insert into fs (n, e) values (0, 'h')", "write"),
+    ("begin", "ddl"),
+    ("insert into fs (e) values ('i'), ('j'), ('k')", "write"),
+    ("select * from fs order by id", "order"),
+    ("rollback", "ddl"),
+    ("insert into fs (e) values ('l')", "write"),
+    ("begin", "ddl"),
+    ("insert into fs (e) values ('m')", "write"),
+    ("insert into fs (e) values (null)", "write"),
+    ("commit", "ddl"),
+    ("begin", "ddl"),
+    ("insert into fs (e) values ('n')", "write"),
+    ("commit", "ddl"),
+    ("insert into fs (e) values ('o')", "write"),
+    ("select * from fs order by id", "order"),
+    ("select id, e from fs where id = 13", "order"),
+    ("update fs set e = e || '!' where id < 3", "write"),
+    ("delete from fs where id = 2", "write"),
+    ("insert into fs (e) values ('p')", "write"),
+    ("select * from fs order by id", "order"),
+    ("create table fs2 (k integer primary key, c integer generated always as identity, s smallint)", "ddl"),
+    ("insert into fs2 (k) values (5), (5)", "write"),
+    ("insert into fs2 (k, s) values (6, 1), (7, 100000)", "write"),
+    ("insert into fs2 (k, s) values (8, 'abc')", "write"),
+    ("insert into fs2 (k) values (9)", "write"),
+    ("select * from fs2 order by k", "order"),
+    ("drop table fs2", "ddl"),
+    ("create table fs2 (k integer primary key, c integer generated always as identity)", "ddl"),
+    ("insert into fs2 (k) values (1)", "write"),
+    ("select * from fs2 order by k", "order"),
+    ("begin", "ddl"),
+    ("create table fs3 (k integer primary key, c bigint generated always as identity)", "ddl"),
+    ("insert into fs3 (k) values (1), (2)", "write"),
+    ("rollback", "ddl"),
+    ("create table fs3 (c bigint generated always as identity, k integer primary key)", "ddl"),
+    ("insert into fs3 (k) values (1), (2)", "write"),
+    ("select * from fs3 order by k", "order"),
+]
+
+# ON CONFLICT DO NOTHING (6z)
+FIXED += [
+    ("create table fo (k integer primary key, v text not null, n integer check (n between 0 and 9), c bigint generated always as identity)", "ddl"),
+    ("insert into fo (k, v) values (1, 'a'), (2, 'b') on conflict do nothing", "write"),
+    ("insert into fo (k, v) values (2, 'again'), (3, 'c'), (3, 'twice'), (4, 'd') on conflict do nothing", "write"),
+    ("insert into fo (k, v) values (1, 'x'), (2, 'y') on conflict do nothing", "write"),
+    ("insert into fo (k, v) values (1, null) on conflict do nothing", "write"),
+    ("insert into fo (k, v, n) values (5, 'e', 1), (1, 'out', 10) on conflict do nothing", "write"),
+    ("insert into fo (k, v) values (null, 'nokey') on conflict do nothing", "write"),
+    ("insert into fo (k, v) values (6, 'f') on conflict do nothing", "write"),
+    ("insert into fo (k, v) values (6, 'f')", "write"),
+    ("select * from fo order by k", "order"),
+    (P("insert into fo (k, v, n) values ($1, $2, $3) on conflict do nothing", "7", "g", "3"), "write"),
+    (P("insert into fo (k, v, n) values ($1, $2, $3) on conflict do nothing", "7", "h", "4"), "write"),
+    ("select * from fo order by k", "order"),
+]
+
+# fewer than five digits and then something else: the text is wrong, whatever the type
+FIXED += [
+    ("create table fn (k integer primary key, s text)", "ddl"),
+    ("insert into fn values (1, '1234z'), (2, ' 12 3'), (3, '9999abc')", "write"),
+    ("select cast(s as smallint) from fn", "order"),
+    ("select cast(s as integer) from fn where k = 2", "order"),
+    ("select cast(s as bigint) from fn where k > 2", "order"),
+    ("update fn set s = '77 '", "write"),
+    ("select cast(s as smallint), cast(s as bigint) from fn order by k", "order"),
+    # the least and the greatest of texts that begin alike (a mutant of the comparison lived when the random history stopped meeting them)
+    ("create table fm (k integer primary key, s text)", "ddl"),
+    ("insert into fm values (1, 'ab'), (2, 'a'), (3, 'abc'), (4, 'ab'), (5, '')", "write"),
+    ("select min(s), max(s) from fm", "order"),
+    ("select min(s), max(s) from fm where k > 1 and k < 5", "order"),
+    ("select k / 3, min(s), max(s) from fm group by k / 3 order by 1", "order"),
+]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
-             "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)"]
+             "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)",
+             "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
+             "create table ft (k integer primary key, s text)", "insert into ft values (1, '3000000000 7abc')"]
 DEP = [
     # the cheaper condition is computed first, wherever it is written: the row with k = 2 never reaches the division
     ("select k from fz where k > 2 and 10 / (k - 2) > 0", None),
@@ -1146,12 +1261,21 @@ UNSUP = [
     ("select a1.k from fz a1 join fz a2 on a1.k = a2.k", None),          # a table joined to itself
     ("create unique index fzu on fz (n)", None),                         # a constraint that needs an index to hold
     ("select fw.m, count(*) from fz join fw on fz.k = fw.wk group by fw.wk", None),   # m depends on fw's key
+    # digits that are out of range, then something that is no digit: PostgreSQL says out of range, having not read on
+    ("select cast(s as integer) from ft", "22003"),
+    ("select cast(s as smallint) from ft", "22003"),
+    ("select cast(s as bigint) from ft", "22P02"),
     # the schema's forms (6x)
     ("create table fzc (k integer primary key, n integer check (n > 0))", None),                     # a check that is no range
     ("create table fzc (k integer primary key, n integer check (n not between 0 and 3))", None),
     ("create table fzc (k integer primary key, n integer, m integer check (n between 0 and 3))", None),   # of another column
     ("create table fzc (k integer primary key, s text check (s between 'a' and 'b'))", None),
-    ("create table fzc (k bigint generated always as identity primary key)", None),                  # the next slice
+    ("create table fzc (k integer primary key, a bigint generated always as identity, b bigint generated always as identity)", None),   # two identity columns
+    ("create table fzc (k integer primary key, a text generated always as identity)", "22023"),
+    ("alter table fz add column idn bigint generated always as identity", None),                     # the rows there would each draw a value
+    ("update fi set c = 7", "428C9"),                                                                # an identity column is given no value
+    ("insert into fi values (2, 9)", "428C9"),
+    ("insert into fi (c, k) values (9, 2)", "428C9"),
     ("alter table fz alter column n type bigint", None),                                              # a change of type
     ("create index fzp on fz (n) where n > 1", None),                                                 # a condition that is no boolean column
     ("create index fzp on fz (n) where n", "42804"),
@@ -1203,6 +1327,8 @@ def order_dependent(pg):
             notes.append("%s: %s, where PostgreSQL 16 says %s" % (sql, err, want))
     pg.query("drop table fz")
     pg.query("drop table fw")
+    pg.query("drop table fi")
+    pg.query("drop table ft")
     return notes
 
 
@@ -1470,7 +1596,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (fk\d?)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (f[ksonm]\d?)\b", sql)
         if m:
             return m.group(1)
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")

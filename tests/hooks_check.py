@@ -20,8 +20,8 @@ sys.argv = sys.argv[:2]
 import engine_check as ec
 
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks")
-SCHEMA_FLOOR = 12
-QUERY_FLOOR = 2
+SCHEMA_FLOOR = 14
+QUERY_FLOOR = 8
 DUMPS = ["select * from attempts order by endpoint, event, replay, attempt", "select * from endpoints order by id", "select * from schedules order by id"]
 
 # (query, values): text as the service's driver sends it, None for a null
@@ -148,9 +148,7 @@ def main():
         where = "%s %s" % (name or "schema", (st.params if name else st[:60]))
         if kind == "refused":
             # a refusal changes nothing: PostgreSQL runs the statement and takes it back, so that the two hold the same rows for the next call
-            pg.query("begin")
-            pg.query(st)
-            pg.query("rollback")
+            ec.take_back(pg, st)
             if name:
                 refused.setdefault(name, detail)
             else:

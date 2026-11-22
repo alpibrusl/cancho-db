@@ -720,7 +720,7 @@ the engine; after each call the answers are compared and so is every table. When
 table is not there (`attempts_of`, `endpoints_all`, `schedule_by_id`, `schedules_all`, `schedules_due`, `advance_schedule`), so the schema comes next, before `returning`: a key of several
 columns, `if not exists`, `check`, an identity column, a sequence, an index with a condition, and `alter column ... type` to the type it has.
 
-## 6x. The schema of hooks (built, but for the identity column and the sequence)
+## 6x. The schema of hooks (built; the identity column is 6y, the sequence is not built)
 
 Fifteen statements (`tests/hooks/schema.sql`), none answered when 6w was written, and six of the sixteen queries wait only for their tables. What the statements need, and what each is in the engine:
 
@@ -753,6 +753,44 @@ is now.
 
 *Found on the way, and not new:* `insert into t values (...)` with fewer values than the table has columns is refused as `syntax`, where PostgreSQL fills the rest with defaults. It is a
 refusal, so it is safe; the tag is wrong and the statement is common. Not fixed here.
+
+## 6y. An identity column: the one thing a rollback does not take back
+
+`id bigint generated always as identity` is how `schedules` gets its ids, and four of hooks' queries waited for that table.
+
+**What PostgreSQL does.** An identity column is a sequence. Each row an insert reaches draws the next value, before the row is tested: a row that fails its constraints has drawn, and so has
+every row before it; the rows after it have not. A value drawn is drawn for good: the statement failing does not give it back, and neither does the transaction being rolled back. A value
+cannot be given to the column, in an insert or an update (428C9).
+
+**Why that is a problem here, and the design.** Everything else in the engine is in the tree, and a statement that fails, or a transaction that is rolled back, leaves the tree it started
+from (that is the whole of their implementation). A counter kept in the tree would be given back. So:
+
+- the counter is in the tree (the catalog: `0x00000000 0x02` and the table's number, the last value drawn), where a commit keeps it, a fork copies it and a crash leaves it as of a commit;
+- every draw is *also* noted outside the tree (`exec.seq_note`), and whoever drives the statements writes the notes into the tree that stays when the tree that has them is thrown away
+  (`exec.seq_replay`: after a statement that failed, at a rollback), or drops them (`seq_forget`) when it is the one that stays;
+- an insert that fails before any row is stored (an error of a constant, which PostgreSQL raises when it plans) has drawn nothing; one that fails at row r has drawn r + 1 values;
+- the counter is no part of the history: `AS OF` reads, and never draws.
+
+*Refused:* a value given to the column (428C9 is not reproduced), an identity column added to a table (each row there would draw), a second one in a table, one that is not an integer.
+*A limit of the fork:* a branch has its own counter from the fork on, so two branches give the same ids; a merge of such rows is M4's.
+
+**Built and measured.** 20 seeds of 3,000 statements against PostgreSQL 16.15, three tables in ten with an identity column (whose values show what every insert drew, the failed and the
+rolled-back ones too): no disagreement. 41 fixed statements (failures at the first, a middle and no row; rollbacks; a table made and rolled back and made again). In the test a statement
+the engine refuses is run by PostgreSQL and taken back *with its sequences set back* (`take_back`), since PostgreSQL would otherwise have drawn where the engine did nothing. 11 mutants.
+`tests/hooks_check.py`: **14 of 15 schema statements** (the sequence is left) and **6 of 16 queries**.
+
+## 6z. `on conflict do nothing`; and a wrong answer the new values found
+
+**`insert ... on conflict do nothing`** (no target; hooks writes it on both its inserts, so that a repeat is harmless). A row whose key is there, or was stored by an earlier row of the same
+statement, is left out and is no error; its nulls and its ranges are tested first all the same, as PostgreSQL tests them before it looks for the conflict; a row that is left out has still
+drawn from an identity column. The tag counts the rows stored. A conflict with a target (`on conflict (k) do ...`) and `do update` are refused by the parser, as before. One of the engine's
+forms: the guard refuses it. 13 fixed statements; two in ten of the random inserts carry it; 20 seeds, no disagreement; 3 mutants. `tests/hooks_check.py`: **8 of 16 queries**.
+
+**A wrong answer, there since M3d.** With more kinds of text in the tables (the parameters' values, 6w) the differential met `cast(b as integer)` where `b` is `'3000000000 7abc'`: the engine
+said 22P02 (not a number), PostgreSQL 22003 (out of range). PostgreSQL reads the digits first and stops with "out of range" as soon as they pass what the type holds, before it sees what
+follows them. The evaluator read the whole text and then judged it. *Corrected by refusing:* digits and then something else is answered (22P02) only when the digits are fewer than five, which
+is in range of every integer type; for more it depends on the type and on how PostgreSQL's reader is written, and nothing is answered. Pinned both ways (3 refused with PostgreSQL's outcome
+beside them, 5 fixed), 2 mutants. The claim that was false for these texts was C149 ("when the evaluator answers, its answer is PostgreSQL's"): its twelve test rows held no such text. It is true again by saying less, and says so.
 
 ## 7. Taking over, safely
 

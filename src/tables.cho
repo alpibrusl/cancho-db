@@ -12,9 +12,10 @@ import cdb.pager;
 //     0x00000000                 -> the next table number to give out (`u32`); absent while no table was ever made (the first number is 1)
 //     0x00000000 then a name     -> that table's entry
 //     0x00000000 0x01 then a name -> the index of that name: the name of the table it is on (`index_key`)
+//     0x00000000 0x02 then a table's number -> the last value its identity column was given (8 bytes; `counter_key`). Written when the table is made; never part of the history
 //
 // An entry: the table's number (`u32`), the length of its definition (`u16`), the definition (src/row.cho), then for each column one byte of marks (1: `not null`, 2: it has a default, 4: it has a
-// range) and, if it has a default, the default as a stored value (a tag and the value, as in a stored row), and if it has a range (`check (c between lo and hi)`, docs/m3-engine.md 6x) the two
+// range, 8: it is an identity column, whose values the table's counter gives) and, if it has a default, the default as a stored value (a tag and the value, as in a stored row), and if it has a range (`check (c between lo and hi)`, docs/m3-engine.md 6x) the two
 // bounds, 8 bytes each (two's complement, big-endian). An entry is at most 800 bytes (a value of the tree).
 
 pub fn max_name() -> [] int {
@@ -75,7 +76,7 @@ fn marks_at[&e](ent: &e [byte], i: int) -> [] int {
         if m / 2 % 2 == 1 {
             at = at + stored_len(ent, at);
         }
-        if m / 4 == 1 {
+        if m / 4 % 2 == 1 {
             at = at + 16;
         }
         k = k + 1;
@@ -83,11 +84,32 @@ fn marks_at[&e](ent: &e [byte], i: int) -> [] int {
     return at;
 }
 
+// The identity column of the entry (an entry that `entry_ok`), or -1.
+pub fn identity_col[&e](ent: &e [byte]) -> [] int {
+    let n = row.columns(ent[6..6 + def_len(ent)]);
+    var i = 0;
+    while i < n {
+        if int_of(ent[marks_at(ent, i)]) / 8 == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// The key of the counter of the table numbered `id`, into `out` (at least 9 bytes): its length.
+pub fn counter_key[&o](id: int, out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, 0, 4);
+    out[4] = byte_of(2);
+    build.put_be(out, 5, id, 4);
+    return 9;
+}
+
 // Where the range of column `i` is in the entry (its low bound, 8 bytes, then its high bound), or -1 if it has none.
 pub fn range_at[&e](ent: &e [byte], i: int) -> [] int {
     let at = marks_at(ent, i);
     let m = int_of(ent[at]);
-    if m / 4 != 1 {
+    if m / 4 % 2 != 1 {
         return 0 - 1;
     }
     if m / 2 % 2 == 1 {
@@ -109,7 +131,7 @@ pub fn default_at[&e](ent: &e [byte], i: int) -> [] int {
     return 0 - 1;
 }
 
-// Whether `ent` is an entry: a number above 0, a definition that is one, marks of 0 to 7 for each column with a default and a range where they say so, and no bytes over.
+// Whether `ent` is an entry: a number above 0, a definition that is one, marks of 0 to 15 for each column with a default and a range where they say so, and no bytes over.
 pub fn entry_ok[&e](ent: &e [byte]) -> [] bool {
     if len(ent) < 8 || id_of(ent) < 1 {
         return false;
@@ -129,7 +151,7 @@ pub fn entry_ok[&e](ent: &e [byte]) -> [] bool {
             return false;
         }
         let m = int_of(ent[at]);
-        if m > 7 {
+        if m > 15 {
             return false;
         }
         at = at + 1;
@@ -140,7 +162,7 @@ pub fn entry_ok[&e](ent: &e [byte]) -> [] bool {
             }
             at = at + l;
         }
-        if m / 4 == 1 {
+        if m / 4 % 2 == 1 {
             if at + 16 > len(ent) {
                 return false;
             }
@@ -248,6 +270,14 @@ pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], r
             let nv = r % 1024;
             if nk < 5 || commit.be(key2, 0, 4) != 0 {
                 more = false;
+            } else if int_of(key2[4]) == 2 {
+                // a table's counter (`counter_key`): no line
+                var i = 0;
+                while i < nk {
+                    key[i] = key2[i];
+                    i = i + 1;
+                }
+                kl = nk;
             } else if int_of(key2[4]) == 1 {
                 // an index (`index_key`): a line `index NAME on TABLE`
                 if at + 6 + (nk - 5) + 4 + nv + 1 > len(out) {

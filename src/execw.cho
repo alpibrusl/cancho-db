@@ -122,7 +122,7 @@ fn checked[&q, &x, &k](w: &!q exec.Work, e: &x [byte], at: int, kinds: &k [int],
 // ---- INSERT
 
 // INSERT (ir.md section 2): the rows as written, each stored before the next is checked.
-pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read, file_write] int {
+pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int], skip: bool) -> [file_read, file_write] int {
     exec.start(w, root);
     if len(e) < 3 || int_of(e[0]) != 1 {
         return exec.malformed();
@@ -141,6 +141,17 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         return exec.too_big();
     }
     let n = columns(w);
+    // an identity column takes its values from the table's counter
+    let el0 = w.elen;
+    let ic = tables.identity_col(contents(w.ent)[0..el0]);
+    let tid = w.tid;
+    var last = 0;
+    if ic >= 0 {
+        last = exec.seq_last(p, w, root, tid);
+        if last < 0 {
+            return exec.damaged();
+        }
+    }
     var i = 0;
     while i < nc {
         if at + 2 > len(e) || at + 2 + commit.be(e, at, 2) > len(e) {
@@ -149,6 +160,10 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         let c = column(w, e, at);
         if c < 0 {
             return exec.malformed();
+        }
+        if c == ic {
+            // a value given to an identity column: PostgreSQL's error (428C9) is not reproduced
+            return exec.unsupported();
         }
         var j = 0;
         while j < i {
@@ -218,7 +233,14 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                     }
                     i = i + 1;
                 }
-                if from >= 0 {
+                if c == ic {
+                    if ra + 9 > exec.max_stored_row() {
+                        return exec.too_big();
+                    }
+                    contents(w.nrow)[ra] = byte_of(1);
+                    exec.put_i64(contents(w.nrow), ra + 1, last + 1 + r);
+                    ra = ra + 9;
+                } else if from >= 0 {
                     let l = tables.stored_len(contents(w.tmp), from);
                     if ra + l > exec.max_stored_row() {
                         return exec.too_big();
@@ -257,7 +279,28 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if w.code != 0 {
         return exec.verdict(w);
     }
-    return store_rows(p, w, root, nr);
+    let sr = store_rows(p, w, root, nr, skip);
+    if ic >= 0 && sr >= 0 {
+        // the values drawn are drawn for good (PostgreSQL draws one for each row it reaches): every row's, or those up to the row that failed
+        var drawn = nr;
+        if sr > 0 {
+            drawn = exec.failed_row(w) + 1;
+        }
+        if drawn > 0 {
+            if !exec.seq_note(w, tid, last + drawn) {
+                return exec.too_big();
+            }
+            if sr == 0 {
+                let nroot = w.root;
+                let pr = exec.seq_put(p, w, nroot, tid, last + drawn);
+                if pr < 0 {
+                    return pr;
+                }
+                w.root = pr;
+            }
+        }
+    }
+    return sr;
 }
 
 // Whether the row `r` has a value outside the range its column was given (a check; a null is inside).
@@ -281,7 +324,8 @@ fn range_out[&q, &r](w: &!q exec.Work, r: &r [byte]) -> [] bool {
 }
 
 // Store the `nr` rows staged in `rows` (a `u16` length before each), in order: the first row that has a null where none is taken, or whose key is there already, is the statement's error.
-fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int) -> [file_read, file_write] int {
+// With `skip` (ON CONFLICT DO NOTHING) a row whose key is there, or was stored by an earlier row, is left out and is no error; its nulls and its ranges are tested all the same, as PostgreSQL tests them first.
+fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int, skip: bool) -> [file_read, file_write] int {
     var nroot = root;
     var ra = 0;
     var r = 0;
@@ -290,6 +334,7 @@ fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int) 
         exec.copy(contents(w.rows), ra + 2, rl, contents(w.nrow), 0);
         ra = ra + 2 + rl;
         exec.copy(contents(w.nrow), 0, rl, contents(w.cur), 0);
+        exec.set_failed_row(w, r);
         if null_in(w, contents(w.cur)[0..rl]) {
             return exec.e_not_null();
         }
@@ -301,22 +346,24 @@ fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int) 
             return exec.too_big();
         }
         let g = btree.get(p, contents(w.sc), nroot, contents(w.key2)[0..kl], contents(w.nrow));
-        if g >= 0 {
+        if g >= 0 && !skip {
             return exec.e_unique();
         }
-        if g != btree.not_found() {
+        if g < 0 && g != btree.not_found() {
             return exec.tree_err(g);
         }
-        let nw = exec.put_known(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl], contents(w.cur)[0..0], false);
-        if nw < 0 {
-            return nw;
+        if g < 0 {
+            let nw = exec.put_known(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl], contents(w.cur)[0..0], false);
+            if nw < 0 {
+                return nw;
+            }
+            nroot = nw;
+            let cr = exec.change(w, contents(w.cur)[0..0], false, contents(w.cur)[0..rl], true);
+            if cr < 0 {
+                return cr;
+            }
+            w.count = w.count + 1;
         }
-        nroot = nw;
-        let cr = exec.change(w, contents(w.cur)[0..0], false, contents(w.cur)[0..rl], true);
-        if cr < 0 {
-            return cr;
-        }
-        w.count = w.count + 1;
         r = r + 1;
     }
     w.root = nroot;
@@ -362,6 +409,11 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         let c = column(w, e, at);
         if c < 0 {
             return exec.malformed();
+        }
+        let el0 = w.elen;
+        if c == tables.identity_col(contents(w.ent)[0..el0]) {
+            // an identity column is not set: PostgreSQL's error (428C9) is not reproduced
+            return exec.unsupported();
         }
         var j = 0;
         while j < i {
@@ -809,6 +861,7 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
     var xa = xa0;
     var keys = keys0;
     var c = c0;
+    contents(w.pos)[exec.p_ddl() + 2] = 0;
     while c < nc {
         // `skip` is the child of the list that is no column (a table's PRIMARY KEY (...)), or -1
         var ci = c - c0;
@@ -820,8 +873,8 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
             return exec.malformed();
         }
         let flags = nodes[6 * cd + 4];
-        if flags / 32 % 2 == 1 {
-            // an identity column: not in this slice
+        if flags / 32 % 2 == 1 && (c0 != 0 || flags / 8 % 2 == 1 || nodes[6 * cd + 3] - 1 - flags / 16 % 2 > 0) {
+            // an identity column added to a table that has rows, or one with a default: not built
             return exec.unsupported();
         }
         // the children after the type: the default and the check, in the order the flags say (src/stmt.cho)
@@ -976,6 +1029,14 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
             }
             marks = marks + 4;
         }
+        if flags / 32 % 2 == 1 {
+            // an identity column: an integer, one a table (PostgreSQL takes several; hooks has one)
+            if ty != row.t_int() && ty != row.t_int4() && ty != row.t_int2() || contents(w.pos)[exec.p_ddl() + 2] != 0 {
+                return exec.unsupported();
+            }
+            contents(w.pos)[exec.p_ddl() + 2] = 1;
+            marks = marks + 8;
+        }
         contents(w.tmp)[ma] = byte_of(marks);
         if da + xa > exec.max_stored_row() {
             return exec.too_big();
@@ -1120,6 +1181,14 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
         return exec.tree_err(nw);
     }
     w.root = nw;
+    if contents(w.pos)[exec.p_ddl() + 2] != 0 {
+        // the counter of its identity column: there from the start, so that a draw in a transaction that is rolled back has somewhere to stay
+        let sr = exec.seq_put(p, w, nw, tables.id_of(contents(w.ent)), 0);
+        if sr < 0 {
+            return sr;
+        }
+        w.root = sr;
+    }
     return 0;
 }
 
@@ -1180,6 +1249,19 @@ pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                 ikl = nk;
             }
         }
+    }
+    // its counter, if it has one
+    let tid = w.tid;
+    let ckl = tables.counter_key(tid, contents(w.key));
+    let cg = btree.get(p, contents(w.sc), nroot, contents(w.key)[0..ckl], contents(w.uval));
+    if cg >= 0 {
+        let cd = btree.del(p, contents(w.sc), nroot, contents(w.key)[0..ckl]);
+        if cd < 0 {
+            return exec.tree_err(cd);
+        }
+        nroot = cd;
+    } else if cg != btree.not_found() {
+        return exec.tree_err(cg);
     }
     // the table's entry in the catalog is a key of the tree like any other: its history is kept, so the table is there AS OF before
     let ekl = tables.entry_key(e[4..4 + nl], contents(w.key));

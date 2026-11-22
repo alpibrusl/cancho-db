@@ -286,6 +286,11 @@ fn parse_int[&a](ar: &a [byte], at: int, n: int) -> [] (int, int) {
     while i < end && is_ws(int_of(ar[i])) {
         i = i + 1;
     }
+    if i != end && digits >= 5 {
+        // digits and then something else: PostgreSQL reads the digits first and says "out of range" (22003) as soon as they pass what the type holds, before it sees what follows; fewer than five
+        // digits are in range of every integer type, so then it is the text that is wrong (22P02). Which of the two it is for more digits depends on the type, and is not answered
+        return (3, 0);
+    }
     if i != end || digits == 0 {
         return (1, 0);
     }
