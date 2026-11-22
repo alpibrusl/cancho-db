@@ -2576,8 +2576,8 @@ ENGINE = [
      '    copy(contents(w.cur), 0, 32, contents(w.salts), 0);\n    shift(contents(w.cur), 32, nv);',
      '    shift(contents(w.cur), 32, nv);'),
     ('salts: a row is written with no seed', 'src/exec.cho',
-     '    if !w.seeded {\n        return no_entropy();\n    } else if how == 0 {',
-     '    if how == 0 {'),
+     '    if !w.seeded {\n        return no_entropy();\n    } else if how == 0 || how == 3 {',
+     '    if how == 0 || how == 3 {'),
     ('salts: a row that moves is written with no seed', 'src/exec.cho',
      '    if !w.seeded {\n        return no_entropy();\n    }\n    salt(w, 0);',
      '    salt(w, 0);'),
@@ -2701,10 +2701,10 @@ ENGINE = [
     ('run: a refusal where the statement is lowered is one where it is read', 'src/drive.cho',
      '            done(hw, o_lower(), 0 - ln);',
      '            done(hw, o_parse(), 0 - ln);'),
-    ('truncate: the rows stay', 'src/execw.cho',
+    ('truncate: the rows stay', 'src/execd.cho',
      '    // the table stays: what is left is its tree with no row of it\n    w.root = nroot;',
      '    // the table stays: what is left is its tree with no row of it\n    w.root = root;'),
-    ('truncate: reports no row', 'src/execw.cho',
+    ('truncate: reports no row', 'src/execd.cho',
      '            // each row is a row deleted, and a fact of the commit (6ao)\n            let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);',
      '            // each row is a row deleted, and a fact of the commit (6ao)\n            let cr = 0;'),
     ("truncate: what follows the table's name is ignored", 'src/stmt.cho',
@@ -2725,6 +2725,33 @@ ENGINE = [
     ('insert: more values than the table has columns are taken', 'src/lower.cho',
      '            if first > width {\n                return fail(sc, 0, parse.e_syntax());\n            }',
      ''),
+    ('rename: the rows are not said to leave the table of the old name', 'src/execd.cho',
+     '            let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);\n            if cr < 0 {\n                return cr;\n            }\n        }\n    }\n    // the entry moves',
+     '            let cr = 0;\n            if cr < 0 {\n                return cr;\n            }\n        }\n    }\n    // the entry moves'),
+    ('rename: the rows are not said to enter the table of the new name', 'src/execd.cho',
+     '            let cr = exec.change(w, contents(w.cur)[0..0], false, contents(w.nrow)[0..rl], true);',
+     '            let cr = 0;'),
+    ("rename: a row keeps its key's salt under the new name", 'src/execd.cho',
+     'contents(w.nrow)[0..rl], contents(w.cur)[0..rl], 3);',
+     'contents(w.nrow)[0..rl], contents(w.cur)[0..rl], 1);'),
+    ('rename: onto a name that is taken', 'src/execd.cho',
+     '    if g1 >= 0 || g2 >= 0 || g3 >= 0 {\n        return exec.e_table_exists();\n    }',
+     ''),
+    ('rename: onto the name of an index', 'src/execd.cho',
+     '    if g1 >= 0 || g2 >= 0 || g3 >= 0 {',
+     '    if g1 >= 0 || g3 >= 0 {'),
+    ('rename: the old name stays', 'src/execd.cho',
+     '    nroot = exec.del_key(p, w, nroot, contents(w.key), kl);\n    if nroot < 0 {\n        return nroot;\n    }\n    // its indexes are',
+     '    // its indexes are'),
+    ('rename: its indexes stay with the old name', 'src/execd.cho',
+     '                if exec.same(contents(w.cur), 0, r % 1024, contents(w.lit), 2, ol) {',
+     '                if false {'),
+    ('rename: what follows the new name is ignored', 'src/stmt.cho',
+     '        if pos < end {\n            return parse.fail(st, pos, parse.e_syntax());\n        }\n        let root = parse.mk(nodes, kids, st, parse.n_rename(),',
+     '        let root = parse.mk(nodes, kids, st, parse.n_rename(),'),
+    ('rename: on a tree read AS OF', 'src/drive.cho',
+     "        // nor has a table's renaming\n        if mode != 0 || exec.params_bound(w) > 0 {",
+     "        // nor has a table's renaming\n        if exec.params_bound(w) > 0 {"),
     ('log: a commit has the number after its parent', 'src/facts.cho',
      'seq = commit.be(contents(w.cur), 0, 8) + 1;', 'seq = commit.be(contents(w.cur), 0, 8);'),
     ('log: a commit names its parent', 'src/facts.cho',
@@ -2979,7 +3006,7 @@ def run_wire(cancho):
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in WIRE if not only or only in m[0]]
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
-            "execw.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho")
+            "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho")
 
     def one(mutant):
         label, rel, old, new = mutant
@@ -3022,7 +3049,7 @@ def run_engine(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho", "execw.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho")
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho")
 
     def one(mutant):
         label, rel, old, new = mutant

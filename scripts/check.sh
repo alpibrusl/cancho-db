@@ -58,7 +58,7 @@ echo "== the engine's expression evaluator against PostgreSQL (docs/m3-engine.md
 quiet 4 python3 tests/eval_check.py build/evalcheck 4000 1
 quiet 4 python3 tests/eval_check.py build/evalcheck 4000 2
 echo "== the engine's statements against PostgreSQL (docs/m3-engine.md 6g, 6h): create, insert, update, delete, select; the changes; what must be answered, what must be refused, what must be gone from the file"
-"$CANCHO" build --std proxy/enginecheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho -o build/enginecheck
+"$CANCHO" build --std proxy/enginecheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho -o build/enginecheck
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 1
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 2
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 3
@@ -103,7 +103,7 @@ quiet 3 python3 tests/erase_l3a_e2e.py build/proxy "python3 tools/l3a.py" build/
 echo "== a log the engine made, read by the three L3a verifiers (docs/m3-engine.md 6ah): 3 seeds of 2,000 statements over two processes, and what must not pass"
 for seed in 1 2 3; do quiet 2 python3 tests/engine_log.py build/enginecheck 2000 $seed "python3 tools/l3a.py" build/l3averify "python3 tests/third/l3a_third.py"; done
 echo "== the engine's server (docs/m3-engine.md 6al): PostgreSQL's protocol over a socket, held against the test program; kill, dropped connections, garbage, psql"
-"$CANCHO" build --std proxy/engine.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/wire.cho src/serve.cho src/login.cho src/token.cho -o build/engine
+"$CANCHO" build --std proxy/engine.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/wire.cho src/serve.cho src/login.cho src/token.cho -o build/engine
 for seed in 1 2 3; do quiet 2 python3 tests/engine_wire.py build/engine build/enginecheck 1500 $seed; done
 echo "== cancho-hooks, the program, on the engine's server (docs/m3-engine.md 6an): skipped unless HOOKS_BIN names a hooks binary"
 quiet 2 python3 tests/hooks_server.py build/engine

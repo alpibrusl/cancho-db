@@ -1259,11 +1259,12 @@ pub fn salted[&q, &v](w: &!q Work, v: &v [byte]) -> [] int {
 }
 
 // Store the row `v` at the key `k`. `how` 0: a new row (a new key salt and a new row salt); 1: the row last read, changed (`old`: what it was; its key salt stays, its row salt is
-// new). The new root, or an error.
+// new); 3: the row last read, written again as a row of its table under another name (6ar): what it was is kept as for 1, and both its salts are new. The new root, or an
+// error.
 pub fn row_put[&q, &z, &k, &v, &o](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int, v: &v [byte], old: &o [byte], how: int) -> [file_read, file_write] int {
     if !w.seeded {
         return no_entropy();
-    } else if how == 0 {
+    } else if how == 0 || how == 3 {
         salt(w, 0);
         salt(w, 16);
     } else {

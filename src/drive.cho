@@ -9,6 +9,7 @@ import cdb.pager;
 import cdb.exec;
 import cdb.execs;
 import cdb.execw;
+import cdb.execd;
 import cdb.session;
 import cdb.answer;
 
@@ -508,9 +509,17 @@ pub fn run[&z, &q, &m, &s](pg: &!z pager.Pager, w: &!q exec.Work, m: &!m Run, sq
         if mode != 0 || exec.params_bound(w) > 0 {
             rc = exec.unsupported();
         } else {
-            rc = execw.truncate_table(pg, w, root, sql, contents(m.tb), contents(m.nb), top);
+            rc = execd.truncate_table(pg, w, root, sql, contents(m.tb), contents(m.nb), top);
         }
         kind = answer.k_truncate();
+    } else if head == parse.n_rename() {
+        // nor has a table's renaming
+        if mode != 0 || exec.params_bound(w) > 0 {
+            rc = exec.unsupported();
+        } else {
+            rc = execd.rename_table(pg, w, root, sql, contents(m.tb), contents(m.nb), top);
+        }
+        kind = answer.k_alter_table();
     } else {
         let ln = lower.lower(sql, contents(m.tb), contents(m.nb), contents(m.kb), top, contents(m.schema)[0..sl], contents(m.rb), contents(m.ir), contents(m.sc));
         if ln < 0 {

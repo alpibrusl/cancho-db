@@ -794,6 +794,10 @@ def compare(pg, stmts, eng, must):
     if len(eng) != len(stmts):
         raise SystemExit("engine_check: %d answers for %d statements" % (len(eng), len(stmts)))
     def snapshot(name):
+        # (a table that is not there is asked about without an error: an error would fail the transaction this may be in)
+        _, _, there, _ = pg.query("select to_regclass('%s') is not null" % name)
+        if not there or there[0][0] != b"t":
+            return None
         # the key's columns, in the key's order, as PostgreSQL has them
         _, _, kr, _ = pg.query("select a.attname from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey) where i.indrelid = to_regclass('%s') and i.indisprimary "
                                "order by array_position(i.indkey, a.attnum)" % name)
@@ -987,6 +991,11 @@ def compare(pg, stmts, eng, must):
             for k in set(before) | set(after):
                 if before.get(k) != after.get(k):
                     want.add((tname.encode(), k, before.get(k), after.get(k)))
+            renamed = re.match(r"alter table \w+ rename to (\w+)$", sql)
+            if renamed:
+                # a table renamed (6ar): its rows left the table of the old name (above: it is not there any more) and are rows of the table of the new one
+                for k, image in (snapshot(renamed.group(1)) or {}).items():
+                    want.add((renamed.group(1).encode(), k, None, image))
             got = set()
             rows = []
             for line in changes:
@@ -1581,6 +1590,42 @@ FIXED += [
     ("drop table ffv", "ddl"),
 ]
 
+FIXED += [
+    # a table renamed (6ar): the same rows under another name, its counter and its indexes with it
+    ("create table frn (k integer generated always as identity primary key, v text)", "ddl"),
+    ("insert into frn (v) values ('x'), ('y')", "write"),
+    ("create index frni on frn (v)", "ddl"),
+    ("create table frno (k integer primary key)", "ddl"),
+    ("alter table frn rename to frno", "ddl"),
+    ("alter table frn rename to frni", "ddl"),
+    ("alter table frnope rename to frnz", "ddl"),
+    ("alter table frn rename to frn2", "ddl"),
+    ("select * from frn2 order by k", "order"),
+    ("insert into frn2 (v) values ('z') returning k", "write"),
+    ("update frn2 set v = v || '!' where k = 1", "write"),
+    ("create index frni on frno (k)", "ddl"),
+    ("begin", "ddl"),
+    ("alter table frn2 rename to frn3", "ddl"),
+    ("insert into frn3 (v) values ('t')", "write"),
+    ("rollback", "ddl"),
+    ("select count(*) from frn2", "set"),
+    ("begin", "ddl"),
+    ("alter table frn2 rename to frn", "ddl"),
+    ("delete from frn where k = 2", "write"),
+    ("commit", "ddl"),
+    ("select * from frn order by k", "order"),
+    ("drop table frn", "ddl"),
+    ("create index frni on frno (k)", "ddl"),
+    # an index goes with its table under whatever name the table has when it is dropped
+    ("create table frn4 (k integer primary key, v text)", "ddl"),
+    ("create index frnx on frn4 (k)", "ddl"),
+    ("alter table frn4 rename to frn5", "ddl"),
+    ("insert into frn5 values (1, 'a'), (2, 'a')", "write"),
+    ("drop table frn5", "ddl"),
+    ("create index frnx on frno (k)", "ddl"),
+    ("drop table frno", "ddl"),
+]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)",
              "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
@@ -1693,6 +1738,8 @@ UNSUP = [
     ("create sequence fzt increment 2", None),
     ("insert into fz values (9, 9, 9)", "42601"),                                                     # more values than the table has columns
     ("insert into fz values (8, 8), (7)", "42601"),                                                  # rows of different lengths
+    ("alter table fz rename column n to m", None),                                                   # the engine renames a table, not what is in it
+    ("alter table fz rename to fzz cascade", "42601"),
     ("truncate fz restart identity", None),                                                          # the options of TRUNCATE are not the engine's
     ("truncate fz, fw", None),
     ("truncate fz cascade", None),
@@ -1868,6 +1915,9 @@ def history(seed):
         r = subprocess.run([EXE, path], input="!asof %d\ninsert into ta (k) values (1)\n" % points[0][0], capture_output=True, text=True)
         if "refused engine-as-of-write" not in r.stdout:
             raise SystemExit("engine_check: history: a write AS OF a past transaction: %s" % r.stdout[-200:])
+        r = subprocess.run([EXE, path], input="!asof %d\nalter table ta rename to tren\n" % points[0][0], capture_output=True, text=True)
+        if "refused engine-unsupported" not in r.stdout or "ok " in r.stdout:
+            raise SystemExit("engine_check: history: a table renamed AS OF a past transaction: %s" % r.stdout[-200:])
         r = subprocess.run([EXE, path], input="!asof %d\ntruncate ta\n" % points[0][0], capture_output=True, text=True)
         if "refused engine-unsupported" not in r.stdout or "ok " in r.stdout:
             raise SystemExit("engine_check: history: a truncate AS OF a past transaction: %s" % r.stdout[-200:])
@@ -2060,7 +2110,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (ffv|ftr|fid\d*|f[ksonmrcef]\d?|fq2)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (frn\d?|ffv|ftr|fid\d*|f[ksonmrcef]\d?|fq2)\b", sql)
         if m:
             return m.group(1)
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")

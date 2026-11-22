@@ -1,0 +1,178 @@
+edition 9;
+module cdb.execd;
+
+import cdb.commit;
+import cdb.build;
+import cdb.btree;
+import cdb.pager;
+import cdb.tables;
+import cdb.parse;
+import cdb.lower;
+import cdb.exec;
+import cdb.execw;
+
+// Statements that change what a table is, or empties it, and tell the log each row they touch (docs/m3-engine.md 6ao, 6ar). The engine's own forms: no IR.
+
+// TRUNCATE (docs/m3-engine.md 6ao): every row of the table is removed, and is a row deleted (a fact of the commit, as for a table dropped, 6ai). The table stays, and its
+// counter goes on from where it was (PostgreSQL's default, CONTINUE IDENTITY).
+pub fn truncate_table[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, sql: &s [byte], toks: &t [int], nodes: &n [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if nodes[6 * stmt] != parse.n_truncate() {
+        return exec.malformed();
+    }
+    let nl = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.nrow)[2..258], 0);
+    if nl < 0 {
+        return exec.unsupported();
+    }
+    build.put_be(contents(w.nrow), 0, nl, 2);
+    exec.copy(contents(w.nrow), 0, 2 + nl, contents(w.lit), 0);
+    let r0 = exec.bind_table(p, w, root, contents(w.lit)[0..2 + nl], 0);
+    if r0 != 0 {
+        return r0;
+    }
+    var nroot = root;
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else {
+            let kl = w.klen;
+            let nw = exec.row_del(p, w, nroot, contents(w.key), kl, contents(w.cur)[0..rl]);
+            if nw < 0 {
+                return nw;
+            }
+            nroot = nw;
+            // each row is a row deleted, and a fact of the commit (6ao)
+            let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);
+            if cr < 0 {
+                return cr;
+            }
+        }
+    }
+    // the table stays: what is left is its tree with no row of it
+    w.root = nroot;
+    return 0;
+}
+
+// ALTER TABLE ... RENAME TO (docs/m3-engine.md 6ar). The table keeps its number, so its rows stay where they are in the tree, and its entry in the catalog moves to the new
+// name with its indexes. For the log a row is a row of the table named: each one leaves the table of the old name and enters the table of the new one, as another row
+// (new salts), which is two facts of the commit.
+pub fn rename_table[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, sql: &s [byte], toks: &t [int], nodes: &n [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if nodes[6 * stmt] != parse.n_rename() {
+        return exec.malformed();
+    }
+    // the old name from 0 of `lit`, the new one from 300, each after its length
+    let ol = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.lit)[2..258], 0);
+    let nl = lower.name_text(sql, toks, nodes[6 * stmt + 4], contents(w.lit)[302..558], 0);
+    if ol < 0 || nl < 0 || !execw.name_ok(contents(w.lit), 302, nl) {
+        return exec.unsupported();
+    }
+    build.put_be(contents(w.lit), 0, ol, 2);
+    build.put_be(contents(w.lit), 300, nl, 2);
+    let r0 = exec.bind_table(p, w, root, contents(w.lit)[0..2 + ol], 0);
+    if r0 != 0 {
+        return r0;
+    }
+    // the new name is free: no table, no index and no sequence has it
+    var there = false;
+    let g1 = tables.find(p, contents(w.sc), root, contents(w.lit)[302..302 + nl], contents(w.key), contents(w.cur));
+    let ikl = tables.index_key(contents(w.lit)[302..302 + nl], contents(w.key));
+    let g2 = btree.get(p, contents(w.sc), root, contents(w.key)[0..ikl], contents(w.cur));
+    let skl = tables.sequence_key(contents(w.lit)[302..302 + nl], contents(w.key));
+    let g3 = btree.get(p, contents(w.sc), root, contents(w.key)[0..skl], contents(w.cur));
+    if g1 >= 0 || g2 >= 0 || g3 >= 0 {
+        return exec.e_table_exists();
+    }
+    if g1 != btree.not_found() || g2 != btree.not_found() || g3 != btree.not_found() {
+        return exec.damaged();
+    }
+    // every row leaves the table of the old name
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else {
+            let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);
+            if cr < 0 {
+                return cr;
+            }
+        }
+    }
+    // the entry moves: under the new name, with the number it had; the old name is free (and stays in the history, as a dropped table's does)
+    let el = w.elen;
+    var kl = tables.entry_key(contents(w.lit)[302..302 + nl], contents(w.key));
+    var nroot = exec.put_key(p, w, root, contents(w.key), kl, contents(w.ent)[0..el]);
+    if nroot < 0 {
+        return nroot;
+    }
+    kl = tables.entry_key(contents(w.lit)[2..2 + ol], contents(w.key));
+    nroot = exec.del_key(p, w, nroot, contents(w.key), kl);
+    if nroot < 0 {
+        return nroot;
+    }
+    // its indexes are indexes of the table under its new name
+    build.put_be(contents(w.key), 0, 0, 4);
+    contents(w.key)[4] = byte_of(1);
+    var xl = 5;
+    more = true;
+    while more {
+        let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..xl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return exec.tree_err(r);
+        } else {
+            let nk = r / 1024;
+            if nk < 6 || commit.be(contents(w.key2), 0, 4) != 0 || int_of(contents(w.key2)[4]) != 1 {
+                more = false;
+            } else {
+                if exec.same(contents(w.cur), 0, r % 1024, contents(w.lit), 2, ol) {
+                    nroot = exec.put_key(p, w, nroot, contents(w.key2), nk, contents(w.lit)[302..302 + nl]);
+                    if nroot < 0 {
+                        return nroot;
+                    }
+                }
+                xl = exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+            }
+        }
+    }
+    // every row enters the table of the new name, with salts of its own
+    let mid = nroot;
+    let r1 = exec.bind_table(p, w, mid, contents(w.lit)[300..302 + nl], 0);
+    if r1 != 0 {
+        return exec.damaged();
+    }
+    exec.scan_start(w);
+    more = true;
+    while more {
+        let rl = exec.scan_next(p, w, mid);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else {
+            let kn = w.klen;
+            exec.copy(contents(w.cur), 0, rl, contents(w.nrow), 0);
+            let nw = exec.row_put(p, w, nroot, contents(w.key), kn, contents(w.nrow)[0..rl], contents(w.cur)[0..rl], 3);
+            if nw < 0 {
+                return nw;
+            }
+            nroot = nw;
+            let cr = exec.change(w, contents(w.cur)[0..0], false, contents(w.nrow)[0..rl], true);
+            if cr < 0 {
+                return cr;
+            }
+        }
+    }
+    w.root = nroot;
+    return 0;
+}

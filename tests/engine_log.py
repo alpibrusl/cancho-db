@@ -71,6 +71,9 @@ FIXED = [
     "create table gone (k integer primary key, v text)",
     "insert into gone values (1, 'a'), (2, 'b')",
     "begin", "update gone set v = 'c' where k = 1", "alter table gone add column w integer", "insert into gone values (3, 'd', 4)", "commit",
+    "alter table gone rename to went",                            # its rows leave one table and enter another (6ar)
+    "update went set v = 'moved' where k = 2",
+    "alter table went rename to gone",
     "truncate gone",                                              # every row deleted, the table kept (6ao)
     "insert into gone values (1, 'again', 1)",
     "begin", "truncate acct", "rollback",

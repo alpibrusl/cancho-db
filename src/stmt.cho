@@ -1108,6 +1108,23 @@ fn alter_table[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], f
     }
     let table = st[9];
     var how = 0;
+    if parse.kw(sql, toks, pos, end, "rename") && parse.kw(sql, toks, pos + 1, end, "to") {
+        // RENAME TO name: the table under another name (a column's or a constraint's renaming is not this)
+        engine_form(st, parse.e_unsupported_statement());
+        pos = plain_name(sql, toks, pos + 2, end, st);
+        if pos < 0 {
+            return pos;
+        }
+        if pos < end {
+            return parse.fail(st, pos, parse.e_syntax());
+        }
+        let root = parse.mk(nodes, kids, st, parse.n_rename(), table, tmp, 0, st[9], 0 - 1);
+        if root < 0 {
+            return parse.fail(st, from, 0 - root);
+        }
+        st[2] = root;
+        return end;
+    }
     if parse.kw(sql, toks, pos, end, "alter") {
         // ALTER [COLUMN] c [SET DATA] TYPE type: a column definition of the name and the type
         how = 2;

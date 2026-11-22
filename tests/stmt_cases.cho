@@ -4,7 +4,7 @@ module cdb.stmt_cases;
 // generator. Inputs and renderings are hex.
 
 pub fn n_stmt() -> [] int {
-    return 397;
+    return 401;
 }
 
 pub fn stmt_input(i: int) -> [] &static [byte] {
@@ -1032,171 +1032,183 @@ pub fn stmt_input(i: int) -> [] &static [byte] {
         return "6372656174652073657175656e6365";
     }
     if i == 341 {
-        return "7472756e636174652074";
+        return "616c746572207461626c6520742072656e616d6520746f2075";
     }
     if i == 342 {
-        return "7472756e63617465207461626c652074";
+        return "616c746572207461626c6520742072656e616d6520746f";
     }
     if i == 343 {
-        return "7472756e6361746520742c2075";
+        return "616c746572207461626c6520742072656e616d6520746f20752076";
     }
     if i == 344 {
-        return "7472756e6361746520742072657374617274206964656e74697479";
+        return "616c746572207461626c6520742072656e616d6520636f6c756d6e206120746f2062";
     }
     if i == 345 {
-        return "7472756e63617465";
+        return "7472756e636174652074";
     }
     if i == 346 {
-        return "7472756e63617465207461626c65";
+        return "7472756e63617465207461626c652074";
     }
     if i == 347 {
-        return "64726f70207461626c65";
+        return "7472756e6361746520742c2075";
     }
     if i == 348 {
-        return "64726f70207461626c6520742c2075";
+        return "7472756e6361746520742072657374617274206964656e74697479";
     }
     if i == 349 {
-        return "64726f70207461626c6520742063617363616465";
+        return "7472756e63617465";
     }
     if i == 350 {
-        return "64726f70207461626c65206966206578697374732074";
+        return "7472756e63617465207461626c65";
     }
     if i == 351 {
-        return "64726f70207461626c6520732e74";
+        return "64726f70207461626c65";
     }
     if i == 352 {
-        return "64726f7020696e646578";
+        return "64726f70207461626c6520742c2075";
     }
     if i == 353 {
-        return "64726f7020696e64657820692c206a";
+        return "64726f70207461626c6520742063617363616465";
     }
     if i == 354 {
-        return "64726f7020696e64657820636f6e63757272656e746c792069";
+        return "64726f70207461626c65206966206578697374732074";
     }
     if i == 355 {
-        return "64726f7020766965772076";
+        return "64726f70207461626c6520732e74";
     }
     if i == 356 {
-        return "64726f702064617461626173652064";
+        return "64726f7020696e646578";
     }
     if i == 357 {
-        return "6372656174652064617461626173652064";
+        return "64726f7020696e64657820692c206a";
     }
     if i == 358 {
-        return "637265617465207669657720762061732073656c6563742031";
+        return "64726f7020696e64657820636f6e63757272656e746c792069";
     }
     if i == 359 {
-        return "626567696e";
+        return "64726f7020766965772076";
     }
     if i == 360 {
-        return "424547494e";
+        return "64726f702064617461626173652064";
     }
     if i == 361 {
-        return "626567696e20776f726b";
+        return "6372656174652064617461626173652064";
     }
     if i == 362 {
-        return "626567696e207472616e73616374696f6e";
+        return "637265617465207669657720762061732073656c6563742031";
     }
     if i == 363 {
-        return "7374617274207472616e73616374696f6e";
+        return "626567696e";
     }
     if i == 364 {
-        return "636f6d6d6974";
+        return "424547494e";
     }
     if i == 365 {
-        return "434f4d4d495420574f524b";
+        return "626567696e20776f726b";
     }
     if i == 366 {
-        return "636f6d6d6974207472616e73616374696f6e";
+        return "626567696e207472616e73616374696f6e";
     }
     if i == 367 {
-        return "656e64";
+        return "7374617274207472616e73616374696f6e";
     }
     if i == 368 {
-        return "656e64207472616e73616374696f6e";
+        return "636f6d6d6974";
     }
     if i == 369 {
-        return "726f6c6c6261636b";
+        return "434f4d4d495420574f524b";
     }
     if i == 370 {
-        return "726f6c6c6261636b20776f726b";
+        return "636f6d6d6974207472616e73616374696f6e";
     }
     if i == 371 {
-        return "61626f7274";
+        return "656e64";
     }
     if i == 372 {
-        return "61626f7274207472616e73616374696f6e";
+        return "656e64207472616e73616374696f6e";
     }
     if i == 373 {
-        return "7374617274";
+        return "726f6c6c6261636b";
     }
     if i == 374 {
-        return "737461727420776f726b";
+        return "726f6c6c6261636b20776f726b";
     }
     if i == 375 {
-        return "626567696e2069736f6c6174696f6e206c6576656c2073657269616c697a61626c65";
+        return "61626f7274";
     }
     if i == 376 {
-        return "626567696e2072656164206f6e6c79";
+        return "61626f7274207472616e73616374696f6e";
     }
     if i == 377 {
-        return "626567696e2064656665727261626c65";
+        return "7374617274";
     }
     if i == 378 {
-        return "7374617274207472616e73616374696f6e2072656164207772697465";
+        return "737461727420776f726b";
     }
     if i == 379 {
-        return "636f6d6d697420616e6420636861696e";
+        return "626567696e2069736f6c6174696f6e206c6576656c2073657269616c697a61626c65";
     }
     if i == 380 {
-        return "636f6d6d697420707265706172656420277827";
+        return "626567696e2072656164206f6e6c79";
     }
     if i == 381 {
-        return "726f6c6c6261636b20707265706172656420277827";
+        return "626567696e2064656665727261626c65";
     }
     if i == 382 {
-        return "726f6c6c6261636b20746f2073617665706f696e742061";
+        return "7374617274207472616e73616374696f6e2072656164207772697465";
     }
     if i == 383 {
-        return "726f6c6c6261636b20746f2061";
+        return "636f6d6d697420616e6420636861696e";
     }
     if i == 384 {
-        return "656e6420776f726b206e6f77";
+        return "636f6d6d697420707265706172656420277827";
     }
     if i == 385 {
-        return "70726570617265207472616e73616374696f6e20277827";
+        return "726f6c6c6261636b20707265706172656420277827";
     }
     if i == 386 {
-        return "73617665706f696e742061";
+        return "726f6c6c6261636b20746f2073617665706f696e742061";
     }
     if i == 387 {
-        return "72656c656173652073617665706f696e742061";
+        return "726f6c6c6261636b20746f2061";
     }
     if i == 388 {
-        return "73656c65637420612066726f6d207420756e696f6e2073656c65637420622066726f6d2075";
+        return "656e6420776f726b206e6f77";
     }
     if i == 389 {
-        return "73656c65637420612066726f6d207420756e696f6e20616c6c2073656c65637420622066726f6d2075";
+        return "70726570617265207472616e73616374696f6e20277827";
     }
     if i == 390 {
-        return "73656c65637420612066726f6d207420696e746572736563742073656c65637420622066726f6d2075";
+        return "73617665706f696e742061";
     }
     if i == 391 {
-        return "73656c65637420612066726f6d2074206578636570742073656c65637420622066726f6d2075";
+        return "72656c656173652073617665706f696e742061";
     }
     if i == 392 {
-        return "73656c65637420612066726f6d2074207768657265206120696e2028312920756e696f6e2073656c6563742031";
+        return "73656c65637420612066726f6d207420756e696f6e2073656c65637420622066726f6d2075";
     }
     if i == 393 {
-        return "73656c65637420612066726f6d20743b";
+        return "73656c65637420612066726f6d207420756e696f6e20616c6c2073656c65637420622066726f6d2075";
     }
     if i == 394 {
-        return "73656c65637420612c20622c20632c2064";
+        return "73656c65637420612066726f6d207420696e746572736563742073656c65637420622066726f6d2075";
     }
     if i == 395 {
-        return "73656c65637420612c20622c2063";
+        return "73656c65637420612066726f6d2074206578636570742073656c65637420622066726f6d2075";
     }
     if i == 396 {
+        return "73656c65637420612066726f6d2074207768657265206120696e2028312920756e696f6e2073656c6563742031";
+    }
+    if i == 397 {
+        return "73656c65637420612066726f6d20743b";
+    }
+    if i == 398 {
+        return "73656c65637420612c20622c20632c2064";
+    }
+    if i == 399 {
+        return "73656c65637420612c20622c2063";
+    }
+    if i == 400 {
         return "73656c65637420312c20322c2033";
     }
     return "";
@@ -2281,16 +2293,16 @@ pub fn stmt_ok(i: int) -> [] int {
         return 0;
     }
     if i == 359 {
-        return 1;
+        return 0;
     }
     if i == 360 {
-        return 1;
+        return 0;
     }
     if i == 361 {
-        return 1;
+        return 0;
     }
     if i == 362 {
-        return 1;
+        return 0;
     }
     if i == 363 {
         return 1;
@@ -2323,16 +2335,16 @@ pub fn stmt_ok(i: int) -> [] int {
         return 1;
     }
     if i == 373 {
-        return 0;
+        return 1;
     }
     if i == 374 {
-        return 0;
+        return 1;
     }
     if i == 375 {
-        return 0;
+        return 1;
     }
     if i == 376 {
-        return 0;
+        return 1;
     }
     if i == 377 {
         return 0;
@@ -2389,9 +2401,21 @@ pub fn stmt_ok(i: int) -> [] int {
         return 0;
     }
     if i == 395 {
-        return 1;
+        return 0;
     }
     if i == 396 {
+        return 0;
+    }
+    if i == 397 {
+        return 0;
+    }
+    if i == 398 {
+        return 0;
+    }
+    if i == 399 {
+        return 1;
+    }
+    if i == 400 {
         return 0;
     }
     return 0;
@@ -3476,58 +3500,58 @@ pub fn stmt_want(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 359 {
-        return "626567696e";
+        return "";
     }
     if i == 360 {
-        return "626567696e";
+        return "";
     }
     if i == 361 {
-        return "626567696e";
+        return "";
     }
     if i == 362 {
-        return "626567696e";
+        return "";
     }
     if i == 363 {
         return "626567696e";
     }
     if i == 364 {
-        return "636f6d6d6974";
+        return "626567696e";
     }
     if i == 365 {
-        return "636f6d6d6974";
+        return "626567696e";
     }
     if i == 366 {
-        return "636f6d6d6974";
+        return "626567696e";
     }
     if i == 367 {
-        return "636f6d6d6974";
+        return "626567696e";
     }
     if i == 368 {
         return "636f6d6d6974";
     }
     if i == 369 {
-        return "726f6c6c6261636b";
+        return "636f6d6d6974";
     }
     if i == 370 {
-        return "726f6c6c6261636b";
+        return "636f6d6d6974";
     }
     if i == 371 {
-        return "726f6c6c6261636b";
+        return "636f6d6d6974";
     }
     if i == 372 {
-        return "726f6c6c6261636b";
+        return "636f6d6d6974";
     }
     if i == 373 {
-        return "";
+        return "726f6c6c6261636b";
     }
     if i == 374 {
-        return "";
+        return "726f6c6c6261636b";
     }
     if i == 375 {
-        return "";
+        return "726f6c6c6261636b";
     }
     if i == 376 {
-        return "";
+        return "726f6c6c6261636b";
     }
     if i == 377 {
         return "";
@@ -3584,9 +3608,21 @@ pub fn stmt_want(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 395 {
-        return "73656c656374202261222c202262222c20226322";
+        return "";
     }
     if i == 396 {
+        return "";
+    }
+    if i == 397 {
+        return "";
+    }
+    if i == 398 {
+        return "";
+    }
+    if i == 399 {
+        return "73656c656374202261222c202262222c20226322";
+    }
+    if i == 400 {
         return "";
     }
     return "";
@@ -4620,25 +4656,25 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "unsupported-statement";
     }
     if i == 342 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 343 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 344 {
         return "unsupported-statement";
     }
     if i == 345 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 346 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 347 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 348 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 349 {
         return "syntax";
@@ -4647,7 +4683,7 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "syntax";
     }
     if i == 351 {
-        return "unknown-construct";
+        return "syntax";
     }
     if i == 352 {
         return "syntax";
@@ -4656,31 +4692,31 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "syntax";
     }
     if i == 354 {
-        return "reserved-word";
+        return "syntax";
     }
     if i == 355 {
-        return "unsupported-statement";
+        return "unknown-construct";
     }
     if i == 356 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 357 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 358 {
-        return "unsupported-statement";
+        return "reserved-word";
     }
     if i == 359 {
-        return "";
+        return "unsupported-statement";
     }
     if i == 360 {
-        return "";
+        return "unsupported-statement";
     }
     if i == 361 {
-        return "";
+        return "unsupported-statement";
     }
     if i == 362 {
-        return "";
+        return "unsupported-statement";
     }
     if i == 363 {
         return "";
@@ -4713,22 +4749,22 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 373 {
-        return "unsupported-statement";
+        return "";
     }
     if i == 374 {
-        return "unsupported-statement";
+        return "";
     }
     if i == 375 {
-        return "unknown-construct";
+        return "";
     }
     if i == 376 {
-        return "unknown-construct";
+        return "";
     }
     if i == 377 {
-        return "unknown-construct";
+        return "unsupported-statement";
     }
     if i == 378 {
-        return "unknown-construct";
+        return "unsupported-statement";
     }
     if i == 379 {
         return "unknown-construct";
@@ -4749,39 +4785,51 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "unknown-construct";
     }
     if i == 385 {
-        return "unsupported-statement";
+        return "unknown-construct";
     }
     if i == 386 {
-        return "unsupported-statement";
+        return "unknown-construct";
     }
     if i == 387 {
-        return "unsupported-statement";
+        return "unknown-construct";
     }
     if i == 388 {
-        return "set-operation";
+        return "unknown-construct";
     }
     if i == 389 {
-        return "set-operation";
+        return "unsupported-statement";
     }
     if i == 390 {
-        return "set-operation";
+        return "unsupported-statement";
     }
     if i == 391 {
-        return "set-operation";
+        return "unsupported-statement";
     }
     if i == 392 {
         return "set-operation";
     }
     if i == 393 {
-        return "syntax";
+        return "set-operation";
     }
     if i == 394 {
-        return "too-big";
+        return "set-operation";
     }
     if i == 395 {
-        return "";
+        return "set-operation";
     }
     if i == 396 {
+        return "set-operation";
+    }
+    if i == 397 {
+        return "syntax";
+    }
+    if i == 398 {
+        return "too-big";
+    }
+    if i == 399 {
+        return "";
+    }
+    if i == 400 {
         return "too-big";
     }
     return "";
@@ -5979,6 +6027,18 @@ pub fn stmt_oscap(i: int) -> [] int {
     if i == 396 {
         return 64;
     }
+    if i == 397 {
+        return 64;
+    }
+    if i == 398 {
+        return 64;
+    }
+    if i == 399 {
+        return 64;
+    }
+    if i == 400 {
+        return 64;
+    }
     return 0;
 }
 
@@ -7174,6 +7234,18 @@ pub fn stmt_vcap(i: int) -> [] int {
     if i == 396 {
         return 64;
     }
+    if i == 397 {
+        return 64;
+    }
+    if i == 398 {
+        return 64;
+    }
+    if i == 399 {
+        return 64;
+    }
+    if i == 400 {
+        return 64;
+    }
     return 0;
 }
 
@@ -8367,6 +8439,18 @@ pub fn stmt_ncap(i: int) -> [] int {
         return 200;
     }
     if i == 396 {
+        return 200;
+    }
+    if i == 397 {
+        return 200;
+    }
+    if i == 398 {
+        return 200;
+    }
+    if i == 399 {
+        return 200;
+    }
+    if i == 400 {
         return 6;
     }
     return 0;
@@ -9564,6 +9648,18 @@ pub fn stmt_kcap(i: int) -> [] int {
     if i == 396 {
         return 200;
     }
+    if i == 397 {
+        return 200;
+    }
+    if i == 398 {
+        return 200;
+    }
+    if i == 399 {
+        return 200;
+    }
+    if i == 400 {
+        return 200;
+    }
     return 0;
 }
 
@@ -10757,6 +10853,18 @@ pub fn stmt_ocap(i: int) -> [] int {
         return 2048;
     }
     if i == 396 {
+        return 2048;
+    }
+    if i == 397 {
+        return 2048;
+    }
+    if i == 398 {
+        return 2048;
+    }
+    if i == 399 {
+        return 2048;
+    }
+    if i == 400 {
         return 2048;
     }
     return 0;
@@ -11954,6 +12062,18 @@ pub fn stmt_rcap(i: int) -> [] int {
     if i == 396 {
         return 128;
     }
+    if i == 397 {
+        return 128;
+    }
+    if i == 398 {
+        return 128;
+    }
+    if i == 399 {
+        return 128;
+    }
+    if i == 400 {
+        return 128;
+    }
     return 0;
 }
 
@@ -13141,12 +13261,24 @@ pub fn stmt_tmpcap(i: int) -> [] int {
         return 64;
     }
     if i == 394 {
-        return 3;
+        return 64;
     }
     if i == 395 {
-        return 3;
+        return 64;
     }
     if i == 396 {
+        return 64;
+    }
+    if i == 397 {
+        return 64;
+    }
+    if i == 398 {
+        return 3;
+    }
+    if i == 399 {
+        return 3;
+    }
+    if i == 400 {
         return 64;
     }
     return 0;

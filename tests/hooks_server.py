@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cancho-hooks, the program, against the engine's server: no PostgreSQL (docs/m3-engine.md 6an).
 
-    HOOKS_BIN=/path/to/hooks python3 tests/hooks_server.py ENGINE_SERVER
+    HOOKS_BIN=/path/to/hooks [HOOKS_REPO=/path/to/cancho-hooks] python3 tests/hooks_server.py ENGINE_SERVER
 
 tests/hooks_check.py asks whether the engine answers hooks' statements. This asks whether hooks runs: its schema is applied with psql (sql/schema.sql, the copy in
 tests/hooks/), an endpoint is put in its table, the service is started with `--pg-host` at the engine's server and a receiver is started for it to deliver to. Then events
@@ -12,7 +12,8 @@ are posted to the service, and:
   * every attempt is a row the service wrote through the engine, read back through the service's own API (`GET /events/:id/attempts`), and, once the service is
     stopped, with psql from the engine's page file: the same rows.
 
-The service is a binary built from cancho-hooks' repository (`scripts/build.sh --pure`); without HOOKS_BIN the test is skipped and says so. What is measured is what it
+The service is a binary built from cancho-hooks' repository (`scripts/build.sh --pure`); without HOOKS_BIN the test is skipped and says so. With HOOKS_REPO (that
+repository) hooks' own test of the feature is run against the engine too: 11 scenarios of a service whose database is there, absent, silent, cut off, wrong (6ar). What is measured is what it
 says: one service, one endpoint, a few events. It is not hooks' own test suite (6an and 6aq say how far that runs against the engine).
 """
 import base64
@@ -70,6 +71,59 @@ class Receiver(http.server.BaseHTTPRequestHandler):
 def get(url):
     with urllib.request.urlopen(url, timeout=15) as r:
         return json.loads(r.read())
+
+
+# What hooks' own test does that is the administration of a PostgreSQL, not a use of a database: the role its scenario 9 makes, grants to, looks for in
+# pg_stat_activity and drops. The engine has no roles (no login at all yet, 6al). These lines are cut from a copy of the test; nothing else is touched.
+ROLE_LINES = ['    psql("drop role if exists hooks")\n', '    psql("create role hooks login")\n', '    psql("grant insert, select on attempts to hooks")\n',
+              '    psql("grant select on endpoints to hooks")\n', '    psql("revoke insert, select on attempts from hooks")\n', '    psql("revoke select on endpoints from hooks")\n',
+              '    psql("drop role hooks")\n']
+ROLE_CHECK = ('        check("9. ... and the server sees the connections as user hooks on database hooks",', '        stop(svc)\n')
+
+
+def own_test():
+    """cancho-hooks' own test of its history in PostgreSQL (tests/history_test.py of its repository, HOOKS_REPO), against the engine's server: unchanged, as far as it
+    gets; and a copy with the role administration of its scenario 9 cut, which must pass every check it has left."""
+    repo = os.environ.get("HOOKS_REPO", "")
+    src = os.path.join(repo, "tests", "history_test.py")
+    if not repo or not os.path.exists(src):
+        print("skip hooks' own history test against the engine: no HOOKS_REPO (cancho-hooks' repository)")
+        return
+    text = open(src).read()
+    cut = text
+    for line in ROLE_LINES:
+        if cut.count(line) != 1:
+            check("hooks' own test has the role lines this test cuts (it has changed: cut them by hand)", False, line)
+            return
+        cut = cut.replace(line, "")
+    a = cut.find(ROLE_CHECK[0])
+    b = cut.find(ROLE_CHECK[1], a)
+    if a < 0 or b < 0:
+        check("hooks' own test has the pg_stat_activity check this test cuts (it has changed: cut it by hand)", False)
+        return
+    cut = cut[:a] + cut[b:]
+    copy = os.path.join(repo, "tests", "history_test_no_roles.py")
+    open(copy, "w").write(cut)
+    try:
+        for name, path, want in (("unchanged", src, None), ("with the role administration of scenario 9 cut", copy, 0)):
+            with tempfile.TemporaryDirectory() as d:
+                port = free_port()
+                srv = subprocess.Popen([SERVER, os.path.join(d, "own.db"), str(port)], stderr=subprocess.PIPE)
+                srv.stderr.readline()
+                r = subprocess.run([sys.executable, path, HOOKS], capture_output=True, text=True, cwd=repo, timeout=900, env=dict(os.environ, HOOKS_PG="127.0.0.1:%d:hooks:hooks" % port))
+                srv.send_signal(signal.SIGTERM)
+                srv.wait()
+            oks = sum(1 for l in r.stdout.splitlines() if l.startswith("ok "))
+            fails = [l for l in r.stdout.splitlines() if l.startswith("FAIL")]
+            last = [l for l in (r.stdout + r.stderr).splitlines() if l.strip()][-1:]
+            print("     hooks' own history test, %s: %d checks pass, %d fail, status %d; its last line: %s" % (name, oks, len(fails), r.returncode, (last[0] if last else "")[:120]))
+            if want is None:
+                # as far as it gets: no check of its own may fail, and it stops where the engine has nothing to offer (a role)
+                check("hooks' own history test, unchanged: every check it reaches passes (it stops at the roles of its scenario 9)", not fails and oks >= 24 and "refused unsupported-statement" in r.stderr, (oks, fails[:2], r.stderr[-300:]))
+            else:
+                check("hooks' own history test, %s: all of it passes" % name, r.returncode == 0 and not fails and oks >= 43 and "all history checks passed" in r.stdout, (oks, fails[:3], r.stderr[-300:]))
+    finally:
+        os.remove(copy)
 
 
 def main():
@@ -135,6 +189,7 @@ def main():
         srv.send_signal(signal.SIGTERM)
         srv.wait()
         rx.shutdown()
+    own_test()
     if FAILED:
         print("FAIL hooks on the engine's server: %d failed" % len(FAILED))
         return 1

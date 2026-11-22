@@ -1375,8 +1375,8 @@ having been sent 2.8 MB, and the other client is answered then; 8 clients at onc
 **And `cancho-hooks` (6an), which is why this was built.** The service now says `2 of 2 connections live`. Its own test of the feature, `tests/history_test.py` of its
 repository, run against the engine unchanged (with `truncate`, 6ao, and the short insert, 6ap): **scenarios 1 to 7 pass, 22 checks** (every attempt a row; the reasons
 that are not a status; a replay's rows; a database not there at start; one that never answers; one cut in the middle; none named). It stops at scenario 8, which renames
-the table away (`alter table attempts rename to ...`) to see what the service does when its table is gone; the engine has no rename. That is the next statement, and after
-it scenarios 9 to 11 are unmeasured.
+the table away (`alter table attempts rename to ...`) to see what the service does when its table is gone; the engine has no rename. *(6ar adds it, and measures the
+rest.)*
 
 *What changed from the first part and is corrected there:* a message of 16 MiB was read and one longer ended the connection; a message is now at most 1 MiB and a longer
 one is refused and read past. The named statements of a connection may hold 1 MiB of text, not 3.
@@ -1386,6 +1386,40 @@ made dead (the old function that found a message's end; a length check the small
 
 *Not tested, and said:* that a connection whose buffer is full is not read from (so that the loop sleeps rather than spins while it waits) is in the code and no test can
 see it, since a loop that spins gives the same answers. Fairness between connections is by construction (the pass starts one place later each time) and is not measured.
+
+## 6ar. A table renamed, and `cancho-hooks`' own test of its history, in full
+
+Scenario 8 of hooks' test (6aq) takes the service's table away by renaming it and brings it back. The engine had no rename.
+
+**Design.** `alter table NAME rename to NEW`. The table keeps its number, so its rows stay where they are in the tree; its entry in the catalog moves to the new name (the
+old name is free, and stays in the history as a dropped table's does), and its indexes become indexes of the table under its new name. The new name must be free of
+tables, indexes and sequences (`42P07`), the old one a table (`42P01`).
+
+*For the log a row is a row of the table named.* A fact is (table, key, before, after), so the same rows under another name are other facts. Each row **leaves the table of
+the old name and enters the table of the new one**, with new salts (it is another row to the log, and no salt is given twice, 6ag): two facts a row, and a replay of the
+log ends at the rows there are, under the names they have. PostgreSQL's capture tells its log nothing of a rename. The cost is a write of every row, as for a column added
+(6ai). Renaming a column or a constraint is not this and is refused.
+
+**Test.** Fixed statements against PostgreSQL: the rename, onto a table's name, an index's name, of a table that is not there; reads and writes under the new name; the
+counter going on; an index that goes with the table when it is dropped under its new name; in a transaction rolled back and in one committed. The rows the engine reports
+are held against PostgreSQL's two tables (the old name gone, the new one read). In the log's test a table is renamed, written to and renamed back, and the three verifiers
+say `ok ... final`. 9 mutants; one survived until the test dropped a table under its new name.
+
+**`cancho-hooks`' own test, measured** (`tests/hooks_server.py` with `HOOKS_REPO`; hooks at its commit `40b2ce0`, its test `tests/history_test.py`, 11 scenarios):
+
+- **unchanged, it passes 24 checks and stops at scenario 9**, which makes a PostgreSQL role (`create role hooks login`, grants) and looks for the service's connections in
+  `pg_stat_activity`. That is the administration of a PostgreSQL. The engine has no roles and no login at all yet (6al); when it has one, it will be its own.
+- **with those lines cut from a copy** (seven statements and one check; nothing else touched) **it passes all it has left: 43 checks, scenarios 1 to 11.** A database that
+  is not there at start, that never answers, that is cut in the middle, that answers with an error, a table renamed away and back, the history read back through the
+  service's API while the database is slow, gone or wrong.
+
+*Run three times.* Twice all 43 passed. Once, while this machine was also running two mutant groups and the gate, one check of scenario 11 failed (a request that should
+have waited and timed out was refused at once: `503`). The scenario is about the service's own waiting slots while a proxy in front of the database stalls; whether the
+service, its test or the engine's server under load was late is **not known**. It is written here so that it is not forgotten, not because it is understood.
+
+*What this is and is not.* It is the first time a program this project did not write for the purpose has had its own test of a database feature pass against the engine.
+It is one test of one feature of one service, on one machine; the gate cannot run it (no hooks binary there). The two queries of C167 the engine refuses are not in this
+test. Nothing the server does is logged or verifiable yet, and anyone on the machine may connect.
 
 ## 7. Taking over, safely
 
