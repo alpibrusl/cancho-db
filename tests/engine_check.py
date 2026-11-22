@@ -860,6 +860,10 @@ def compare(pg, stmts, eng, must):
             if rows:
                 fail(i, "no facts for a commit that changed rows")
             return
+        if not rows:
+            # a statement or a transaction that changed no row is no commit
+            fail(i, "facts for a commit that changed no row")
+            return
         if line[0] == "F -":
             if must:
                 fail(i, "the facts of this commit are not to be had")
@@ -1516,6 +1520,28 @@ FIXED += [
     ("select * from ff2 order by a, b", "order"),
 ]
 
+FIXED += [
+    # BEGIN in a transaction that has failed is the error every statement there gets
+    ("begin", "ddl"),
+    ("select 1 / (k - k) from ff", "set"),
+    ("begin", "ddl"),
+    ("select 1 from ff", "set"),
+    ("rollback", "ddl"),
+    # a transaction that writes nothing, after one that wrote, is no commit
+    ("create table fid (k integer primary key, v integer)", "ddl"),
+    ("begin", "ddl"),
+    ("insert into fid values (1, 1), (2, 2)", "write"),
+    ("commit", "ddl"),
+    ("begin", "ddl"),
+    ("select count(*) from fid", "set"),
+    ("commit", "ddl"),
+    ("drop table fid", "ddl"),
+]
+# more counters drawn from, with no failure between, than a session remembers at once (32): what was drawn is forgotten whenever nothing is left to roll back
+FIXED += [("create table fid%d (k integer generated always as identity primary key, v integer)" % i, "ddl") for i in range(34)]
+FIXED += [("insert into fid%d (v) values (%d)" % (i, i), "write") for i in range(34)]
+FIXED += [("drop table fid%d" % i, "ddl") for i in range(34)]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)",
              "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
@@ -1971,7 +1997,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (f[ksonmrcef]\d?|fq2)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (fid\d*|f[ksonmrcef]\d?|fq2)\b", sql)
         if m:
             return m.group(1)
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")

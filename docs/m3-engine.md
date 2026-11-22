@@ -977,7 +977,7 @@ one the engine prints at each commit. So the engine's `changes` is checked again
 the engine's `changes` equals the reference's for every commit compared, statements of their own and transactions of several. 30 fixed statements for the netting (a row inserted
 and updated, updated and put back, inserted and deleted, deleted and inserted again, a key of two columns, two tables in one transaction, a rollback). 7 mutants.
 
-*What the test program still does itself:* it decides when a transaction's facts begin and end (as it decides which tree a transaction runs on, 6v). Those lines have no mutants.
+*What the test program still did itself:* it decided when a transaction's facts begin and end (as it decided which tree a transaction runs on, 6v). Those lines had no mutants *(they are `src/session.cho` since 6aj, with mutants)*.
 
 ## 6ag. J4, second part: salts, so that what is erased cannot be guessed back
 
@@ -1087,6 +1087,29 @@ its type is (a commit's schema hash is still zeros, 6ah).
 rows), and the engine's reported changes must be exactly the difference, with the salts following each row's history and the commit's `changes` equal to the reference's over
 them, inside transactions too (a transaction with DDL in it was skipped by the facts' comparison before; it is not any more). `tests/engine_log.py` has both in its fixed
 history and its random one (a column added to the random table, the table dropped and made again), and the three verifiers must still say `ok ... final`.
+
+## 6aj. The session is the engine's, and tested as it is
+
+Since 6v the test program decided which tree a statement runs on and when a transaction's tree becomes the branch's; since 6af when the facts of a commit begin and end; since
+6ah when a commit is sealed. Each of those sections ended with the same sentence: *those lines have no mutants*. They were about 130 lines of the test program, and a server
+would have had to write them again.
+
+**Design.** `src/session.cho` holds a session's state (idle, in a transaction, in one that has failed; the transaction's tree; its facts) and two functions the driver calls
+around every statement:
+
+- `open`: the tree the statement runs on (the branch's, or the open transaction's), the number its writes take, whether a key written twice keeps its first record (6n);
+- `close`: given what running the statement gave (a tree, or that it was `begin`, `commit` or `rollback`) and whether it failed. Outside a transaction a statement that wrote
+  is a commit: its facts are taken, its number marked, the commit sealed. Inside one the statement's tree becomes the transaction's and its facts are folded into the
+  transaction's; `commit` marks, seals and hands the tree to the branch; `rollback`, or the `commit` of a transaction that failed, gives back what was drawn from counters (6y)
+  and nothing else. It leaves what the driver answers with: the command, the facts to show, the record.
+
+The driver keeps what is its own: reading a statement, running it (`run_sql`), writing answers. The test program is that driver, and is 102 lines shorter.
+
+*Not moved:* a branch other than the first, `AS OF` a point, and erasing are still chosen by the test program's own commands; the seed of the salts and the signing key are
+still handed over by it. A server will have to decide where each comes from.
+
+**Test.** Nothing new is claimed: every test that ran through the test program's lines runs through `session` (the differential's transactions, C165; the facts, C175; the
+log, C177). What is new is that a fault in those decisions is now caught: 20 mutants in `src/session.cho` judged by the differential and 1 by the log's verifiers.
 
 ## 7. Taking over, safely
 

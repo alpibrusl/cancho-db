@@ -16,6 +16,7 @@ import cdb.execw;
 import cdb.answer;
 import cdb.drive;
 import cdb.facts;
+import cdb.session;
 import cdb.tables;
 import cdb.build;
 import cdb.row;
@@ -552,42 +553,6 @@ fn put_facts[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, froo
     return 0;
 }
 
-// The commit the facts `froot` are, as a line: `L` and the record of the log in hex (docs/m3-engine.md 6ah), `L -` if it is not to be had; nothing while no key was given (`!log`) or
-// off the first branch. The tree with the head of the log moved (`root` itself if no commit was made).
-fn put_commit[&i, &z, &q, &f](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, froot: int, fl: &f [int], cur: int) -> [io_write, file_read, file_write] int {
-    var nw = root;
-    if fl[1] == 0 || cur != 0 {
-        return nw;
-    }
-    region r {
-        let seed = alloc_slice[r](32, byte_of(0));
-        let rec = alloc_slice[r](facts.max_record(), byte_of(0));
-        var k = 0;
-        while k < 32 {
-            seed[k] = byte_of(fl[2 + k]);
-            k = k + 1;
-        }
-        var sealed = froot;
-        if sealed >= 0 {
-            sealed = facts.seal(pg, w, root, froot, seed, rec);
-        }
-        if sealed < 0 {
-            put_str(io, "L -\n");
-        } else {
-            nw = sealed;
-            put_str(io, "L ");
-            let n = 4 + commit.be(rec, 0, 4) + 64;
-            k = 0;
-            while k < n {
-                hex_byte(io, int_of(rec[k]));
-                k = k + 1;
-            }
-            putchar(io, '\n');
-        }
-    }
-    return nw;
-}
-
 // Every row of the table `name` as a line: `D`, then in hex the plain key, the key's salt, the row's image and the row's salt, as the facts have them (what a live dump holds,
 // docs/spec/l3a.md 3b); `rows N` at the end, `rows -` if there is no such table or a row cannot be shown.
 fn put_table[&i, &z, &q, &n](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, name: &n [byte]) -> [io_write, file_read] int {
@@ -703,12 +668,7 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
     var status = 0;
     var cur = 0;
     var view = 0 - 1;
-    var tstate = 0;
-    var troot = 0;
-    // the facts of the transaction that is open: their tree (below 0: they are not to be had), and whether it wrote
-    var tfacts = 0;
-    var twrote = false;
-    var flags = box_slice(heap, 34, 0);
+    var flags = box_slice(heap, 48, 0);
     borrow mut flags as &!fw in {
         borrow mut roots as &!rw in {
             let rs = contents(rw);
@@ -885,138 +845,76 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                         run_sql(heap, io, pg, w, all[ls..le], view, 1, fl, false);
                         put_str(io, "S I\n.\n");
                     } else {
-                        // a statement outside a transaction is one of its own; inside one (BEGIN ... COMMIT) the statements build on the transaction's tree, which becomes the branch's at COMMIT
-                        let last = exec.last_txn(pg, w, rs[cur]);
-                        if last < 0 {
+                        // which tree the statement runs on, and what it leaves, is the session's (src/session.cho)
+                        let on = session.open(pg, w, fl[40..48], rs[cur]);
+                        if on < 0 {
                             put_str(io, "err ");
-                            put_int(io, last);
+                            put_int(io, on);
                             putchar(io, '\n');
-                        } else if tstate == 0 {
-                            exec.set_txn(w, last + 1);
-                            exec.set_once(w, true);
-                            var after = 0;
-                            exec.draw_set(w, 0, 0);
-                            let pl = drive.prepare(pg, w, sub, all[ls..le], rs[cur]);
-                            if pl >= 0 {
-                                after = run_sql(heap, io, pg, w, drive.text(sub)[0..pl], rs[cur], 0, fl, true);
-                            } else {
-                                after = run_sql(heap, io, pg, w, all[ls..le], rs[cur], 0, fl, false);
-                            }
-                            if after == 0 - 20 {
-                                tstate = 1;
-                                troot = rs[cur];
-                                put_str(io, "ok BEGIN 0\nG BEGIN\n");
-                            } else if after == 0 - 21 {
-                                put_str(io, "ok COMMIT 0\nG COMMIT\n");
-                            } else if after == 0 - 22 {
-                                put_str(io, "ok ROLLBACK 0\nG ROLLBACK\n");
-                            } else if fl[0] != 0 {
-                                // the statement failed, or was refused: what it drew from a counter stays drawn (docs/m3-engine.md 6y)
-                                let sr = exec.seq_replay(pg, w, rs[cur]);
-                                if sr < 0 {
-                                    put_str(io, "err ");
-                                    put_int(io, sr);
-                                    putchar(io, '\n');
-                                } else {
-                                    rs[cur] = sr;
-                                }
-                            } else if after != rs[cur] {
-                                // the facts of the commit this statement is (docs/m3-engine.md 6af)
-                                var sfacts = 0;
-                                let swrote = exec.changes_of(w) > 0;
-                                if swrote {
-                                    sfacts = facts.take(pg, w, 0);
-                                    put_facts(io, pg, w, sfacts);
-                                }
-                                // the statement wrote: its number is used
-                                let marked = exec.mark_txn(pg, w, after, last + 1);
-                                if marked < 0 {
-                                    put_str(io, "err ");
-                                    put_int(io, marked);
-                                    putchar(io, '\n');
-                                } else {
-                                    rs[cur] = marked;
-                                    if swrote {
-                                        rs[cur] = put_commit(io, pg, w, marked, sfacts, fl, cur);
-                                    }
-                                }
-                            }
-                            if tstate == 0 {
-                                // nothing is left to roll back: the tree that stays has what was drawn
-                                exec.seq_forget(w);
-                            }
                         } else {
-                            exec.set_txn(w, last + 1);
-                            // a key may be written more than once in a transaction: what it held before the transaction is its first record (6n)
-                            exec.set_once(w, false);
-                            var mode = 0;
-                            if tstate == 2 {
-                                mode = 3;
+                            let mode = session.mode(fl[40..48]);
+                            var pl = 0 - 1;
+                            if mode == 0 {
+                                pl = drive.prepare(pg, w, sub, all[ls..le], on);
                             }
                             var after = 0;
-                            var pl = 0 - 1;
-                            exec.draw_set(w, 0, 0);
-                            if mode == 0 {
-                                pl = drive.prepare(pg, w, sub, all[ls..le], troot);
-                            }
                             if pl >= 0 {
-                                after = run_sql(heap, io, pg, w, drive.text(sub)[0..pl], troot, mode, fl, true);
+                                after = run_sql(heap, io, pg, w, drive.text(sub)[0..pl], on, mode, fl, true);
                             } else {
-                                after = run_sql(heap, io, pg, w, all[ls..le], troot, mode, fl, false);
+                                after = run_sql(heap, io, pg, w, all[ls..le], on, mode, fl, false);
                             }
-                            if after == 0 - 20 && tstate == 2 {
-                                // in a transaction that has failed BEGIN is refused like any other statement
-                                put_str(io, "error 25P02\n");
-                            } else if after == 0 - 20 {
-                                // PostgreSQL warns and goes on
-                                put_str(io, "ok BEGIN 0\nG BEGIN\n");
-                            } else if after == 0 - 21 || after == 0 - 22 {
-                                if after == 0 - 21 && tstate == 1 {
-                                    if troot != rs[cur] {
-                                        let marked = exec.mark_txn(pg, w, troot, last + 1);
-                                        if marked < 0 {
-                                            put_str(io, "err ");
-                                            put_int(io, marked);
-                                            putchar(io, '\n');
-                                        } else {
-                                            rs[cur] = marked;
-                                        }
-                                    }
-                                    put_str(io, "ok COMMIT 0\nG COMMIT\n");
-                                    if twrote {
-                                        put_facts(io, pg, w, tfacts);
-                                        rs[cur] = put_commit(io, pg, w, rs[cur], tfacts, fl, cur);
-                                    }
-                                    exec.seq_forget(w);
-                                } else {
-                                    // a rollback, or the commit of a transaction that failed: what its statements drew from counters stays drawn
-                                    let sr = exec.seq_replay(pg, w, rs[cur]);
-                                    if sr < 0 {
-                                        put_str(io, "err ");
-                                        put_int(io, sr);
-                                        putchar(io, '\n');
-                                    } else {
-                                        rs[cur] = sr;
-                                    }
-                                    put_str(io, "ok ROLLBACK 0\nG ROLLBACK\n");
+                            region cr {
+                                // commits of the first branch are records of the log once a key was given (`!log`)
+                                var kn = 0;
+                                if fl[1] != 0 && cur == 0 {
+                                    kn = 32;
                                 }
-                                tstate = 0;
-                                tfacts = 0;
-                                twrote = false;
-                            } else if fl[0] != 0 {
-                                // an error, or a refusal: the transaction has failed
-                                tstate = 2;
-                            } else {
-                                troot = after;
-                                if exec.changes_of(w) > 0 && tfacts >= 0 {
-                                    tfacts = facts.take(pg, w, tfacts);
-                                    twrote = true;
+                                let key = alloc_slice[cr](kn, byte_of(0));
+                                let rec = alloc_slice[cr](facts.max_record(), byte_of(0));
+                                var k = 0;
+                                while k < kn {
+                                    key[k] = byte_of(fl[2 + k]);
+                                    k = k + 1;
+                                }
+                                let nr = session.close(pg, w, fl[40..48], rs[cur], after, fl[0] != 0, key, rec);
+                                let said = session.said(fl[40..48]);
+                                if said == 1 {
+                                    put_str(io, "ok BEGIN 0\nG BEGIN\n");
+                                } else if said == 2 {
+                                    put_str(io, "ok COMMIT 0\nG COMMIT\n");
+                                } else if said == 3 {
+                                    put_str(io, "ok ROLLBACK 0\nG ROLLBACK\n");
+                                } else if said == 4 {
+                                    put_str(io, "error 25P02\n");
+                                }
+                                if nr < 0 {
+                                    put_str(io, "err ");
+                                    put_int(io, nr);
+                                    putchar(io, '\n');
+                                } else {
+                                    rs[cur] = nr;
+                                }
+                                // the facts of the commit (docs/m3-engine.md 6af), and its record (6ah)
+                                if session.facts_of(fl[40..48]) != 0 - 2 {
+                                    put_facts(io, pg, w, session.facts_of(fl[40..48]));
+                                }
+                                if session.sealed(fl[40..48]) < 0 {
+                                    put_str(io, "L -\n");
+                                } else if session.sealed(fl[40..48]) > 0 {
+                                    put_str(io, "L ");
+                                    let n = 4 + commit.be(rec, 0, 4) + 64;
+                                    k = 0;
+                                    while k < n {
+                                        hex_byte(io, int_of(rec[k]));
+                                        k = k + 1;
+                                    }
+                                    putchar(io, '\n');
                                 }
                             }
                         }
-                        if tstate == 0 {
+                        if session.state(fl[40..48]) == session.idle() {
                             put_str(io, "S I\n.\n");
-                        } else if tstate == 1 {
+                        } else if session.state(fl[40..48]) == session.open_txn() {
                             put_str(io, "S T\n.\n");
                         } else {
                             put_str(io, "S E\n.\n");
