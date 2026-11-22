@@ -774,7 +774,7 @@ def run_engine(path, lines):
         if line == ".":
             out.append(cur)
             cur = []
-        elif line.startswith("committed ") or line.startswith("swept ") or line.startswith("err "):
+        elif line.startswith("committed ") or line.startswith("swept ") or line.startswith("err ") or line == "unseeded":
             if line.startswith("err "):
                 raise SystemExit("engine_check: %s" % line)
         elif line:
@@ -812,18 +812,50 @@ def compare(pg, stmts, eng, must):
     def count(k):
         counts[k] = counts.get(k, 0) + 1
 
-    tx = {}          # (table, key) -> [image before the transaction, image now]: what PostgreSQL's tables show the open transaction changed
+    tx = []          # the changes of the open transaction, in order: (table, key, image before, image after, key salt, old salt, new salt)
     tx_ddl = [False]
+    live = {}        # (table, key) -> (key salt, row salt) of every row there is, as the engine's changes gave them; None: no such row
+    over = {}        # the same, for what the open transaction has changed
+    given = set()    # every salt the engine has given
+
+    def salts_follow(i, row):
+        """One change's salts against the row's history (6ag): what it says the row had is what the write before gave; a key's salt stays while the row does; no salt is given twice."""
+        t, k, o, nw, ks, osalt, nsalt = row
+        had = over[(t, k)] if (t, k) in over else live.get((t, k))
+        if o is None:
+            if had is not None or osalt is not None or ks in given:
+                fail(i, "a new row's salts: the row was there, or its key's salt is not new")
+            given.add(ks)
+        elif had != (ks, osalt):
+            fail(i, "the salts a write says the row had are not the ones the write before gave", "%s %s" % (k, had))
+        if nw is None:
+            if nsalt is not None:
+                fail(i, "a row that is gone has a salt")
+            over[(t, k)] = None
+        else:
+            if nsalt is None or len(nsalt) != 16 or len(ks) != 16 or nsalt in given:
+                fail(i, "a row's new salt is missing, or was given before")
+            given.add(nsalt)
+            over[(t, k)] = (ks, nsalt)
 
     def facts_agree(i, body, rows):
         """The engine's `changes` for the commit (its F line) against the reference's (tools/state.py), over the net facts of `rows`."""
         line = [x for x in body if x.startswith("F ")]
+        # version 2 (docs/spec/l3a.md section 9): the key is a commitment over the key's salt, a hash is over the row's salt and the image; netted by commitment
+        per = {}
+        for t, k, o, nw, ks, osalt, nsalt in rows:
+            kc = hashlib.sha256(b"cancho-db/key/v1\x00" + ks + k).digest()
+            oh = None if o is None else hashlib.sha256(b"cancho-db/row/v2\x00" + osalt + o).digest()
+            nh = None if nw is None else hashlib.sha256(b"cancho-db/row/v2\x00" + nsalt + nw).digest()
+            if (t, kc) in per:
+                per[(t, kc)][1] = nh
+            else:
+                per[(t, kc)] = [oh, nh]
         facts = []
-        for (t, k), (o, nw) in sorted(rows.items()):
-            if o == nw:
+        for (t, kc), (oh, nh) in sorted(per.items()):
+            if oh == nh:
                 continue
-            h = lambda im: None if im is None else hashlib.sha256(b"cancho-db/row/v1\x00" + im).digest()
-            facts.append((0 if o is None else 2 if nw is None else 1, t, k, h(o), h(nw)))
+            facts.append((0 if oh is None else 2 if nh is None else 1, t, kc, oh, nh))
         if not line:
             if rows:
                 fail(i, "no facts for a commit that changed rows")
@@ -845,6 +877,11 @@ def compare(pg, stmts, eng, must):
         state = blk[-1].split()[1] if blk and blk[-1].startswith("S ") else "?"
         body = blk[1:-1]
         pre = pg.status
+        if pre == "I" and (over or tx):
+            # a transaction that ended without its commit took its changes with it
+            over.clear()
+            del tx[:]
+            tx_ddl[0] = False
         if head.startswith("refused "):
             tag = head.split()[1]
             if must:
@@ -937,36 +974,45 @@ def compare(pg, stmts, eng, must):
                 if before.get(k) != after.get(k):
                     want.add((tname.encode(), k, before.get(k), after.get(k)))
             got = set()
+            rows = []
             for line in changes:
-                _, t, k, o, nw = line.split()
-                got.add((unhex(t), unhex(k), None if o == "-" else unhex(o), None if nw == "-" else unhex(nw)))
+                f = line.split()
+                t, k = unhex(f[1]), unhex(f[2])
+                o, nw = (None if f[3] == "-" else unhex(f[3])), (None if f[4] == "-" else unhex(f[4]))
+                got.add((t, k, o, nw))
+                rows.append((t, k, o, nw, bytes.fromhex(f[5]), None if f[6] == "-" else bytes.fromhex(f[6]), None if f[7] == "-" else bytes.fromhex(f[7])))
             if got == want and len(got) == len(changes):
                 count("agree-changes")
+                # the key and the images are PostgreSQL's: with the salts the engine gave them (docs/m3-engine.md 6ag) they are the facts of the commit (6af)
+                for row in rows:
+                    salts_follow(i, row)
+                tx.extend(rows)
             else:
                 fail(i, "changes differ", "only engine: %s\n     only postgres: %s" % (sorted(got - want, key=str)[:3], sorted(want - got, key=str)[:3]))
-            # the facts of the commit (docs/m3-engine.md 6af): from what PostgreSQL's table shows the statement changed
-            for t, k, o, nw in want:
-                if (t, k) in tx:
-                    tx[(t, k)][1] = nw
-                else:
-                    tx[(t, k)] = [o, nw]
+                tx_ddl[0] = True
             if pre == "I":
-                facts_agree(i, body, tx)
-                tx.clear()
+                if not tx_ddl[0]:
+                    facts_agree(i, body, tx)
+                live.update(over)
+                over.clear()
+                del tx[:]
+                tx_ddl[0] = False
         else:
             count("agree-ddl")
             if sql == "commit" and pre == "T":
                 if not tx_ddl[0]:
                     facts_agree(i, body, tx)
+                # the transaction's rows are the branch's now
+                live.update(over)
             elif sql not in ("begin", "commit", "rollback") and pre == "T":
                 # DDL in a transaction: its commit's facts are not compared
                 tx_ddl[0] = True
-            if pg.status == "I":
-                tx.clear()
-                tx_ddl[0] = False
-        if pg.status == "I":
-            tx.clear()
-            tx_ddl[0] = False
+            if sql.startswith("drop table ") and head.startswith("ok "):
+                # its rows went with it, and their salts
+                gone = sql.split()[2].encode()
+                for d in (live, over):
+                    for key in [key for key in d if key[0] == gone]:
+                        d[key] = None
     return counts, fails, refused_answered, answered
 
 
@@ -1771,14 +1817,25 @@ def erasure():
 
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "erase.db")
-        run_engine(path, ["create table er (k integer primary key, s text)", "insert into er values (1, '%s'), (2, '%s'), (3, '%s')" % (one, two, three), "!commit"])
+        salts = {}   # key -> every salt the engine gave it: its key's and each of its versions' (docs/m3-engine.md 6ag)
+
+        def note(out):
+            for b in out:
+                for line in b:
+                    if line.startswith("C "):
+                        f = line.split()
+                        salts.setdefault(bytes.fromhex(f[2]), set()).update(bytes.fromhex(x) for x in f[5:8] if x != "-")
+
+        note(run_engine(path, ["create table er (k integer primary key, s text)", "insert into er values (1, '%s'), (2, '%s'), (3, '%s')" % (one, two, three), "!commit"]))
         data = open(path, "rb").read()
         if one.encode() not in data or two.encode() not in data or three.encode() not in data:
             raise SystemExit("engine_check: the rows are not in the page file after a commit")
         # an update and a delete: what the rows were stays in the history, in the file and to AS OF
         newer = "THIRD-NEW-rezrov"
-        run_engine(path, ["update er set s = 'CHANGED-VALUE-nitfol' where k = 1", "delete from er where k = 2", "update er set s = '%s' where k = 3" % newer] + settle)
+        note(run_engine(path, ["update er set s = 'CHANGED-VALUE-nitfol' where k = 1", "delete from er where k = 2", "update er set s = '%s' where k = 3" % newer] + settle))
         data = open(path, "rb").read()
+        if sorted(len(v) for v in salts.values()) != [2, 3, 3] or any(x not in data for v in salts.values() for x in v):
+            raise SystemExit("engine_check: the salts of the rows and of their past are not all in the page file (%s)" % sorted(len(v) for v in salts.values()))
         if one.encode() not in data or two.encode() not in data:
             raise SystemExit("engine_check: the history of an updated and of a deleted row is not in the page file")
         out = run_engine(path, ["!asof 2", "select s from er order by k", "!asof -", "select s from er order by k"])
@@ -1795,6 +1852,11 @@ def erasure():
                 raise SystemExit("engine_check: %s is still in the page file after its key was erased, two commits and a sweep" % gone)
         if three.encode() not in data or newer.encode() not in data:
             raise SystemExit("engine_check: a row that was not erased, or its past, is gone from the page file")
+        # and so are its salts: the key's and every version's; those of the row that was not erased are there
+        for key, kept in ((b"[1]", False), (b"[2]", False), (b"[3]", True)):
+            for x in salts[key]:
+                if (x in data) != kept:
+                    raise SystemExit("engine_check: a salt of the row %s is %s the page file after the erase" % (key.decode(), "not in" if kept else "still in"))
         # the row that was not erased still has its past: what it held before its update is read AS OF before it
         out = run_engine(path, ["!asof 2", "select s from er order by k", "!asof 4", "select s from er order by k", "!asof -", "select s from er order by k"])
         if [texts(b) for b in out] != [[three], [three], [newer]]:
@@ -1806,6 +1868,11 @@ def erasure():
         out = run_engine(path, ["!asof 5", "select s from er order by k", "!asof 2", "select s from er order by k"])
         if texts(out[0]) != [newer] or texts(out[1]) != [three]:
             raise SystemExit("engine_check: a dropped table AS OF before the drop reads %s" % out)
+        # with no seed to make salts of, a statement that writes a row is refused and one that reads is not (6ag)
+        out = run_engine(path, ["create table ns (k integer primary key, v integer)", "insert into ns values (1, 1), (2, 2)", "!unseed", "insert into ns values (3, 3)", "update ns set v = 9 where k = 1",
+                                "update ns set k = 7 where k = 2", "update ns set v = 1 where k = 1", "delete from ns where k = 2", "select count(*) from ns", "alter table ns add column z integer default 0"])
+        if heads(out) != ["ok CREATE 0", "ok INSERT 2", "refused engine-no-entropy", "refused engine-no-entropy", "refused engine-no-entropy", "ok UPDATE 1", "ok DELETE 1", "ok SELECT 1", "ok ALTER 0"]:
+            raise SystemExit("engine_check: with no seed the statements answered %s" % heads(out))
         # text that is not UTF-8 is refused (PostgreSQL would not take it either), and the engine goes on
         r = subprocess.run([EXE, path], input=b"create table u8 (k integer primary key, s text)\ninsert into u8 values (1, '\xff\xfe')\ninsert into u8 values (2, 'a\xc3')\ninsert into u8 values (3, '\xc3\xb1')\nselect k from u8\n", capture_output=True)
         heads = [b.split(b"\n")[0] for b in r.stdout.split(b"\n.\n")]
@@ -1921,7 +1988,7 @@ def main():
     npoints, nforked = history(SEED)
     print("engine_check: AS OF %d points of a history reads what was there, from another process, after a sweep and more writes, and on a fork (%d points); the branch is untouched by its fork" % (npoints, nforked))
     erasure()
-    print("engine_check: a deleted row and a dropped table stay in the history; an erased key is gone from the page file two commits and a sweep later, and from every AS OF")
+    print("engine_check: a deleted row and a dropped table stay in the history; an erased key is gone from the page file two commits and a sweep later, with every salt it had, and from every AS OF")
     print("engine_check: %d statements (seed %d): %s" % (len(stmts), SEED, ", ".join("%s=%d" % kv for kv in sorted(counts.items()))))
     print("engine_check: %d of the statements have parameters and go by the extended protocol; the engine answers %d of them (rows, changes or the error)" % (len(psent), pok))
     if pok * 3 < len(psent):

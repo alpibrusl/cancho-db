@@ -388,7 +388,7 @@ fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int, 
             return exec.tree_err(g);
         }
         if g < 0 {
-            let nw = exec.put_known(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl], contents(w.cur)[0..0], false);
+            let nw = exec.row_put(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl], contents(w.cur)[0..0], 0);
             if nw < 0 {
                 return nw;
             }
@@ -595,7 +595,7 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                         moved = !exec.same(contents(w.key), 0, okl, contents(w.key2), 0, kl);
                     }
                     if !moved {
-                        let nw = exec.put_known(p, w, nroot, contents(w.key), okl, contents(w.nrow)[0..ra], contents(w.cur)[0..rl], true);
+                        let nw = exec.row_put(p, w, nroot, contents(w.key), okl, contents(w.nrow)[0..ra], contents(w.cur)[0..rl], 1);
                         if nw < 0 {
                             return nw;
                         }
@@ -614,7 +614,13 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                         } else if g != btree.not_found() {
                             return exec.tree_err(g);
                         } else {
-                            let s1 = btree.put(p, contents(w.sc), side, contents(w.tmp)[65536..65536 + sl], contents(w.nrow)[0..ra]);
+                            // the row under its new key is a new row: new salts, kept with it until the keys are settled
+                            let ns = exec.new_salts(w);
+                            if ns < 0 {
+                                return ns;
+                            }
+                            let fl2 = exec.salted(w, contents(w.nrow)[0..ra]);
+                            let s1 = btree.put(p, contents(w.sc), side, contents(w.tmp)[65536..65536 + sl], contents(w.full)[0..fl2]);
                             if s1 < 0 {
                                 return exec.tree_err(s1);
                             }
@@ -788,7 +794,7 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
             }
             if pass == 1 {
                 let kl = w.klen;
-                let nw = exec.del_known(p, w, nroot, contents(w.key), kl, contents(w.cur)[0..rl]);
+                let nw = exec.row_del(p, w, nroot, contents(w.key), kl, contents(w.cur)[0..rl]);
                 if nw < 0 {
                     return nw;
                 }
@@ -1380,7 +1386,7 @@ pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
             return rl;
         } else {
             let kl = w.klen;
-            let nw = exec.del_known(p, w, nroot, contents(w.key), kl, contents(w.cur)[0..rl]);
+            let nw = exec.row_del(p, w, nroot, contents(w.key), kl, contents(w.cur)[0..rl]);
             if nw < 0 {
                 return nw;
             }
@@ -1554,7 +1560,7 @@ pub fn alter_add[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Wor
                 ra = ra + 1;
             }
             let kl = w.klen;
-            let nw = exec.put_known(p, w, nroot, contents(w.key), kl, contents(w.nrow)[0..ra], contents(w.cur)[0..rl], true);
+            let nw = exec.row_put(p, w, nroot, contents(w.key), kl, contents(w.nrow)[0..ra], contents(w.cur)[0..rl], 2);
             if nw < 0 {
                 return nw;
             }

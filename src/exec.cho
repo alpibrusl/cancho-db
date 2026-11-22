@@ -9,7 +9,7 @@ import cdb.btree;
 import cdb.pager;
 import cdb.tables;
 import cdb.lex;
-import cdb.state;
+import std.crypto;
 
 // The executor of the engine (docs/m3-engine.md 6g): what the statements share. SELECT is in src/execs.cho, the statements that write in src/execw.cho.
 //
@@ -45,6 +45,11 @@ pub fn malformed() -> [] int {
     return 0 - 19;
 }
 
+// A statement that writes a row, and no seed was given to make its salts of (docs/m3-engine.md 6ag).
+pub fn no_entropy() -> [] int {
+    return 0 - 17;
+}
+
 pub fn refusal_name(code: int) -> [] &static [byte] {
     if code == order_dependent() {
         return "engine-order-dependent";
@@ -63,6 +68,9 @@ pub fn refusal_name(code: int) -> [] &static [byte] {
     }
     if code == malformed() {
         return "engine-malformed";
+    }
+    if code == no_entropy() {
+        return "engine-no-entropy";
     }
     return "engine-unsupported";
 }
@@ -281,117 +289,6 @@ pub fn draw_value[&q](w: &q Work) -> [] int {
     return w.dval;
 }
 
-// The facts of a transaction (docs/m3-engine.md 6af). Fold the changes the statement just made (`chg`) into the tree `froot` (0: none yet): a key is the table, a zero byte and the
-// plain key; a value is 66 bytes, for each of "when the transaction first touched the row" and "now" a byte (1: there is an image) and the hash of the image. The new root, or an error
-// (`too_big()` for a key the tree does not hold).
-pub fn facts_take[&q, &z](p: &!z pager.Pager, w: &!q Work, froot: int) -> [file_read, file_write] int {
-    var root = froot;
-    var at = 0;
-    var c = 0;
-    while c < w.nchg {
-        let nl = commit.be(contents(w.chg), at, 2);
-        let kl = commit.be(contents(w.chg), at + 2 + nl, 2);
-        if nl + 1 + kl > 184 {
-            return too_big();
-        }
-        var fk = copy(contents(w.chg), at + 2, nl, contents(w.key), 0);
-        contents(w.key)[fk] = byte_of(0);
-        fk = copy(contents(w.chg), at + 4 + nl, kl, contents(w.key), fk + 1);
-        at = at + 4 + nl + kl;
-        var side = 0;
-        while side < 2 {
-            let il = commit.be(contents(w.chg), at, 4);
-            at = at + 4;
-            let o = 33 * side;
-            if il == 4294967295 {
-                contents(w.uval)[o] = byte_of(0);
-                var z = 0;
-                while z < 32 {
-                    contents(w.uval)[o + 1 + z] = byte_of(0);
-                    z = z + 1;
-                }
-            } else {
-                contents(w.uval)[o] = byte_of(1);
-                state.row_hash(contents(w.chg)[at..at + il], contents(w.uval)[o + 1..o + 33]);
-                at = at + il;
-            }
-            side = side + 1;
-        }
-        let g = btree.get(p, contents(w.sc), root, contents(w.key)[0..fk], contents(w.cur));
-        if g == 66 {
-            // touched before in this transaction: what it was then stays
-            copy(contents(w.cur), 0, 33, contents(w.uval), 0);
-        } else if g != btree.not_found() {
-            return damaged();
-        }
-        var nw = 0;
-        if int_of(contents(w.uval)[0]) == 0 && int_of(contents(w.uval)[33]) == 0 {
-            // made and removed in the transaction: no fact
-            nw = root;
-            if g == 66 {
-                nw = btree.del(p, contents(w.sc), root, contents(w.key)[0..fk]);
-            }
-        } else {
-            nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..fk], contents(w.uval)[0..66]);
-        }
-        if nw < 0 {
-            return tree_err(nw);
-        }
-        root = nw;
-        c = c + 1;
-    }
-    return root;
-}
-
-// `changes` (docs/spec/state.md section 3) of the facts in the tree `froot`, into the 32 bytes of `out`: how many facts, or an error.
-pub fn facts_changes[&q, &z, &o](p: &!z pager.Pager, w: &!q Work, froot: int, out: &!o [byte]) -> [file_read] int {
-    var n = 0;
-    var kl = 0;
-    var more = froot != 0;
-    while more {
-        let r = btree.next_after(p, contents(w.sc), froot, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
-        if r == btree.not_found() {
-            more = false;
-        } else if r < 0 {
-            return tree_err(r);
-        } else {
-            let nk = r / 1024;
-            if r % 1024 != 66 || n >= 4096 {
-                return too_big();
-            }
-            kl = copy(contents(w.key2), 0, nk, contents(w.key), 0);
-            let was = int_of(contents(w.cur)[0]) == 1;
-            let is = int_of(contents(w.cur)[33]) == 1;
-            // a row that ends as it began is no fact
-            if !(was && is && same(contents(w.cur), 1, 32, contents(w.cur), 34, 32)) {
-                var z = 0;
-                while z < nk && int_of(contents(w.key2)[z]) != 0 {
-                    z = z + 1;
-                }
-                var kind = 1;
-                var ol = 32;
-                var nl = 32;
-                if !was {
-                    kind = 0;
-                    ol = 0;
-                } else if !is {
-                    kind = 2;
-                    nl = 0;
-                }
-                let el = state.put_fact(contents(w.nrow), 0, kind, contents(w.key2)[0..z], contents(w.key2)[z + 1..nk], contents(w.cur)[1..1 + ol], contents(w.cur)[34..34 + nl]);
-                if el < 0 {
-                    return unsupported();
-                }
-                state.leaf(contents(w.nrow)[0..el], contents(w.tmp)[32 * n..32 * n + 32]);
-                n = n + 1;
-            }
-        }
-    }
-    state.merkle(contents(w.tmp)[0..32 * n], n, contents(w.uval)[0..32]);
-    state.changes(n, contents(w.uval)[0..32], out);
-    return n;
-}
-
 // The row of an INSERT at which it failed (from 0).
 pub fn failed_row[&q](w: &q Work) -> [] int {
     return w.frow;
@@ -542,6 +439,13 @@ pub res struct Work {
     glen: int,
     did: int,
     dval: int,
+    salts: Box[[byte]],
+    nsalts: Box[[byte]],
+    full: Box[[byte]],
+    ofull: Box[[byte]],
+    seed: Box[[byte]],
+    seeded: bool,
+    scount: int,
 }
 
 pub fn rows_size() -> [] int {
@@ -553,11 +457,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -588,6 +492,11 @@ pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
     unbox_slice(heap, lo);
     unbox_slice(heap, hi);
     unbox_slice(heap, sq);
+    unbox_slice(heap, salts);
+    unbox_slice(heap, nsalts);
+    unbox_slice(heap, full);
+    unbox_slice(heap, ofull);
+    unbox_slice(heap, seed);
     return 0;
 }
 
@@ -1262,7 +1171,6 @@ pub fn scan_next[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_re
         return tree_err(r);
     }
     let nk = r / 1024;
-    let nv = r % 1024;
     if nk < 4 || commit.be(contents(w.key2), 0, 4) != w.tid {
         return 0 - 1;
     }
@@ -1274,6 +1182,13 @@ pub fn scan_next[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_re
         }
     }
     let dl = w.dlen;
+    // the value is the row's two salts and the row (6ag)
+    if r % 1024 < 32 {
+        return damaged();
+    }
+    let nv = r % 1024 - 32;
+    copy(contents(w.cur), 0, 32, contents(w.salts), 0);
+    shift(contents(w.cur), 32, nv);
     if !row.row_ok(contents(w.ctx)[64..64 + dl], contents(w.cur)[0..nv]) {
         // a page that passed its CRC and does not hold a row of this table: nothing is computed from it
         return damaged();
@@ -1283,6 +1198,110 @@ pub fn scan_next[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_re
     copy(contents(w.cur), 0, nv, contents(w.ctx), 1024);
     contents(w.cx)[5] = nv;
     return nv;
+}
+
+// Move the `n` bytes of `buf` from `by` to its start.
+fn shift[&b](buf: &!b [byte], by: int, n: int) -> [] int {
+    var i = 0;
+    while i < n {
+        buf[i] = buf[by + i];
+        i = i + 1;
+    }
+    return n;
+}
+
+// ---- salts (docs/m3-engine.md 6ag). A row's value in the tree is the key's salt (16 bytes), the row's salt (16) and the row. `salts` holds those of the row last read (`scan_next`),
+// `nsalts` those of the row last written.
+
+// The seed the salts are made of: 32 bytes from the system, given once by whoever drives the engine and never stored.
+pub fn seed[&q, &s](w: &!q Work, bytes: &s [byte]) -> [] bool {
+    if len(bytes) != 32 {
+        return false;
+    }
+    copy(bytes, 0, 32, contents(w.seed), 0);
+    w.seeded = true;
+    w.scount = 0;
+    return true;
+}
+
+// Forget the seed (a test's way to a statement with none).
+pub fn unseed[&q](w: &!q Work) -> [] int {
+    w.seeded = false;
+    return 0;
+}
+
+// A new salt into `nsalts` at `at`: the first 16 bytes of SHA-256 of the seed and a counter that goes up.
+fn salt[&q](w: &!q Work, at: int) -> [] int {
+    w.scount = w.scount + 1;
+    build.put_be(contents(w.seed), 32, w.scount, 8);
+    region r {
+        let d = alloc_slice[r](32, byte_of(0));
+        crypto.sha256(contents(w.seed)[0..40], d);
+        copy(d, 0, 16, contents(w.nsalts), at);
+    }
+    return 0;
+}
+
+// New salts for a row under a new key (`nsalts`): 0, or `no_entropy()`.
+pub fn new_salts[&q](w: &!q Work) -> [] int {
+    if !w.seeded {
+        return no_entropy();
+    }
+    salt(w, 0);
+    salt(w, 16);
+    return 0;
+}
+
+// The row `v` with `nsalts` before it, into `full`: its length.
+pub fn salted[&q, &v](w: &!q Work, v: &v [byte]) -> [] int {
+    copy(contents(w.nsalts), 0, 32, contents(w.full), 0);
+    return copy(v, 0, len(v), contents(w.full), 32);
+}
+
+// Store the row `v` at the key `k`. `how` 0: a new row (a new key salt and a new row salt); 1: the row last read, changed (`old`: what it was; its key salt stays, its row salt is
+// new); 2: the row last read, written again as part of a change of its table's definition (its salts stay). The new root, or an error.
+pub fn row_put[&q, &z, &k, &v, &o](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int, v: &v [byte], old: &o [byte], how: int) -> [file_read, file_write] int {
+    if how == 2 {
+        copy(contents(w.salts), 0, 32, contents(w.nsalts), 0);
+    } else if !w.seeded {
+        return no_entropy();
+    } else if how == 0 {
+        salt(w, 0);
+        salt(w, 16);
+    } else {
+        copy(contents(w.salts), 0, 16, contents(w.nsalts), 0);
+        salt(w, 16);
+    }
+    let n = salted(w, v);
+    var on = 0;
+    if how != 0 {
+        copy(contents(w.salts), 0, 32, contents(w.ofull), 0);
+        on = copy(old, 0, len(old), contents(w.ofull), 32);
+    }
+    let r = remember_known(p, w, root, k, kn, contents(w.ofull)[0..on], how != 0);
+    if r < 0 {
+        return r;
+    }
+    let nw = btree.put(p, contents(w.sc), r, k[0..kn], contents(w.full)[0..n]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
+// Remove the row last read (`old`: what it was) from the key `k`: the new root, or an error.
+pub fn row_del[&q, &z, &k, &o](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int, old: &o [byte]) -> [file_read, file_write] int {
+    copy(contents(w.salts), 0, 32, contents(w.ofull), 0);
+    let on = copy(old, 0, len(old), contents(w.ofull), 32);
+    let r = remember_known(p, w, root, k, kn, contents(w.ofull)[0..on], true);
+    if r < 0 {
+        return r;
+    }
+    let nw = btree.del(p, contents(w.sc), r, k[0..kn]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
 }
 
 // Whether the key `k[ka..ka + kn]` is after the key `h[0..hn]` in the tree's order (bytes, a shorter one first).
@@ -1584,6 +1603,26 @@ pub fn change[&q, &o, &n](w: &!q Work, old: &o [byte], has_old: bool, new: &n [b
         build.put_be(contents(w.chg), at, 4294967295, 4);
         at = at + 4;
     }
+    // the salts (6ag): the key's, then the old row's and the new row's, each after a byte that says whether it is there
+    if at + 50 > rows_size() {
+        return too_big();
+    }
+    if has_old {
+        at = copy(contents(w.salts), 0, 16, contents(w.chg), at);
+        contents(w.chg)[at] = byte_of(1);
+        at = copy(contents(w.salts), 16, 16, contents(w.chg), at + 1);
+    } else {
+        at = copy(contents(w.nsalts), 0, 16, contents(w.chg), at);
+        contents(w.chg)[at] = byte_of(0);
+        at = at + 17;
+    }
+    if has_new {
+        contents(w.chg)[at] = byte_of(1);
+        at = copy(contents(w.nsalts), 16, 16, contents(w.chg), at + 1);
+    } else {
+        contents(w.chg)[at] = byte_of(0);
+        at = at + 17;
+    }
     w.cfill = at;
     w.nchg = w.nchg + 1;
     return 0;
@@ -1597,7 +1636,7 @@ pub fn max_stored_key() -> [] int {
 }
 
 pub fn max_stored_row() -> [] int {
-    return 780;
+    return 748;
 }
 
 // The transaction the next statement that writes belongs to (1 or more; 0: no history is kept).
