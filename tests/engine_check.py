@@ -906,6 +906,11 @@ def compare(pg, stmts, eng, must):
                 fail(i, "the transaction is %s, PostgreSQL's: %s" % (state, pg.status))
                 raise SystemExit("engine_check: the two are out of step; stopping")
             continue
+        # a column added and a table dropped change rows too (docs/m3-engine.md 6ai): every row of the table is another row, or gone
+        rowsddl = how == "ddl" and sql.startswith(("alter table ", "drop table "))
+        if rowsddl:
+            how = "write"
+            tname = re.match(r"(?:alter|drop) table (?:if exists )?(\w+)", sql).group(1)
         before = snapshot(tname) if how == "write" and pre != "E" else None
         err, oids, rows, tag = pg.query(sql)
         if err is None:
@@ -967,8 +972,10 @@ def compare(pg, stmts, eng, must):
                 continue
             count("agree-returning")
         changes = [line for line in body[1:] if line.startswith("C ")]
+        if rowsddl:
+            count("agree-ddl")
         if how == "write" and before is not None:
-            after = snapshot(tname)
+            after = snapshot(tname) or {}
             want = set()
             for k in set(before) | set(after):
                 if before.get(k) != after.get(k):
@@ -1004,15 +1011,6 @@ def compare(pg, stmts, eng, must):
                     facts_agree(i, body, tx)
                 # the transaction's rows are the branch's now
                 live.update(over)
-            elif sql not in ("begin", "commit", "rollback") and pre == "T":
-                # DDL in a transaction: its commit's facts are not compared
-                tx_ddl[0] = True
-            if sql.startswith("drop table ") and head.startswith("ok "):
-                # its rows went with it, and their salts
-                gone = sql.split()[2].encode()
-                for d in (live, over):
-                    for key in [key for key in d if key[0] == gone]:
-                        d[key] = None
     return counts, fails, refused_answered, answered
 
 
@@ -1868,10 +1866,10 @@ def erasure():
         out = run_engine(path, ["!asof 5", "select s from er order by k", "!asof 2", "select s from er order by k"])
         if texts(out[0]) != [newer] or texts(out[1]) != [three]:
             raise SystemExit("engine_check: a dropped table AS OF before the drop reads %s" % out)
-        # with no seed to make salts of, a statement that writes a row is refused and one that reads is not (6ag)
+        # with no seed to make salts of, a statement that writes a row is refused and one that reads is not (6ag); a column added writes every row of its table (6ai)
         out = run_engine(path, ["create table ns (k integer primary key, v integer)", "insert into ns values (1, 1), (2, 2)", "!unseed", "insert into ns values (3, 3)", "update ns set v = 9 where k = 1",
                                 "update ns set k = 7 where k = 2", "update ns set v = 1 where k = 1", "delete from ns where k = 2", "select count(*) from ns", "alter table ns add column z integer default 0"])
-        if heads(out) != ["ok CREATE 0", "ok INSERT 2", "refused engine-no-entropy", "refused engine-no-entropy", "refused engine-no-entropy", "ok UPDATE 1", "ok DELETE 1", "ok SELECT 1", "ok ALTER 0"]:
+        if heads(out) != ["ok CREATE 0", "ok INSERT 2", "refused engine-no-entropy", "refused engine-no-entropy", "refused engine-no-entropy", "ok UPDATE 1", "ok DELETE 1", "ok SELECT 1", "refused engine-no-entropy"]:
             raise SystemExit("engine_check: with no seed the statements answered %s" % heads(out))
         # text that is not UTF-8 is refused (PostgreSQL would not take it either), and the engine goes on
         r = subprocess.run([EXE, path], input=b"create table u8 (k integer primary key, s text)\ninsert into u8 values (1, '\xff\xfe')\ninsert into u8 values (2, 'a\xc3')\ninsert into u8 values (3, '\xc3\xb1')\nselect k from u8\n", capture_output=True)

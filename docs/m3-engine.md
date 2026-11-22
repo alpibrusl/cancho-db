@@ -1001,7 +1001,7 @@ with the process. A statement that writes with no seed given is refused (`engine
 *The cost.* 32 bytes a row, so the longest row is 748 bytes where it was 780. **A page file written before this change is not readable after it** (a row's first 32 bytes would be
 taken for salts): nothing was promised about page files, and none exists outside a test.
 
-*Not decided here:* `alter table ... add column` rewrites every row with its salts as they were and no fact, which is what PostgreSQL's capture does too (no trigger fires), and
+*Not decided here (decided in 6ai, which corrects this: the rewrite did leave the log unable to verify, and a column added now gives each row a new salt and a fact):* `alter table ... add column` rewrites every row with its salts as they were and no fact, which is what PostgreSQL's capture does too (no trigger fires), and
 leaves the next fact of each row starting from an image the log never committed to. That is a question for the log (what a change of definition is, there), not for the salts.
 
 **Test.** For every change the engine reports the three salts beside the key and the images. The differential (a) already holds the key and the images against PostgreSQL's; (b) now
@@ -1046,9 +1046,8 @@ follows, and replaying the facts from nothing gives exactly the rows the engine 
 
 *Not in this part, and pinned by the test as the refusals they are:*
 
-- **a column added** rewrites every row's image with no fact (6ag), so the next change of such a row is `replay-precondition`; **a table dropped** takes its rows with no fact,
-  so the end is `replay-final`. The log has no notion of a change of definition yet; until it has, a log of an engine whose tables were altered does not verify. This is the first
-  thing the log needs before it can be relied on;
+- *(corrected in 6ai)* as first built, **a column added** rewrote every row's image with no fact, so the next change of such a row was `replay-precondition`, and **a table
+  dropped** took its rows with no fact, so the end was `replay-final`; the test pinned both refusals. 6ai makes each a change of rows, and the pins are gone;
 - commits on a fork (no record is made off the first branch), the erasure of a row from the store (the store here is the test's, made of what the engine printed), statements
   that change no row (DDL, a sequence's value) which are in no commit;
 - **the log is not written by the engine.** The test program prints records and the test keeps them. A crash after a record was given out and before the page file's commit
@@ -1057,6 +1056,31 @@ follows, and replaying the facts from nothing gives exactly the rows the engine 
 **Built.** `facts.seal`, the table notes in `facts.take`, `tables.head_key`; `!log` and `!rows` in the test program. Measured: 12 seeds of 2,000 random statements (885 to 1,039
 commits and 3,018 to 4,332 changes each) and the fixed history: the log and all three verifiers `ok ... final`, every tampered file refused with its rule. 12 mutants, each
 killed by a verifier's own rule (`seq-gap`, `parent-count`, `bad-signature`, `state-mismatch`, `store-foreign-row`) or by a record the engine could no longer make.
+
+## 6ai. A column added and a table dropped are changes of rows
+
+6ah found that a log of the engine did not verify once a table had a column added (every row's image changes, and no fact said so) or was dropped (its rows are gone, and no
+fact said so). PostgreSQL's capture has the same hole: no row trigger fires for either. The engine does not need to inherit it.
+
+**Design.** Both are what they do to rows:
+
+- `alter table ... add column` writes every row of the table again with the new column's value. That is an update of each row: its key salt stays, **its row salt is new**,
+  and the statement reports the change from the image under the old definition to the image under the new one (`exec.change_def`), which is a fact of the commit. (6ag kept the
+  salts as they were; that is corrected there.) A consequence: with no seed to make salts of, a column added to a table that has rows is refused (`engine-no-entropy`);
+- `drop table` reports each row it removes as a row deleted.
+
+A table made again under a dropped one's name has other rows: new key salts, so other commitments. Nothing changes for a table with no rows, for `add column if not exists` of
+a column that is there, or for an index.
+
+*The cost* is the one an update of every row has: a fact a row, the 16 MiB a statement's changes may take (beyond it the statement is refused, as an update is).
+
+*Not in this part:* the definition itself. The log now tells every change of every row, so a replay ends at the rows there are; it does not say that a column was added or what
+its type is (a commit's schema hash is still zeros, 6ah).
+
+**Test.** The differential (`tests/engine_check.py`) treats both statements as writes: PostgreSQL's table is read before and after (`to_jsonb` of each row; after a drop, no
+rows), and the engine's reported changes must be exactly the difference, with the salts following each row's history and the commit's `changes` equal to the reference's over
+them, inside transactions too (a transaction with DDL in it was skipped by the facts' comparison before; it is not any more). `tests/engine_log.py` has both in its fixed
+history and its random one (a column added to the random table, the table dropped and made again), and the three verifiers must still say `ok ... final`.
 
 ## 7. Taking over, safely
 

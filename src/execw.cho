@@ -1391,6 +1391,11 @@ pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                 return nw;
             }
             nroot = nw;
+            // each row that goes with the table is a row deleted, and a fact of the commit (6ai)
+            let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);
+            if cr < 0 {
+                return cr;
+            }
         }
     }
     let nl = w.nlen;
@@ -1560,11 +1565,16 @@ pub fn alter_add[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Wor
                 ra = ra + 1;
             }
             let kl = w.klen;
-            let nw = exec.row_put(p, w, nroot, contents(w.key), kl, contents(w.nrow)[0..ra], contents(w.cur)[0..rl], 2);
+            // the row is another row now, of another definition: a change like an update's, with a new salt, and a fact of the commit (6ai)
+            let nw = exec.row_put(p, w, nroot, contents(w.key), kl, contents(w.nrow)[0..ra], contents(w.cur)[0..rl], 1);
             if nw < 0 {
                 return nw;
             }
             nroot = nw;
+            let cr = exec.change_def(w, contents(w.cur)[0..rl], true, contents(w.nrow)[0..ra], true, da - 6);
+            if cr < 0 {
+                return cr;
+            }
         }
     }
     if w.code != 0 {

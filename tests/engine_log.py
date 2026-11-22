@@ -16,8 +16,7 @@ Then tools/verify.py must accept the log (chain, numbers, signatures) and every 
 hash of the facts of its lines, each `state` follows from its parent's, and replaying the facts from nothing gives exactly the rows of the dump. Then what must not pass is tried:
 a line of the store removed, an image changed, a row missing from the dump, a row in the dump changed, a record cut out of the log.
 
-Two things the engine does that its log does not tell yet are pinned as what they are, refusals by the verifiers (6ah, "not in this part"): a column added to a table changes
-every row's image with no fact, so the next change of such a row is `replay-precondition`; a table dropped takes its rows with no fact, so the end is `replay-final`.
+A column added to a table and a table dropped are in the history: each changes rows (6ai), and the log has to tell it for the replay to end at the rows there are.
 
 No PostgreSQL is needed: nothing here asks whether the answers are right (tests/engine_check.py does), only whether the log tells what the engine did.
 """
@@ -67,13 +66,22 @@ FIXED = [
     "update note set body = 'bye' where k = 'first' returning k",
     "delete from pair",
     "select count(*) from acct",
+    "alter table acct add column note text default 'n'",          # every row of the table is another row (6ai)
+    "update acct set note = 'm' where id = 2",
+    "create table gone (k integer primary key, v text)",
+    "insert into gone values (1, 'a'), (2, 'b')",
+    "begin", "update gone set v = 'c' where k = 1", "alter table gone add column w integer", "insert into gone values (3, 'd', 4)", "commit",
+    "drop table gone",                                            # its rows are rows deleted
+    "create table gone (k integer primary key)",                  # the name again: other rows
+    "insert into gone values (1)",
 ]
-TABLES = ["acct", "note", "pair", "rnd"]
+TABLES = ["acct", "note", "pair", "rnd", "gone"]
 
 
 def random_history(rng, n):
     out = ["create table rnd (k integer primary key, t text, n bigint)"]
     intxn = False
+    ncol = [0]
     for _ in range(n):
         c = rng.random()
         k = rng.randrange(40)
@@ -84,15 +92,23 @@ def random_history(rng, n):
             out.append(rng.choice(["commit", "commit", "rollback"]))
             intxn = False
         elif c < 0.50:
-            out.append("insert into rnd values (%d, '%s', %d)%s" % (k, rng.choice(["a", "bb", "", "ccc"]), rng.randrange(1000), rng.choice(["", " on conflict do nothing"])))
+            out.append("insert into rnd (k, t, n) values (%d, '%s', %d)%s" % (k, rng.choice(["a", "bb", "", "ccc"]), rng.randrange(1000), rng.choice(["", " on conflict do nothing"])))
         elif c < 0.75:
             op = rng.choice(["=", "<", ">"])
             # a key is moved one row at a time: moving several is refused, since the order would decide the answer (engine-order-dependent)
             out.append("update rnd set n = %d%s where k %s %d" % (rng.randrange(1000), rng.choice(["", ", t = 'u'"] + ([", k = k + 40"] if op == "=" else [])), op, k))
         elif c < 0.92:
             out.append("delete from rnd where k %s %d" % (rng.choice(["=", "=", "<"]), k))
-        else:
+        elif c < 0.985 or intxn:
             out.append("update acct set cents = cents + 1 where id = %d" % rng.choice([1, 2, 4, 30]))
+        elif c < 0.993:
+            ncol[0] += 1
+            out.append("alter table rnd add column x%d %s" % (ncol[0], rng.choice(["integer", "text default 'd'", "bigint default 7"])))
+        else:
+            # the table dropped and made again, with the columns it has
+            out.append("drop table rnd")
+            out.append("create table rnd (k integer primary key, t text, n bigint)")
+            ncol[0] = 0
     if intxn:
         out.append("commit")
     return out
@@ -227,15 +243,6 @@ def main():
                                        ("a row changed in the dump", files.store(), dump(out[out.index("mark"):], TABLES, bend=nrows // 2)[0], "replay-final")):
                 v = verdict(cmd, work, files.log(), st, lv)
                 check("%s: %s is %s" % (cmd, name, want), v.startswith("reject rule=%s " % want), v)
-        # what the log does not tell yet
-        for name, script, tables, want in (("a column added, then its row changed", ["create table lim (k integer primary key)", "insert into lim values (1)", "alter table lim add column c integer default 5", "update lim set c = 6"], ["lim"], "replay-precondition"),
-                                           ("a table dropped", ["create table lim (k integer primary key)", "insert into lim values (1)", "create table kept (k integer primary key)", "insert into kept values (1)", "drop table lim"], ["kept"], "replay-final")):
-            lim = Files()
-            o = run(str(work / ("pages-" + want)), ["!log " + KEY] + script + ["!mark"] + ["!rows " + t for t in tables])
-            lim.take(o[:o.index("mark")])
-            for cmd in VERIFIERS:
-                v = verdict(cmd, work, lim.log(), lim.store(), dump(o[o.index("mark"):], tables)[0])
-                check("%s: not told yet, %s: %s" % (cmd, name, want), v.startswith("reject rule=%s " % want), v)
         print("commits %d, changes %d, rows at the end %d" % (len(files.records), len(files.deltas), nrows))
     if FAILED:
         print("FAIL engine log: %d failed" % len(FAILED))
