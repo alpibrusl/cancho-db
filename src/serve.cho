@@ -1,0 +1,310 @@
+edition 9;
+module cdb.serve;
+
+import std.addr;
+import cdb.login;
+import cdb.pager;
+import cdb.pstore;
+import cdb.exec;
+import cdb.drive;
+import cdb.session;
+import cdb.wire;
+
+// One connection of the engine's server (docs/m3-engine.md 6al): the startup, then a statement at a time, each answered after what it committed is on the disk.
+
+// All of `data` to the client: false if the connection is gone.
+fn send[&c, &d](conn: &!c Conn, data: &d [byte]) -> [conn_write] bool {
+    var sent = 0;
+    while sent < len(data) {
+        match conn_write(conn, data[sent..len(data)]) {
+            Sent::Wrote(x) => {
+                sent = sent + x;
+            }
+            Sent::Again => {
+            }
+            Sent::Failed(e) => {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Read until `buf` holds `need` bytes: how many it holds then, or -1 if the client is gone first.
+fn fill_to[&c, &b](conn: &!c Conn, buf: &!b [byte], have: int, need: int) -> [conn_read] int {
+    var fill = have;
+    while fill < need {
+        if need > len(buf) {
+            return 0 - 1;
+        }
+        match conn_read(conn, buf[fill..len(buf)]) {
+            Received::Data(g) => {
+                fill = fill + g;
+            }
+            Received::End => {
+                return 0 - 1;
+            }
+            Received::Again => {
+            }
+            Received::Failed(e) => {
+                return 0 - 1;
+            }
+        }
+    }
+    return fill;
+}
+
+pub fn from_here[&c](conn: &c Conn) -> [] bool {
+    var yes = false;
+    region r {
+        let raw = alloc_slice[r](19, byte_of(0));
+        if conn_peer(conn, raw) == 0 {
+            match addr.decode(raw) {
+                addr.Parsed::Ok(p) => {
+                    yes = login.is_loopback(p);
+                }
+                addr.Parsed::Bad => {
+                }
+            }
+        }
+    }
+    return yes;
+}
+
+// Drop the first `n` of the `fill` bytes `buf` holds: how many it holds then, from its start.
+fn shift[&b](buf: &!b [byte], n: int, fill: int) -> [] int {
+    var j = 0;
+    while n + j < fill {
+        buf[j] = buf[n + j];
+        j = j + 1;
+    }
+    return fill - n;
+}
+
+// The first packets of a connection, until a startup is answered: how many bytes of `buf` are held then (what the client sent after its startup without waiting), or -1 if
+// the connection is to be closed.
+fn startup[&c, &b, &o](conn: &!c Conn, buf: &!b [byte], out: &!o [byte]) -> [conn_read, conn_write] int {
+    var tries = 0;
+    var have = 0;
+    while tries < 4 {
+        var fill = fill_to(conn, buf, have, 4);
+        if fill < 0 {
+            return 0 - 1;
+        }
+        let n = login.startup_body_len(buf[0..4]);
+        if n < 0 {
+            return 0 - 1;
+        }
+        fill = fill_to(conn, buf, fill, 4 + n);
+        if fill < 0 {
+            return 0 - 1;
+        }
+        var kind = 0;
+        region r {
+            let at = alloc_slice[r](6, 0);
+            kind = login.parse_startup(buf[4..4 + n], at);
+        }
+        // what a client sent after this packet without waiting for the answer is the start of what follows
+        have = shift(buf, 4 + n, fill);
+        if kind == login.kind_ssl() || kind == login.kind_gss() {
+            // no TLS here: the client goes on in clear, or goes away
+            out[0] = byte_of('N');
+            if !send(conn, out[0..1]) {
+                return 0 - 1;
+            }
+        } else if kind == login.kind_startup() {
+            var p = wire.auth_ok(out, 0);
+            p = wire.parameter(out, p, "server_version", "16.0 (cancho-db engine)");
+            p = wire.parameter(out, p, "server_encoding", "UTF8");
+            p = wire.parameter(out, p, "client_encoding", "UTF8");
+            p = wire.parameter(out, p, "DateStyle", "ISO, MDY");
+            p = wire.parameter(out, p, "integer_datetimes", "on");
+            p = wire.parameter(out, p, "standard_conforming_strings", "on");
+            p = wire.key_data(out, p);
+            p = wire.ready(out, p, session.idle());
+            if p < 0 || !send(conn, out[0..p]) {
+                return 0 - 1;
+            }
+            return have;
+        } else {
+            return 0 - 1;
+        }
+        tries = tries + 1;
+    }
+    return 0 - 1;
+}
+
+// Answer one statement: false if the connection is gone, or (`st[1]` set) the server must stop.
+fn query[&h, &c, &z, &q, &b, &s, &o, &r, &t](heap: &!h Heap, conn: &!c Conn, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, sql: &s [byte], out: &!o [byte], roots: &!r [int], st: &!t [int]) -> [heap, conn_write, file_read, file_write] bool {
+    exec.params_clear(w);
+    let wr = pager.begin(pg);
+    let on = session.open(pg, w, st[8..16], roots[0]);
+    if wr < 0 || on < 0 {
+        st[1] = 7;
+        return send(conn, out[0..wire.error(out, 0, true, "58030", "cancho-db: the page file cannot be read", "")]);
+    }
+    let mode = session.mode(st[8..16]);
+    var pl = 0 - 1;
+    if mode == 0 {
+        pl = drive.prepare(pg, w, sub, sql, on);
+    }
+    var run = drive.run_new(heap, len(sql) + 256);
+    var alive = true;
+    borrow mut run as &!m in {
+        var after = 0;
+        if pl >= 0 {
+            after = drive.run(pg, w, m, drive.text(sub)[0..pl], on, mode, true);
+        } else {
+            after = drive.run(pg, w, m, sql, on, mode, false);
+        }
+        let o = drive.outcome(m);
+        var nr = 0;
+        region kr {
+            // no log is written yet (6al): no key, no record
+            let key = alloc_slice[kr](0, byte_of(0));
+            let rec = alloc_slice[kr](1, byte_of(0));
+            nr = session.close(pg, w, st[8..16], roots[0], after, o != drive.o_ok() && o != drive.o_control(), key, rec);
+        }
+        var p = 0;
+        if nr >= 0 && nr != roots[0] {
+            // durable before it is acknowledged: the page file's commit comes before the answer
+            roots[0] = nr;
+            if session.state(st[8..16]) == session.idle() {
+                let seq = pstore.commit(pg, exec.scratch(w), roots, st[0]);
+                if seq < 0 {
+                    nr = seq;
+                } else {
+                    st[0] = seq;
+                }
+            }
+        }
+        if nr < 0 {
+            st[1] = 7;
+            p = wire.error(out, 0, true, "58030", "cancho-db: the page file cannot be written", "");
+            alive = send(conn, out[0..p]);
+        } else {
+            let said = session.said(st[8..16]);
+            if said == 1 {
+                p = wire.complete_as(out, 0, "BEGIN");
+            } else if said == 2 {
+                p = wire.complete_as(out, 0, "COMMIT");
+            } else if said == 3 {
+                p = wire.complete_as(out, 0, "ROLLBACK");
+            } else if said == 4 {
+                p = wire.error(out, 0, false, "25P02", "current transaction is aborted, commands ignored until end of transaction block", "");
+            } else if o == drive.o_error() {
+                p = wire.error(out, 0, false, exec.sqlstate(drive.code(m)), "cancho-db: error ", exec.sqlstate(drive.code(m)));
+            } else if o != drive.o_ok() {
+                p = wire.error(out, 0, false, wire.refused_state(), "cancho-db: refused ", drive.refusal(m));
+            } else {
+                if drive.has_rows(m) {
+                    p = wire.row_description(out, 0, drive.names(m), w);
+                    var k = 0;
+                    while k < exec.count_of(w) && p >= 0 && alive {
+                        // as many rows to a write as the buffer holds: the answer may be larger than any buffer, and a write for each message would wait on the client's
+                        // acknowledgement of the one before
+                        var next = wire.data_row(out, p, w, k);
+                        if next < 0 && p > 0 {
+                            alive = send(conn, out[0..p]);
+                            next = wire.data_row(out, 0, w, k);
+                        }
+                        p = next;
+                        k = k + 1;
+                    }
+                }
+                p = wire.complete(out, p, drive.kind(m), exec.count_of(w));
+            }
+            p = wire.ready(out, p, session.state(st[8..16]));
+            if p < 0 {
+                // an answer that does not fit a message this server can build: the connection ends rather than send half of one
+                alive = false;
+            } else if alive {
+                alive = send(conn, out[0..p]);
+            }
+        }
+    }
+    drive.run_free(heap, run);
+    return alive && st[1] == 0;
+}
+
+// Serve one connection to its end. `roots` are the page file's trees (the first is the branch's); `st[0]` is the number of its last commit, `st[1]` becomes the status the
+// server must stop with if the page file fails, and `st[8..16]` is the session's.
+pub fn connection[&h, &c, &z, &q, &b, &i, &o, &r, &t](heap: &!h Heap, conn: &!c Conn, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, buf: &!i [byte], out: &!o [byte], roots: &!r [int], st: &!t [int]) -> [heap, conn_read, conn_write, file_read, file_write] int {
+    var fill = startup(conn, buf, out);
+    var skipping = false;
+    while fill >= 0 && st[1] == 0 {
+        var n = wire.frame(buf, fill);
+        while n == 0 && fill >= 0 {
+            fill = fill_to(conn, buf, fill, fill + 1);
+            if fill >= 0 {
+                n = wire.frame(buf, fill);
+            }
+        }
+        if fill < 0 {
+            n = 0;
+        } else if n < 0 {
+            send(conn, out[0..wire.error(out, 0, true, wire.violation_state(), "cancho-db: a message of no length a message has", "")]);
+            fill = 0 - 1;
+        }
+        if n > 0 {
+            let t = int_of(buf[0]);
+            if t == 'X' {
+                fill = 0 - 1;
+            } else if t == 'Q' {
+                let e = wire.query_end(buf[5..n]);
+                var alive = true;
+                if e < 0 {
+                    send(conn, out[0..wire.error(out, 0, true, wire.violation_state(), "cancho-db: a query that is no string", "")]);
+                    alive = false;
+                } else if e == 0 {
+                    alive = send(conn, out[0..wire.ready(out, wire.empty_query(out, 0), session.state(st[8..16]))]);
+                } else {
+                    alive = query(heap, conn, pg, w, sub, buf[5..5 + e], out, roots, st);
+                }
+                if !alive {
+                    fill = 0 - 1;
+                }
+            } else if t == 'S' {
+                // Sync: what was skipped since the refusal of the extended protocol ends here
+                skipping = false;
+                if !send(conn, out[0..wire.ready(out, 0, session.state(st[8..16]))]) {
+                    fill = 0 - 1;
+                }
+            } else if t == 'P' || t == 'B' || t == 'D' || t == 'E' || t == 'C' || t == 'H' || t == 'F' {
+                // the extended protocol (and a function call) is not served yet: refused once, then skipped up to the Sync
+                if !skipping {
+                    skipping = true;
+                    if !send(conn, out[0..wire.error(out, 0, false, wire.refused_state(), "cancho-db: refused ", "extended-protocol")]) {
+                        fill = 0 - 1;
+                    }
+                }
+            } else {
+                send(conn, out[0..wire.error(out, 0, true, wire.violation_state(), "cancho-db: a message of no type this server reads", "")]);
+                fill = 0 - 1;
+            }
+            if fill >= 0 {
+                // what was read after this message is the start of the next
+                fill = shift(buf, n, fill);
+            }
+        }
+    }
+    if session.state(st[8..16]) != session.idle() && st[1] == 0 {
+        // the connection ended inside a transaction: it is rolled back (what it drew from counters stays drawn, 6y), and the next connection finds no transaction. If that
+        // cannot be done the server stops: it does not hand one client's transaction to the next
+        pager.begin(pg);
+        var nr = session.open(pg, w, st[8..16], roots[0]);
+        if nr >= 0 {
+            region kr {
+                let key = alloc_slice[kr](0, byte_of(0));
+                let rec = alloc_slice[kr](1, byte_of(0));
+                nr = session.close(pg, w, st[8..16], roots[0], session.is_rollback(), false, key, rec);
+            }
+        }
+        if nr < 0 {
+            st[1] = 7;
+        } else {
+            roots[0] = nr;
+        }
+    }
+    return 0;
+}

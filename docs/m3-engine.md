@@ -1132,6 +1132,74 @@ read `AS OF` (refused), and the exact tag of a refusal at each stage (the lexer'
 *The test program is now 874 lines where it was 1,155 before 6aj.* What it still decides: which branch, which point `AS OF`, when to commit the page file, and the lines
 of its own protocol.
 
+## 6al. A server: PostgreSQL's protocol in front of the engine, first part
+
+Until here the engine was reached by a test program that reads lines. This is the first program a PostgreSQL client can connect to with no PostgreSQL behind it.
+
+**Scope of this part, deliberately small:** one connection at a time, the simple query protocol, no authentication, no log written. Each of the four is its own later part and
+is listed below as what it is.
+
+**Design.** `build/engine PAGEFILE PORT` (`proxy/engine.cho`) listens on a port and serves one connection to its end, then the next.
+
+- *Who may connect.* A client from this machine (the loopback addresses), as for the proxy; any other is closed unread. **There is no login**: a startup message is answered
+  `AuthenticationOk` whatever user it names. The proxy's token login (`src/login.cho`) is the next part; until then the server is for a test and a developer's own machine.
+- *Startup.* An `SSLRequest` or `GSSENCRequest` is answered `N` (no TLS: loopback only). A startup of protocol 3.0 is answered `AuthenticationOk`, the parameters a client
+  reads (`server_version`, `server_encoding` and `client_encoding` `UTF8`, `DateStyle`, `integer_datetimes`, `standard_conforming_strings`), `BackendKeyData` and
+  `ReadyForQuery`. A cancel request is closed: nothing runs long enough to cancel.
+- *A query* (`Q`) is one statement. The server does what the test program does and nothing else: `session.open`, `drive.prepare`, `drive.run`, `session.close` (6ae, 6aj,
+  6ak). The answer is written from the `Run` and the rows where they are: `RowDescription` (each column's name and type; no table or column number, the engine has none to
+  give that a client could use), a `DataRow` per row in text, `CommandComplete` with the tag (C164); or `ErrorResponse` with the SQLSTATE the engine gave; then
+  `ReadyForQuery` with the session's state (`I`, `T`, `E`). An empty query is `EmptyQueryResponse`.
+- *A refusal is an error a client can tell from PostgreSQL's:* SQLSTATE `0A000` (feature not supported) and the message `cancho-db: refused <tag>`, the tag being the rule
+  that refused. In a transaction it fails the transaction, as any error does (6v).
+- *Durable before acknowledged.* When a statement left a commit (a statement of its own that wrote, or `commit`), the page file is committed (`pstore.commit`: the write and
+  the `fsync` of the superblock) **before** `CommandComplete` is sent. If that fails the client is told `58030` and the server stops; it does not go on over a file it could
+  not write.
+- *A connection that ends inside a transaction* rolls it back.
+- *The extended protocol* (`Parse`, `Bind`, ...) is refused, properly: one `ErrorResponse` (`0A000`, `extended-protocol`), everything up to `Sync` skipped, `ReadyForQuery`
+  at `Sync`. `Terminate` ends the connection. Any other message type, a length under 4 or over 16 MiB ends the connection with an error: there is no way to find the next
+  message after it.
+
+`src/wire.cho` holds the messages (pure: bytes into a buffer), so that they have mutants; the program holds the socket.
+
+*Not in this part:* **the extended protocol**, which is what `cancho-pg` and so `cancho-hooks` speak for every statement with a parameter (the engine already runs those,
+6w; the server cannot be sent them yet). **The log**: the server commits the page file and writes no log, so nothing it does can be verified yet (6ah made the records; where
+they are written, and in what order with the page file, is not designed). **Authentication. More than one connection** (a second client waits until the first is gone).
+`AS OF`, forks and erasure, which the test program reaches by its own commands and SQL has no form for yet.
+
+**Test** (`tests/engine_wire.py`; no PostgreSQL). The oracle is the test program, whose answers are held against PostgreSQL's for the same statements (C150, C164): a history
+from the differential's own generator is run through the test program and, over a socket, through the server; for every statement the two must agree on the outcome (the
+tag and count, or the SQLSTATE, or the refusal's tag), the column names and type oids, every row's text, and the transaction's state. Then the server is stopped and the
+test program opens **the server's page file**: every table must hold what the test program's own file holds. And: the server is killed (`SIGKILL`) after an acknowledged
+commit and the rows are there on restart; a connection dropped inside a transaction leaves nothing of it; `psql` (a client this project did not write) runs a script
+against it and against PostgreSQL and must print the same (skipped, and said so, where no PostgreSQL is at hand; the gate has one); the extended protocol is refused and
+the connection goes on; garbage (random bytes, a huge length, a half message and a close) never stops the server.
+
+**Built.** `src/wire.cho` (the messages), `src/serve.cho` (one connection: startup, a statement at a time, the commit before the answer, the rollback at the end),
+`proxy/engine.cho` (the listener and the page file; 192 lines). Measured, 3 seeds: 2,031 statements each (570 fixed, 1,461 random) answered by the server as by the test
+program (for seed 1: 722 commands, 555 answers with rows, 449 errors, 305 refusals), and the server's page file read by the test program as its own, 20 tables. A run takes
+17 to 22 s here, every write committed to the disk before its answer (500 single-row inserts: about 0.5 s on this machine's disk, which is a sandbox's). `psql` 16 prints the same 54 lines for a script of 15 statements against the server and against
+PostgreSQL 16.15. 54 kinds of garbage; the server answers the next connection after each.
+
+*Found while testing, and corrected:*
+
+- the design said a client that sends more than its startup before it is answered is closed. It was closed without a word, and nothing is wrong with such a client: what
+  follows the startup is now kept and read as the messages it is;
+- a connection that ended inside a transaction was rolled back twice over (the session was also reset when the next connection began), and the reset hid that the rollback
+  could fail unseen. The reset is gone; a rollback that cannot be done stops the server rather than hand one client's transaction to the next;
+- **a select of one row took 44 ms.** The first version wrote the row's description to the socket, then the row, then the end: three small writes, and the second waits
+  for the client to acknowledge the first (500 selects: 22 s; 500 inserts, whose answer is one message: 0.5 s). The differential did not see it, because it asks nothing
+  about time. An answer is now written in as few writes as the buffer allows (500 selects: 0.07 s; an answer of 30,000 rows and 2.4 MB, larger than the buffer, arrives whole
+  in 0.05 s), and the test has both the large answer and a floor for the speed. Turning off the socket's delay as well changed nothing measurable, so it is not done;
+- what the test did not see until a mutant survived: a message arriving in two pieces, a value drawn from a counter in a transaction the connection took with it (it stays
+  drawn), the server closing its side at `Terminate`, a second refused batch of the extended protocol, and that the server says why (`08P01`) before it closes on a message
+  it cannot read past.
+
+31 mutants (16 of the messages, 15 of the connection), each built into a server of its own and judged by this test.
+
+*What the test cannot reach:* the page file failing under the server (`58030` and the stop): there is no way to make it fail from outside. The crash test (C156) covers the
+page file's own behaviour at every step; the server's two lines around it are read, not run.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

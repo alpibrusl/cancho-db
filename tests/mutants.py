@@ -2727,6 +2727,148 @@ ENGINE = [
      '                contents(w.key)[kl] = byte_of(1);\n                kl = kl + 1;', '                contents(w.key)[kl] = byte_of(0);\n                kl = kl + 1;'),
 ]
 
+# The engine's server (docs/m3-engine.md 6al): the messages and one connection. Judged by tests/engine_wire.py, which holds the server against the test program.
+WIRE = [
+    ('wire: the startup is answered with a request for a password', 'src/wire.cho',
+     "return shut(out, at, be(out, open(out, at, 'R'), 0, 4));",
+     "return shut(out, at, be(out, open(out, at, 'R'), 3, 4));"),
+    ('wire: a transaction that is open is said to be idle', 'src/wire.cho',
+     "        c = 'T';",
+     "        c = 'I';"),
+    ('wire: a transaction that has failed is said to be open', 'src/wire.cho',
+     "        c = 'E';",
+     "        c = 'T';"),
+    ('wire: a tag is not ended', 'src/wire.cho',
+     '    return shut(out, at, zero(out, b + tn));',
+     '    return shut(out, at, b + tn);'),
+    ('wire: a bigint is said to be four bytes', 'src/wire.cho',
+     '    if oid == 20 {\n        return 8;',
+     '    if oid == 20 {\n        return 4;'),
+    ('wire: a text is said to be of a fixed size', 'src/wire.cho',
+     '    return 65535;\n}',
+     '    return 0;\n}'),
+    ('wire: a column is said to come from a table', 'src/wire.cho',
+     '        p = be(out, be(out, p, 0, 4), 0, 2);\n        p = be(out, be(out, p, oid, 4)',
+     '        p = be(out, be(out, p, 1, 4), 0, 2);\n        p = be(out, be(out, p, oid, 4)'),
+    ('wire: a column has a type modifier', 'src/wire.cho',
+     'p = be(out, be(out, p, 4294967295, 4), 0, 2);',
+     'p = be(out, be(out, p, 0, 4), 0, 2);'),
+    ('wire: a null is an empty string', 'src/wire.cho',
+     '            p = build.put_be(out, p, 4294967295, 4);',
+     '            p = build.put_be(out, p, 0, 4);'),
+    ('wire: an error says its severity once', 'src/wire.cho',
+     "p = be(out, p, 'S' + 3 * side, 1);",
+     "p = be(out, p, 'S' + 0 * side, 1);"),
+    ('wire: an error that ends the connection is not said to', 'src/wire.cho',
+     '        if fatal {\n            p = text(out, p, "FATAL");',
+     '        if false {\n            p = text(out, p, "FATAL");'),
+    ('wire: a message of length under four is read', 'src/wire.cho',
+     '    if n < 4 || n > max_message() {',
+     '    if n > max_message() {'),
+    ('wire: a message is whole one byte early', 'src/wire.cho',
+     '    if fill < 1 + n {',
+     '    if fill < n {'),
+    ('wire: a semicolon is part of the statement', 'src/wire.cho',
+     "    if e > 0 && int_of(body[e - 1]) == ';' {",
+     '    if false {'),
+    ('wire: a query need not be a string', 'src/wire.cho',
+     '    if e == 0 || int_of(body[e - 1]) != 0 {',
+     '    if e == 0 {'),
+    ('wire: a refusal has another SQLSTATE', 'src/wire.cho',
+     '    return "0A000";',
+     '    return "XX000";'),
+    ('serve: a commit is acknowledged before it is on the disk', 'src/serve.cho',
+     '            if session.state(st[8..16]) == session.idle() {\n                let seq = pstore.commit(',
+     '            if false {\n                let seq = pstore.commit('),
+    ("serve: what a statement wrote is not the branch's", 'src/serve.cho',
+     '            roots[0] = nr;\n            if session.state',
+     '            if session.state'),
+    ('serve: a connection that ends in a transaction leaves it open', 'src/serve.cho',
+     '    if session.state(st[8..16]) != session.idle() && st[1] == 0 {',
+     '    if false {'),
+    ('serve: a client from anywhere is served', 'src/serve.cho',
+     '                    yes = login.is_loopback(p);',
+     '                    yes = true;'),
+    ('serve: every message of the extended protocol is refused', 'src/serve.cho',
+     '                if !skipping {',
+     '                if true {'),
+    ('serve: BEGIN in a failed transaction has another SQLSTATE', 'src/serve.cho',
+     'p = wire.error(out, 0, false, "25P02",',
+     'p = wire.error(out, 0, false, "25P01",'),
+    ('serve: an error is a refusal', 'src/serve.cho',
+     '            } else if o == drive.o_error() {',
+     '            } else if false {'),
+    ('serve: what follows a message in the buffer is lost', 'src/serve.cho',
+     '        buf[j] = buf[n + j];',
+     '        buf[j] = buf[j];'),
+    ('serve: what a client sent after its startup is lost', 'src/serve.cho',
+     '            return have;',
+     '            return 0;'),
+    ('serve: an SSLRequest is answered yes', 'src/serve.cho',
+     "            out[0] = byte_of('N');",
+     "            out[0] = byte_of('S');"),
+    ('serve: an empty query is run', 'src/serve.cho',
+     '                } else if e == 0 {',
+     '                } else if false {'),
+    ('serve: a buffer that is full is not sent before it is written again', 'src/serve.cho',
+     '                            alive = send(conn, out[0..p]);\n                            next = wire.data_row(out, 0, w, k);',
+     '                            next = wire.data_row(out, 0, w, k);'),
+    ('serve: a row that does not fit after the others is the end', 'src/serve.cho',
+     '                        if next < 0 && p > 0 {',
+     '                        if false {'),
+    ('serve: a Terminate is no end', 'src/serve.cho',
+     "            if t == 'X' {\n                fill = 0 - 1;",
+     "            if t == 'X' {\n                fill = fill;"),
+    ('serve: a Sync does not end the skipping', 'src/serve.cho',
+     '                skipping = false;\n',
+     ''),
+]
+
+
+def run_wire(cancho):
+    """Each mutant is a server of its own, built and held against the test program (build/enginecheck, which is not mutated here)."""
+    import concurrent.futures
+    import threading
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in WIRE if not only or only in m[0]]
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
+            "execw.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho")
+
+    def one(mutant):
+        label, rel, old, new = mutant
+        db = "cdb_wiremut_" + "".join(c for c in threading.current_thread().name if c.isdigit())
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            shutil.copytree(ROOT / "src", work / "src")
+            f = work / rel
+            text = f.read_text()
+            if text.count(old) != 1:
+                return label, "STALE  %-48s original text occurs %d times" % (label, text.count(old)), True
+            f.write_text(text.replace(old, new))
+            exe = work / "engine"
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/engine.cho")] + [str(work / "src" / x) for x in srcs] + ["-o", str(exe)], capture_output=True, text=True)
+            if b.returncode != 0:
+                return label, "BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]), True
+            try:
+                r = subprocess.run([sys.executable, str(ROOT / "tests/engine_wire.py"), str(exe), str(ROOT / "build/enginecheck"), "300", "1"], capture_output=True, text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
+                rc, out = r.returncode, r.stdout + r.stderr
+            except subprocess.TimeoutExpired:
+                rc, out = 1, "FAIL timed out"
+            if rc != 0:
+                first = [l for l in out.splitlines() if l.startswith("FAIL")] or [l for l in out.splitlines() if l.strip()][-1:]
+                return label, "killed   %-46s %s" % (label, (first[0] if first else "a crash")[:90]), False
+            return label, "SURVIVED %-46s the server answers as the test program" % label, True
+
+    survivors = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(4, os.cpu_count() or 1))) as pool:
+        for label, line, alive in pool.map(one, table):
+            print(line, flush=True)
+            if alive:
+                survivors.append(label)
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run_engine(cancho):
     """Each mutant is built and judged on its own, so several are run at once (a database a worker): the group is the longest of the gate."""
     import concurrent.futures
@@ -2781,6 +2923,8 @@ def run_engine(cancho):
 def run(kind, cancho):
     if kind == "engine":
         return run_engine(cancho)
+    if kind == "wire":
+        return run_wire(cancho)
     if kind == "guard":
         return run_guard(cancho)
     if kind == "build":

@@ -1,0 +1,235 @@
+edition 9;
+module cdb.wire;
+
+import cdb.commit;
+import cdb.build;
+import cdb.exec;
+import cdb.answer;
+import cdb.session;
+
+// The messages of PostgreSQL's protocol (version 3.0) that the engine's server sends and reads (docs/m3-engine.md 6al). Each `put` writes one whole message into `out` from `at`
+// and gives where it ends, or -1 if it does not fit. Nothing here touches a socket.
+
+// The longest message a client may send: 16 MiB. A longer one cannot be skipped to find the next, so the connection ends.
+pub fn max_message() -> [] int {
+    return 16777216;
+}
+
+// The SQLSTATE of a refusal (feature not supported), and of what a client sent that the protocol does not allow.
+pub fn refused_state() -> [] &static [byte] {
+    return "0A000";
+}
+
+pub fn violation_state() -> [] &static [byte] {
+    return "08P01";
+}
+
+fn text[&o](out: &!o [byte], at: int, t: &static [byte]) -> [] int {
+    return build.put_bytes(out, at, t);
+}
+
+// A message's first five bytes: its type, and room for its length. Where the body starts, or -1.
+fn open[&o](out: &!o [byte], at: int, t: int) -> [] int {
+    if at < 0 || at + 5 > len(out) {
+        return 0 - 1;
+    }
+    out[at] = byte_of(t);
+    return at + 5;
+}
+
+// The length of the message that began at `from` and ends at `at` (it counts itself and not the type). `at`, or -1.
+fn shut[&o](out: &!o [byte], from: int, at: int) -> [] int {
+    if at < 0 {
+        return 0 - 1;
+    }
+    build.put_be(out, from + 1, at - from - 1, 4);
+    return at;
+}
+
+fn zero[&o](out: &!o [byte], at: int) -> [] int {
+    if at < 0 || at + 1 > len(out) {
+        return 0 - 1;
+    }
+    out[at] = byte_of(0);
+    return at + 1;
+}
+
+fn be[&o](out: &!o [byte], at: int, v: int, n: int) -> [] int {
+    if at < 0 || at + n > len(out) {
+        return 0 - 1;
+    }
+    return build.put_be(out, at, v, n);
+}
+
+// AuthenticationOk.
+pub fn auth_ok[&o](out: &!o [byte], at: int) -> [] int {
+    return shut(out, at, be(out, open(out, at, 'R'), 0, 4));
+}
+
+// ParameterStatus: a name and its value.
+pub fn parameter[&o](out: &!o [byte], at: int, name: &static [byte], value: &static [byte]) -> [] int {
+    return shut(out, at, zero(out, text(out, zero(out, text(out, open(out, at, 'S'), name)), value)));
+}
+
+// BackendKeyData. There is nothing to cancel (one statement at a time, none long), so the key opens nothing: zeros.
+pub fn key_data[&o](out: &!o [byte], at: int) -> [] int {
+    return shut(out, at, be(out, be(out, open(out, at, 'K'), 0, 4), 0, 4));
+}
+
+// ReadyForQuery, with the session's state: `I` idle, `T` in a transaction, `E` in one that has failed.
+pub fn ready[&o](out: &!o [byte], at: int, state: int) -> [] int {
+    var c = 'I';
+    if state == session.open_txn() {
+        c = 'T';
+    } else if state == session.failed() {
+        c = 'E';
+    }
+    return shut(out, at, be(out, open(out, at, 'Z'), c, 1));
+}
+
+// EmptyQueryResponse.
+pub fn empty_query[&o](out: &!o [byte], at: int) -> [] int {
+    return shut(out, at, open(out, at, 'I'));
+}
+
+// CommandComplete with the tag of a command of `kind` over `n` rows (src/answer.cho).
+pub fn complete[&o](out: &!o [byte], at: int, kind: int, n: int) -> [] int {
+    let b = open(out, at, 'C');
+    if b < 0 || b + 41 > len(out) {
+        return 0 - 1;
+    }
+    let tn = answer.tag(kind, n, out[b..b + 40]);
+    return shut(out, at, zero(out, b + tn));
+}
+
+// CommandComplete with a tag as it is (`BEGIN`, `COMMIT`, `ROLLBACK`).
+pub fn complete_as[&o](out: &!o [byte], at: int, tag: &static [byte]) -> [] int {
+    return shut(out, at, zero(out, text(out, open(out, at, 'C'), tag)));
+}
+
+// The size a client is told a type has: its bytes, or -1 for one of no fixed size.
+fn type_size(oid: int) -> [] int {
+    if oid == 20 {
+        return 8;
+    }
+    if oid == 23 {
+        return 4;
+    }
+    if oid == 21 {
+        return 2;
+    }
+    if oid == 16 {
+        return 1;
+    }
+    return 65535;
+}
+
+// RowDescription for the answer in `w`: `names` holds each column's name (a `u16` length and the bytes, as `drive.names` gives them). A column is said to come from no table
+// (table 0, column 0), with its type's oid and size, no modifier, in text.
+pub fn row_description[&o, &n, &q](out: &!o [byte], at: int, names: &n [byte], w: &!q exec.Work) -> [] int {
+    let nc = exec.columns_of(w);
+    var p = be(out, open(out, at, 'T'), nc, 2);
+    var na = 0;
+    var c = 0;
+    while c < nc {
+        if na + 2 > len(names) {
+            return 0 - 1;
+        }
+        let l = commit.be(names, na, 2);
+        if na + 2 + l > len(names) {
+            return 0 - 1;
+        }
+        p = zero(out, build.put_bytes(out, p, names[na + 2..na + 2 + l]));
+        na = na + 2 + l;
+        let oid = answer.oid(exec.type_of(w, c));
+        p = be(out, be(out, p, 0, 4), 0, 2);
+        p = be(out, be(out, p, oid, 4), type_size(oid), 2);
+        p = be(out, be(out, p, 4294967295, 4), 0, 2);
+        c = c + 1;
+    }
+    return shut(out, at, p);
+}
+
+// DataRow for row `k` of the answer in `w`: each value as text, a null as a length of -1.
+pub fn data_row[&o, &q](out: &!o [byte], at: int, w: &!q exec.Work, k: int) -> [] int {
+    let nc = exec.columns_of(w);
+    var p = be(out, open(out, at, 'D'), nc, 2);
+    var ra = exec.row_at(w, k);
+    var c = 0;
+    while c < nc {
+        if p < 0 || p + 4 > len(out) {
+            return 0 - 1;
+        }
+        let n = answer.text(exec.rows_of(w), ra, out, p + 4);
+        if n == 0 - 1 {
+            p = build.put_be(out, p, 4294967295, 4);
+        } else if n < 0 {
+            return 0 - 1;
+        } else {
+            build.put_be(out, p, n, 4);
+            p = p + 4 + n;
+        }
+        ra = answer.skip(exec.rows_of(w), ra);
+        c = c + 1;
+    }
+    return shut(out, at, p);
+}
+
+// ErrorResponse: severity ERROR (or FATAL), the SQLSTATE, and a message of two parts (`lead` and `rest`, one after the other).
+pub fn error[&o, &r](out: &!o [byte], at: int, fatal: bool, state: &static [byte], lead: &static [byte], rest: &r [byte]) -> [] int {
+    var p = open(out, at, 'E');
+    var side = 0;
+    while side < 2 {
+        p = be(out, p, 'S' + 3 * side, 1);
+        if fatal {
+            p = text(out, p, "FATAL");
+        } else {
+            p = text(out, p, "ERROR");
+        }
+        p = zero(out, p);
+        side = side + 1;
+    }
+    p = zero(out, text(out, be(out, p, 'C', 1), state));
+    p = zero(out, build.put_bytes(out, text(out, be(out, p, 'M', 1), lead), rest));
+    return shut(out, at, zero(out, p));
+}
+
+// A message a client sent, at the start of `buf[0..fill]`: its whole length (the type and what its length counts) if it is all there, 0 if more must be read, -1 if its length
+// is not one a message has (under 4, or over `max_message()`).
+pub fn frame[&b](buf: &b [byte], fill: int) -> [] int {
+    if fill < 5 {
+        return 0;
+    }
+    let n = commit.be(buf, 1, 4);
+    if n < 4 || n > max_message() {
+        return 0 - 1;
+    }
+    if fill < 1 + n {
+        return 0;
+    }
+    return 1 + n;
+}
+
+fn blank(c: int) -> [] bool {
+    return c == ' ' || c == 9 || c == 10 || c == 13;
+}
+
+// The statement in the body of a Query message: where it ends, without the zero byte that ends the string, the blanks after it and one semicolon (a client that ends its
+// statement with one means no second statement by it). 0: there is no statement, the query is empty. -1: the body is not a string.
+pub fn query_end[&b](body: &b [byte]) -> [] int {
+    var e = len(body);
+    if e == 0 || int_of(body[e - 1]) != 0 {
+        return 0 - 1;
+    }
+    e = e - 1;
+    while e > 0 && blank(int_of(body[e - 1])) {
+        e = e - 1;
+    }
+    if e > 0 && int_of(body[e - 1]) == ';' {
+        e = e - 1;
+    }
+    while e > 0 && blank(int_of(body[e - 1])) {
+        e = e - 1;
+    }
+    return e;
+}

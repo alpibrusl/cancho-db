@@ -1915,15 +1915,8 @@ def erasure():
             raise SystemExit("engine_check: text that is not UTF-8: %s" % heads)
 
 
-def main():
-    admin("drop database if exists %s" % DB)
-    r = admin("create database %s encoding 'UTF8' lc_collate 'C' lc_ctype 'C' template template0" % DB)
-    if r.returncode != 0:
-        raise SystemExit("engine_check: " + r.stderr)
-    pg = Pg(DB)
-    version = pg.query("show server_version")[2][0][0].decode().split()[0]
-    PGMAJOR[0] = int(version.split(".")[0])
-    rng = random.Random(SEED)
+def generate(rng, n, params=True):
+    """A random history of `n` statements, as (sql, how it is compared, the table it is about); `params`: some go with parameters, by the extended protocol."""
     g = Gen(rng)
     tables = {}
     stmts = []   # (sql, how, table name)
@@ -1933,7 +1926,7 @@ def main():
     spare = 0
     added = [0]
     open_txn = False
-    while len(stmts) < N:
+    while len(stmts) < n:
         # a transaction now and then: a few statements, then a commit or a rollback (and, rarely, one of those out of place)
         rt = rng.random()
         if not open_txn and rt < 0.03:
@@ -1983,12 +1976,24 @@ def main():
         else:
             sql, how = g.select()
             stmts.append((sql, how, g.t.name))
-        if stmts[-1][1] != "ddl" and rng.random() < 0.3:
+        if params and stmts[-1][1] != "ddl" and rng.random() < 0.3:
             stmts[-1] = (parametrise(rng, stmts[-1][0]),) + stmts[-1][1:]
+    if open_txn:
+        stmts.append(("commit", "ddl", "ta"))
+    return stmts
+
+
+def main():
+    admin("drop database if exists %s" % DB)
+    r = admin("create database %s encoding 'UTF8' lc_collate 'C' lc_ctype 'C' template template0" % DB)
+    if r.returncode != 0:
+        raise SystemExit("engine_check: " + r.stderr)
+    pg = Pg(DB)
+    version = pg.query("show server_version")[2][0][0].decode().split()[0]
+    PGMAJOR[0] = int(version.split(".")[0])
+    stmts = generate(random.Random(SEED), N)
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "engine.db")
-        if open_txn:
-            stmts.append(("commit", "ddl", "ta"))
         # the two processes part where no transaction is open
         half = len(stmts) // 2
         inside = False
