@@ -1,0 +1,323 @@
+edition 9;
+module cdb.drive;
+
+import cdb.lex;
+import cdb.parse;
+import cdb.stmt;
+import cdb.lower;
+import cdb.pager;
+import cdb.exec;
+import cdb.execs;
+import cdb.answer;
+
+// What the engine does with a statement's text before it parses it (docs/m3-engine.md 6ac, 6ad, 6ae): a subquery that stands where a value does is run first and a parameter takes
+// its place; so does the value a `nextval` will draw. This was written in the program that tests the engine and is here so that it is tested as the engine is (its mutants are in
+// tests/mutants.py, group `engine`).
+
+// What a subquery is run with (docs/m3-engine.md 6ac): the buffers a SELECT needs from text to rows, beside the statement's own.
+pub struct Sub {
+    tb: Box[[int]],
+    t2: Box[[int]],
+    nb: Box[[int]],
+    kb: Box[[int]],
+    vb: Box[[int]],
+    ob: Box[[int]],
+    rb: Box[[int]],
+    st: Box[[int]],
+    gb: Box[[int]],
+    cb: Box[[int]],
+    sc: Box[[int]],
+    schema: Box[[byte]],
+    ir: Box[[byte]],
+    text: Box[[byte]],
+    vtx: Box[[byte]],
+}
+
+pub fn new[&h](heap: &!h Heap) -> [heap] Sub {
+    return Sub { tb: box_slice(heap, 16384, 0), t2: box_slice(heap, 32768, 0), nb: box_slice(heap, 6 * 4160, 0), kb: box_slice(heap, 4160, 0), vb: box_slice(heap, 64, 0), ob: box_slice(heap, 256, 0), rb: box_slice(heap, 512, 0), st: box_slice(heap, 16, 0), gb: box_slice(heap, 4096, 0), cb: box_slice(heap, 16, 0), sc: box_slice(heap, 1024, 0), schema: box_slice(heap, 65536, byte_of(0)), ir: box_slice(heap, 32768, byte_of(0)), text: box_slice(heap, 16384, byte_of(0)), vtx: box_slice(heap, 4096, byte_of(0)) };
+}
+
+pub fn free[&h](heap: &!h Heap, b: Sub) -> [heap] int {
+    let Sub { tb, t2, nb, kb, vb, ob, rb, st, gb, cb, sc, schema, ir, text, vtx } = b;
+    unbox_slice(heap, tb);
+    unbox_slice(heap, t2);
+    unbox_slice(heap, nb);
+    unbox_slice(heap, kb);
+    unbox_slice(heap, vb);
+    unbox_slice(heap, ob);
+    unbox_slice(heap, rb);
+    unbox_slice(heap, st);
+    unbox_slice(heap, gb);
+    unbox_slice(heap, cb);
+    unbox_slice(heap, sc);
+    unbox_slice(heap, schema);
+    unbox_slice(heap, ir);
+    unbox_slice(heap, text);
+    unbox_slice(heap, vtx);
+    return 0;
+}
+
+// Run the SELECT `sql` (a subquery's text) on the tree `root`: 0 with its rows left in `w`, or anything else (a refusal, an error).
+fn scalar[&z, &q, &b, &s](pg: &!z pager.Pager, w: &!q exec.Work, b: &!b Sub, sql: &s [byte], root: int) -> [file_read] int {
+    if len(sql) + 4 > 4096 {
+        return exec.too_big();
+    }
+    let sl = exec.schema(pg, w, root, contents(b.schema));
+    if sl < 0 {
+        return sl;
+    }
+    let n = lex.tokenize(sql, contents(b.tb));
+    if n < 0 || !exec.params_fit(w, sql, contents(b.tb), n, true) {
+        return exec.unsupported();
+    }
+    parse.reset(contents(b.st));
+    contents(b.st)[12] = 0;
+    let q = stmt.select(sql, contents(b.tb), 0, n, contents(b.nb), contents(b.kb), contents(b.vb), contents(b.ob), contents(b.gb), contents(b.cb), contents(b.st));
+    if q != n {
+        return exec.unsupported();
+    }
+    let top = contents(b.st)[2];
+    let ln = lower.lower(sql, contents(b.tb), contents(b.nb), contents(b.kb), top, contents(b.schema)[0..sl], contents(b.rb), contents(b.ir), contents(b.sc));
+    if ln < 0 {
+        return exec.unsupported();
+    }
+    return execs.select(pg, w, root, contents(b.ir)[0..ln], contents(b.sc));
+}
+
+fn tok_is[&s, &t](sql: &s [byte], toks: &t [int], i: int, n: int, c: int) -> [] bool {
+    return i >= 0 && i < n && toks[4 * i] == lex.t_punct() && int_of(sql[toks[4 * i + 1]]) == c;
+}
+
+fn put_text[&o](out: &!o [byte], at: int, text: &static [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        out[at + i] = text[i];
+        i = i + 1;
+    }
+    return at + len(text);
+}
+
+// The subqueries of the statement `sql` (docs/m3-engine.md 6ac): each `(select ...)` that stands where a value does is run, and the statement is written again into `b.text` with a
+// parameter and a cast in its place, bound to the value. The length of the new text; -1 if the statement has no subquery (it runs as it is); -2 if it has one that is not answered (the
+// statement, run as it is, is then refused by the parser as it always was).
+pub fn prepare[&z, &q, &b, &s](pg: &!z pager.Pager, w: &!q exec.Work, b: &!b Sub, sql: &s [byte], root: int) -> [file_read] int {
+    if 4 * (len(sql) + 4) > 32768 || len(sql) + 256 > 16384 {
+        return 0 - 1;
+    }
+    let n = lex.tokenize(sql, contents(b.t2));
+    if n < 0 {
+        return 0 - 1;
+    }
+    var any = false;
+    var i = 0;
+    while i + 1 < n {
+        if tok_is(sql, contents(b.t2), i, n, '(') && parse.kw(sql, contents(b.t2), i + 1, n, "select") {
+            any = true;
+        }
+        if parse.kw(sql, contents(b.t2), i, n, "nextval") && tok_is(sql, contents(b.t2), i + 1, n, '(') {
+            any = true;
+        }
+        i = i + 1;
+    }
+    if !any {
+        return 0 - 1;
+    }
+    if !exec.params_fit(w, sql, contents(b.t2), n, false) {
+        return 0 - 2;
+    }
+    var o = 0;
+    var from = 0;
+    // whether the place is in a list of output columns (the items of a SELECT that is the statement, a RETURNING): a subquery there, under whatever, may give its column its name, which the
+    // parameter in its place would not
+    var named = false;
+    var depth0 = 0;
+    i = 0;
+    while i < n {
+        if tok_is(sql, contents(b.t2), i, n, '(') {
+            depth0 = depth0 + 1;
+        } else if tok_is(sql, contents(b.t2), i, n, ')') {
+            depth0 = depth0 - 1;
+        } else if depth0 == 0 && (parse.kw(sql, contents(b.t2), i, n, "select") && !parse.kw(sql, contents(b.t2), 0, n, "insert") || parse.kw(sql, contents(b.t2), i, n, "returning")) {
+            named = true;
+        } else if depth0 == 0 && (parse.kw(sql, contents(b.t2), i, n, "from") || parse.kw(sql, contents(b.t2), i, n, "where") || parse.kw(sql, contents(b.t2), i, n, "set")) {
+            named = false;
+        }
+        if named && tok_is(sql, contents(b.t2), i, n, '(') && parse.kw(sql, contents(b.t2), i + 1, n, "select") {
+            return 0 - 2;
+        }
+        if parse.kw(sql, contents(b.t2), i, n, "nextval") && tok_is(sql, contents(b.t2), i + 1, n, '(') {
+            // nextval('name') (docs/m3-engine.md 6ad): in an INSERT, once, in its first row, with nothing before it that may leave it uncomputed (a CASE, a COALESCE, an AND, an OR, an IN);
+            // the value it will draw takes its place, and the INSERT makes the draw when its row is reached
+            var ok = parse.kw(sql, contents(b.t2), 0, n, "insert") && exec.draw_id(w) == 0 && i >= 2 && i + 3 < n && contents(b.t2)[4 * (i + 2)] == lex.t_string() && tok_is(sql, contents(b.t2), i + 3, n, ')');
+            var k = 0;
+            while k < n {
+                if parse.kw(sql, contents(b.t2), k, n, "case") {
+                    ok = false;
+                }
+                // nothing before it that may leave what follows uncomputed
+                if k < i && (parse.kw(sql, contents(b.t2), k, n, "coalesce") || parse.kw(sql, contents(b.t2), k, n, "and") || parse.kw(sql, contents(b.t2), k, n, "or") || parse.kw(sql, contents(b.t2), k, n, "in")) {
+                    ok = false;
+                }
+                // in the first row: no `), (` before it (PostgreSQL does not reach a later row if an earlier one fails)
+                if k + 2 < i && tok_is(sql, contents(b.t2), k, n, ')') && tok_is(sql, contents(b.t2), k + 1, n, ',') && tok_is(sql, contents(b.t2), k + 2, n, '(') {
+                    ok = false;
+                }
+                k = k + 1;
+            }
+            if !ok {
+                return 0 - 2;
+            }
+            // (a string's token is what is between its quotes)
+            let na = contents(b.t2)[4 * (i + 2) + 1];
+            let nz = na + contents(b.t2)[4 * (i + 2) + 2];
+            k = na;
+            while k < nz {
+                let c = int_of(sql[k]);
+                if !(c >= 'a' && c <= 'z' || c == '_' || c >= '0' && c <= '9' && k > na) {
+                    return 0 - 2;
+                }
+                k = k + 1;
+            }
+            let id = exec.seq_find(pg, w, root, sql[na..nz]);
+            if id < 0 {
+                return 0 - 2;
+            }
+            let last = exec.seq_last(pg, w, root, id);
+            if last < 0 {
+                return 0 - 2;
+            }
+            let v = last;
+            exec.draw_set(w, id, v + 1);
+            // the digits of `v` (it is at least a sequence's least value, which is not negative)
+            var digits = 1;
+            var div = 1;
+            while v / div >= 10 {
+                div = div * 10;
+                digits = digits + 1;
+            }
+            k = 0;
+            while k < digits {
+                contents(b.vtx)[k] = byte_of('0' + v / div % 10);
+                div = div / 10;
+                k = k + 1;
+            }
+            let num = exec.params_inner(w);
+            if v < 0 || num > 99 || !exec.param_add(w, contents(b.vtx)[0..digits], false) {
+                return 0 - 2;
+            }
+            let start = contents(b.t2)[4 * i + 1];
+            if o + (start - from) + 32 > 16384 {
+                return 0 - 2;
+            }
+            k = from;
+            while k < start {
+                contents(b.text)[o] = sql[k];
+                o = o + 1;
+                k = k + 1;
+            }
+            o = put_text(contents(b.text), o, "($");
+            if num >= 10 {
+                contents(b.text)[o] = byte_of('0' + num / 10);
+                o = o + 1;
+            }
+            contents(b.text)[o] = byte_of('0' + num % 10);
+            o = o + 1;
+            o = put_text(contents(b.text), o, "::bigint)");
+            from = contents(b.t2)[4 * (i + 3) + 1] + 1;
+            i = i + 4;
+        } else if tok_is(sql, contents(b.t2), i, n, '(') && parse.kw(sql, contents(b.t2), i + 1, n, "select") {
+            depth0 = depth0 - 1;
+            // where a value stands: after an operator, a parenthesis or a comma, or one of the words an expression follows; not after IN, EXISTS, a function's name, FROM
+            var ok = i > 0;
+            if ok && (contents(b.t2)[4 * (i - 1)] == lex.t_ident() || contents(b.t2)[4 * (i - 1)] == lex.t_quoted()) {
+                let p = i - 1;
+                ok = parse.kw(sql, contents(b.t2), p, n, "and") || parse.kw(sql, contents(b.t2), p, n, "or") || parse.kw(sql, contents(b.t2), p, n, "not") || parse.kw(sql, contents(b.t2), p, n, "when") || parse.kw(sql, contents(b.t2), p, n, "then") || parse.kw(sql, contents(b.t2), p, n, "else") || parse.kw(sql, contents(b.t2), p, n, "where") || parse.kw(sql, contents(b.t2), p, n, "having") || parse.kw(sql, contents(b.t2), p, n, "between") || parse.kw(sql, contents(b.t2), p, n, "on");
+            }
+            var depth = 1;
+            var j = i + 1;
+            while j < n && depth > 0 {
+                if tok_is(sql, contents(b.t2), j, n, '(') {
+                    depth = depth + 1;
+                } else if tok_is(sql, contents(b.t2), j, n, ')') {
+                    depth = depth - 1;
+                }
+                j = j + 1;
+            }
+            let close = j - 1;
+            if !ok || depth != 0 {
+                return 0 - 2;
+            }
+            let a = contents(b.t2)[4 * (i + 1) + 1];
+            let z = contents(b.t2)[4 * close + 1];
+            let rc = scalar(pg, w, b, sql[a..z], root);
+            if rc != 0 || exec.count_of(w) > 1 || exec.columns_of(w) != 1 {
+                return 0 - 2;
+            }
+            var vn = 0 - 1;
+            if exec.count_of(w) == 1 {
+                vn = answer.text(exec.rows_of(w), exec.row_at(w, 0), contents(b.vtx), 0);
+                if vn < 0 - 1 {
+                    return 0 - 2;
+                }
+            }
+            let ty = exec.type_of(w, 0);
+            let num = exec.params_inner(w);
+            var added = false;
+            if vn < 0 {
+                added = exec.param_add(w, contents(b.vtx)[0..0], true);
+            } else {
+                added = exec.param_add(w, contents(b.vtx)[0..vn], false);
+            }
+            if !added || num > 99 || ty != 1 && ty != 5 && ty != 6 && ty != 2 && ty != 3 {
+                return 0 - 2;
+            }
+            let start = contents(b.t2)[4 * i + 1];
+            if o + (start - from) + 32 > 16384 {
+                return 0 - 2;
+            }
+            var k = from;
+            while k < start {
+                contents(b.text)[o] = sql[k];
+                o = o + 1;
+                k = k + 1;
+            }
+            o = put_text(contents(b.text), o, "($");
+            if num >= 10 {
+                contents(b.text)[o] = byte_of('0' + num / 10);
+                o = o + 1;
+            }
+            contents(b.text)[o] = byte_of('0' + num % 10);
+            o = o + 1;
+            if ty == 1 {
+                o = put_text(contents(b.text), o, "::bigint)");
+            } else if ty == 5 {
+                o = put_text(contents(b.text), o, "::integer)");
+            } else if ty == 6 {
+                o = put_text(contents(b.text), o, "::smallint)");
+            } else if ty == 2 {
+                o = put_text(contents(b.text), o, "::boolean)");
+            } else {
+                o = put_text(contents(b.text), o, "::text)");
+            }
+            from = z + 1;
+            i = close + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    if o + (len(sql) - from) > 16384 {
+        return 0 - 2;
+    }
+    var k = from;
+    while k < len(sql) {
+        contents(b.text)[o] = sql[k];
+        o = o + 1;
+        k = k + 1;
+    }
+    return o;
+}
+
+// The statement as `prepare` wrote it again.
+pub fn text[&b](b: &b Sub) -> [] &b [byte] {
+    return contents(b.text);
+}
