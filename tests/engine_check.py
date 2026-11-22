@@ -1462,6 +1462,10 @@ UNSUP = [
     # a subquery that is not a value computed once (6ac)
     ("select k from fz where n > (select n from fz)", "21000"),                                       # more than one row
     ("select k from fz where n in (select n from fz)", None),
+    ("select k from fz where n not in (select n from fz where k = 99)", None),                        # no row: IN of nothing is not IN of a null
+    (P("select k from fz where n = (select max(n) from fz) and k = $2", "1", "2"), "42P18"),         # a parameter the statement does not name
+    ("select k from fz where n = (select k, n from fz where k = 1)", "42601"),                        # several columns
+    ("select k from fz where n = (select nope from fz where k = 1)", "42703"),                        # it fails
     ("select k from fz f1 where n = (select max(n) from fz where k = f1.k)", None),                   # it names the statement around it
     ("select k from fz where n > (select count(*) from fz where n > (select 5 from fz where k = 1))", None),   # one in another
     ("select k from fz where cast((select 'x' from fz where k = 1) as integer) = 1 and k > 99", "22P02"),  # a condition with no column in it is computed once, before any row
@@ -1482,6 +1486,10 @@ UNSUP = [
     ("insert into fz values (nextval('nope'), 1)", "42P01"),
     ("insert into fz values (1, 1), (nextval('fzs'), 2)", "23505"),                                  # the first row fails: the second's value is not drawn
     ("insert into fz values (1, 1), (greatest(nextval('fzs'), 3), 2)", "23505"),
+    ("insert into fz values (case when false then greatest(nextval('fzs'), 1) else 55 end, 1)", None),   # under a CASE: not computed
+    ("insert into fz values (coalesce(56, greatest(nextval('fzs'), 1)), 1)", None),                  # after a COALESCE that is settled
+    ("insert into fz values (57, 1) returning k > 0 or greatest(nextval('fzs'), 1) > 0", None),
+    ("insert into fz values (nextval('fzs') + 60, nextval('fzs'))", None),                           # twice
     ("insert into fz values (nextval('fzs') + 3000000000, 1)", "22003"),                              # an error of the value drawn: after the draw, to PostgreSQL
     ("insert into fi (k) values ((select max(k) from fz) + 3000000000)", "22003"),                    # the same, for an identity column and a subquery's value
     ("select nextval('fzs') from fz", None),

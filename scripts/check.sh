@@ -58,7 +58,7 @@ echo "== the engine's expression evaluator against PostgreSQL (docs/m3-engine.md
 quiet 4 python3 tests/eval_check.py build/evalcheck 4000 1
 quiet 4 python3 tests/eval_check.py build/evalcheck 4000 2
 echo "== the engine's statements against PostgreSQL (docs/m3-engine.md 6g, 6h): create, insert, update, delete, select; the changes; what must be answered, what must be refused, what must be gone from the file"
-"$CANCHO" build --std proxy/enginecheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/answer.cho -o build/enginecheck
+"$CANCHO" build --std proxy/enginecheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/answer.cho src/drive.cho -o build/enginecheck
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 1
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 2
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 3
