@@ -189,6 +189,27 @@ pub fn pin[&q](p: &q Pager, id: int) -> [] int {
     return 0 - 1;
 }
 
+// Page `id` is the open window's own (no root names it) and is in the cache: where it is there, and it is already marked as to be written when the window closes. The caller may then change it
+// where it is (`bytes_mut`), which is what PostgreSQL does with a page it has pinned. -1 if the page is not such a page.
+pub fn own[&q](p: &!q Pager, id: int) -> [] int {
+    if !is_fresh(p, id) {
+        return 0 - 1;
+    }
+    let slot = id % cache_slots();
+    if contents(p.ctag)[slot] != id {
+        return 0 - 1;
+    }
+    if int_of(contents(p.cdirty)[slot]) != 1 {
+        // already written to the file in this window (the list of pages to write filled up): the caller takes the long way, which marks it again
+        return 0 - 1;
+    }
+    return 4096 * slot;
+}
+
+pub fn bytes_mut[&q](p: &!q Pager) -> [] &!q [byte] {
+    return contents(p.cache);
+}
+
 pub fn bytes[&q](p: &q Pager) -> [] &q [byte] {
     return contents(p.cache);
 }

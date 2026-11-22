@@ -284,7 +284,7 @@ fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int) 
         if g != btree.not_found() {
             return exec.tree_err(g);
         }
-        let nw = exec.put_key(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl]);
+        let nw = exec.put_known(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl], contents(w.cur)[0..0], false);
         if nw < 0 {
             return nw;
         }
@@ -472,7 +472,7 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                         moved = !exec.same(contents(w.key), 0, okl, contents(w.key2), 0, kl);
                     }
                     if !moved {
-                        let nw = exec.put_key(p, w, nroot, contents(w.key), okl, contents(w.nrow)[0..ra]);
+                        let nw = exec.put_known(p, w, nroot, contents(w.key), okl, contents(w.nrow)[0..ra], contents(w.cur)[0..rl], true);
                         if nw < 0 {
                             return nw;
                         }
@@ -665,7 +665,7 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
             }
             if pass == 1 {
                 let kl = w.klen;
-                let nw = exec.del_key(p, w, nroot, contents(w.key), kl);
+                let nw = exec.del_known(p, w, nroot, contents(w.key), kl, contents(w.cur)[0..rl]);
                 if nw < 0 {
                     return nw;
                 }
@@ -983,7 +983,7 @@ pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
             return rl;
         } else {
             let kl = w.klen;
-            let nw = exec.del_key(p, w, nroot, contents(w.key), kl);
+            let nw = exec.del_known(p, w, nroot, contents(w.key), kl, contents(w.cur)[0..rl]);
             if nw < 0 {
                 return nw;
             }
@@ -1095,7 +1095,7 @@ pub fn alter_add[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Wor
                 ra = ra + 1;
             }
             let kl = w.klen;
-            let nw = exec.put_key(p, w, nroot, contents(w.key), kl, contents(w.nrow)[0..ra]);
+            let nw = exec.put_known(p, w, nroot, contents(w.key), kl, contents(w.nrow)[0..ra], contents(w.cur)[0..rl], true);
             if nw < 0 {
                 return nw;
             }

@@ -183,6 +183,170 @@ fn setp[&s](sc: &!s [byte], d: int, id: int, idx: int) -> [] int {
     return 0;
 }
 
+// The value of `key` in the leaf that starts at `base` of `pg`, copied into `out`: its length, `not_found()`, or `err_big()`.
+fn leaf_get[&g, &k, &o](pg: &g [byte], base: int, key: &k [byte], out: &!o [byte]) -> [] int {
+    let count = commit.be(pg, base + 1, 2);
+    var at = base + 7;
+    var i = 0;
+    while i < count {
+        let kl = int_of(pg[at]);
+        let vl = commit.be(pg, at + 1, 2);
+        let c = cmp(key, pg[at + 3..at + 3 + kl]);
+        if c == 0 {
+            if vl > len(out) {
+                return err_big();
+            }
+            copy(out, 0, pg, at + 3 + kl, vl);
+            return vl;
+        }
+        if c < 0 {
+            return not_found();
+        }
+        at = at + 3 + kl + vl;
+        i = i + 1;
+    }
+    return not_found();
+}
+
+// The leaf of the tree `root` that holds (or would hold) `key`, if every page on the way and the leaf are in the cache and the leaf is the open window's own (`pager.own`): where the leaf is in the
+// cache, marked as to be written; or -1. Nothing is read from the file and nothing copied.
+fn own_leaf[&q, &k](p: &!q pager.Pager, root: int, key: &k [byte]) -> [] int {
+    var id = root;
+    var depth = 0;
+    while depth < 16 {
+        let off = pager.pin(p, id);
+        if off < 0 {
+            return 0 - 1;
+        }
+        let t = int_of(pager.bytes(p)[off]);
+        if t == 1 {
+            return pager.own(p, id);
+        }
+        if t != 2 {
+            return 0 - 1;
+        }
+        let (ix, ch, al) = pick(pager.bytes(p)[off..off + 4096], key);
+        id = ch;
+        depth = depth + 1;
+    }
+    return 0 - 1;
+}
+
+// Set `key` to `vbytes` in a leaf that is the statement's own, where the leaf is (docs/m3-engine.md 6u: as PostgreSQL changes a page it has pinned, the bytes after the entry are moved and nothing
+// else is touched). The root, which is unchanged since no page changed its number; or -1 if this way is not open (the leaf is not such a page, or the entry does not fit: the caller takes the long way).
+fn put_in_place[&q, &k, &v](p: &!q pager.Pager, root: int, key: &k [byte], vbytes: &v [byte]) -> [] int {
+    let o = own_leaf(p, root, key);
+    if o < 0 {
+        return 0 - 1;
+    }
+    let pg = pager.bytes_mut(p);
+    let count = commit.be(pg, o + 1, 2);
+    var at = o + 7;
+    var i = 0;
+    var found = false;
+    var here = false;
+    while i < count && !here {
+        let kl = int_of(pg[at]);
+        let c = cmp(key, pg[at + 3..at + 3 + kl]);
+        if c <= 0 {
+            found = c == 0;
+            here = true;
+        } else {
+            at = leaf_next(pg, at);
+            i = i + 1;
+        }
+    }
+    var end = at;
+    var j = i;
+    while j < count {
+        end = leaf_next(pg, end);
+        j = j + 1;
+    }
+    var oldlen = 0;
+    if found {
+        oldlen = leaf_next(pg, at) - at;
+    }
+    let newlen = 3 + len(key) + len(vbytes);
+    if end - oldlen + newlen > o + 4096 {
+        return 0 - 1;
+    }
+    // the entries after this one move to where they now begin
+    if newlen > oldlen {
+        var m = end - 1;
+        while m >= at + oldlen {
+            pg[m + newlen - oldlen] = pg[m];
+            m = m - 1;
+        }
+    } else if newlen < oldlen {
+        var m = at + oldlen;
+        while m < end {
+            pg[m - (oldlen - newlen)] = pg[m];
+            m = m + 1;
+        }
+        // what the shorter entry left behind is not left in the page
+        m = end - (oldlen - newlen);
+        while m < end {
+            pg[m] = byte_of(0);
+            m = m + 1;
+        }
+    }
+    put_entry(pg, at, key, vbytes);
+    if !found {
+        build.put_be(pg, o + 1, count + 1, 2);
+    }
+    return root;
+}
+
+// Remove `key` from a leaf that is the statement's own, where the leaf is: the root, `not_found()`, or -1 if this way is not open (also when the leaf would be left empty: the long way drops it).
+fn del_in_place[&q, &k](p: &!q pager.Pager, root: int, key: &k [byte]) -> [] int {
+    let o = own_leaf(p, root, key);
+    if o < 0 {
+        return 0 - 1;
+    }
+    let pg = pager.bytes_mut(p);
+    let count = commit.be(pg, o + 1, 2);
+    if count < 2 {
+        return 0 - 1;
+    }
+    var at = o + 7;
+    var i = 0;
+    var found = false;
+    var here = false;
+    while i < count && !here {
+        let kl = int_of(pg[at]);
+        let c = cmp(key, pg[at + 3..at + 3 + kl]);
+        if c <= 0 {
+            found = c == 0;
+            here = true;
+        } else {
+            at = leaf_next(pg, at);
+            i = i + 1;
+        }
+    }
+    if !found {
+        return not_found();
+    }
+    var end = at;
+    var j = i;
+    while j < count {
+        end = leaf_next(pg, end);
+        j = j + 1;
+    }
+    let oldlen = leaf_next(pg, at) - at;
+    var m = at + oldlen;
+    while m < end {
+        pg[m - oldlen] = pg[m];
+        m = m + 1;
+    }
+    m = end - oldlen;
+    while m < end {
+        pg[m] = byte_of(0);
+        m = m + 1;
+    }
+    build.put_be(pg, o + 1, count - 1, 2);
+    return root;
+}
+
 // The value of `key` in the tree `root`, copied into `out`: its length, `not_found()`, or an error.
 pub fn get[&q, &s, &k, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte], out: &!o [byte]) -> [file_read] int {
     if root == 0 {
@@ -198,6 +362,10 @@ pub fn get[&q, &s, &k, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
             id = ch0;
             depth = depth + 1;
             off = pager.pin(p, id);
+        }
+        if off >= 0 && int_of(pager.bytes(p)[off]) == 1 {
+            // and so is a leaf: nothing is copied but the value
+            return leaf_get(pager.bytes(p), off, key, out);
         }
         let rc = pager.read_page(p, id, sc[0..4096]);
         if rc < 0 {
@@ -439,6 +607,10 @@ pub fn put[&q, &s, &k, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
         emit_at(sc, w2(), 1, 1, w1(), n - w1());
         return new_page(p, sc, w2(), 0);
     }
+    let quick = put_in_place(p, root, key, vbytes);
+    if quick != 0 - 1 {
+        return quick;
+    }
     let d = descend(p, sc, root, key);
     if d < 0 {
         return d;
@@ -510,6 +682,10 @@ pub fn put[&q, &s, &k, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &
 pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte]) -> [file_read, file_write] int {
     if root == 0 {
         return not_found();
+    }
+    let quick = del_in_place(p, root, key);
+    if quick != 0 - 1 {
+        return quick;
     }
     let d = descend(p, sc, root, key);
     if d < 0 {
