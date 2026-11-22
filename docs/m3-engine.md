@@ -1296,6 +1296,22 @@ no login. It is a demonstration, not a deployment. The order of work this measur
 *The gate skips this test:* it needs a `cancho-hooks` binary (`HOOKS_BIN`), and the gate does not build one. It is measured on a developer's machine, as C180's step
 with `cancho-pg`'s client is.
 
+## 6ao. `truncate`
+
+The first thing `cancho-hooks`' own test asks of its database (6an). Small, and the engine had everything for it.
+
+**Design.** `truncate [table] NAME`, one table, none of the options (several tables, `restart identity`, `cascade`: refused, `unsupported-statement`). Every row of the
+table is removed and is a row deleted: a change the statement reports and a fact of the commit, as for a table dropped (6ai). The table stays, with its indexes and its
+definition, and **its counter goes on from where it was**, which is PostgreSQL's default (`continue identity`). In a transaction it is taken back by a rollback like any
+write. Behind PostgreSQL's capture a `truncate` fires no row trigger and tells the log nothing; here it does.
+
+It is one of the engine's own forms (no IR; the guard refuses it behind PostgreSQL, as it refuses `create sequence`), refused on a tree read `AS OF` and with parameters.
+
+**Test.** The differential's generator truncates a table now and then, and the fixed statements have it alone, with `table`, on a table that is not there (`42P01`), in a
+transaction rolled back and in one committed, and before an insert that must draw the next value of the counter, not the first. As for a table dropped, the rows the
+engine reports are held against PostgreSQL's table read before and after, and the commit's `changes` against the reference's. The three options are pinned as refused.
+`tests/engine_log.py` has it in both histories. 20 seeds of 3,000 statements; 6 mutants; 6 cases of the statement test.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

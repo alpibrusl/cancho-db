@@ -71,6 +71,9 @@ FIXED = [
     "create table gone (k integer primary key, v text)",
     "insert into gone values (1, 'a'), (2, 'b')",
     "begin", "update gone set v = 'c' where k = 1", "alter table gone add column w integer", "insert into gone values (3, 'd', 4)", "commit",
+    "truncate gone",                                              # every row deleted, the table kept (6ao)
+    "insert into gone values (1, 'again', 1)",
+    "begin", "truncate acct", "rollback",
     "drop table gone",                                            # its rows are rows deleted
     "create table gone (k integer primary key)",                  # the name again: other rows
     "insert into gone values (1)",
@@ -101,6 +104,8 @@ def random_history(rng, n):
             out.append("delete from rnd where k %s %d" % (rng.choice(["=", "=", "<"]), k))
         elif c < 0.985 or intxn:
             out.append("update acct set cents = cents + 1 where id = %d" % rng.choice([1, 2, 4, 30]))
+        elif c < 0.989:
+            out.append("truncate rnd")
         elif c < 0.993:
             ncol[0] += 1
             out.append("alter table rnd add column x%d %s" % (ncol[0], rng.choice(["integer", "text default 'd'", "bigint default 7"])))

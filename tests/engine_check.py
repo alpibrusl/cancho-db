@@ -612,6 +612,9 @@ def ddl_more(g, counter):
     if r < 0.95:
         # a sequence (docs/m3-engine.md 6ad): its name among the tables' and the indexes'
         return "create sequence %s%s%s%s" % ("if not exists " if g.r.random() < 0.3 else "", g.pick(["sq1", "sq1", "sq2", "ix1", "ta"]), g.pick(["", "", " minvalue 0", " minvalue 5"]), g.pick(["", "", " start 0", " start 7", " start with 3"]))
+    if r < 0.975:
+        # every row of a table at once (docs/m3-engine.md 6ao)
+        return "truncate %s%s" % (g.pick(["", "table "]), g.pick([t.name, t.name, t.name, "nope"]))
     return "drop index %s" % g.pick(["ix1", "ix2", "ix3"])
 
 
@@ -910,11 +913,11 @@ def compare(pg, stmts, eng, must):
                 fail(i, "the transaction is %s, PostgreSQL's: %s" % (state, pg.status))
                 raise SystemExit("engine_check: the two are out of step; stopping")
             continue
-        # a column added and a table dropped change rows too (docs/m3-engine.md 6ai): every row of the table is another row, or gone
-        rowsddl = how == "ddl" and sql.startswith(("alter table ", "drop table "))
+        # a column added, a table dropped and a table truncated change rows too (docs/m3-engine.md 6ai, 6ao): every row of the table is another row, or gone
+        rowsddl = how == "ddl" and sql.startswith(("alter table ", "drop table ", "truncate "))
         if rowsddl:
             how = "write"
-            tname = re.match(r"(?:alter|drop) table (?:if exists )?(\w+)", sql).group(1)
+            tname = re.match(r"(?:(?:alter|drop) table (?:if exists )?|truncate (?:table )?)(\w+)", sql).group(1)
         before = snapshot(tname) if how == "write" and pre != "E" else None
         err, oids, rows, tag = pg.query(sql)
         if err is None:
@@ -1542,6 +1545,29 @@ FIXED += [("create table fid%d (k integer generated always as identity primary k
 FIXED += [("insert into fid%d (v) values (%d)" % (i, i), "write") for i in range(34)]
 FIXED += [("drop table fid%d" % i, "ddl") for i in range(34)]
 
+FIXED += [
+    # truncate (6ao): every row goes, the table and its counter stay; it is taken back by a rollback like any write
+    ("create table ftr (k integer generated always as identity primary key, v text)", "ddl"),
+    ("insert into ftr (v) values ('a'), ('b'), ('c')", "write"),
+    ("truncate ftr", "ddl"),
+    ("select count(*) from ftr", "set"),
+    ("truncate table ftr", "ddl"),
+    ("insert into ftr (v) values ('d') returning k", "write"),
+    ("begin", "ddl"),
+    ("insert into ftr (v) values ('e')", "write"),
+    ("truncate ftr", "ddl"),
+    ("select count(*) from ftr", "set"),
+    ("rollback", "ddl"),
+    ("select k, v from ftr order by k", "order"),
+    ("begin", "ddl"),
+    ("truncate ftr", "ddl"),
+    ("insert into ftr (v) values ('f')", "write"),
+    ("commit", "ddl"),
+    ("select k, v from ftr order by k", "order"),
+    ("truncate nosuchtable", "ddl"),
+    ("drop table ftr", "ddl"),
+]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)",
              "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
@@ -1652,6 +1678,9 @@ UNSUP = [
     ("update fz set n = nextval('fzs')", None),
     ("create sequence fzt start 0", "22023"),
     ("create sequence fzt increment 2", None),
+    ("truncate fz restart identity", None),                                                          # the options of TRUNCATE are not the engine's
+    ("truncate fz, fw", None),
+    ("truncate fz cascade", None),
     ("update fi set c = 7", "428C9"),                                                                # an identity column is given no value
     ("insert into fi values (2, 9)", "428C9"),
     ("insert into fi (c, k) values (9, 2)", "428C9"),
@@ -1824,6 +1853,9 @@ def history(seed):
         r = subprocess.run([EXE, path], input="!asof %d\ninsert into ta (k) values (1)\n" % points[0][0], capture_output=True, text=True)
         if "refused engine-as-of-write" not in r.stdout:
             raise SystemExit("engine_check: history: a write AS OF a past transaction: %s" % r.stdout[-200:])
+        r = subprocess.run([EXE, path], input="!asof %d\ntruncate ta\n" % points[0][0], capture_output=True, text=True)
+        if "refused engine-unsupported" not in r.stdout or "ok " in r.stdout:
+            raise SystemExit("engine_check: history: a truncate AS OF a past transaction: %s" % r.stdout[-200:])
         r = subprocess.run([EXE, path], input="!asof %d\ncreate sequence hsq\n!asof -\nselect nextval('hsq')\n" % points[0][0], capture_output=True, text=True)
         if "refused engine-unsupported" not in r.stdout or "ok " in r.stdout:
             raise SystemExit("engine_check: history: a sequence made AS OF a past transaction: %s" % r.stdout[-200:])
@@ -2013,7 +2045,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (fid\d*|f[ksonmrcef]\d?|fq2)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (ftr|fid\d*|f[ksonmrcef]\d?|fq2)\b", sql)
         if m:
             return m.group(1)
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")

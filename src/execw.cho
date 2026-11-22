@@ -1286,6 +1286,51 @@ fn tok_number[&s, &t](sql: &s [byte], toks: &t [int], tok: int) -> [] int {
 
 // CREATE SEQUENCE (docs/m3-engine.md 6ad): a name among the tables' and the indexes', a number of its own, a least value (1 if none is said) and a counter that starts one below its
 // first value (the least, if none is said).
+// TRUNCATE (docs/m3-engine.md 6ao): every row of the table is removed, and is a row deleted (a fact of the commit, as for a table dropped, 6ai). The table stays, and its
+// counter goes on from where it was (PostgreSQL's default, CONTINUE IDENTITY).
+pub fn truncate_table[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, sql: &s [byte], toks: &t [int], nodes: &n [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if nodes[6 * stmt] != parse.n_truncate() {
+        return exec.malformed();
+    }
+    let nl = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.nrow)[2..258], 0);
+    if nl < 0 {
+        return exec.unsupported();
+    }
+    build.put_be(contents(w.nrow), 0, nl, 2);
+    exec.copy(contents(w.nrow), 0, 2 + nl, contents(w.lit), 0);
+    let r0 = exec.bind_table(p, w, root, contents(w.lit)[0..2 + nl], 0);
+    if r0 != 0 {
+        return r0;
+    }
+    var nroot = root;
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else {
+            let kl = w.klen;
+            let nw = exec.row_del(p, w, nroot, contents(w.key), kl, contents(w.cur)[0..rl]);
+            if nw < 0 {
+                return nw;
+            }
+            nroot = nw;
+            // each row is a row deleted, and a fact of the commit (6ao)
+            let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);
+            if cr < 0 {
+                return cr;
+            }
+        }
+    }
+    // the table stays: what is left is its tree with no row of it
+    w.root = nroot;
+    return 0;
+}
+
 pub fn create_sequence[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, sql: &s [byte], toks: &t [int], nodes: &n [int], stmt: int) -> [file_read, file_write] int {
     exec.start(w, root);
     if nodes[6 * stmt] != parse.n_create_seq() {
