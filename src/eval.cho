@@ -929,10 +929,15 @@ fn step[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], p: int, tag: int, ops: int, to
             return unsupported();
         }
         let pn = cx[params_at() + 2 * idx];
+        // a parameter the client bound is a constant to PostgreSQL's planner; one that stands for a subquery's value (docs/m3-engine.md 6ac) is known only when the statement runs
+        var constant = 1;
+        if cx[inner_at()] != 0 && idx >= cx[inner_at()] {
+            constant = 0;
+        }
         if pn < 0 {
-            set(ws, out, 0, 1, 0, 0, 1);
+            set(ws, out, 0, 1, 0, 0, constant);
         } else {
-            set(ws, out, 0, 0, cx[params_at() + 2 * idx - 1], pn, 1);
+            set(ws, out, 0, 0, cx[params_at() + 2 * idx - 1], pn, constant);
         }
         ws[out + 5] = 1;
     } else if tag == 5 {
@@ -1523,6 +1528,11 @@ pub fn slots_at() -> [] int {
 // (-1: null). The caller keeps those bytes at the start of the arena and starts the arena's fill after them. A `cx` no longer than `params_at()` has none.
 pub fn params_at() -> [] int {
     return 832;
+}
+
+// `cx[inner_at()]` is the number of the first parameter that the engine bound itself, for the value of a subquery (0: none): such a parameter is no constant.
+pub fn inner_at() -> [] int {
+    return 962;
 }
 
 // The slot whose expression starts at `p`: its index; -2 if `p` is inside a slot's expression, after its start; -1 otherwise.

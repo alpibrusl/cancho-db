@@ -232,6 +232,11 @@ pub fn n_param() -> [] int {
     return 50;
 }
 
+// CREATE SEQUENCE (src/stmt.cho; one of the engine's forms): data = the name's token, ex and ey the tokens of MINVALUE's and START's numbers (or -1), one child if IF NOT EXISTS.
+pub fn n_create_seq() -> [] int {
+    return 51;
+}
+
 // The ways a parse is refused: `expr` answers `0 - code`, and `st[3]` is the token index it stopped at.
 pub fn e_syntax() -> [] int {
     return 1;

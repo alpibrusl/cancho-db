@@ -169,6 +169,10 @@ pub fn k_drop_index() -> [] int {
     return 12;
 }
 
+pub fn k_create_sequence() -> [] int {
+    return 13;
+}
+
 pub fn k_begin() -> [] int {
     return 20;
 }
@@ -206,6 +210,8 @@ pub fn tag[&o](kind: int, n: int, out: &!o [byte]) -> [] int {
             at = word(out, 0, "CREATE INDEX");
         } else if kind == k_drop_index() {
             at = word(out, 0, "DROP INDEX");
+        } else if kind == k_create_sequence() {
+            at = word(out, 0, "CREATE SEQUENCE");
         } else if kind == k_begin() {
             at = word(out, 0, "BEGIN");
         } else if kind == k_commit() {

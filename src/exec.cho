@@ -111,7 +111,7 @@ pub fn e_no_column() -> [] int {
 // PostgreSQL. The tree a failed statement or a rolled-back transaction leaves behind does not have the draw, so each draw is also noted here (the table's number and the counter's new value), and
 // whoever drives the statements writes the notes into the tree that stays (`seq_replay`) or drops them when the tree that has them is the one that stays (`seq_forget`).
 
-// The last value the counter of table `id` gave in the tree `root`: 0 if none yet, or an error (below 0; `btree.not_found()` if the table has no counter).
+// The value the counter of table (or sequence) `id` gives next in the tree `root` (never below 0), or an error (below 0; `btree.not_found()` if there is no such counter).
 pub fn seq_last[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, id: int) -> [file_read] int {
     let kl = tables.counter_key(id, contents(w.key2));
     let g = btree.get(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.uval));
@@ -209,6 +209,75 @@ pub fn ret_row[&q, &r](w: &!q Work, r: &r [byte]) -> [] int {
     w.retfill = copy(r, 0, len(r), contents(w.jbuf), w.retfill + 2);
     w.retn = w.retn + 1;
     return 0;
+}
+
+// The condition of an `insert ... select ... where` with no table (docs/m3-engine.md 6ac): a SELECT of it, lowered into `lit` (with `lsc`), `glen` bytes; 0 if the insert has none.
+pub fn guard_len[&q](w: &q Work) -> [] int {
+    return w.glen;
+}
+
+pub fn set_guard[&q](w: &!q Work, n: int) -> [] int {
+    w.glen = n;
+    return 0;
+}
+
+// Whether the condition holds: 1, 0 (false or null), or a refusal (it is not a boolean, or it raised an error, which PostgreSQL might not reach).
+pub fn guard_holds[&q](w: &!q Work) -> [] int {
+    let n = w.glen;
+    if n < 7 || int_of(contents(w.lit)[0]) != 6 || commit.be(contents(w.lit), 2, 4) != 1 {
+        return unsupported();
+    }
+    contents(w.info)[0] = w.pend;
+    let r = eval.eval(contents(w.lit)[0..n], 6, contents(w.lsc), contents(w.ctx), contents(w.cx), 0, contents(w.ws), contents(w.ar), contents(w.info));
+    let b = eval.max_nodes();
+    if r == 0 && contents(w.ws)[b] == 0 && contents(w.ws)[b + 1] == 1 {
+        // `where null`
+        return 0;
+    }
+    if r != 0 || contents(w.ws)[b] != 2 || contents(w.ws)[b + 1] == 2 {
+        return unsupported();
+    }
+    if contents(w.ws)[b + 1] == 0 && contents(w.ws)[b + 2] == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+// Whether the statement has a parameter the engine bound itself (a subquery's value, a sequence's: 6ac, 6ad).
+pub fn params_inner_bound[&q](w: &q Work) -> [] bool {
+    return contents(w.cx)[eval.inner_at()] != 0;
+}
+
+// A sequence (docs/m3-engine.md 6ad): its number in the tree `root`, with its least value left in `uval` at 4; `btree.not_found()`; or an error.
+pub fn seq_find[&q, &z, &n](p: &!z pager.Pager, w: &!q Work, root: int, name: &n [byte]) -> [file_read] int {
+    let kl = tables.sequence_key(name, contents(w.key2));
+    if kl < 0 {
+        return btree.not_found();
+    }
+    let g = btree.get(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.uval));
+    if g == btree.not_found() {
+        return g;
+    }
+    if g != 12 {
+        return damaged();
+    }
+    return commit.be(contents(w.uval), 0, 4);
+}
+
+// The value the statement that follows draws from the sequence numbered `id` with its `nextval` (0, 0: none). The driver sets it; the INSERT whose one row has the value in it makes the
+// draw the sequence's when the row is reached, as it does an identity column's (`draw_take`).
+pub fn draw_set[&q](w: &!q Work, id: int, v: int) -> [] int {
+    w.did = id;
+    w.dval = v;
+    return 0;
+}
+
+pub fn draw_id[&q](w: &q Work) -> [] int {
+    return w.did;
+}
+
+pub fn draw_value[&q](w: &q Work) -> [] int {
+    return w.dval;
 }
 
 // The row of an INSERT at which it failed (from 0).
@@ -358,6 +427,9 @@ pub res struct Work {
     retn: int,
     retfill: int,
     retcur: int,
+    glen: int,
+    did: int,
+    dval: int,
 }
 
 pub fn rows_size() -> [] int {
@@ -369,11 +441,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -583,7 +655,17 @@ pub fn start[&q](w: &!q Work, root: int) -> [] int {
 pub fn params_clear[&q](w: &!q Work) -> [] int {
     w.pend = 0;
     contents(w.cx)[eval.params_at()] = 0;
+    contents(w.cx)[eval.inner_at()] = 0;
     return 0;
+}
+
+// The parameters added from here on are the engine's own, for the values of subqueries (docs/m3-engine.md 6ac): the number the next one has.
+pub fn params_inner[&q](w: &!q Work) -> [] int {
+    let next = contents(w.cx)[eval.params_at()] + 1;
+    if contents(w.cx)[eval.inner_at()] == 0 {
+        contents(w.cx)[eval.inner_at()] = next;
+    }
+    return next;
 }
 
 // The next parameter of the statement that follows (`$1` first): its text, or a null. False if there is no room (64 parameters, 65,536 bytes).
@@ -654,7 +736,7 @@ fn param_number[&s, &t](sql: &s [byte], toks: &t [int], i: int) -> [] int {
 // Whether the statement's parameters are ones the engine reads as PostgreSQL does (docs/m3-engine.md 6w): the statement names every one that was bound and no other, and one it names more than once
 // is each time written with the same cast (`$1::bigint`). PostgreSQL gives a parameter the type of its first use and reads the later ones as that type; the evaluator reads each use as a literal on
 // its own, which is the same only where every use says its type.
-pub fn params_fit[&q, &s, &t](w: &q Work, sql: &s [byte], toks: &t [int], n: int) -> [] bool {
+pub fn params_fit[&q, &s, &t](w: &q Work, sql: &s [byte], toks: &t [int], n: int, part: bool) -> [] bool {
     let count = contents(w.cx)[eval.params_at()];
     var seen = 0;
     var i = 0;
@@ -699,7 +781,8 @@ pub fn params_fit[&q, &s, &t](w: &q Work, sql: &s [byte], toks: &t [int], n: int
         }
         i = i + 1;
     }
-    return seen == count;
+    // (`part`: the text is a part of a statement that was tested whole, a subquery or what is left around one)
+    return part || seen == count;
 }
 
 // Where the evaluator's arena starts for an expression: after the parameters' text.

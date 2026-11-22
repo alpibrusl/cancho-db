@@ -616,14 +616,70 @@ pub fn insert[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
         clauses[n] = id;
         n = n + 1;
     }
-    if parse.kw(sql, toks, pos, end, "select") || parse.kw(sql, toks, pos, end, "with") {
-        return parse.fail(st, pos, parse.e_insert_select());
-    }
-    if !parse.kw(sql, toks, pos, end, "values") {
-        return parse.fail(st, pos, parse.e_syntax());
-    }
-    pos = pos + 1;
+    var guard = 0 - 1;
     var rows = true;
+    if parse.kw(sql, toks, pos, end, "select") {
+        // SELECT expression, ... [WHERE condition], with no FROM: the one row of a VALUES, stored if the condition holds (docs/m3-engine.md 6ac). One of the engine's forms; with a FROM it
+        // is refused as it was. The condition is kept as a SELECT of it, whose node is the root's data, plus one
+        engine_form(st, parse.e_insert_select());
+        let at = pos;
+        let mark = st[10];
+        pos = pos + 1;
+        var items = true;
+        while items {
+            pos = expr_item(sql, toks, pos, end, nodes, kids, vs, os, tmp, st);
+            if pos < 0 {
+                return pos;
+            }
+            if parse.punct(sql, toks, pos, end, ',') {
+                pos = pos + 1;
+            } else {
+                items = false;
+            }
+        }
+        let row = close_list(nodes, kids, tmp, st, parse.n_row(), mark, 0);
+        if row < 0 {
+            return parse.fail(st, at, 0 - row);
+        }
+        let r = stage(tmp, st, row);
+        if r < 0 {
+            return parse.fail(st, at, 0 - r);
+        }
+        if parse.kw(sql, toks, pos, end, "where") {
+            pos = parse.expr(sql, toks, pos + 1, end, nodes, kids, vs, os, st);
+            if pos < 0 {
+                return pos;
+            }
+            // a SELECT of the one item FROM the statement's table (the lowering knows no SELECT without a table; the engine computes the item over no row), built in the last two places
+            // of `clauses`
+            clauses[14] = st[2];
+            clauses[14] = parse.mk(nodes, kids, st, parse.n_item(), 0 - 1, clauses[14..15], 1, 0 - 1, 0 - 1);
+            if clauses[14] >= 0 {
+                clauses[14] = parse.mk(nodes, kids, st, parse.n_items(), 0, clauses[14..15], 1, 0 - 1, 0 - 1);
+            }
+            clauses[15] = clauses[0];
+            clauses[15] = parse.mk(nodes, kids, st, parse.n_from(), 0, clauses[15..16], 1, 0 - 1, 0 - 1);
+            if clauses[14] < 0 || clauses[15] < 0 {
+                return parse.fail(st, at, parse.e_too_big());
+            }
+            guard = parse.mk(nodes, kids, st, parse.n_select(), 0, clauses[14..16], 2, 0 - 1, 0 - 1);
+            if guard < 0 {
+                return parse.fail(st, at, 0 - guard);
+            }
+        }
+        if pos < end && !parse.kw(sql, toks, pos, end, "on") && !parse.kw(sql, toks, pos, end, "returning") {
+            return parse.fail(st, at, parse.e_insert_select());
+        }
+        rows = false;
+    } else {
+        if parse.kw(sql, toks, pos, end, "with") {
+            return parse.fail(st, pos, parse.e_insert_select());
+        }
+        if !parse.kw(sql, toks, pos, end, "values") {
+            return parse.fail(st, pos, parse.e_syntax());
+        }
+        pos = pos + 1;
+    }
     while rows {
         if !parse.punct(sql, toks, pos, end, '(') {
             return parse.fail(st, pos, parse.e_syntax());
@@ -688,7 +744,7 @@ pub fn insert[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [int]
     if pos < end {
         return leftover(sql, toks, pos, end, st);
     }
-    let root = parse.mk(nodes, kids, st, parse.n_insert(), 0, clauses[0..n], n, oc, ret);
+    let root = parse.mk(nodes, kids, st, parse.n_insert(), guard + 1, clauses[0..n], n, oc, ret);
     if root < 0 {
         return parse.fail(st, pos, 0 - root);
     }
@@ -1175,6 +1231,59 @@ fn create_index[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], 
     return end;
 }
 
+// CREATE SEQUENCE [IF NOT EXISTS] name [MINVALUE n] [START [WITH] n]: no other option, and no negative number (docs/m3-engine.md 6ad). One of the engine's forms.
+fn create_sequence[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    st[10] = 0;
+    engine_form(st, parse.e_unsupported_statement());
+    let ine = if_not_exists(sql, toks, from + 2, end, st);
+    var pos = plain_name(sql, toks, from + 2 + 3 * ine, end, st);
+    if pos < 0 {
+        return pos;
+    }
+    let name = st[9];
+    var low = 0 - 1;
+    var start = 0 - 1;
+    var more = true;
+    while more {
+        if parse.kw(sql, toks, pos, end, "minvalue") && low < 0 && pos + 1 < end && parse.tkind(toks, pos + 1) == lex.t_number() {
+            low = pos + 1;
+            pos = pos + 2;
+        } else if parse.kw(sql, toks, pos, end, "start") && start < 0 {
+            pos = pos + 1;
+            if parse.kw(sql, toks, pos, end, "with") {
+                pos = pos + 1;
+            }
+            if pos >= end || parse.tkind(toks, pos) != lex.t_number() {
+                return parse.fail(st, pos, parse.e_syntax());
+            }
+            start = pos;
+            pos = pos + 1;
+        } else {
+            more = false;
+        }
+    }
+    if pos < end {
+        return parse.fail(st, pos, parse.e_unsupported_statement());
+    }
+    if ine == 1 {
+        let id = parse.mk(nodes, kids, st, parse.n_name(), name, tmp, 0, 0 - 1, 0 - 1);
+        if id < 0 {
+            return parse.fail(st, from, 0 - id);
+        }
+        let r = stage(tmp, st, id);
+        if r < 0 {
+            return parse.fail(st, from, 0 - r);
+        }
+    }
+    let root = parse.mk(nodes, kids, st, parse.n_create_seq(), name, tmp[0..st[10]], st[10], low, start);
+    st[10] = 0;
+    if root < 0 {
+        return parse.fail(st, from, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
 // DROP TABLE t, DROP INDEX name
 fn drop_object[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
     var kind = parse.n_drop_table();
@@ -1253,6 +1362,9 @@ pub fn statement[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [i
         }
         if parse.kw(sql, toks, from + 1, end, "index") || parse.kw(sql, toks, from + 1, end, "unique") && parse.kw(sql, toks, from + 2, end, "index") {
             return create_index(sql, toks, from, end, nodes, kids, vs, os, tmp, st);
+        }
+        if parse.kw(sql, toks, from + 1, end, "sequence") {
+            return create_sequence(sql, toks, from, end, nodes, kids, tmp, st);
         }
         return parse.fail(st, from + 1, parse.e_unsupported_statement());
     }

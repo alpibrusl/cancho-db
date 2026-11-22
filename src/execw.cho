@@ -141,6 +141,14 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         return exec.too_big();
     }
     let n = columns(w);
+    // `insert ... select ... where` with no table: no row if the condition does not hold. It is read first: what is wrong with it is PostgreSQL's error before what is wrong with the row
+    var held = 1;
+    if exec.guard_len(w) > 0 {
+        held = exec.guard_holds(w);
+        if held < 0 {
+            return held;
+        }
+    }
     // an identity column takes its values from the table's counter
     let el0 = w.elen;
     let ic = tables.identity_col(contents(w.ent)[0..el0]);
@@ -238,7 +246,7 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                         return exec.too_big();
                     }
                     contents(w.nrow)[ra] = byte_of(1);
-                    exec.put_i64(contents(w.nrow), ra + 1, last + 1 + r);
+                    exec.put_i64(contents(w.nrow), ra + 1, last + r);
                     ra = ra + 9;
                 } else if from >= 0 {
                     let l = tables.stored_len(contents(w.tmp), from);
@@ -277,12 +285,39 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         return exec.malformed();
     }
     if w.code != 0 {
+        if exec.draw_id(w) != 0 || ic >= 0 && exec.params_inner_bound(w) {
+            // an error before any row is stored, in a statement that draws from a sequence, or that fills an identity column and has a value known only when it runs (a subquery's): whether
+            // PostgreSQL raises it before the draw (when it plans) or after (at the row) is not decided here
+            return exec.unsupported();
+        }
         return exec.verdict(w);
     }
-    let sr = store_rows(p, w, root, nr, skip);
+    var stored = nr;
+    if held == 0 {
+        stored = 0;
+    }
+    if exec.draw_id(w) != 0 && exec.guard_len(w) > 0 {
+        // a `nextval` is answered where it is drawn once for certain: in the first row of an insert (the driver sees to that) that has no condition
+        return exec.unsupported();
+    }
+    let sr = store_rows(p, w, root, stored, skip);
+    if exec.draw_id(w) != 0 && sr >= 0 {
+        // the row was reached: the value is drawn for good, as an identity column's is
+        if !exec.seq_note(w, exec.draw_id(w), exec.draw_value(w)) {
+            return exec.too_big();
+        }
+        if sr == 0 {
+            let r1 = w.root;
+            let pr = exec.seq_put(p, w, r1, exec.draw_id(w), exec.draw_value(w));
+            if pr < 0 {
+                return pr;
+            }
+            w.root = pr;
+        }
+    }
     if ic >= 0 && sr >= 0 {
         // the values drawn are drawn for good (PostgreSQL draws one for each row it reaches): every row's, or those up to the row that failed
-        var drawn = nr;
+        var drawn = stored;
         if sr > 0 {
             drawn = exec.failed_row(w) + 1;
         }
@@ -1177,6 +1212,14 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     } else if gi != btree.not_found() {
         return exec.tree_err(gi);
     }
+    // and so has a sequence
+    let qkl = tables.sequence_key(e[4..4 + nl], contents(w.key));
+    let gq = btree.get(p, contents(w.sc), root, contents(w.key)[0..qkl], contents(w.cur));
+    if gq >= 0 {
+        exec.note(w, exec.e_table_exists());
+    } else if gq != btree.not_found() {
+        return exec.tree_err(gq);
+    }
     if w.code != 0 {
         return exec.verdict(w);
     }
@@ -1197,12 +1240,122 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     w.root = nw;
     if contents(w.pos)[exec.p_ddl() + 2] != 0 {
         // the counter of its identity column: there from the start, so that a draw in a transaction that is rolled back has somewhere to stay
-        let sr = exec.seq_put(p, w, nw, tables.id_of(contents(w.ent)), 0);
+        let sr = exec.seq_put(p, w, nw, tables.id_of(contents(w.ent)), 1);
         if sr < 0 {
             return sr;
         }
         w.root = sr;
     }
+    return 0;
+}
+
+// Lower the condition of an `insert ... select ... where` (the SELECT of it at `node`, src/stmt.cho) for `insert` to read: 0, or a refusal.
+pub fn guard_lower[&q, &s, &t, &n, &k, &m](w: &!q exec.Work, sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], node: int, schema: &m [byte]) -> [] int {
+    let ln = lower.lower(sql, toks, nodes, kids, node, schema, contents(w.lrs), contents(w.lit), contents(w.lsc));
+    if ln < 0 {
+        exec.set_guard(w, 0);
+        return exec.unsupported();
+    }
+    exec.set_guard(w, ln);
+    return 0;
+}
+
+// The number the token `tok` is (digits, at most 18), or -1.
+fn tok_number[&s, &t](sql: &s [byte], toks: &t [int], tok: int) -> [] int {
+    if parse.tlen(toks, tok) > 18 {
+        return 0 - 1;
+    }
+    var v = 0;
+    var q = parse.tstart(toks, tok);
+    while q < parse.tstart(toks, tok) + parse.tlen(toks, tok) {
+        let d = int_of(sql[q]);
+        if d < '0' || d > '9' {
+            return 0 - 1;
+        }
+        v = v * 10 + d - '0';
+        q = q + 1;
+    }
+    return v;
+}
+
+// CREATE SEQUENCE (docs/m3-engine.md 6ad): a name among the tables' and the indexes', a number of its own, a least value (1 if none is said) and a counter that starts one below its
+// first value (the least, if none is said).
+pub fn create_sequence[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, sql: &s [byte], toks: &t [int], nodes: &n [int], stmt: int) -> [file_read, file_write] int {
+    exec.start(w, root);
+    if nodes[6 * stmt] != parse.n_create_seq() {
+        return exec.malformed();
+    }
+    let nl = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.nrow)[0..256], 0);
+    if nl < 0 || !name_ok(contents(w.nrow), 0, nl) {
+        return exec.unsupported();
+    }
+    var low = 1;
+    if nodes[6 * stmt + 4] >= 0 {
+        low = tok_number(sql, toks, nodes[6 * stmt + 4]);
+    }
+    var first = low;
+    if nodes[6 * stmt + 5] >= 0 {
+        first = tok_number(sql, toks, nodes[6 * stmt + 5]);
+    }
+    if low < 0 || first < low {
+        // a number that is no integer; a start below the least value (PostgreSQL: 22023)
+        return exec.unsupported();
+    }
+    // the name is free: no sequence, no table and no index has it
+    let skl = tables.sequence_key(contents(w.nrow)[0..nl], contents(w.key2));
+    var there = false;
+    let g0 = btree.get(p, contents(w.sc), root, contents(w.key2)[0..skl], contents(w.cur));
+    if g0 >= 0 {
+        there = true;
+    } else if g0 != btree.not_found() {
+        return exec.tree_err(g0);
+    }
+    let g1 = tables.find(p, contents(w.sc), root, contents(w.nrow)[0..nl], contents(w.key), contents(w.cur));
+    if g1 >= 0 {
+        there = true;
+    } else if g1 != btree.not_found() {
+        return exec.tree_err(g1);
+    }
+    let ikl = tables.index_key(contents(w.nrow)[0..nl], contents(w.key));
+    let g2 = btree.get(p, contents(w.sc), root, contents(w.key)[0..ikl], contents(w.cur));
+    if g2 >= 0 {
+        there = true;
+    } else if g2 != btree.not_found() {
+        return exec.tree_err(g2);
+    }
+    if there {
+        if nodes[6 * stmt + 3] == 1 {
+            // IF NOT EXISTS: a notice
+            return 0;
+        }
+        return exec.e_table_exists();
+    }
+    // a number from the tables' numbers
+    build.put_be(contents(w.key), 0, 0, 4);
+    var id = 1;
+    let gc = btree.get(p, contents(w.sc), root, contents(w.key)[0..4], contents(w.cur));
+    if gc == 4 {
+        id = commit.be(contents(w.cur), 0, 4);
+    } else if gc != btree.not_found() {
+        return exec.damaged();
+    }
+    build.put_be(contents(w.cur), 0, id + 1, 4);
+    var nroot = btree.put(p, contents(w.sc), root, contents(w.key)[0..4], contents(w.cur)[0..4]);
+    if nroot < 0 {
+        return exec.tree_err(nroot);
+    }
+    build.put_be(contents(w.cur), 0, id, 4);
+    exec.put_i64(contents(w.cur), 4, low);
+    let skl2 = tables.sequence_key(contents(w.nrow)[0..nl], contents(w.key2));
+    nroot = btree.put(p, contents(w.sc), nroot, contents(w.key2)[0..skl2], contents(w.cur)[0..12]);
+    if nroot < 0 {
+        return exec.tree_err(nroot);
+    }
+    let sr = exec.seq_put(p, w, nroot, id, first);
+    if sr < 0 {
+        return sr;
+    }
+    w.root = sr;
     return 0;
 }
 
@@ -1503,6 +1656,13 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
         there = true;
     } else if gt != btree.not_found() {
         return exec.tree_err(gt);
+    }
+    let qkl = tables.sequence_key(contents(w.nrow)[0..il], contents(w.key));
+    let gq = btree.get(p, contents(w.sc), root, contents(w.key)[0..qkl], contents(w.cur));
+    if gq >= 0 {
+        there = true;
+    } else if gq != btree.not_found() {
+        return exec.tree_err(gq);
     }
     if there && !ine {
         exec.note(w, exec.e_table_exists());
