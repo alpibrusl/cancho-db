@@ -31,6 +31,9 @@ import cdb.row;
 //     !erase DELETE  the row that `delete from T where KEY = CONSTANT` names, and its history (6n)   -> `ok ERASE N`
 //     !fork S        slot S becomes the same tree as the branch                -> `forked`
 //     !branch S      statements go to slot S (the branch is slot 0 at start)   -> `branch`
+//     !seed HEX      the seed of the salts is these 32 bytes, not the system's (for a test whose runs must write the same pages)  -> `seeded`
+//     !log HEX       commits of the first branch are records of the log, signed with the key of this seed (6ah)  -> `L` and the log's header in hex
+//     !rows T        every row of the table T with its salts (6ah)             -> `D key keysalt image salt` each, then `rows N`
 //     !mark          nothing                                                  -> `mark` (a separator for a test that reads the output)
 //     anything else  one SQL statement, which is run and, if it is done, becomes the state the next one sees
 //                    (`begin`, `commit` and `rollback` are answered here: the statements between them build on the transaction's own tree)
@@ -754,6 +757,25 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                     }
                     put_int(io, r);
                     putchar(io, '\n');
+                } else if begins(all, ls, le, "!seed ") {
+                    // the seed of the salts, given (64 hex digits) in place of the system's: for a test that needs two runs to write the same pages (tests/engine_crash.py)
+                    region zr {
+                        let sd = alloc_slice[zr](32, byte_of(0));
+                        var k = 0;
+                        var oks = le - ls == 6 + 64;
+                        while k < 32 && oks {
+                            let hi = unhex(int_of(all[ls + 6 + 2 * k]));
+                            let lo = unhex(int_of(all[ls + 7 + 2 * k]));
+                            oks = hi >= 0 && lo >= 0;
+                            sd[k] = byte_of((hi * 16 + lo) % 256);
+                            k = k + 1;
+                        }
+                        if oks && exec.seed(w, sd) {
+                            put_str(io, "seeded\n");
+                        } else {
+                            put_str(io, "seeded -\n");
+                        }
+                    }
                 } else if starts(all, ls, le, "!unseed") {
                     // from here on there is no seed to make salts of: a statement that writes a row is refused
                     exec.unseed(w);

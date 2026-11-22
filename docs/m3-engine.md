@@ -1057,6 +1057,12 @@ follows, and replaying the facts from nothing gives exactly the rows the engine 
 commits and 3,018 to 4,332 changes each) and the fixed history: the log and all three verifiers `ok ... final`, every tampered file refused with its rule. 12 mutants, each
 killed by a verifier's own rule (`seq-gap`, `parent-count`, `bad-signature`, `state-mismatch`, `store-foreign-row`) or by a record the engine could no longer make.
 
+*Found after this was pushed, and corrected:* `tests/engine_crash.py` failed in about half its runs (6 of 12 here). It learns from one whole run at which durable step each commit
+ends and then stops other runs at every step; with the table notes in the facts' tree, a commit's facts no longer fit one page for its larger statements, and the tree, keyed
+by commitments, takes its pages in an order the salts decide. Two runs with different seeds wrote different pages at the same step number. The property the test checks (the
+tables after a crash are those of the last commit) was never violated; its bookkeeping was. The test program takes a seed on a line (`!seed`) and the crash test gives every run
+the same one: 12 of 12 runs pass.
+
 ## 6ai. A column added and a table dropped are changes of rows
 
 6ah found that a log of the engine did not verify once a table had a column added (every row's image changes, and no fact said so) or was dropped (its rows are gone, and no
