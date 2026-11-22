@@ -10,13 +10,14 @@ import cdb.pstore;
 import cdb.exec;
 import cdb.drive;
 import cdb.session;
+import cdb.facts;
 import cdb.wire;
 
 // One connection of the engine's server (docs/m3-engine.md 6al): the startup, then a statement at a time, each answered after what it committed is on the disk.
 
 // What the server keeps for all connections (`gs`): the number of the page file's last commit; the status it must stop with (0: none); the connection that is in a
 // transaction (its place and one; 0: none); how long a transaction may idle while another connection waits, and how long a client may take none of its answer (ms); the
-// time (ms); where the next pass over the connections begins.
+// time (ms); where the next pass over the connections begins; whether commits are logged, and the key.
 pub fn g_seq() -> [] int {
     return 0;
 }
@@ -45,8 +46,17 @@ pub fn g_turn() -> [] int {
     return 6;
 }
 
-pub fn globals() -> [] int {
+// Whether commits are recorded in the log (6as), and the 32 bytes of the signing key's seed, one an int, from `g_key()`.
+pub fn g_logs() -> [] int {
+    return 7;
+}
+
+pub fn g_key() -> [] int {
     return 8;
+}
+
+pub fn globals() -> [] int {
+    return 40;
 }
 
 // What it keeps for one connection (`st`, `stride()` ints): 0 whether the place is taken (1: before its startup is answered, 2: after); 1 how many bytes of its buffer are
@@ -392,9 +402,18 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &o, &r, &t](heap: &!h Heap, tab: &!c c
         let o = drive.outcome(m);
         var nr = 0;
         region kr {
-            // no log is written yet (6al): no key, no record
-            let key = alloc_slice[kr](0, byte_of(0));
-            let rec = alloc_slice[kr](1, byte_of(0));
+            // with a key, a commit is recorded in the tree with what it wrote (6as); one that cannot be recorded is not made, and the server stops
+            var kn = 0;
+            if gs[g_logs()] == 1 {
+                kn = 32;
+            }
+            let key = alloc_slice[kr](kn, byte_of(0));
+            let rec = alloc_slice[kr](1 + kn * facts.max_record() / 32, byte_of(0));
+            var kk = 0;
+            while kk < kn {
+                key[kk] = byte_of(gs[g_key() + kk]);
+                kk = kk + 1;
+            }
             nr = session.close(pg, w, st[8..16], roots[0], after, !bound || o != drive.o_ok() && o != drive.o_control(), key, rec);
         }
         if nr >= 0 && nr != roots[0] {

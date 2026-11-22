@@ -238,6 +238,122 @@ pub fn seal[&q, &z, &s, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, fro
         if nw < 0 {
             return exec.tree_err(nw);
         }
+        // the log is in the tree (6as). One key signs it: the first commit's, kept, and a commit signed with another is not made
+        build.public_key(seed, sig[0..32]);
+        let lk = tables.log_key(contents(w.key));
+        let lr = btree.get(p, contents(w.sc), nw, contents(w.key)[0..lk], contents(w.cur));
+        if lr == btree.not_found() {
+            nw = btree.put(p, contents(w.sc), nw, contents(w.key)[0..lk], sig[0..32]);
+            if nw < 0 {
+                return exec.tree_err(nw);
+            }
+        } else if lr != 32 || !exec.same(contents(w.cur), 0, 32, sig, 0, 32) {
+            return exec.unsupported();
+        }
+        // the record, in parts a value of the tree holds
+        let rn = 4 + en + 64;
+        var ra = 0;
+        var part = 0;
+        while ra < rn {
+            var pl = rn - ra;
+            if pl > 700 {
+                pl = 700;
+            }
+            let rk = tables.record_key(seq, part, contents(w.key));
+            nw = btree.put(p, contents(w.sc), nw, contents(w.key)[0..rk], out[ra..ra + pl]);
+            if nw < 0 {
+                return exec.tree_err(nw);
+            }
+            ra = ra + pl;
+            part = part + 1;
+        }
+        // its facts, as they are in the transaction's tree (the note of a table is no fact)
+        var fl = 0;
+        var going = froot != 0;
+        while going {
+            let r = btree.next_after(p, contents(w.sc), froot, contents(w.key)[0..fl], false, contents(w.key2), contents(w.cur));
+            if r == btree.not_found() {
+                going = false;
+            } else if r < 0 {
+                return exec.tree_err(r);
+            } else {
+                let nk = r / 1024;
+                fl = exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+                if r % 1024 == 66 {
+                    let dk = tables.fact_key(seq, contents(w.lit));
+                    let dl = exec.copy(contents(w.key2), 0, nk, contents(w.lit), dk);
+                    nw = btree.put(p, contents(w.sc), nw, contents(w.lit)[0..dl], contents(w.cur)[0..66]);
+                    if nw < 0 {
+                        return exec.tree_err(nw);
+                    }
+                }
+            }
+        }
     }
     return nw;
+}
+
+// The log's header as it is in the tree `root` (6as): `build.log_header` into `out`, its length; 0 if no commit was ever recorded there; or an error.
+pub fn header[&q, &z, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, out: &!o [byte]) -> [file_read] int {
+    let lk = tables.log_key(contents(w.key));
+    let lr = btree.get(p, contents(w.sc), root, contents(w.key)[0..lk], contents(w.cur));
+    if lr == btree.not_found() {
+        return 0;
+    }
+    if lr != 32 {
+        return exec.damaged();
+    }
+    return build.log_header(out, 0, contents(w.cur)[0..32]);
+}
+
+// The record of commit `seq` as it is in the tree `root`, into `out`: its length, 0 if there is no such commit, or an error.
+pub fn record[&q, &z, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, seq: int, out: &!o [byte]) -> [file_read] int {
+    var at = 0;
+    var part = 0;
+    var more = true;
+    while more {
+        let rk = tables.record_key(seq, part, contents(w.key));
+        let r = btree.get(p, contents(w.sc), root, contents(w.key)[0..rk], contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return exec.tree_err(r);
+        } else if at + r > len(out) || part >= 255 {
+            return exec.too_big();
+        } else {
+            at = exec.copy(contents(w.cur), 0, r, out, at);
+            part = part + 1;
+        }
+    }
+    if at > 0 && (at < 68 || at != 4 + commit.be(out, 0, 4) + 64) {
+        // not a whole record
+        return exec.damaged();
+    }
+    return at;
+}
+
+// The fact of the log after the one whose key is `after[0..an]` (nothing: the first), as it is in the tree `root`: its key into `after` (the commit's number, 8 bytes, the
+// table, a zero byte, the commitment) and its two hashes into `out` (66 bytes); the key's length, 0 after the last, or an error.
+pub fn next_fact[&q, &z, &a, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, after: &!a [byte], an: int, out: &!o [byte]) -> [file_read] int {
+    let fk = tables.fact_key(0, contents(w.key));
+    var kl = exec.copy(after, 0, an, contents(w.key), fk - 8);
+    if an == 0 {
+        kl = fk - 8;
+    }
+    let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+    if r == btree.not_found() {
+        return 0;
+    }
+    if r < 0 {
+        return exec.tree_err(r);
+    }
+    let nk = r / 1024;
+    if nk < 5 || commit.be(contents(w.key2), 0, 4) != tables.log_space() || int_of(contents(w.key2)[4]) != 6 {
+        return 0;
+    }
+    if nk < 5 + 8 + 2 + 32 || r % 1024 != 66 || nk - 5 > len(after) {
+        return exec.damaged();
+    }
+    exec.copy(contents(w.cur), 0, 66, out, 0);
+    return exec.copy(contents(w.key2), 5, nk - 5, after, 0);
 }

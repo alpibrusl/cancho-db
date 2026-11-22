@@ -35,6 +35,8 @@ import cdb.row;
 //     !seed HEX      the seed of the salts is these 32 bytes, not the system's (for a test whose runs must write the same pages)  -> `seeded`
 //     !log HEX       commits of the first branch are records of the log, signed with the key of this seed (6ah)  -> `L` and the log's header in hex
 //     !rows T        every row of the table T with its salts (6ah)             -> `D key keysalt image salt` each, then `rows N`
+//     !records       the log as it is in the page file (6as)                    -> `L` and the header, `L` and each record, `records N`
+//     !store         the facts of every commit as they are in the page file    -> `X seq table commitment was is` each, then `store N`
 //     !mark          nothing                                                  -> `mark` (a separator for a test that reads the output)
 //     anything else  one SQL statement, which is run and, if it is done, becomes the state the next one sees
 //                    (`begin`, `commit` and `rollback` are answered here: the statements between them build on the transaction's own tree)
@@ -596,6 +598,85 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                             putchar(io, '\n');
                         } else {
                             put_str(io, "L -\n");
+                        }
+                    }
+                } else if starts(all, ls, le, "!records") {
+                    // the log as it is in the page file (docs/m3-engine.md 6as): `L` and the header, then `L` and each record, in hex; `records N`
+                    region xr {
+                        let rec = alloc_slice[xr](facts.max_record(), byte_of(0));
+                        var n = facts.header(pg, w, rs[cur], rec);
+                        var seq2 = 0;
+                        while n > 0 {
+                            put_str(io, "L ");
+                            var k = 0;
+                            while k < n {
+                                hex_byte(io, int_of(rec[k]));
+                                k = k + 1;
+                            }
+                            putchar(io, '\n');
+                            n = facts.record(pg, w, rs[cur], seq2, rec);
+                            seq2 = seq2 + 1;
+                        }
+                        if n < 0 {
+                            put_str(io, "records -\n");
+                        } else {
+                            put_str(io, "records ");
+                            if seq2 > 0 {
+                                // (the first line was the header)
+                                seq2 = seq2 - 1;
+                            }
+                            put_int(io, seq2);
+                            putchar(io, '\n');
+                        }
+                    }
+                } else if starts(all, ls, le, "!store") {
+                    // the facts of every commit as they are in the page file: `X`, the commit's number, then in hex the table, the commitment and the two hashes (`-`: none)
+                    region xr {
+                        let fk = alloc_slice[xr](256, byte_of(0));
+                        let fv = alloc_slice[xr](66, byte_of(0));
+                        var an = 0;
+                        var count = 0;
+                        var n = facts.next_fact(pg, w, rs[cur], fk, an, fv);
+                        while n > 0 {
+                            an = n;
+                            put_str(io, "X ");
+                            put_int(io, commit.be(fk, 0, 8));
+                            putchar(io, ' ');
+                            var k = 8;
+                            while int_of(fk[k]) != 0 {
+                                hex_byte(io, int_of(fk[k]));
+                                k = k + 1;
+                            }
+                            putchar(io, ' ');
+                            k = k + 1;
+                            while k < n {
+                                hex_byte(io, int_of(fk[k]));
+                                k = k + 1;
+                            }
+                            var side = 0;
+                            while side < 2 {
+                                putchar(io, ' ');
+                                if int_of(fv[33 * side]) == 1 {
+                                    k = 1;
+                                    while k < 33 {
+                                        hex_byte(io, int_of(fv[33 * side + k]));
+                                        k = k + 1;
+                                    }
+                                } else {
+                                    putchar(io, '-');
+                                }
+                                side = side + 1;
+                            }
+                            putchar(io, '\n');
+                            count = count + 1;
+                            n = facts.next_fact(pg, w, rs[cur], fk, an, fv);
+                        }
+                        if n < 0 {
+                            put_str(io, "store -\n");
+                        } else {
+                            put_str(io, "store ");
+                            put_int(io, count);
+                            putchar(io, '\n');
                         }
                     }
                 } else if begins(all, ls, le, "!rows ") {

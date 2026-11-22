@@ -16,6 +16,11 @@ import cdb.pager;
 //     0x00000000 0x03 then a name -> the sequence of that name (`sequence_key`): its number (`u32`, from the tables' numbers; its counter is `counter_key` of it) and its least value (8 bytes)
 //     0x00000000 0x04            -> the head of the log (`head_key`, docs/m3-engine.md 6ah): the number of the branch's last commit (8 bytes), its id and its `state` (32 bytes each)
 //
+// and under the number 0xFFFFFFFE, which is no table's, the log (docs/m3-engine.md 6as):
+//
+//     0xFFFFFFFE 0x05            -> the public key the log is signed with (`log_key`); then a commit's number (8 bytes) and a part's (1): that part of its record (`record_key`)
+//     0xFFFFFFFE 0x06 then a commit's number (8 bytes), a table, a zero byte and a key's commitment -> that fact of the commit: for each of was and is a byte and a hash (`fact_key`)
+//
 // An entry: the table's number (`u32`), the length of its definition (`u16`), the definition (src/row.cho), then for each column one byte of marks (1: `not null`, 2: it has a default, 4: it has a
 // range, 8: it is an identity column, whose values the table's counter gives) and, if it has a default, the default as a stored value (a tag and the value, as in a stored row), and if it has a range (`check (c between lo and hi)`, docs/m3-engine.md 6x) the two
 // bounds, 8 bytes each (two's complement, big-endian). An entry is at most 800 bytes (a value of the tree).
@@ -113,6 +118,33 @@ pub fn head_key[&o](out: &!o [byte]) -> [] int {
     build.put_be(out, 0, 0, 4);
     out[4] = byte_of(4);
     return 5;
+}
+
+// The log in the tree (docs/m3-engine.md 6as): the public key that signs it, a part of a commit's record, and where a commit's facts begin.
+// (They are not in the catalog, which every statement reads from end to end: they are under a number no table has, `log_space()`, just below the history's.)
+pub fn log_space() -> [] int {
+    return 4294967294;
+}
+
+pub fn log_key[&o](out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, log_space(), 4);
+    out[4] = byte_of(5);
+    return 5;
+}
+
+pub fn record_key[&o](seq: int, part: int, out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, log_space(), 4);
+    out[4] = byte_of(5);
+    build.put_be(out, 5, seq, 8);
+    out[13] = byte_of(part);
+    return 14;
+}
+
+pub fn fact_key[&o](seq: int, out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, log_space(), 4);
+    out[4] = byte_of(6);
+    build.put_be(out, 5, seq, 8);
+    return 13;
 }
 
 pub fn counter_key[&o](id: int, out: &!o [byte]) -> [] int {

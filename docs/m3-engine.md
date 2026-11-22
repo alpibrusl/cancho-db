@@ -1421,6 +1421,75 @@ service, its test or the engine's server under load was late is **not known**. I
 It is one test of one feature of one service, on one machine; the gate cannot run it (no hooks binary there). The two queries of C167 the engine refuses are not in this
 test. Nothing the server does is logged or verifiable yet, and anyone on the machine may connect.
 
+## 6as. The log is in the page file
+
+6ah made a commit's record and gave it to the test program to print; 6al's server commits and writes no log. 6ah left open where a server writes the log and in what
+order with the page file, across a crash. This part answers it by not having the question.
+
+**Design.** The record of a commit, and the facts it commits to, are written **into the branch's tree**, in the same tree and the same page-file commit as the rows the
+transaction wrote and the head of the log (6ah):
+
+- `0xFFFFFFFE 0x05`, the commit's number, a part number: the record as the log holds it (`build.log_record`), in parts of at most 700 bytes (a value of the tree is at most
+  800);
+- `0xFFFFFFFE 0x06`, the commit's number, then the table, a zero byte and the key's commitment: for each fact of the commit, the two hashes (was, is), each after a byte
+  that says whether it is there. This is what `facts.seal` already walks to compute `changes`; it is copied, not recomputed.
+
+So a commit, its record and its facts are durable together or not at all: a crash cannot leave a record without its rows or rows without their record, and the crash test
+of the page file (C156) covers the log with nothing added. The log file a verifier reads is an **export**: the header and the records in order, read back from the tree.
+
+*The store has no images.* The delta store a verifier reads (`docs/spec/l3a.md` section 9) has for each change the hashes and, where they have not been erased, the key,
+the images and the salts. What is kept here is the hashes only, which is the form of a line that has been erased, for every line. The verifiers check exactly what they
+check for an erased line: that the facts hash to the commit's `changes`, that each `state` follows, that a replay of the facts ends at the rows there are (whose keys,
+images and salts the live dump gives). They do not check that an image hashes to its fact, since no image is given; the engine's history holds the old rows with their
+salts for as long as they are not erased (6n), and showing them is a matter of reading the history, not of a second copy. **Erasure therefore has nothing to do in the
+store:** what it destroys (rows, salts) was never there, and what is there (salted hashes, commitments) says nothing once the salts are gone (6ag).
+
+*The cost:* a write to the tree for each fact, beside the row's own. Measured below.
+
+*The server* takes the seed of its signing key from a file named on its command line and logs every commit of the first branch that changed rows. With no key file it
+logs nothing, as before, and says so when it starts. How a key is kept, rotated or put in hardware is not this part.
+
+*Not in this part:* the log as a file the server appends to and ships (it is read out of the page file on request, by the test program's commands; a tool of its own for
+an operator is not written); commits that change no row (a table made, a sequence drawn) are in no record, as before; the schema hash, token, principal, statements and
+time of a record are still zeros (6ah); branches other than the first.
+
+**Test.** `tests/engine_log.py`: after the history, **a process that did not write it** reads the records and the facts out of the page file, and those are what goes to
+`tools/verify.py` and the three L3a verifiers, with the live dump; they must be byte for byte what the writing process printed at each commit. Then a row is erased
+(`!erase`), the file swept, and the export verified again: the same log, the same store, the row gone from the dump and its facts still accounted for.
+`tests/engine_wire.py`: the server is started with a key; after the differential's history (2,070 statements over a socket, a third by the extended protocol) it is
+stopped, the log is read out of its page file and verified. That is the first log of a client's session through the server that a verifier has read.
+
+**Built.** `facts.seal` writes the record and the facts with the head; `facts.header`, `facts.record`, `facts.next_fact` read them back; `!records` and `!store` in the
+test program; the server's key file. Measured:
+
+- `tests/engine_log.py`, 3 seeds of 2,000 statements (933 to 1,025 commits): the log and the facts read out of the page file by another process are the ones printed,
+  record for record; `tools/verify.py` and the three L3a verifiers say `ok ... final` on them (every line of the store counted as erased, since none has an image); a fact
+  removed and a hash changed are each `changes-mismatch`; after a delete, an erase and a sweep, one commit more and still `ok ... final`; a record of 40 tables is kept in
+  two parts and read back whole.
+- `tests/engine_wire.py`: **the log of a session of 929 statements over a socket** (the differential's fixed statements and 300 random ones, a third of the parametrised
+  by the extended protocol; 225 commits, 1,859 facts), read out of the server's page file after it stopped, verifies with `tools/verify.py` and the three L3a verifiers,
+  the replay ending at the 69 rows the file holds; at the gate's size, 2,129 statements, 328 and 333 commits for seeds 1 and 2. The same for the server that 8 clients wrote to at once, with transactions that waited, one that was ended and
+  connections that were dropped.
+- **One key signs a log:** a commit signed with another key is refused, and (which was not so as the session was first written in 6ah and 6aj: a commit whose
+  record failed was made without one) **a commit that cannot be recorded is not made**: the statement is an error and its rows are not there. The server stops on it rather than go on unrecorded.
+
+*The cost, measured on this machine while it was busy with other work, the two servers side by side:* 300 commits of one row take 1.57 s with no key and 4.46 s with
+one, 2.8 times as long (9.6 ms a commit more); one update of 1,200 rows 0.028 s and 0.044 s; the page file after both, 22 MB and 45 MB. What of the 9.6 ms is the
+signature and what the writes is not measured. C162's numbers are without a log.
+
+*Found while building, and corrected:*
+
+- the log was first put in the catalog (`0x00000000 0x05`, `0x06`). **Every statement reads the catalog from end to end** to know the tables, so every statement read
+  the whole log: after 30,000 facts a select of one row took 200 ms. The floor of 6al's test (500 selects under 5 s) failed, which is what it is for. The log is under a
+  number of its own, and the 500 selects take 0.04 s again;
+- a test that fails did not stop its server. Two servers built with a mutant that loops had been running for 38 minutes on every processor of this machine when that
+  was noticed, during which a check of hooks' test failed once (6ar) and several timings in this document were taken. The test now kills what it started however it
+  ends. **The timings of 6al and 6am were taken before those servers existed; those of 6aq and the cost above were not, and are marked so.** The hooks failure of 6ar may
+  have been this load; it has not been seen since, in 2 runs, which proves nothing.
+
+*Still not there:* the log covers the rows and nothing else. A commit says no schema, no principal, no statement, no time; a table made or dropped leaves no record
+unless it had rows; nobody is authenticated, so "who" is not a question the log could answer yet. It is the L3a half of what the proxy's log says.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

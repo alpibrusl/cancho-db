@@ -23,6 +23,7 @@ Then, each on a server of its own:
 If a PostgreSQL is reachable (PG_E2E_PORT) and `psql` is installed, a script is run with psql against both and what psql prints must be the same: a client this project did
 not write. And cancho-pg's own example client, built from its repository if it is beside this one, the same. Without them those steps are skipped, and say so.
 """
+import atexit
 import difflib
 import os
 import random
@@ -37,6 +38,8 @@ import tempfile
 import time
 
 SERVER, HARNESS, COUNT, SEED = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+VERIFIERS = sys.argv[5:] or ["python3 tools/l3a.py"]
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.argv = ["engine_check.py", HARNESS, str(COUNT), str(SEED)]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import engine_check as ec  # noqa: E402  (the generator, the fixed statements, and how the test program is run)
@@ -58,10 +61,40 @@ def free_port():
     return p
 
 
+STARTED = []
+
+
+def stop_all():
+    """No server this test started outlives it, however the test ends (a mutant of the server may loop for ever, and did, for 38 minutes of every processor, before this)."""
+    for p in STARTED:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+
+
+atexit.register(stop_all)
+
+
+def die_with_parent():
+    """In the server, before it starts: if this test is killed (a mutant runner's time limit), the kernel kills the server too (Linux; elsewhere `stop_all` is what there is)."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGKILL)       # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+
+
 class Server:
-    def __init__(self, path, *limits):
+    def __init__(self, path, *limits, key=True):
         self.path, self.port = path, free_port()
-        self.p = subprocess.Popen([SERVER, path, str(self.port)] + [str(x) for x in limits], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        args = [SERVER, path, str(self.port)]
+        if key:
+            # the seed of the key that signs the log (6as)
+            with open(path + ".key", "w") as f:
+                f.write(bytes(range(32)).hex() + "\n")
+            args += [path + ".key"] + [str(x) for x in limits]
+        self.p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=die_with_parent)
+        STARTED.append(self.p)
         line = self.p.stderr.readline()
         if line != b"listening\n":
             raise SystemExit("engine_wire: the server did not start: %r (status %s)" % (line, self.p.poll()))
@@ -231,6 +264,44 @@ def harness_view(block):
     return None, None, names, oids, rows, tag, state
 
 
+def verified(d, path, history, what):
+    """The log the server left in its page file (6as), read out by the test program and given to the verifiers with the rows the file holds: the number of commits."""
+    import hashlib
+    tables = sorted(set(re.findall(r"create table (?:if not exists )?(\w+)", " ".join(history)) + re.findall(r"rename to (\w+)", " ".join(history))))
+    out = [l for b in ec.run_engine(path, ["select 1 from nosuchtable"]) for l in b]      # (the file opens)
+    r = subprocess.run([HARNESS, path], input="\n".join(["!records", "!store", "!mark"] + ["!rows " + t for t in tables]) + "\n", capture_output=True, text=True)
+    out = r.stdout.split("\n")
+    cut = out.index("mark")
+    recs = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("L ")]
+    if not recs:
+        check("%s: the server's page file has a log" % what, False, out[:3])
+        return 0
+    ids = [hashlib.sha256(b"cancho-db/commit/v1\0" + rec[4:4 + int.from_bytes(rec[:4], "big")]).digest() for rec in recs[1:]]
+    lines, live, t = ["CHODBDL2"], ["CHODBLV2"], iter(tables)
+    for l in out[:cut]:
+        f = l.split()
+        if f and f[0] == "X":
+            lines.append("\t".join([str(len(lines) - 1), ids[int(f[1])].hex(), "public", f[2], f[3], "" if f[4] == "-" else f[4], "" if f[5] == "-" else f[5], "", "", "", "", "", ""]))
+    table = next(t)
+    for l in out[cut + 1:]:
+        f = l.split()
+        if f and f[0] == "D":
+            live.append("\t".join(["public", table.encode().hex(), f[1], f[2], "" if f[3] == "." else f[3], f[4]]))
+        elif f and f[0] == "rows":
+            table = next(t, None)
+    for name, data in (("log", b"".join(recs)), ("deltas", ("\n".join(lines) + "\n").encode()), ("live", ("\n".join(live) + "\n").encode())):
+        with open(os.path.join(d, "v." + name), "wb") as fh:
+            fh.write(data)
+    v = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "verify.py"), os.path.join(d, "v.log")], capture_output=True, text=True).stdout.strip()
+    check("%s: the log out of the server's page file verifies (chain, numbers, signatures; %d commits)" % (what, len(ids)), v.startswith("ok ") and "commits=%d" % len(ids) in v and len(ids) > 3, v)
+    for cmd in VERIFIERS:
+        v = subprocess.run(cmd.split() + [os.path.join(d, "v.log"), "--deltas", os.path.join(d, "v.deltas"), "--live-dump", os.path.join(d, "v.live")], capture_output=True, text=True, cwd=ROOT)
+        v = (v.stdout + v.stderr).strip()
+        check("%s: %s: every commit's changes, every state, and the replay ends at the rows the file holds (%d facts, %d rows)" % (what, cmd, len(lines) - 1, len(live) - 1),
+              v.startswith("ok commits=%d " % len(ids)) and v.endswith(" final"), v)
+    return len(ids)
+
+
 def differential(d):
     # the statements with parameters go as cancho-pg sends them (the extended protocol), the others as simple queries
     fixed = [sql for sql, _ in ec.FIXED]
@@ -274,6 +345,8 @@ def differential(d):
     theirs = ec.run_engine(os.path.join(d, "server.db"), dump)
     answered = sum(1 for b in mine if b and b[0].startswith("ok "))
     check("the server's page file holds what the test program's does (%d tables read)" % answered, mine == theirs and answered >= 3)
+    # and the log of that session, which the server recorded as it went
+    verified(d, os.path.join(d, "server.db"), [str(x) for x in history], "a session of %d statements over a socket" % len(history))
 
 
 def durability(d):
@@ -733,6 +806,24 @@ def several(d):
     check("8 clients at once, %d statements each with transactions among them: each is answered as the test program answers its statements alone" % len(scripts[0]), not wrong and all(results), wrong)
     check("the server is still running", srv.alive())
     srv.stop()
+    # what 8 clients at once, the transactions that waited, the one that was ended and the connections that were dropped left behind: one log, and it verifies
+    verified(d, os.path.join(d, "several.db"), ["create table sv ", "create table wide "] + [sc[0] for sc in scripts], "many connections")
+    # with no key file the server serves and records nothing, and says so; with one that is no key it does not start
+    quiet = Server(os.path.join(d, "nokey.db"), key=False)
+    said = quiet.p.stderr.readline()
+    c = Client(quiet.port)
+    c.query("create table nk (k integer primary key)")
+    wrote = c.query("insert into nk values (1)")
+    c.close()
+    quiet.stop()
+    r = subprocess.run([HARNESS, os.path.join(d, "nokey.db")], input="!records\nselect count(*) from nk\n", capture_output=True, text=True)
+    with open(os.path.join(d, "bad.key"), "w") as f:
+        f.write("not a key\n")
+    bad = subprocess.run([SERVER, os.path.join(d, "bad.db"), str(free_port()), os.path.join(d, "bad.key")], capture_output=True, text=True, timeout=20)
+    missing = subprocess.run([SERVER, os.path.join(d, "bad.db"), str(free_port()), os.path.join(d, "nosuch.key")], capture_output=True, text=True, timeout=20)
+    check("with no key file the server serves, records nothing and says so; with a file that is no key, or none where one is named, it does not start",
+          b"not recorded" in said and wrote[5] == "INSERT 0 1" and "records 0" in r.stdout and "R 31" in r.stdout and bad.returncode == 2 and missing.returncode == 2 and "listening" not in bad.stderr + missing.stderr,
+          (said, wrote, r.stdout[:100], bad.returncode, missing.returncode))
 
 
 def with_psql(d):

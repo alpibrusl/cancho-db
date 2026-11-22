@@ -81,7 +81,10 @@ FIXED = [
     "create table gone (k integer primary key)",                  # the name again: other rows
     "insert into gone values (1)",
 ]
-TABLES = ["acct", "note", "pair", "rnd", "gone"]
+# a transaction over many tables: its record names each (an effect a table) and is longer than one value of the tree holds, so it is kept in parts (6as)
+MANY = ["many_tables_in_one_commit_%02d" % i for i in range(40)]
+FIXED += ["create table %s (k integer primary key)" % t for t in MANY] + ["begin"] + ["insert into %s values (%d)" % (t, i) for i, t in enumerate(MANY)] + ["commit"]
+TABLES = ["acct", "note", "pair", "rnd", "gone"] + MANY
 
 
 def random_history(rng, n):
@@ -212,6 +215,61 @@ def verdict(cmd, work, log, store, live):
     return (r.stdout + r.stderr).strip()
 
 
+def read_back(path, extra=()):
+    """The log, the facts and the rows as a process that wrote none of them reads them out of the page file (6as): (log bytes, records, store lines, live dump, rows)."""
+    out = run(path, list(extra) + ["!mark", "!records", "!store", "!mark"] + ["!rows " + t for t in TABLES])
+    out = out[out.index("mark") + 1:]                             # what the process said while it ran `extra` is not the export
+    cut = out.index("mark")
+    recs = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("L ")]
+    said = [l for l in out[:cut] if l.startswith("records ") or l.startswith("store ")]
+    ids = [commit_id(r[4:4 + int.from_bytes(r[:4], "big")]) for r in recs[1:]]
+    lines = []
+    for l in out[:cut]:
+        f = l.split()
+        if f and f[0] == "X":
+            # a line of the store with nothing but the hashes: the form of a line that has been erased (docs/spec/l3a.md section 9), for every line
+            lines.append("\t".join([str(len(lines)), ids[int(f[1])].hex(), "public", f[2], f[3], "" if f[4] == "-" else f[4], "" if f[5] == "-" else f[5], "", "", "", "", "", ""]))
+    live, n = dump(out[cut:], TABLES)
+    return b"".join(recs), recs[1:], lines, live, n, said
+
+
+def exported(work, path, files, live, nrows):
+    log, recs, lines, live2, n2, said = read_back(path)
+    check("the log read out of the page file by another process is the one printed, record for record (%d)" % len(recs),
+          log == files.log() and recs == files.records and said == ["records %d" % len(recs), "store %d" % len(lines)] and live2 == live, (len(recs), len(files.records), said))
+    store = lambda ls: ("\n".join(["CHODBDL2"] + ls) + "\n").encode()
+    per = {}
+    for l in lines:
+        per[l.split("\t")[1]] = per.get(l.split("\t")[1], 0) + 1
+    alone = [i for i, l in enumerate(lines) if per[l.split("\t")[1]] == 1]
+    pick = alone[len(alone) // 2]
+    bent = list(lines)
+    f = bent[pick].split("\t")
+    f[6 if f[6] else 5] = "00" * 32
+    bent[pick] = "\t".join(f)
+    for cmd in VERIFIERS:
+        v = verdict(cmd, work, log, store(lines), live)
+        check("%s, on the log and the facts out of the page file (%d facts, no image among them): ok, the rows at the end compared" % (cmd, len(lines)),
+              v.startswith("ok commits=%d " % len(recs)) and v.endswith(" erased=%d final" % len(lines)), v)
+        for name, st, want in (("a fact removed", store(lines[:pick] + lines[pick + 1:]), "changes-mismatch"), ("a hash changed", store(bent), "changes-mismatch")):
+            v = verdict(cmd, work, log, st, live)
+            check("%s: %s is %s" % (cmd, name, want), v.startswith("reject rule=%s " % want), v)
+    # a row deleted and then erased (its past and its salts destroyed, 6o), the file swept: the log and the store are what they were and one commit more, and still verify
+    log3, recs3, lines3, live3, n3, _ = read_back(path, ["!log " + KEY, "delete from note where k = 'first'", "!erase delete from note where k = 'first'", "!commit", "!sweep", "!commit"])
+    log4, recs4, lines4, live4, n4, _ = read_back(path)
+    check("after a delete and an erase: one commit more, what was there before unchanged, and the same read again by another process",
+          recs3[:-1] == recs and len(lines3) == len(lines) + 1 and [l.split("\t")[1:] for l in lines3[:len(lines)]] == [l.split("\t")[1:] for l in lines] and (log4, lines4, live4) == (log3, lines3, live3) and n3 == n2 - 1,
+          (len(recs3), len(recs), len(lines3), len(lines), n3, n2))
+    for cmd in VERIFIERS:
+        v = verdict(cmd, work, log4, store(lines4), live4)
+        check("%s, after the erase: ok, the rows at the end compared" % cmd, v.startswith("ok commits=%d " % len(recs4)) and v.endswith(" final"), v)
+    # one key signs a log: a commit signed with another is not made, with or without its record
+    other = bytes(range(1, 33)).hex()
+    out = run(path, ["!log " + other, "insert into acct values (777, 'other key', 1)", "!commit", "select count(*) from acct where id = 777"])
+    log5, recs5, lines5, live5, n5, _ = read_back(path)
+    check("a commit signed with another key is not made: an error, no record, no row", any(l.startswith("err ") for l in out) and "R 30" in out and (log5, lines5, live5) == (log4, lines4, live4), [l for l in out if l[:2] in ("er", "ok", "R ", "L ")][:6])
+
+
 def main():
     rng = random.Random(SEED)
     history = FIXED + random_history(rng, COUNT)
@@ -251,6 +309,7 @@ def main():
                                        ("a row changed in the dump", files.store(), dump(out[out.index("mark"):], TABLES, bend=nrows // 2)[0], "replay-final")):
                 v = verdict(cmd, work, files.log(), st, lv)
                 check("%s: %s is %s" % (cmd, name, want), v.startswith("reject rule=%s " % want), v)
+        exported(work, path, files, live, nrows)
         print("commits %d, changes %d, rows at the end %d" % (len(files.records), len(files.deltas), nrows))
     if FAILED:
         print("FAIL engine log: %d failed" % len(FAILED))
