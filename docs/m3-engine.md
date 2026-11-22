@@ -1264,6 +1264,38 @@ closed; places are reused now (the text is not: 3 MiB of statements ever prepare
 are answered by the engine (14 of 16, C167) and its driver's messages are served, but a program is more than its queries (what it does at connect, in what order, under
 what timeouts), and that is the next thing to measure, not to assume.
 
+## 6an. `cancho-hooks`, the program, on the engine: a first measurement
+
+6w made `cancho-hooks` the first user and counted how many of its statements the engine answers. 6am ended on the sentence that a program is more than its queries. This
+section is the measurement, made as soon as there was a server to make it against, and nothing is built in it.
+
+**What was run** (`tests/hooks_server.py`). `cancho-hooks` at its commit `40b2ce0`, built from its repository with its own script (`scripts/build.sh --pure`, with this
+compiler rather than the one it pins), started with `--pg-host` at `build/engine` and nothing else changed. Its schema applied with `psql`, one endpoint in its table, a
+receiver for it to deliver to, 12 events posted.
+
+**What happened.** The service read its endpoint from the engine and said it was ready; delivered the 12 events; wrote 12 rows of its attempt history through the engine
+(`hooks_history_rows_total{result="written"} 12`, none failed, none dropped); answered `GET /events/:id/attempts` for each from the engine; and after it was stopped the 12
+rows were read from the engine with `psql`. **No PostgreSQL was running.**
+
+**What it also showed, which is the point of measuring:**
+
+- **"1 of 2 connections live."** The service opens two connections; the server takes one at a time (6al), so the second waited for the whole run. The service went on
+  with one, as it is built to. Anything that needs the second (a request while the first is busy) was not exercised;
+- **hooks' own test of this feature does not run.** `tests/history_test.py` of its repository, pointed at the engine, stops at its first step: it empties its table with
+  `truncate attempts`, which the engine refuses (`unsupported-statement`). Past that it reads the tables with `psql` *while the service is connected*, which one
+  connection at a time cannot serve. So: `truncate`, then more than one connection, then whatever the 11 scenarios of that test find. Its scenarios (a database that goes
+  away, that never answers, that answers with an error) are about the service, but each needs the server to behave as PostgreSQL does when cut off or slow, and none of
+  that has been tried;
+- the two queries the engine does not answer (C167: deleting an endpoint, pruning old attempts) were not reached by 12 deliveries. The service prepares them when it
+  connects, and the server says nothing at `Parse` (6am); it will refuse them the first time they are run.
+
+*So the honest state is:* a `cancho-hooks` that only delivers and records runs on the engine today, on one connection, with nothing it does verifiable (no log, 6al) and
+no login. It is a demonstration, not a deployment. The order of work this measurement gives: more than one connection, `truncate`, hooks' own tests as the gate for
+"hooks runs on the engine", then the log and the login.
+
+*The gate skips this test:* it needs a `cancho-hooks` binary (`HOOKS_BIN`), and the gate does not build one. It is measured on a developer's machine, as C180's step
+with `cancho-pg`'s client is.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
