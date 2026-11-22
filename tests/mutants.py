@@ -2377,8 +2377,8 @@ ENGINE = [
      '        if int_of(ent[marks_at(ent, i)]) / 8 == 1 {',
      '        if int_of(ent[marks_at(ent, i)]) / 8 == 2 {'),
     ("identity: a table's counter is read as a table", 'src/tables.cho',
-     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 {',
-     '            } else if int_of(key2[4]) == 3 {'),
+     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 {',
+     '            } else if int_of(key2[4]) == 3 || int_of(key2[4]) == 4 {'),
     ('identity: every row of an insert draws the same value', 'src/execw.cho',
      '                    exec.put_i64(contents(w.nrow), ra + 1, last + r);',
      '                    exec.put_i64(contents(w.nrow), ra + 1, last);'),
@@ -2488,8 +2488,8 @@ ENGINE = [
      '        if nodes[6 * stmt + 3] == 1 {\n            // IF NOT EXISTS: a notice',
      '        if nodes[6 * stmt + 3] == 2 {\n            // IF NOT EXISTS: a notice'),
     ('sequence: a sequence is read as a table', 'src/tables.cho',
-     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 {',
-     '            } else if int_of(key2[4]) == 2 {'),
+     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 {',
+     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 4 {'),
     ('sequence: an error before the rows is answered beside a draw', 'src/execw.cho',
      '        if exec.draw_id(w) != 0 || ic >= 0 && exec.params_inner_bound(w) {',
      '        if ic >= 0 && exec.params_inner_bound(w) {'),
@@ -2542,11 +2542,11 @@ ENGINE = [
      '            nw = root;\n            if g == 66 {\n                nw = btree.del(p, contents(w.sc), root, contents(w.key)[0..fk]);\n            }',
      '            nw = root;'),
     ('facts: an insert is a delete', 'src/facts.cho',
-     '            if !was {\n                kind = 0;\n                ol = 0;',
-     '            if !was {\n                kind = 2;\n                ol = 0;'),
+     '                if !was {\n                    kind = 0;\n                    ol = 0;',
+     '                if !was {\n                    kind = 2;\n                    ol = 0;'),
     ('facts: the key is the table and the key with nothing between', 'src/facts.cho',
-     '        contents(w.key)[fk] = byte_of(0);\n        state.key_commit(',
-     '        contents(w.key)[fk] = byte_of(1);\n        state.key_commit('),
+     '        contents(w.key)[fk] = byte_of(0);\n        // the table was written',
+     '        contents(w.key)[fk] = byte_of(1);\n        // the table was written'),
     ('facts: the image after is hashed as the image before', 'src/facts.cho',
      '            let o = 33 * side;',
      '            let o = 0;'),
@@ -2592,6 +2592,30 @@ ENGINE = [
     ("assign: a constant's error is a refusal", 'src/eval.cho',
      '    let constant = ws[v + 4];\n    ws[v + 4] = 0;',
      '    let constant = ws[v + 4];'),
+    ('log: a commit has the number after its parent', 'src/facts.cho',
+     'seq = commit.be(contents(w.cur), 0, 8) + 1;', 'seq = commit.be(contents(w.cur), 0, 8);'),
+    ('log: a commit names its parent', 'src/facts.cho',
+     '            np = 1;\n            exec.copy(contents(w.cur), 0, 72, head, 0);', '            exec.copy(contents(w.cur), 0, 72, head, 0);'),
+    ("log: the state follows from the parent's state", 'src/facts.cho',
+     'state.state(np, head[40..40 + 32 * np], chg, st);', 'state.state(np, head[8..8 + 32 * np], chg, st);'),
+    ('log: the effect of a table with a fact is a write', 'src/facts.cho',
+     '                effs[el] = byte_of(1);', '                effs[el] = byte_of(0);'),
+    ('log: a table written is noted whatever the facts net to', 'src/facts.cho',
+     '        root = mk;\n        state.key_commit(', '        state.key_commit('),
+    ('log: the note of a table is no fact', 'src/facts.cho',
+     'if z + 1 == nk {', 'if z + 1 == nk && false {'),
+    ('log: the head keeps the state of its commit', 'src/facts.cho',
+     '        exec.copy(st, 0, 32, head, 40);\n', ''),
+    ('log: the head keeps the number of its commit', 'src/facts.cho',
+     '        build.put_be(head, 0, seq, 8);\n', ''),
+    ('log: the id is what is signed', 'src/facts.cho',
+     'build.sign(seed, head[8..40], sig);', 'build.sign(seed, st, sig);'),
+    ('log: the head is written whole', 'src/facts.cho',
+     'nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..hk2], head);', 'nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..hk2], head[0..40]);'),
+    ('log: the head is no table of the schema', 'src/tables.cho',
+     '} else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 {', '} else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 {'),
+    ('log: the next table is looked for after all of the last one', 'src/facts.cho',
+     '                contents(w.key)[kl] = byte_of(1);\n                kl = kl + 1;', '                contents(w.key)[kl] = byte_of(0);\n                kl = kl + 1;'),
 ]
 
 def run_engine(cancho):
@@ -2617,6 +2641,13 @@ def run_engine(cancho):
             b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/enginecheck.cho")] + [str(work / "src" / x) for x in srcs] + ["-o", str(exe)], capture_output=True, text=True)
             if b.returncode != 0:
                 return label, "BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]), True
+            if label.startswith("log: "):
+                # the log's mutants are judged by the verifiers (tests/engine_log.py), which need no database
+                r = subprocess.run([sys.executable, str(ROOT / "tests/engine_log.py"), str(exe), "300", "1"], capture_output=True, text=True, timeout=900)
+                if r.returncode != 0:
+                    first = [l for l in (r.stdout + r.stderr).splitlines() if l.startswith("FAIL")]
+                    return label, "killed   %-46s %s" % (label, (first[0] if first else "a crash")[:90]), False
+                return label, "SURVIVED %-46s the verifiers accept the log" % label, True
             for seed in ("1", "2", "3"):
                 try:
                     r = subprocess.run([sys.executable, str(ROOT / "tests/engine_check.py"), str(exe), "2500", seed], capture_output=True, text=True, timeout=900, env=dict(os.environ, E2E_DB=db))

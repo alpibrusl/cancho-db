@@ -2,6 +2,8 @@ edition 9;
 module cdb.facts;
 
 import cdb.commit;
+import cdb.build;
+import cdb.tables;
 import cdb.btree;
 import cdb.pager;
 import cdb.state;
@@ -47,6 +49,13 @@ pub fn take[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, froot: int) -> [file_r
         }
         var fk = exec.copy(contents(w.chg), at + 2, nl, contents(w.key), 0);
         contents(w.key)[fk] = byte_of(0);
+        // the table was written, whatever the facts net to: a key of the table alone says so (it is what the commit's effects are made of, 6ah)
+        contents(w.uval)[0] = byte_of(1);
+        let mk = btree.put(p, contents(w.sc), root, contents(w.key)[0..fk + 1], contents(w.uval)[0..1]);
+        if mk < 0 {
+            return exec.tree_err(mk);
+        }
+        root = mk;
         state.key_commit(contents(w.chg)[ia..ia + 16], contents(w.chg)[ka..ka + kl], contents(w.key)[fk + 1..fk + 33]);
         fk = fk + 33;
         side = 0;
@@ -112,36 +121,123 @@ pub fn changes[&q, &z, &o](p: &!z pager.Pager, w: &!q exec.Work, froot: int, out
             return exec.tree_err(r);
         } else {
             let nk = r / 1024;
-            if r % 1024 != 66 || n >= 4096 {
-                return exec.too_big();
-            }
             kl = exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
-            let was = int_of(contents(w.cur)[0]) == 1;
-            let is = int_of(contents(w.cur)[33]) == 1;
-            // (a row that ends as it began would be no fact; with a new salt for every change, 6ag, none does: its two hashes differ)
             var z = 0;
             while z < nk && int_of(contents(w.key2)[z]) != 0 {
                 z = z + 1;
             }
-            var kind = 1;
-            var ol = 32;
-            var nl = 32;
-            if !was {
-                kind = 0;
-                ol = 0;
-            } else if !is {
-                kind = 2;
-                nl = 0;
+            if z + 1 == nk {
+                // the key of a table alone: it was written (`take`), which is no fact
+            } else {
+                if r % 1024 != 66 || n >= 4096 {
+                    return exec.too_big();
+                }
+                let was = int_of(contents(w.cur)[0]) == 1;
+                let is = int_of(contents(w.cur)[33]) == 1;
+                // (a row that ends as it began would be no fact; with a new salt for every change, 6ag, none does: its two hashes differ)
+                var kind = 1;
+                var ol = 32;
+                var nl = 32;
+                if !was {
+                    kind = 0;
+                    ol = 0;
+                } else if !is {
+                    kind = 2;
+                    nl = 0;
+                }
+                let el = state.put_fact(contents(w.nrow), 0, kind, contents(w.key2)[0..z], contents(w.key2)[z + 1..nk], contents(w.cur)[1..1 + ol], contents(w.cur)[34..34 + nl]);
+                if el < 0 {
+                    return exec.unsupported();
+                }
+                state.leaf(contents(w.nrow)[0..el], contents(w.tmp)[32 * n..32 * n + 32]);
+                n = n + 1;
             }
-            let el = state.put_fact(contents(w.nrow), 0, kind, contents(w.key2)[0..z], contents(w.key2)[z + 1..nk], contents(w.cur)[1..1 + ol], contents(w.cur)[34..34 + nl]);
-            if el < 0 {
-                return exec.unsupported();
-            }
-            state.leaf(contents(w.nrow)[0..el], contents(w.tmp)[32 * n..32 * n + 32]);
-            n = n + 1;
         }
     }
     state.merkle(contents(w.tmp)[0..32 * n], n, contents(w.uval)[0..32]);
     state.changes(n, contents(w.uval)[0..32], out);
     return n;
+}
+
+// The longest record `seal` writes: a commit of `build.max_effects()` is not made here, one of 32 tables is.
+pub fn max_record() -> [] int {
+    return 12288;
+}
+
+// The commit a transaction is (docs/m3-engine.md 6ah). `root` is the branch's tree with the transaction in it and `froot` its facts (`take`). The record of the commit as the log
+// holds it (`build.log_record`: its length is 4, the encoding's length that its first four bytes say, and 64) is written to `out`, and the tree's head of the log is moved to it: the
+// new root, or an error. The commit's parent is the head the tree had (none: the first commit of the log, number 0), its `changes` are the facts', its `state` follows from the
+// parent's, its effects are one write for each table that has a fact, and it is signed with the key `seed` is the seed of.
+pub fn seal[&q, &z, &s, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, froot: int, seed: &s [byte], out: &!o [byte]) -> [file_read, file_write] int {
+    var nw = 0 - 1;
+    region g {
+        let chg = alloc_slice[g](32, byte_of(0));
+        let head = alloc_slice[g](72, byte_of(0));
+        let zero = alloc_slice[g](32, byte_of(0));
+        let effs = alloc_slice[g](2048, byte_of(0));
+        let enc = alloc_slice[g](4096, byte_of(0));
+        let sig = alloc_slice[g](64, byte_of(0));
+        let st = alloc_slice[g](32, byte_of(0));
+        let n = changes(p, w, froot, chg);
+        if n < 0 {
+            return n;
+        }
+        // the head the tree has
+        var seq = 0;
+        var np = 0;
+        let hk = tables.head_key(contents(w.key));
+        let hr = btree.get(p, contents(w.sc), root, contents(w.key)[0..hk], contents(w.cur));
+        if hr == 72 {
+            seq = commit.be(contents(w.cur), 0, 8) + 1;
+            np = 1;
+            exec.copy(contents(w.cur), 0, 72, head, 0);
+        } else if hr != btree.not_found() {
+            if hr < 0 {
+                return exec.tree_err(hr);
+            }
+            return exec.damaged();
+        }
+        // a write for each table with a fact: the facts are in the order of their tables, so the next table is the first key after `table 0x01`
+        var el = 0;
+        var kl = 0;
+        var more = froot != 0;
+        while more {
+            let r = btree.next_after(p, contents(w.sc), froot, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+            if r == btree.not_found() {
+                more = false;
+            } else if r < 0 {
+                return exec.tree_err(r);
+            } else {
+                var z = 0;
+                while z < r / 1024 && int_of(contents(w.key2)[z]) != 0 {
+                    z = z + 1;
+                }
+                if el + 3 + z > len(effs) {
+                    return exec.too_big();
+                }
+                effs[el] = byte_of(1);
+                build.put_be(effs, el + 1, z, 2);
+                el = exec.copy(contents(w.key2), 0, z, effs, el + 3);
+                kl = exec.copy(contents(w.key2), 0, z, contents(w.key), 0);
+                contents(w.key)[kl] = byte_of(1);
+                kl = kl + 1;
+            }
+        }
+        state.state(np, head[40..40 + 32 * np], chg, st);
+        let en = build.encode(enc, head[8..8 + 32 * np], "main", seq, zero, zero[0..0], effs[0..el], zero, zero, zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], 0);
+        if en < 0 || 4 + en + 64 > len(out) {
+            return exec.too_big();
+        }
+        build.put_be(head, 0, seq, 8);
+        build.id(enc[0..en], head[8..40]);
+        build.sign(seed, head[8..40], sig);
+        build.log_record(out, 0, enc[0..en], sig);
+        exec.copy(st, 0, 32, head, 40);
+        let hk2 = tables.head_key(contents(w.key));
+        nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..hk2], head);
+        if nw < 0 {
+            return exec.tree_err(nw);
+        }
+    }
+    return nw;
 }

@@ -100,6 +100,8 @@ echo "== L3a over a real session: the live tables compared, and the ways to chea
 quiet 3 python3 tests/l3a_e2e.py build/proxy "python3 tools/l3a.py" build/l3averify
 echo "== L3a over a session in which a subject is erased through the proxy (docs/m2g-erasure.md E5)"
 quiet 3 python3 tests/erase_l3a_e2e.py build/proxy "python3 tools/l3a.py" build/l3averify
+echo "== a log the engine made, read by the three L3a verifiers (docs/m3-engine.md 6ah): 3 seeds of 2,000 statements over two processes, and what must not pass"
+for seed in 1 2 3; do quiet 2 python3 tests/engine_log.py build/enginecheck 2000 $seed "python3 tools/l3a.py" build/l3averify "python3 tests/third/l3a_third.py"; done
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
 PG_PORT=5593 N=40 quiet 2 python3 scripts/measure_p2e.py build/proxy
 echo "== the lexer against PostgreSQL (statement counts, operator tokens)"

@@ -970,7 +970,7 @@ the second part; nothing here decides it.
 what **PostgreSQL's** tables show each statement changed (the key and the images before and after, read from PostgreSQL), netted over each transaction, and holds the hash against the
 one the engine prints at each commit. So the engine's `changes` is checked against rows it did not produce and code it does not share.
 
-*Not in this part:* a commit (its parents, its `state`, its signature), the store the verifiers read, DDL in a transaction with writes (the test skips those commits), a key over
+*Not in this part:* a commit (its parents, its `state`, its signature; 6ah), the store the verifiers read, DDL in a transaction with writes (the test skips those commits), a key over
 183 bytes with its table's name (the facts are then refused, and the commit says so: `F -`).
 
 **Built.** `exec.facts_take` and `exec.facts_changes` (src/exec.cho); the test program prints `F <count> <changes>` for each commit that changed rows. 20 seeds of 3,000 statements:
@@ -1018,6 +1018,45 @@ and those of the row beside it are. With no seed a statement that writes a row i
 test for it could not be made to fail and is gone with its mutant. (A row inserted and deleted in one transaction is still no fact.) The reference nets the same way, by commitment.
 
 *Version 1 of the facts (6af) is replaced, not kept beside:* the engine makes the salted form only.
+
+## 6ah. J4, third part: a commit from the engine, read by the verifiers
+
+6af and 6ag give a commit's facts. A commit is more: its parent, its number, its `state`, its effects, a signature (`docs/spec/commit.md`). This part makes the record, so that the
+verifiers that were written for the proxy's log read one the engine made.
+
+**Design.**
+
+- *The head of the log lives in the branch's tree.* The catalog key `0x00000000 0x04` holds the number of the branch's last commit, its id and its `state`. `facts.seal` reads it,
+  makes the next commit and writes the new head into the same tree the transaction's rows are in, so the page file's commit (`pstore.commit`) makes both durable or neither, and a
+  process that starts later goes on from where the file is. No commit yet: the first has number 0 and no parent.
+- *The commit is made of what the engine already has, with the code the proxy uses* (`build.encode`, `build.id`, `build.sign`, `state.state`): `changes` from the facts (6af),
+  `state` from the parent's `state` and `changes`, one **write** effect for each table the transaction wrote. A transaction whose changes net to nothing (a row inserted and
+  deleted) still wrote: `facts.take` notes each table it sees under the key of the table alone, and the effects are made of those notes, not of the facts.
+- *What the record does not say yet is said as nothing*, not invented: the schema hash, the token and the principal are zeros, there are no statement ids, the time is 0, the
+  branch is always `main`. Each is a field the proxy fills from things the engine's driver does not have yet (a login, the lowered statements kept, a clock).
+- *The signing key* is given to the test program on a line (`!log` and the seed in hex). Where a server keeps its key is not decided here.
+
+**Test** (`tests/engine_log.py`; no PostgreSQL). The engine runs fixed statements and a random history in two processes over one page file and prints a record for each commit
+that changed rows, and for each statement what it changed (as since 6af). The test only moves bytes: the records into a log; each change into a line of the version-2 delta store
+under the commit whose record came next (the commitment and the two hashes of a line computed in Python from the specification's formulas; the engine prints none of them); every
+row of every table at the end, with its salts, into a live dump. Then `tools/verify.py` must accept the log (chain, numbers, signatures) and **the three L3a verifiers**
+(`tools/l3a.py`, `build/l3averify`, `tests/third/l3a_third.py`) must each say `ok ... final`: every commit's `changes` is the hash of the facts of its lines, every `state`
+follows, and replaying the facts from nothing gives exactly the rows the engine holds. And what must not pass: a line of the store removed (`changes-mismatch`), an image changed
+(`facts-image`), a row missing from the dump or changed in it (`replay-final`), a record cut out of the log.
+
+*Not in this part, and pinned by the test as the refusals they are:*
+
+- **a column added** rewrites every row's image with no fact (6ag), so the next change of such a row is `replay-precondition`; **a table dropped** takes its rows with no fact,
+  so the end is `replay-final`. The log has no notion of a change of definition yet; until it has, a log of an engine whose tables were altered does not verify. This is the first
+  thing the log needs before it can be relied on;
+- commits on a fork (no record is made off the first branch), the erasure of a row from the store (the store here is the test's, made of what the engine printed), statements
+  that change no row (DDL, a sequence's value) which are in no commit;
+- **the log is not written by the engine.** The test program prints records and the test keeps them. A crash after a record was given out and before the page file's commit
+  leaves a record the file does not know; a server has to write the log and the page file in an order, and recover to the file's head. Not designed here.
+
+**Built.** `facts.seal`, the table notes in `facts.take`, `tables.head_key`; `!log` and `!rows` in the test program. Measured: 12 seeds of 2,000 random statements (885 to 1,039
+commits and 3,018 to 4,332 changes each) and the fixed history: the log and all three verifiers `ok ... final`, every tampered file refused with its rule. 12 mutants, each
+killed by a verifier's own rule (`seq-gap`, `parent-count`, `bad-signature`, `state-mismatch`, `store-foreign-row`) or by a record the engine could no longer make.
 
 ## 7. Taking over, safely
 
