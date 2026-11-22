@@ -889,6 +889,45 @@ them) and a quarter of the one-row inserts written as `insert ... select` with a
 the parser), 5 statement cases and 4 guard cases. `tests/hooks_check.py`: **13 of 16 queries** (`create_schedule`), and the four `schedules` queries that were answered over an empty
 table are now answered over the rows it makes.
 
+## 6ad. A sequence, where its value is drawn once for certain
+
+`create_endpoint` in hooks takes its id from `greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1)`: a sequence, so that an id is never given twice,
+and the largest id there is, so that one somebody inserted by hand is skipped.
+
+**Design.** A sequence is the counter of 6y under a name of its own: `create sequence [if not exists] name [minvalue n] [start [with] n]` (a name among the tables' and the indexes';
+a number from the tables' numbers; the counter holds the value given next, which is never below 0; no other option, no negative number, no `drop`). A value drawn is drawn for good,
+by the same notes.
+
+`nextval` is a function with an effect, and the evaluator computes an expression more than once (before the rows, for its types, and for each row). So it is not the evaluator that
+draws. The driver puts the value the sequence gives next in the place of `nextval('name')` in the statement's text (a parameter, as for a subquery, 6ac), and the insert whose row holds
+it makes the draw the sequence's at the moment an identity column's is: when the row is reached. That is right only where PostgreSQL computes the `nextval` once for certain, so it is
+answered only there: **in an insert, once, in its first row, as the first thing after `select`, `values (`, `greatest(` or `least(`, with no `case` in the statement and no condition
+on the row.** Everywhere else it is refused, as before (`nondeterministic`).
+
+`setval`, `currval`, `drop sequence`, and a sequence's other options are not built.
+
+**Built, and what the differential corrected.** The first 20 seeds had six that disagreed, all one mistake: a `nextval` in a later row of a `values` was taken, and PostgreSQL never
+reaches that row if an earlier one fails (the engine had drawn, PostgreSQL had not). Two rules came of it: the first row only; and an error that is raised before any row is stored,
+in a statement that draws, is not answered (PostgreSQL raises it before the draw if it is a constant's, after it if it is made of the value drawn, and the engine does not tell
+the two apart there). The second rule holds for an identity column beside a subquery's value too, where it had been wrong since 6ac.
+
+*Measured:* 40 seeds of 3,000 statements with sequences made (with and without `minvalue`, `start`, `if not exists`, under names that are taken) and drawn from in the random
+inserts: no disagreement; every value equals PostgreSQL's, through rows that fail and transactions that are rolled back. 32 fixed statements, 13 pinned refusals; 12 mutants (11 of
+the engine, 1 of the parser's mark), 5 statement cases, 2 guard cases. As for a subquery, the part that finds `nextval` in the text is in the test's driver and has no mutants.
+`tests/hooks_check.py`: **the whole schema, 15 of 15, and 14 of 16 queries** (`create_endpoint`).
+
+**The two that are left, and why they are not built.**
+
+- `delete_endpoint` is `with gone as (delete ... returning id) select id, setval('endpoint_ids', greatest(nextval('endpoint_ids'), id), true) from gone`: it moves the sequence past
+  the id that was deleted, so that the id is not given again. It needs a `with` over a statement that writes, and `setval`. Since `create_endpoint` already takes the larger of the
+  sequence and the largest id there is, the only id this protects is the largest one, deleted. On the engine an id is never given twice if the sequence is simply never set back,
+  and `delete from endpoints where id = $1 returning id` is answered today.
+- `prune_attempts` is `delete from attempts where ctid in (select ctid from attempts where at_ms < $1 limit $2)`: "delete some `$2` of the old rows". Which rows is PostgreSQL's
+  choice (the order they lie in its file), and `ctid` is a place in that file. The engine has no such place and will not invent one. By key it can be said without either:
+  the oldest `$2` rows, `order by at_ms, endpoint, event, replay, attempt limit $2`, which needs a subquery of several columns and rows.
+
+Both are for hooks to decide (a different statement each), not for the engine to imitate.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

@@ -360,6 +360,9 @@ class Gen:
         r = self.r.random()
         if r < 0.05:
             return self.pick(["'abc'", "true", "1", "'5'", "null", "100000", "3000000000", "'t'", "(1 + 1)", "('a' || 'b')", "cast('7' as integer)", "(1 / 0)", "''"])
+        if ty in INTS and 0.05 <= r < 0.11:
+            # a value drawn from a sequence (6ad), there or not
+            return self.pick(["nextval('sq1')", "nextval('sq1')", "nextval('sq2')", "greatest(nextval('sq1'), 3)", "nextval('sq1') + 20", "nextval('nope')", "coalesce(nextval('sq1'), 1)"])
         if is_pk:
             return "null" if r < 0.07 else self.key_lit(ty)
         if r < 0.2:
@@ -602,6 +605,9 @@ def ddl_more(g, counter):
         # a change of a column's type: to the type it has, now and then
         c = g.pick(t.cols)
         return "alter table %s alter %s%s %stype %s" % (t.name, g.pick(["column ", ""]), g.pick([c[0], c[0], c[0], "nope"]), g.pick(["", "set data "]), c[1] if g.r.random() < 0.6 else g.pick(["smallint", "integer", "bigint", "text", "boolean"]))
+    if r < 0.95:
+        # a sequence (docs/m3-engine.md 6ad): its name among the tables' and the indexes'
+        return "create sequence %s%s%s%s" % ("if not exists " if g.r.random() < 0.3 else "", g.pick(["sq1", "sq1", "sq2", "ix1", "ta"]), g.pick(["", "", " minvalue 0", " minvalue 5"]), g.pick(["", "", " start 0", " start 7", " start with 3"]))
     return "drop index %s" % g.pick(["ix1", "ix2", "ix3"])
 
 
@@ -1347,10 +1353,43 @@ FIXED += [
     ("select * from fq2 order by id", "order"),
 ]
 
+# a sequence (6ad)
+FIXED += [
+    ("create sequence fseq minvalue 0 start 0", "ddl"),
+    ("create sequence fseq", "ddl"),
+    ("create sequence if not exists fseq start 100", "ddl"),
+    ("create sequence fseq2", "ddl"),
+    ("create sequence fseq3 start with 7", "ddl"),
+    ("create sequence fq2", "ddl"),
+    ("create table fseq (k integer primary key)", "ddl"),
+    ("create table fe (id integer primary key, h text not null)", "ddl"),
+    ("create index fseq2 on fe (h)", "ddl"),
+    ("create index if not exists fseq2 on fe (h)", "ddl"),
+    ("insert into fe (id, h) select nextval('fseq'), 'a'", "write"),
+    ("insert into fe (id, h) select greatest(nextval('fseq'), 5), 'b'", "write"),
+    ("insert into fe (id, h) select greatest(nextval('fseq'), coalesce((select max(id) from fe), -1) + 1), 'd' returning id", "write"),
+    ("insert into fe (id, h) values (nextval('fseq'), 'v')", "write"),
+    ("insert into fe (id, h) values (nextval('fseq'), null)", "write"),
+    ("begin", "ddl"),
+    ("insert into fe (id, h) values (nextval('fseq'), 'dup')", "write"),
+    ("rollback", "ddl"),
+    ("begin", "ddl"),
+    ("insert into fe (id, h) values (nextval('fseq2') + 100, 'r')", "write"),
+    ("rollback", "ddl"),
+    ("insert into fe (id, h) values (nextval('fseq') + 10, 'z')", "write"),
+    ("insert into fe (id, h) values (nextval('fseq') + 200, 'm1'), (500, 'm2')", "write"),
+    ("insert into fe (id, h) values (nextval('fseq') + 300, 'm3'), (500, 'again')", "write"),
+    ("insert into fe (id, h) values (nextval('fseq2'), 'two')", "write"),
+    ("insert into fe (id, h) values (nextval('fseq3'), 'seven')", "write"),
+    ("insert into fe (id, h) values (nextval('fseq3'), 'eight') on conflict do nothing returning id, h", "write"),
+    (P("insert into fe (id, h) select greatest(nextval('fseq'), coalesce((select max(id) from fe), -1) + 1), $1::text returning id", "param"), "write"),
+    ("select * from fe order by id", "order"),
+]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)",
              "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
-             "create table ft (k integer primary key, s text)", "insert into ft values (1, '3000000000 7abc')"]
+             "create table ft (k integer primary key, s text)", "insert into ft values (1, '3000000000 7abc')", "create sequence fzs"]
 DEP = [
     # the cheaper condition is computed first, wherever it is written: the row with k = 2 never reaches the division
     ("select k from fz where k > 2 and 10 / (k - 2) > 0", None),
@@ -1436,6 +1475,19 @@ UNSUP = [
     ("insert into fz select 9, 9 where 1 / 0 > 1", "22012"),
     ("insert into fz select 9, 9 where 7", "42804"),
     ("insert into fz select 9, 'abc' where 7", "42804"),                                              # the condition's error, not the row's
+    # a sequence (6ad): a nextval that is not drawn once for certain, or not in an insert
+    ("insert into fz values (nextval('fzs'), 1), (nextval('fzs'), 2)", "23505"),
+    ("insert into fz values (coalesce(nextval('fzs'), 1), 1)", "23505"),
+    ("insert into fz select nextval('fzs'), 1 where true", "23505"),
+    ("insert into fz values (nextval('nope'), 1)", "42P01"),
+    ("insert into fz values (1, 1), (nextval('fzs'), 2)", "23505"),                                  # the first row fails: the second's value is not drawn
+    ("insert into fz values (1, 1), (greatest(nextval('fzs'), 3), 2)", "23505"),
+    ("insert into fz values (nextval('fzs') + 3000000000, 1)", "22003"),                              # an error of the value drawn: after the draw, to PostgreSQL
+    ("insert into fi (k) values ((select max(k) from fz) + 3000000000)", "22003"),                    # the same, for an identity column and a subquery's value
+    ("select nextval('fzs') from fz", None),
+    ("update fz set n = nextval('fzs')", None),
+    ("create sequence fzt start 0", "22023"),
+    ("create sequence fzt increment 2", None),
     ("update fi set c = 7", "428C9"),                                                                # an identity column is given no value
     ("insert into fi values (2, 9)", "428C9"),
     ("insert into fi (c, k) values (9, 2)", "428C9"),
@@ -1482,7 +1534,7 @@ def order_dependent(pg):
         pg.query("begin")
         err, _, _, _ = pg.query(sql)
         pg.query("rollback")
-        if ans[:1] not in (["refused engine-unsupported"], ["refused subquery"], ["refused insert-select"]):
+        if ans[:1] not in (["refused engine-unsupported"], ["refused subquery"], ["refused insert-select"], ["refused nondeterministic"], ["refused unsupported-statement"]):
             raise SystemExit("engine_check: %s: the engine says %s, and this is one it does not answer" % (sql, ans))
         if err != want:
             if PGMAJOR[0] == 16:
@@ -1492,6 +1544,7 @@ def order_dependent(pg):
     pg.query("drop table fw")
     pg.query("drop table fi")
     pg.query("drop table ft")
+    pg.query("drop sequence fzs")
     return notes
 
 
@@ -1759,7 +1812,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (f[ksonmrc]\d?|fq2)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (f[ksonmrce]\d?|fq2)\b", sql)
         if m:
             return m.group(1)
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")

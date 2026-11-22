@@ -1231,6 +1231,59 @@ fn create_index[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], 
     return end;
 }
 
+// CREATE SEQUENCE [IF NOT EXISTS] name [MINVALUE n] [START [WITH] n]: no other option, and no negative number (docs/m3-engine.md 6ad). One of the engine's forms.
+fn create_sequence[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    st[10] = 0;
+    engine_form(st, parse.e_unsupported_statement());
+    let ine = if_not_exists(sql, toks, from + 2, end, st);
+    var pos = plain_name(sql, toks, from + 2 + 3 * ine, end, st);
+    if pos < 0 {
+        return pos;
+    }
+    let name = st[9];
+    var low = 0 - 1;
+    var start = 0 - 1;
+    var more = true;
+    while more {
+        if parse.kw(sql, toks, pos, end, "minvalue") && low < 0 && pos + 1 < end && parse.tkind(toks, pos + 1) == lex.t_number() {
+            low = pos + 1;
+            pos = pos + 2;
+        } else if parse.kw(sql, toks, pos, end, "start") && start < 0 {
+            pos = pos + 1;
+            if parse.kw(sql, toks, pos, end, "with") {
+                pos = pos + 1;
+            }
+            if pos >= end || parse.tkind(toks, pos) != lex.t_number() {
+                return parse.fail(st, pos, parse.e_syntax());
+            }
+            start = pos;
+            pos = pos + 1;
+        } else {
+            more = false;
+        }
+    }
+    if pos < end {
+        return parse.fail(st, pos, parse.e_unsupported_statement());
+    }
+    if ine == 1 {
+        let id = parse.mk(nodes, kids, st, parse.n_name(), name, tmp, 0, 0 - 1, 0 - 1);
+        if id < 0 {
+            return parse.fail(st, from, 0 - id);
+        }
+        let r = stage(tmp, st, id);
+        if r < 0 {
+            return parse.fail(st, from, 0 - r);
+        }
+    }
+    let root = parse.mk(nodes, kids, st, parse.n_create_seq(), name, tmp[0..st[10]], st[10], low, start);
+    st[10] = 0;
+    if root < 0 {
+        return parse.fail(st, from, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
 // DROP TABLE t, DROP INDEX name
 fn drop_object[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
     var kind = parse.n_drop_table();
@@ -1309,6 +1362,9 @@ pub fn statement[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [i
         }
         if parse.kw(sql, toks, from + 1, end, "index") || parse.kw(sql, toks, from + 1, end, "unique") && parse.kw(sql, toks, from + 2, end, "index") {
             return create_index(sql, toks, from, end, nodes, kids, vs, os, tmp, st);
+        }
+        if parse.kw(sql, toks, from + 1, end, "sequence") {
+            return create_sequence(sql, toks, from, end, nodes, kids, tmp, st);
         }
         return parse.fail(st, from + 1, parse.e_unsupported_statement());
     }

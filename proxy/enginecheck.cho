@@ -238,6 +238,14 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
                                                         } else if mode == 3 {
                                                             // the transaction has failed: nothing runs until it is ended
                                                             rc = exec.e_aborted();
+                                                        } else if contents(nw)[6 * contents(sw)[2]] == parse.n_create_seq() {
+                                                            // CREATE SEQUENCE has no IR: it is the engine's alone
+                                                            if mode != 0 || exec.params_bound(w) > 0 {
+                                                                rc = exec.unsupported();
+                                                            } else {
+                                                                rc = execw.create_sequence(pg, w, root, sql, contents(tw), contents(nw), contents(sw)[2]);
+                                                            }
+                                                            kind = 13;
                                                         } else {
                                                             let top = contents(sw)[2];
                                                             let ln = lower.lower(sql, contents(tw), contents(nw), contents(kw), top, contents(mw)[0..sl], contents(rw), contents(iw), contents(xw));
@@ -349,7 +357,7 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
                                                                 put_str(io, "INDEX ");
                                                             } else if kind == 12 {
                                                                 put_str(io, "DROPINDEX ");
-                                                            } else if kind == 7 {
+                                                            } else if kind == 7 || kind == 13 {
                                                                 put_str(io, "CREATE ");
                                                             } else {
                                                                 put_str(io, "DROP ");
@@ -621,6 +629,9 @@ fn prepare[&z, &q, &b, &s](pg: &!z pager.Pager, w: &!q exec.Work, b: &!b Sub, sq
         if tok_is(sql, contents(b.t2), i, n, '(') && parse.kw(sql, contents(b.t2), i + 1, n, "select") {
             any = true;
         }
+        if parse.kw(sql, contents(b.t2), i, n, "nextval") && tok_is(sql, contents(b.t2), i + 1, n, '(') {
+            any = true;
+        }
         i = i + 1;
     }
     if !any {
@@ -649,7 +660,86 @@ fn prepare[&z, &q, &b, &s](pg: &!z pager.Pager, w: &!q exec.Work, b: &!b Sub, sq
         if named && tok_is(sql, contents(b.t2), i, n, '(') && parse.kw(sql, contents(b.t2), i + 1, n, "select") {
             return 0 - 2;
         }
-        if tok_is(sql, contents(b.t2), i, n, '(') && parse.kw(sql, contents(b.t2), i + 1, n, "select") {
+        if parse.kw(sql, contents(b.t2), i, n, "nextval") && tok_is(sql, contents(b.t2), i + 1, n, '(') {
+            // nextval('name') (docs/m3-engine.md 6ad): in an INSERT, once, where it is computed whatever stands beside it (the first thing after SELECT, VALUES ( or GREATEST ( / LEAST ();
+            // the value it will draw takes its place, and the INSERT makes the draw when its row is reached
+            var ok = parse.kw(sql, contents(b.t2), 0, n, "insert") && exec.draw_id(w) == 0 && i >= 2 && i + 3 < n && contents(b.t2)[4 * (i + 2)] == lex.t_string() && tok_is(sql, contents(b.t2), i + 3, n, ')');
+            if ok && !parse.kw(sql, contents(b.t2), i - 1, n, "select") {
+                ok = tok_is(sql, contents(b.t2), i - 1, n, '(') && (parse.kw(sql, contents(b.t2), i - 2, n, "values") || parse.kw(sql, contents(b.t2), i - 2, n, "greatest") || parse.kw(sql, contents(b.t2), i - 2, n, "least"));
+            }
+            var k = 0;
+            while k < n {
+                if parse.kw(sql, contents(b.t2), k, n, "case") {
+                    ok = false;
+                }
+                // in the first row: no `), (` before it (PostgreSQL does not reach a later row if an earlier one fails)
+                if k + 2 < i && tok_is(sql, contents(b.t2), k, n, ')') && tok_is(sql, contents(b.t2), k + 1, n, ',') && tok_is(sql, contents(b.t2), k + 2, n, '(') {
+                    ok = false;
+                }
+                k = k + 1;
+            }
+            if !ok {
+                return 0 - 2;
+            }
+            // (a string's token is what is between its quotes)
+            let na = contents(b.t2)[4 * (i + 2) + 1];
+            let nz = na + contents(b.t2)[4 * (i + 2) + 2];
+            k = na;
+            while k < nz {
+                let c = int_of(sql[k]);
+                if !(c >= 'a' && c <= 'z' || c == '_' || c >= '0' && c <= '9' && k > na) {
+                    return 0 - 2;
+                }
+                k = k + 1;
+            }
+            let id = exec.seq_find(pg, w, root, sql[na..nz]);
+            if id < 0 {
+                return 0 - 2;
+            }
+            let last = exec.seq_last(pg, w, root, id);
+            if last < 0 {
+                return 0 - 2;
+            }
+            let v = last;
+            exec.draw_set(w, id, v + 1);
+            // the digits of `v` (it is at least a sequence's least value, which is not negative)
+            var digits = 1;
+            var div = 1;
+            while v / div >= 10 {
+                div = div * 10;
+                digits = digits + 1;
+            }
+            k = 0;
+            while k < digits {
+                contents(b.vtx)[k] = byte_of('0' + v / div % 10);
+                div = div / 10;
+                k = k + 1;
+            }
+            let num = exec.params_inner(w);
+            if v < 0 || num > 99 || !exec.param_add(w, contents(b.vtx)[0..digits], false) {
+                return 0 - 2;
+            }
+            let start = contents(b.t2)[4 * i + 1];
+            if o + (start - from) + 32 > 16384 {
+                return 0 - 2;
+            }
+            k = from;
+            while k < start {
+                contents(b.text)[o] = sql[k];
+                o = o + 1;
+                k = k + 1;
+            }
+            o = put_text(contents(b.text), o, "($");
+            if num >= 10 {
+                contents(b.text)[o] = byte_of('0' + num / 10);
+                o = o + 1;
+            }
+            contents(b.text)[o] = byte_of('0' + num % 10);
+            o = o + 1;
+            o = put_text(contents(b.text), o, "::bigint)");
+            from = contents(b.t2)[4 * (i + 3) + 1] + 1;
+            i = i + 4;
+        } else if tok_is(sql, contents(b.t2), i, n, '(') && parse.kw(sql, contents(b.t2), i + 1, n, "select") {
             depth0 = depth0 - 1;
             // where a value stands: after an operator, a parenthesis or a comma, or one of the words an expression follows; not after IN, EXISTS, a function's name, FROM
             var ok = i > 0;
@@ -880,6 +970,7 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                             exec.set_txn(w, last + 1);
                             exec.set_once(w, true);
                             var after = 0;
+                            exec.draw_set(w, 0, 0);
                             let pl = prepare(pg, w, sub, all[ls..le], rs[cur]);
                             if pl >= 0 {
                                 after = run_sql(heap, io, pg, w, contents(sub.text)[0..pl], rs[cur], 0, fl, true);
@@ -929,6 +1020,7 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                             }
                             var after = 0;
                             var pl = 0 - 1;
+                            exec.draw_set(w, 0, 0);
                             if mode == 0 {
                                 pl = prepare(pg, w, sub, all[ls..le], troot);
                             }
