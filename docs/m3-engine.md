@@ -951,6 +951,34 @@ pinned refusals.
 *What is still the test program's:* transactions (which tree a statement runs on, 6v) and the writing back of counters after a failure (6y). They are a dozen lines each and go to
 src/ with the session that will hold them (J6).
 
+## 6af. J4, first part: the facts of a commit, from the engine
+
+A commit in the log says what it changed as `changes`, a hash over its **facts** (`docs/spec/state.md`): for each row the commit changed, net, the table, the key, and the hash of
+the row's image before and after, in the order of `(table, key)`. Behind PostgreSQL a trigger collects them. The engine has to make them itself, and this is the first of it.
+
+**Design.** A statement already keeps, for each row it writes, the table, the plain key and the two images (they are what `tests/engine_check.py` compares with PostgreSQL's
+rows, C150). At the end of a statement that succeeded the driver folds them into the facts of the transaction (`exec.facts_take`): a tree of its own in the page file, keyed by the
+table, a zero byte and the plain key, which is the order the facts are in, holding for each row the hash of its image *when the transaction first touched it* and *as it is now*. A row
+touched again keeps the first and takes the new second; one that ends as it began (inserted and deleted; updated back) is no fact. At commit `exec.facts_changes` walks the tree and
+computes `changes` exactly as the specification says, with src/state.cho, the code the proxy and the verifiers use.
+
+**This is version 1 of the facts**: the key as it is, and the row's hash without a salt. The log's second version (salted hashes and a commitment to the key, so that a row can be
+erased and the log still verify, `docs/spec/l3a.md` section 9) needs a salt kept beside each version of a row and destroyed with it. That is a change to what the tree stores and is
+the second part; nothing here decides it.
+
+**Test.** `tools/state.py` and `tools/l3a.py` are the project's own second implementation of facts, their netting and `changes`, written for the verifiers. The differential feeds them
+what **PostgreSQL's** tables show each statement changed (the key and the images before and after, read from PostgreSQL), netted over each transaction, and holds the hash against the
+one the engine prints at each commit. So the engine's `changes` is checked against rows it did not produce and code it does not share.
+
+*Not in this part:* a commit (its parents, its `state`, its signature), the store the verifiers read, DDL in a transaction with writes (the test skips those commits), a key over
+183 bytes with its table's name (the facts are then refused, and the commit says so: `F -`).
+
+**Built.** `exec.facts_take` and `exec.facts_changes` (src/exec.cho); the test program prints `F <count> <changes>` for each commit that changed rows. 20 seeds of 3,000 statements:
+the engine's `changes` equals the reference's for every commit compared, statements of their own and transactions of several. 30 fixed statements for the netting (a row inserted
+and updated, updated and put back, inserted and deleted, deleted and inserted again, a key of two columns, two tables in one transaction, a rollback). 7 mutants.
+
+*What the test program still does itself:* it decides when a transaction's facts begin and end (as it decides which tree a transaction runs on, 6v). Those lines have no mutants.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
