@@ -192,24 +192,45 @@ def q(s):
 class Table:
     def __init__(self, name, cols, pk):
         self.name, self.cols, self.pk = name, cols, pk   # cols: (name, sql type, not null, default sql or None)
+        self.key2 = None     # a second column of the key: then the key is written for the table, `primary key (k, c)` or `(c, k)`
+        self.key2_first = False
+        self.checks = {}     # column -> (low, high): `check (c between low and high)`
+        self.spoil = ""      # a table key that PostgreSQL refuses, now and then
+
+    def key_cols(self):
+        k = self.cols[self.pk][0]
+        if self.key2 is None:
+            return [k]
+        return [self.key2, k] if self.key2_first else [k, self.key2]
 
     def of(self, kind):
         if kind == "int":
             return [c[0] for c in self.cols if c[1] in INTS]
         return [c[0] for c in self.cols if c[1] == kind]
 
-    def ddl(self):
+    def ddl(self, ine=False):
         parts = []
         for i, (name, ty, nn, dflt) in enumerate(self.cols):
             s = "%s %s" % (name, ty)
-            if i == self.pk:
+            if i == self.pk and (self.key2 is None or self.spoil == "two"):
                 s += " primary key"
+            if name in self.checks and i % 2 == 0:
+                s += " check (%s between %d and %d)" % ((name,) + self.checks[name])
             if nn:
                 s += " not null"
             if dflt is not None:
                 s += " default " + dflt
+            if name in self.checks and i % 2 == 1:
+                s += " check (%s between %d and %d)" % ((name,) + self.checks[name])
             parts.append(s)
-        return "create table %s (%s)" % (self.name, ", ".join(parts))
+        if self.key2 is not None:
+            keys = self.key_cols()
+            if self.spoil == "twice":
+                keys.append(keys[0])
+            elif self.spoil == "nope":
+                keys.append("nope")
+            parts.insert(len(parts) if len(parts) % 2 else 1, "primary key (%s)" % ", ".join(keys))
+        return "create table %s%s (%s)" % ("if not exists " if ine else "", self.name, ", ".join(parts))
 
 
 TEXTS = ["", "a", "b", "abc", "A", "12", " 7", "x%", "ñ", "a_c", "it's", "zz"]
@@ -358,7 +379,18 @@ class Gen:
             cols[0], cols[pk] = cols[pk], cols[0]
             cols[pk] = ("k", cols[pk][1], False, None) if cols[pk][0] != "k" else cols[pk]
             pk = [c[0] for c in cols].index("k")
-        return Table(name, cols, pk)
+        t = Table(name, cols, pk)
+        r = self.r.random()
+        if r < 0.3:
+            # a key of two columns (docs/m3-engine.md 6x)
+            others = [c[0] for c in cols if c[0] != "k" and c[1] != "boolean"]
+            if others:
+                t.key2 = self.pick(others)
+                t.key2_first = self.r.random() < 0.4
+        for cname, ty, _, _ in cols:
+            if ty in INTS and self.r.random() < 0.15:
+                t.checks[cname] = self.pick([(0, 10), (-5, 100), (1, 65535), (0, 0), (5, 1)])
+        return t
 
     def insert(self):
         t = self.t
@@ -431,7 +463,8 @@ class Gen:
                 keys.append(k + self.pick(["", "", " asc", " desc"]))
             if not distinct and self.r.random() < 0.75:
                 # with the table's name: a bare `k` may be an output column that a cast or a CASE named k, and then it decides nothing
-                keys.append(t.name + "." + pk + self.pick(["", " desc"]))
+                for kc in t.key_cols():
+                    keys.append(t.name + "." + kc + self.pick(["", " desc"]))
                 total = True
             if distinct and self.r.random() < 0.6:
                 keys = ["%d%s" % (i + 1, self.pick(["", " desc"])) for i in range(nout)]
@@ -458,7 +491,7 @@ def ddl_more(g, counter):
         ty = g.pick(["smallint", "integer", "bigint", "text", "boolean"])
         q2 = g.r.random()
         if q2 < 0.08:
-            return "alter table %s add column %s %s" % (t.name, g.pick(t.cols)[0], ty)
+            return "alter table %s add column %s%s %s" % (t.name, g.pick(["", "if not exists "]), g.pick(t.cols)[0], ty)
         if q2 < 0.14:
             return "alter table %s add column %s %s primary key" % (t.name, name, ty)
         if q2 < 0.22:
@@ -469,13 +502,29 @@ def ddl_more(g, counter):
         if g.r.random() < 0.6:
             dflt = {"smallint": "5", "integer": "- 2", "bigint": "7", "text": "'dd'", "boolean": "true"}[ty]
         nn = dflt is not None and g.r.random() < 0.3
-        t.cols.append((name, ty, nn, dflt))
-        return "alter table %s add column %s %s%s%s" % (t.name, name, ty, " not null" if nn else "", " default " + dflt if dflt else "")
+        chk = ""
+        if ty in INTS and g.r.random() < 0.25:
+            # a range the default is in, or (now and then) is not: then only an empty table takes the column, and the generator does not count on it
+            lo, hi = g.pick([(-5, 10), (0, 100), (0, 1), (6, 9)])
+            chk = " check (%s between %d and %d)" % (name, lo, hi)
+            if dflt is None or lo <= int(dflt.replace(" ", "")) <= hi:
+                t.checks[name] = (lo, hi)
+                t.cols.append((name, ty, nn, dflt))
+        else:
+            t.cols.append((name, ty, nn, dflt))
+        return "alter table %s add column %s%s %s%s%s%s" % (t.name, g.pick(["", "", "if not exists "]), name, ty, " not null" if nn else "", " default " + dflt if dflt else "", chk)
     if r < 0.85:
         cols = [g.pick(t.cols)[0] for _ in range(g.pick([1, 1, 2]))]
         if g.r.random() < 0.08:
             cols.append("nope")
-        return "create %sindex %s on %s (%s)" % ("unique " if g.r.random() < 0.08 else "", g.pick(["ix1", "ix2", "ix3", "ta", "tb"]), t.name, ", ".join(cols))
+        cond = ""
+        if g.r.random() < 0.2:
+            cond = " where " + g.pick(t.cols + [("nope",)])[0]
+        return "create %sindex %s%s on %s (%s)%s" % ("unique " if g.r.random() < 0.08 else "", "if not exists " if g.r.random() < 0.3 else "", g.pick(["ix1", "ix2", "ix3", "ta", "tb"]), t.name, ", ".join(cols), cond)
+    if r < 0.9:
+        # a change of a column's type: to the type it has, now and then
+        c = g.pick(t.cols)
+        return "alter table %s alter %s%s %stype %s" % (t.name, g.pick(["column ", ""]), g.pick([c[0], c[0], c[0], "nope"]), g.pick(["", "set data "]), c[1] if g.r.random() < 0.6 else g.pick(["smallint", "integer", "bigint", "text", "boolean"]))
     return "drop index %s" % g.pick(["ix1", "ix2", "ix3"])
 
 
@@ -655,7 +704,11 @@ def compare(pg, stmts, eng, must):
     if len(eng) != len(stmts):
         raise SystemExit("engine_check: %d answers for %d statements" % (len(eng), len(stmts)))
     def snapshot(name):
-        err, _, rows, _ = pg.query("select jsonb_build_array(k)::text, to_jsonb(x)::text from %s x" % name)
+        # the key's columns, in the key's order, as PostgreSQL has them
+        _, _, kr, _ = pg.query("select a.attname from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey) where i.indrelid = to_regclass('%s') and i.indisprimary "
+                               "order by array_position(i.indkey, a.attnum)" % name)
+        key = ", ".join(r[0].decode() for r in kr) or "k"
+        err, _, rows, _ = pg.query("select jsonb_build_array(%s)::text, to_jsonb(x)::text from %s x" % (key, name))
         return None if err else {r[0]: r[1] for r in rows}
 
     counts = {}
@@ -981,6 +1034,71 @@ FIXED += [
     ("select * from fp order by k", "order"),
 ]
 
+# the schema's forms (docs/m3-engine.md 6x): a key of several columns, a range, IF NOT EXISTS, a change of type to the same type, an index with a condition
+FIXED += [
+    ("create table fk (a integer, b bigint, c text, n smallint check (n between 0 and 9), primary key (a, b))", "ddl"),
+    ("insert into fk values (1, 1, 'x', 0), (1, 2, 'y', 9), (2, 1, 'z', null)", "write"),
+    ("insert into fk values (1, 2, 'again', 1)", "write"),
+    ("insert into fk values (1, null, 'no', 1)", "write"),
+    ("insert into fk values (null, 1, 'no', 1)", "write"),
+    ("insert into fk values (3, 3, 'out', 10)", "write"),
+    ("insert into fk values (3, 3, 'out', -1)", "write"),
+    ("insert into fk (b, a) values (-5, 3), (5, -3)", "write"),
+    ("select * from fk order by a, b", "order"),
+    ("select * from fk where a = 1 and b = 2", "order"),
+    ("select c from fk where b = 1 order by a desc", "order"),
+    ("update fk set n = n + 5 where a = 1 and b = 1", "write"),
+    ("update fk set n = n + 5 where a = 1 and b = 1", "write"),
+    ("update fk set n = null where a = 1", "write"),
+    ("update fk set b = 7 where a = 2", "write"),
+    ("update fk set a = 1, b = 2 where a = 2", "write"),
+    ("delete from fk where a = 3 and b = -5", "write"),
+    ("select a, count(*) from fk group by a order by a", "order"),
+    ("create table if not exists fk (zzz integer)", "ddl"),
+    ("create table if not exists fk (zzz integer primary key, zzz text, nope integer default 'abc')", "ddl"),
+    ("select * from fk order by a, b", "order"),
+    ("create table if not exists fk2 (k integer primary key, v integer default 3 check (v between 1 and 5))", "ddl"),
+    ("insert into fk2 (k) values (1)", "write"),
+    ("insert into fk2 values (2, 0)", "write"),
+    ("insert into fk2 values (2, 5), (3, 6)", "write"),
+    ("alter table fk2 add column if not exists v text", "ddl"),
+    ("alter table fk2 add column if not exists w integer check (w between 0 and 3) default 2", "ddl"),
+    ("alter table fk2 add column z integer default 9 check (z between 0 and 3)", "ddl"),
+    ("alter table fk2 add column y integer check (y between 0 and 3)", "ddl"),
+    ("alter table fk2 alter column v type integer", "ddl"),
+    ("alter table fk2 alter w set data type integer", "ddl"),
+    ("alter table fk2 alter column nope type integer", "ddl"),
+    ("update fk2 set w = w + 1", "write"),
+    ("update fk2 set w = w + 1, y = 4", "write"),
+    ("alter table fk2 add column flag boolean", "ddl"),
+    ("create index if not exists fk on fk2 (nope)", "ddl"),
+    ("create index if not exists fki on fk2 (nope)", "ddl"),
+    ("create index if not exists fki on fk2 (v)", "ddl"),
+    ("create index if not exists fki on fk2 (nope)", "ddl"),
+    ("create index fki on fk2 (v)", "ddl"),
+    ("create index fkp on fk2 (v, w) where flag", "ddl"),
+    ("select * from fk2 order by k", "order"),
+    ("create table fk3 (a integer primary key, b integer, primary key (a, b))", "ddl"),
+    ("create table fk3 (a integer, b integer, primary key (a, a))", "ddl"),
+    ("create table fk3 (a integer, b integer, primary key (a, nope))", "ddl"),
+    ("create table fk3 (s text, t text, u integer, primary key (t, s))", "ddl"),
+    ("insert into fk3 values ('a', 'b', 1), ('ab', '', 2), ('a', '', 3), ('', 'ab', 4), ('', '', 5)", "write"),
+    ("insert into fk3 values ('ab', '', 6)", "write"),
+    ("select * from fk3 order by t, s", "order"),
+    ("select u from fk3 where t = '' and s = 'ab'", "order"),
+    ("delete from fk3 where t = ''", "write"),
+    ("select * from fk3 order by t, s", "order"),
+    ("create table fk5 (k integer primary key, t integer check (t between -3 and -1))", "ddl"),
+    ("insert into fk5 values (1, -2)", "write"),
+    ("insert into fk5 values (2, 0)", "write"),
+    ("insert into fk5 values (3, -4)", "write"),
+    ("insert into fk5 values (4, -3), (5, -1), (6, null)", "write"),
+    ("create index fkname on fk5 (t)", "ddl"),
+    ("create table if not exists fkname (k integer primary key)", "ddl"),
+    ("create table fkname (k integer primary key)", "ddl"),
+    ("select * from fk5 order by k", "order"),
+]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)"]
 DEP = [
@@ -1028,6 +1146,15 @@ UNSUP = [
     ("select a1.k from fz a1 join fz a2 on a1.k = a2.k", None),          # a table joined to itself
     ("create unique index fzu on fz (n)", None),                         # a constraint that needs an index to hold
     ("select fw.m, count(*) from fz join fw on fz.k = fw.wk group by fw.wk", None),   # m depends on fw's key
+    # the schema's forms (6x)
+    ("create table fzc (k integer primary key, n integer check (n > 0))", None),                     # a check that is no range
+    ("create table fzc (k integer primary key, n integer check (n not between 0 and 3))", None),
+    ("create table fzc (k integer primary key, n integer, m integer check (n between 0 and 3))", None),   # of another column
+    ("create table fzc (k integer primary key, s text check (s between 'a' and 'b'))", None),
+    ("create table fzc (k bigint generated always as identity primary key)", None),                  # the next slice
+    ("alter table fz alter column n type bigint", None),                                              # a change of type
+    ("create index fzp on fz (n) where n > 1", None),                                                 # a condition that is no boolean column
+    ("create index fzp on fz (n) where n", "42804"),
     # parameters (6w): PostgreSQL gives one the type of its first use, and refuses one that meets no type
     (P("select k from fz where n > $1 or k = $1", "1"), None),          # used twice with no cast
     (P("select $1::bigint, $1::text from fz", "1"), None),              # and with two casts
@@ -1286,7 +1413,7 @@ def main():
             # the generator's idea of the tables is not taken back by a rollback: no DDL inside a transaction here (the fixed statements have some)
             r = 0.5
         if r < 0.012:
-            stmts.append((g.t.ddl(), "ddl", g.t.name))
+            stmts.append((g.t.ddl(rng.random() < 0.5), "ddl", g.t.name))
         elif r < 0.02:
             # a table is dropped and another definition made under its name
             name = g.t.name
@@ -1298,7 +1425,9 @@ def main():
         elif r < 0.065:
             spare += 1
             bad = g.table("tz%d" % spare)
-            stmts.append((bad.ddl() + rng.choice(["", "", " "]), "ddl", bad.name))
+            if bad.key2 is not None:
+                bad.spoil = rng.choice(["", "two", "twice", "nope"])
+            stmts.append((bad.ddl(rng.random() < 0.3) + rng.choice(["", "", " "]), "ddl", bad.name))
             stmts.append(("drop table %s" % bad.name, "ddl", bad.name))
         elif r < 0.35:
             stmts.append((g.insert(), "write", g.t.name))
@@ -1307,8 +1436,7 @@ def main():
         elif r < 0.6:
             stmts.append((g.delete(), "write", g.t.name))
         elif r < 0.64:
-            pk = g.t.cols[g.t.pk][0]
-            stmts.append(("select * from %s order by %s" % (g.t.name, pk), "order", g.t.name))
+            stmts.append(("select * from %s order by %s" % (g.t.name, ", ".join(g.t.key_cols())), "order", g.t.name))
         elif r < 0.74:
             sql, how = gselect(g)
             stmts.append((sql, how, g.t.name))
@@ -1341,7 +1469,12 @@ def main():
     pok = sum(1 for i in psent if eng[i] and not eng[i][0].startswith("refused "))
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
-    fstmts = [(sql, how, "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")) for sql, how in FIXED]
+    def ftable(sql, how):
+        m = re.match(r"(?:insert into|update|delete from) (fk\d?)\b", sql)
+        if m:
+            return m.group(1)
+        return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")
+    fstmts = [(sql, how, ftable(sql, how)) for sql, how in FIXED]
     fcounts, ffails, _, _ = compare(pg, fstmts, feng, True)
     print("engine_check: %d fixed statements, none refused: %s" % (len(FIXED), ", ".join("%s=%d" % kv for kv in sorted(fcounts.items()))))
     fails += ffails

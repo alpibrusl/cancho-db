@@ -5,7 +5,8 @@
 
 `tests/hooks/schema.sql` and `tests/hooks/queries.sql` are copies of that repository's `sql/` (the commit is in tests/hooks/README). The schema is run on PostgreSQL and on the engine, then a
 script of calls (a query's name and the values bound to its parameters, by the extended protocol) on both. After every call the answers are held against each other (the error, or the tag and the
-rows) and so is what every table then holds. The engine may refuse; it may not differ.
+rows) and so is what every table then holds. The engine may refuse; it may not differ. What it refuses PostgreSQL runs and takes back, so the two hold the same rows at the next call (a
+sequence is not taken back, in PostgreSQL: a query that draws from one is not answered yet).
 
 What is printed is the measure of the work from here: how many of the schema's statements and how many of the sixteen queries the engine answers (a query counts if every call of it is answered).
 The two floors below only go up.
@@ -19,8 +20,8 @@ sys.argv = sys.argv[:2]
 import engine_check as ec
 
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks")
-SCHEMA_FLOOR = 0
-QUERY_FLOOR = 0
+SCHEMA_FLOOR = 12
+QUERY_FLOOR = 2
 DUMPS = ["select * from attempts order by endpoint, event, replay, attempt", "select * from endpoints order by id", "select * from schedules order by id"]
 
 # (query, values): text as the service's driver sends it, None for a null
@@ -144,11 +145,21 @@ def main():
     called = {}
     for i, (name, st) in enumerate(steps):
         kind, detail = answer(eng[4 * i])
-        err, oids, rows, tag = pg.query(st)
         where = "%s %s" % (name or "schema", (st.params if name else st[:60]))
         if kind == "refused":
+            # a refusal changes nothing: PostgreSQL runs the statement and takes it back, so that the two hold the same rows for the next call
+            pg.query("begin")
+            pg.query(st)
+            pg.query("rollback")
             if name:
                 refused.setdefault(name, detail)
+            else:
+                print("hooks_check:   refused schema: %s (%s)" % (st[:70], detail))
+            err = None
+        else:
+            err, oids, rows, tag = pg.query(st)
+        if kind == "refused":
+            pass
         elif kind == "error":
             if err != detail:
                 raise SystemExit("hooks_check: %s: the engine says error %s, PostgreSQL %s" % (where, detail, err or "no error"))
@@ -166,8 +177,8 @@ def main():
         for j, dump in enumerate(DUMPS):
             dk, dd = answer(eng[4 * i + 1 + j])
             _, _, prow, _ = pg.query(dump)
-            if dk == "ok" and not refused and ok_schema == sum(1 for n, _ in steps[:i + 1] if n is None) and dd[2] != prow:
-                raise SystemExit("hooks_check: after %s: %s differs" % (where, dump.split()[3]))
+            if dk == "ok" and dd[2] != prow:
+                raise SystemExit("hooks_check: after %s: %s differs\n  engine:   %s\n  postgres: %s" % (where, dump.split()[3], dd[2][:6], prow[:6]))
     answered = sorted(n for n in qs if n not in refused and called.get(n, 0) > 0)
     print("hooks_check: the schema of cancho-hooks: %d of %d statements answered" % (ok_schema, len(schema)))
     print("hooks_check: its queries: %d of 16 answered as PostgreSQL answers them, over %d calls%s" % (len(answered), len(CALLS), (": " + ", ".join(answered)) if answered else ""))

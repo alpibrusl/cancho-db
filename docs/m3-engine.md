@@ -720,6 +720,40 @@ the engine; after each call the answers are compared and so is every table. When
 table is not there (`attempts_of`, `endpoints_all`, `schedule_by_id`, `schedules_all`, `schedules_due`, `advance_schedule`), so the schema comes next, before `returning`: a key of several
 columns, `if not exists`, `check`, an identity column, a sequence, an index with a condition, and `alter column ... type` to the type it has.
 
+## 6x. The schema of hooks (built, but for the identity column and the sequence)
+
+Fifteen statements (`tests/hooks/schema.sql`), none answered when 6w was written, and six of the sixteen queries wait only for their tables. What the statements need, and what each is in the engine:
+
+| in the schema | in the engine | refused |
+|---|---|---|
+| `create table if not exists`, `create index if not exists`, `add column if not exists` | if the name is there, nothing changes and the answer is the statement's own tag (PostgreSQL adds a notice, which is not an answer) | - (*corrected:* the design refused a definition that would have raised an error had the name not been there. PostgreSQL's source says when it looks: for a table and a column, never, the name is tested first; for an index, the condition and the columns are read first and their errors raised, `src/backend/commands/indexcmds.c`. The engine does the same, and the differential found the index's order before the source was read) |
+| `primary key (endpoint, event, replay, attempt)` | the place of each column in the key, which the stored definition and the stored key have had since M3c (src/row.cho): only the statement was missing | - |
+| `check (id between 0 and 999999)` on a column | a range: two integers kept with the column's marks in the catalog; a row written with a value outside it (a null is inside) is error 23514 | every other check: not a `between` of the column itself and two integer literals, or a column that is not an integer |
+| `alter table attempts alter column endpoint type bigint` | nothing, if that is the column's type | any change of type |
+| `create index schedules_due on schedules (next_fire) where enabled` | an index is a name (6l); the condition is taken if it is a boolean column of the table | any other condition |
+| `bigint generated always as identity`, `create sequence` | *the next slice*: a counter that a failed statement and a rollback do not take back, which is not what the tree does with anything else | - |
+
+**Not for the proxy.** The guard (src/guard.cho) reads statements with the same parser, and what it lets through goes to PostgreSQL with the proxy's promises about it. None of these forms was
+examined for that (an identity column makes an insert's row something the statement does not say). So the parser marks a statement that uses any of them (`st[12]`), and the guard refuses it as
+before (`unsupported-statement`); only the engine's harness reads past the mark. *Test:* the guard's own tests, and one case for each form.
+
+**Errors.** 23514 joins the errors of a row (not null 23502, the key 23505): several different ones in a statement are `engine-ambiguous-error`, as everywhere.
+
+**Tests.** The random history gets tables with a key of two or three columns, columns with a range, and the `if not exists` forms (so that the skip and the create are both met); the fixed
+statements pin each form; the checklist's schema count goes from 0 to 14 (the sequence stays), and the six queries that waited for tables are answered if parameters (6w) were enough for them.
+
+**Built.** The grammar is in src/stmt.cho, the catalog's marks carry the range (src/tables.cho), a row is tested where its nulls are (src/execw.cho). `tests/hooks_check.py`: **12 of the 15
+schema statements** (what is left: the identity column of `schedules`, the sequence, and the index on the table that was not made) and **2 of the 16 queries** (`attempts_of`, `endpoints_all`;
+the four others that waited for a table wait for `schedules`). The test's floors are now those numbers.
+
+*Measured:* 20 seeds of 3,000 statements against PostgreSQL 16.15 with three tables in ten keyed by two columns (in either order, the key written for the table), ranges on integer columns,
+the `if not exists` forms on names that are and are not there, indexes with a condition, changes of type: no disagreement. 61 fixed statements pin the forms, 8 are refused on purpose with
+PostgreSQL's outcome beside them. The guard refuses each form (9 cases). 27 mutants (20 of the engine, 7 of the mark and the guard), all killed; 13 older mutants were moved to the code as it
+is now.
+
+*Found on the way, and not new:* `insert into t values (...)` with fewer values than the table has columns is refused as `syntax`, where PostgreSQL fills the rest with defaults. It is a
+refusal, so it is safe; the tag is wrong and the statement is common. Not fixed here.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

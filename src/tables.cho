@@ -13,8 +13,9 @@ import cdb.pager;
 //     0x00000000 then a name     -> that table's entry
 //     0x00000000 0x01 then a name -> the index of that name: the name of the table it is on (`index_key`)
 //
-// An entry: the table's number (`u32`), the length of its definition (`u16`), the definition (src/row.cho), then for each column one byte of marks (1: `not null`, 2: it has a default) and, if it has a
-// default, the default as a stored value (a tag and the value, as in a stored row). An entry is at most 800 bytes (a value of the tree).
+// An entry: the table's number (`u32`), the length of its definition (`u16`), the definition (src/row.cho), then for each column one byte of marks (1: `not null`, 2: it has a default, 4: it has a
+// range) and, if it has a default, the default as a stored value (a tag and the value, as in a stored row), and if it has a range (`check (c between lo and hi)`, docs/m3-engine.md 6x) the two
+// bounds, 8 bytes each (two's complement, big-endian). An entry is at most 800 bytes (a value of the tree).
 
 pub fn max_name() -> [] int {
     return 63;
@@ -69,14 +70,30 @@ fn marks_at[&e](ent: &e [byte], i: int) -> [] int {
     var at = 6 + def_len(ent);
     var k = 0;
     while k < i {
-        if int_of(ent[at]) / 2 % 2 == 1 {
-            at = at + 1 + stored_len(ent, at + 1);
-        } else {
-            at = at + 1;
+        let m = int_of(ent[at]);
+        at = at + 1;
+        if m / 2 % 2 == 1 {
+            at = at + stored_len(ent, at);
+        }
+        if m / 4 == 1 {
+            at = at + 16;
         }
         k = k + 1;
     }
     return at;
+}
+
+// Where the range of column `i` is in the entry (its low bound, 8 bytes, then its high bound), or -1 if it has none.
+pub fn range_at[&e](ent: &e [byte], i: int) -> [] int {
+    let at = marks_at(ent, i);
+    let m = int_of(ent[at]);
+    if m / 4 != 1 {
+        return 0 - 1;
+    }
+    if m / 2 % 2 == 1 {
+        return at + 1 + stored_len(ent, at + 1);
+    }
+    return at + 1;
 }
 
 pub fn not_null[&e](ent: &e [byte], i: int) -> [] bool {
@@ -92,7 +109,7 @@ pub fn default_at[&e](ent: &e [byte], i: int) -> [] int {
     return 0 - 1;
 }
 
-// Whether `ent` is an entry: a number above 0, a definition that is one, marks of 0 to 3 for each column with a default where they say so, and no bytes over.
+// Whether `ent` is an entry: a number above 0, a definition that is one, marks of 0 to 7 for each column with a default and a range where they say so, and no bytes over.
 pub fn entry_ok[&e](ent: &e [byte]) -> [] bool {
     if len(ent) < 8 || id_of(ent) < 1 {
         return false;
@@ -112,16 +129,22 @@ pub fn entry_ok[&e](ent: &e [byte]) -> [] bool {
             return false;
         }
         let m = int_of(ent[at]);
-        if m > 3 {
+        if m > 7 {
             return false;
         }
         at = at + 1;
-        if m / 2 == 1 {
+        if m / 2 % 2 == 1 {
             let l = stored_len(ent, at);
             if l < 0 {
                 return false;
             }
             at = at + l;
+        }
+        if m / 4 == 1 {
+            if at + 16 > len(ent) {
+                return false;
+            }
+            at = at + 16;
         }
         k = k + 1;
     }
