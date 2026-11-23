@@ -22,6 +22,7 @@ No PostgreSQL is needed: nothing here asks whether the answers are right (tests/
 """
 import base64
 import hashlib
+import os
 import random
 import struct
 import subprocess
@@ -347,6 +348,88 @@ def exported(work, path, files, live, nrows):
     check("a commit signed with another key is not made: an error, no record, no row", any(l.startswith("err ") for l in out) and "R 30" in out and (log5, lines5, live5) == (log7, lines7, live7), [l for l in out if l[:2] in ("er", "ok", "R ", "L ")][:6])
 
 
+TOOL = os.environ.get("LOGEXPORT", str(ROOT / "build/logexport"))             # the export tool (6av); a mutant of it is named by the environment
+
+
+def export(path, *what):
+    """What the export tool (6av) writes for `what`: (status, the bytes, the refusal's tag or '')."""
+    r = subprocess.run([TOOL, path] + [str(x) for x in what], capture_output=True)
+    said = r.stderr.decode().strip().split("\n")[-1]
+    return r.returncode, r.stdout, said[8:] if said.startswith("refused ") else said
+
+
+def tool(work, path, early):
+    """The log out of the page file by the program an operator has (6av): the files the verifiers read, an anchor that a later log is held to, and every refusal."""
+    log, recs, lines, live, _, _ = read_back(path)
+    ids = [commit_id(r[4:4 + int.from_bytes(r[:4], "big")]) for r in recs]
+    facts = ("\n".join(["CHODBDL2"] + lines) + "\n").encode()
+    toks = b"CHODBTK1" + b"".join(struct.pack(">I", len(t)) + t for t in KEPT[0])
+    stmts = b"CHODBST3" + b"".join(struct.pack(">I", len(t)) + t for t in KEPT[1])
+    got = {w: export(path, w) for w in ("anchor", "log", "facts", "tokens", "stmts", "live")}
+    check("the export tool writes the log, the facts, the tokens and the statements byte for byte as this test assembles them (%d commits, %d facts, %d tokens, %d statements)"
+          % (len(recs), len(lines), len(KEPT[0]), len(KEPT[1])),
+          all(got[w][0] == 0 and got[w][2] == "" for w in got) and (got["log"][1], got["facts"][1], got["tokens"][1], got["stmts"][1]) == (log, facts, toks, stmts),
+          [(w, got[w][0], got[w][2], len(got[w][1])) for w in got])
+    check("its live dump has every row of every table, the tables found in the catalog (%d lines)" % (len(live.split(b"\n")) - 2),
+          got["live"][1].startswith(b"CHODBLV2\n") and sorted(got["live"][1].split(b"\n")) == sorted(live.split(b"\n")))
+    check("its anchor is the number of commits and the id of the last", got["anchor"][1] == b"anchor %d %s\n" % (len(recs), ids[-1].hex().encode()), got["anchor"][1])
+    for cmd in VERIFIERS:
+        v = verdict(cmd, work, got["log"][1], got["facts"][1], got["live"][1])
+        check("%s, on the files the export tool wrote: ok, the rows at the end compared" % cmd, v.startswith("ok commits=%d " % len(recs)) and v.endswith(" final"), v)
+    n0, id0 = early
+    check("an anchor taken earlier names a commit of this log (commit %d of %d)" % (n0, len(recs)), 0 < n0 < len(recs) and ids[n0 - 1].hex() == id0, (n0, id0))
+    (work / "t.tok").write_bytes(got["tokens"][1])
+    (work / "t.st").write_bytes(got["stmts"][1])
+
+    def judged(cmd, data, expect):
+        (work / "t.log").write_bytes(data)
+        r = subprocess.run(cmd.split() + [str(work / "t.log"), "--expect", expect, "--root", ROOT_KEY, "--tokens", str(work / "t.tok"), "--stmts", str(work / "t.st")], capture_output=True, text=True, cwd=ROOT)
+        return (r.stdout + r.stderr).strip()
+    # another history under the same key and the same token: a log that verifies, and is not the one the anchor was taken from
+    other = str(work / "other")
+    run(other, WHO + FIXED[:3] + ["insert into acct values (1, 'another history', 1)", "!commit"])
+    st, part, _ = export(path, "log", n0)
+    check("`log N` is the first N records, and `facts N` the facts of those", st == 0 and part == log[:40] + b"".join(recs[:n0])
+          and export(path, "facts", n0)[1] == ("\n".join(["CHODBDL2"] + [l for l in lines if l.split("\t")[1] in {i.hex() for i in ids[:n0]}]) + "\n").encode())
+    olog, otok, ost = export(other, "log")[1], export(other, "tokens")[1], export(other, "stmts")[1]
+    for cmd in L2:
+        v = judged(cmd, got["log"][1], id0)
+        check("%s: the log at the end holds the commit of the earlier anchor: level=2+ir" % cmd, v.startswith("ok commits=%d " % len(recs)) and v.endswith("level=2+ir"), v)
+        v = judged(cmd, part, id0)
+        check("%s: the log cut at the anchor holds it" % cmd, v.startswith("ok commits=%d " % n0), v)
+        v = judged(cmd, part, ids[-1].hex())
+        check("%s: the log cut at the anchor does not hold the last commit: expected-missing" % cmd, v.startswith("reject rule=expected-missing"), v)
+        (work / "t.tok").write_bytes(otok)
+        (work / "t.st").write_bytes(ost)
+        v = judged(cmd, olog, id0)
+        check("%s: another history under the same key does not hold the anchor's commit: expected-missing" % cmd, v.startswith("reject rule=expected-missing"), v)
+        (work / "t.tok").write_bytes(got["tokens"][1])
+        (work / "t.st").write_bytes(got["stmts"][1])
+    # every refusal but the race (tests/engine_wire.py has a server to race with)
+    nolog = str(work / "nolog")
+    run(nolog, ["create table t (a integer primary key)", "insert into t values (1)", "!commit"])
+    (work / "junk").write_bytes(bytes(range(256)) * 80)
+    (work / "short").write_bytes(b"not a page file")
+    cases = [((path, "log", len(recs) + 1), 1, "export-behind"), ((path, "facts", len(recs) + 1), 1, "export-behind"), ((path, "live", len(recs) - 1), 1, "export-behind"),
+             ((str(work / "none"), "log"), 1, "export-no-file"), ((str(work / "short"), "log"), 1, "export-no-database"), ((str(work / "junk"), "log"), 1, "export-damaged"),
+             ((nolog, "anchor"), 1, "export-no-log"), ((nolog, "log"), 1, "export-no-log"), ((nolog, "tokens"), 1, "export-no-log"),
+             ((path,), 2, "export-usage"), ((path, "rows"), 2, "export-usage"), ((path, "log", "x"), 2, "export-usage"), ((path, "log", "-1"), 2, "export-usage"),
+             ((path, "anchor", 1), 2, "export-usage"), ((path, "tokens", 1), 2, "export-usage"), ((path, "log", 1, 2), 2, "export-usage"), ((path, "log", "9" * 13), 2, "export-usage")]
+    # a record of the log damaged where it lies in the page file (its length, in every copy the file has of it): the log does not end quietly before it
+    whole = Path(path).read_bytes()
+    victim = recs[len(recs) // 2]
+    bent = whole.replace(victim[:40], victim[:3] + bytes([victim[3] ^ 1]) + victim[4:40])
+    (work / "bent").write_bytes(bent)
+    check("the damaged record is in the copy of the page file", bent != whole and len(bent) == len(whole))
+    cases += [((str(work / "bent"), w), 1, "export-damaged") for w in ("anchor", "log", "facts")]
+    seen = [(export(*a)[0], export(*a)[2]) for a, _, _ in cases]
+    check("the export tool's refusals, each with its tag and nothing believed of it: " + ", ".join(sorted({t for _, _, t in cases})), seen == [(st, t) for _, st, t in cases],
+          [(a[1:], s) for (a, _, _), s in zip(cases, seen) if s != (_, _)][:0] or [(a[1:], s) for (a, st, t), s in zip(cases, seen) if s != (st, t)])
+    check("a page file with no log still has its rows to export; `live N` at the head it is at is the dump",
+          export(nolog, "live")[0] == 0 and export(nolog, "live")[1].startswith(b"CHODBLV2\npublic\t74\t") and export(nolog, "live")[1].count(b"\n") == 2
+          and export(path, "live", len(recs))[1] == got["live"][1], export(nolog, "live"))
+
+
 def main():
     rng = random.Random(SEED)
     history = FIXED + random_history(rng, COUNT)
@@ -359,6 +442,8 @@ def main():
         files = Files()
         files.take(run(path, WHO + history[:cut] + ["!commit"]))
         first = len(files.records)
+        st, said, _ = export(path, "anchor")
+        early = (int(said.split()[1]), said.split()[2].decode()) if st == 0 and len(said.split()) == 3 else (0, "")
         out = run(path, WHO + history[cut:] + ["!commit", "!mark"] + ["!rows " + t for t in TABLES])
         files.take(out[:out.index("mark")])
         live, nrows = dump(out[out.index("mark"):], TABLES)
@@ -387,6 +472,7 @@ def main():
                 v = verdict(cmd, work, files.log(), st, lv)
                 check("%s: %s is %s" % (cmd, name, want), v.startswith("reject rule=%s " % want), v)
         exported(work, path, files, live, nrows)
+        tool(work, path, early)
         print("commits %d, changes %d, rows at the end %d" % (len(files.records), len(files.deltas), nrows))
     if FAILED:
         print("FAIL engine log: %d failed" % len(FAILED))
