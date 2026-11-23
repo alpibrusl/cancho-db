@@ -1616,6 +1616,70 @@ commit: `ir.lift`, a salt, `build.stmt3` with the constants left out, `ir.infer`
 statement outside a transaction that changes no row leaves no record, so **reads outside a writing transaction are still enforced and not recorded**. The schema hash
 is still zeros. The 500-statement limit is a refusal at the commit, after the work was done.
 
+## 6av. The log out of the page file, for someone else to keep
+
+The log is in the page file (6as), and the page file is the operator's. A log its keeper can rewrite proves nothing to anyone else until a copy, or at least the id
+of its head, is somewhere the keeper cannot reach. Until now the only way out of the page file was the test program's commands (C186's limit: *no tool for an
+operator*). This part is the tool; what carries its output off the machine stays the operator's (a copy command, a mail), and is not built.
+
+**What was already there (a read, `docs/spec/commit.md` section 6, `tools/verify.py` line 157).** The check that a log still holds a commit someone was given
+earlier exists in all three verifiers since M1: `--expect ID`, verdict `expected-missing`. So an *anchor* needs no new rule: it is a commit's number and id, and
+whoever holds one runs any verifier with `--expect` on a later copy of the log.
+
+**Design.**
+
+- *A program that can only read.* `build/logexport PAGEFILE WHAT [UPTO]` writes one thing to its standard output and nothing anywhere else. `WHAT` is `anchor`,
+  `log`, `facts`, `tokens`, `stmts` or `live`. Its authority is a fact to check: it opens one file to read, and has no word for writing a file, the network or the
+  clock (`cancho authority`).
+- *The files are the ones the verifiers read*, byte for byte what `tests/engine_log.py` assembled until now from the test program's output: `log` is `CHODBLG1`, the
+  key, and each record; `facts` a version-2 delta store with the hashes only (6as); `tokens` `CHODBTK1`; `stmts` `CHODBST3`; `live` a version-2 dump of every row of
+  every table, the tables found in the catalog and not named by the caller.
+- *`anchor`* prints `anchor N ID`: the number of commits and the id of the last (`anchor 0 -` for a log with none).
+- *One log, several runs.* The five things are five runs, and commits may be made between them. `UPTO` (a count of commits, from `anchor`) makes `log` and `facts`
+  stop there, so the two agree with each other and with the anchor. `tokens` and `stmts` are stores looked into by id: more than the log names does no harm. `live`
+  is the rows now: it can be compared (L3a's `final`) only with a log taken at the same head, so with `UPTO` it refuses if the head is not there.
+- *Beside a server that is running.* The tool does not stop the server or lock the file. A page it reads may have been freed and written again by commits made
+  while it read. So at its end it reads the file's superblock again, and if a commit was made since it began, its output is not to be believed: it says
+  `refused export-raced` and ends with status 1. The caller runs it again. Every other way of failing is a refusal with a tag too: `export-usage` (2),
+  `export-no-file`, `export-no-database`, `export-no-log` (a page file with no log has nothing to export but `live`), `export-damaged`, `export-behind` (`UPTO` is
+  more commits than there are, or `live` asked at a head that is gone).
+
+*Not in this part:* carrying the output anywhere; an export that picks up where the last one ended (each run writes the whole log; measured below); the server
+giving an anchor to a client (`cancho_last_commit()` is the proxy's); `cancho-log` (6at saw it as the file a copy could be appended to: with whole exports there is
+no file to append to yet, so it has no place in this part).
+
+**Test.** `tests/engine_log.py`: after its history, the tool's five outputs are byte for byte what the test assembles from the test program's commands; the
+verifiers are given the tool's files. An anchor taken in the middle of the history: `--expect` of its id on the log at the end is `ok`, and on the log of another
+history made with the same key `expected-missing`; `log N` is exactly the first `N` records and verifies. `tests/engine_wire.py`: the tool run again and again
+beside a server that 4 clients write to; every run either ends 0 with a log that verifies or says `export-raced`, and at least one of each happens. Every refusal
+is reached. `tests/authority.sh`: the tool's authority.
+
+**Built.** `proxy/logexport.cho` (one file; it uses `facts.header`, `record`, `next_fact` and `next_kept` as the test program does, and writes no page). Measured:
+
+- 3 seeds of 2,000 statements (944 to 1,036 commits, 2,325 to 2,821 facts, 1,200 to 1,277 statements): the tool's log, facts, tokens and statements are byte for
+  byte what the test assembles; its live dump has the same lines (the tables in the catalog's order, not the caller's); the three L3a verifiers say `ok ... final`
+  on its files.
+- An anchor taken when the first process ended: all three L2 verifiers say `ok ... level=2+ir` with `--expect` of its id on the log at the end and on the log cut at
+  the anchor (`log N`), and `expected-missing` on the cut log asked for the last commit and on the log of another history made with the same key and token.
+- Beside a server 4 clients write 480 rows to (3 runs): 55 to 57 runs of the tool whole, each log verifying and each log with its facts (16 to 19 pairs) having every
+  commit's changes; 46 to 73 runs `export-raced`; no other outcome. With the writers done, everything taken at one anchor (481 commits) verifies to `final`.
+- Every refusal reached, 20 cases: `export-behind`, `export-damaged` (a file of noise; a record's length changed where it lies in the page file),
+  `export-no-database`, `export-no-file`, `export-no-log`, `export-usage`.
+- Authority (`tests/authority.sh`): `args err_write file_read fs_read("") heap io_write`; never the network, signals, other programs, foreign code. No `file_write`.
+- Cost, a log of 1,000 commits (a page file of 37.5 MB): `anchor` 9 ms, `log` 14 ms (344 KB), `facts` 20 ms, `stmts` 17 ms, `live` 26 ms. A whole export each time
+  is not yet a cost worth an incremental one.
+- 17 mutants (group `export`), all killed. One survived the first run: a record that cannot be read ended the log quietly at the commit before, status 0, and what
+  was written verified. No test had a damaged record; now one does.
+
+*Found while testing.* `create table` changes no row, so it makes no commit (6ah): a server that has only made tables has no log, and the tool says `export-no-log`
+of it. That is the rule of 6ah showing, not a fault of the tool; it is one more reason the schema hash matters (still zeros).
+
+*Limits.* Nothing here takes the output off the machine or gives the anchor to a third party: until someone else holds an anchor, the log is as rewritable as before.
+`export-raced` is detected by the superblock's number at the two ends of a run, on the argument that a page of the tree read is written again only by a commit after
+the next; the argument is tested by the runs beside a server, not proved. Under writers that never pause, a run long enough may never be whole (not met: 14 ms
+against a commit's 7). The tool reads the first branch only. A reader of the page file can read every row: the tool's authority bounds what it can *do*, not what it
+can see.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

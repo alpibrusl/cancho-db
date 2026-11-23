@@ -999,6 +999,89 @@ def with_psql(d):
           "\n".join(difflib.unified_diff((theirs.stdout + theirs.stderr).splitlines(), (pg.stdout + pg.stderr).splitlines(), "server", "postgres", lineterm="")))
 
 
+def beside(d):
+    """The export tool (6av) run again and again beside a server that clients write to: each run is whole and verifies, or says it raced a commit; never something else."""
+    import threading
+    import time
+    tool = os.environ.get("LOGEXPORT", os.path.join(ROOT, "build", "logexport"))
+    path = os.path.join(d, "beside")
+    srv = Server(path)
+    c = Client(srv.port)
+    for i in range(4):
+        c.query("create table w%d (k integer primary key, v text)" % i)
+    c.query("insert into w0 values (-1, 'the first commit: a table made changes no row and is no commit')")
+    c.close()
+    done = [0]
+
+    def writer(i):
+        cl = Client(srv.port)
+        for k in range(120):
+            cl.query("insert into w%d values (%d, 'row %d of writer %d')" % (i, k, k, i))
+            time.sleep(0.004 * (1 + (k * 7 + i) % 5))
+        cl.close()
+        done[0] += 1
+    ths = [threading.Thread(target=writer, args=(i,)) for i in range(4)]
+    for t in ths:
+        t.start()
+
+    def run(*what):
+        r = subprocess.run([tool, path] + [str(x) for x in what], capture_output=True)
+        return r.returncode, r.stdout, r.stderr.decode().strip()
+
+    def judged(name, data, more=()):
+        with open(os.path.join(d, name), "wb") as fh:
+            fh.write(data)
+        return subprocess.run([sys.executable, os.path.join(ROOT, "tools", "verify.py" if not more else "l3a.py"), os.path.join(d, name)] + list(more), capture_output=True, text=True).stdout.strip()
+    whole, raced, sets, odd, last = 0, 0, 0, [], 0
+    while done[0] < 4:
+        st, out, err = run("anchor")
+        if st == 0:
+            n = int(out.split()[1])
+            if n < last:
+                odd.append(("the log got shorter", n, last))
+            last = n
+            a, b = run("log", n), run("facts", n)
+            for st2, data, err2 in (a, b):
+                if st2 == 0:
+                    whole += 1
+                elif (st2, err2) == (1, "refused export-raced"):
+                    raced += 1
+                else:
+                    odd.append((st2, err2))
+            if a[0] == 0:
+                v = judged("b.log", a[1])
+                if not v.startswith("ok commits=%d " % n):
+                    odd.append(("log", n, v))
+            if a[0] == 0 and b[0] == 0 and n > 0:
+                with open(os.path.join(d, "b.facts"), "wb") as fh:
+                    fh.write(b[1])
+                v = judged("b.log", a[1], ["--deltas", os.path.join(d, "b.facts")])
+                sets += 1
+                if not v.startswith("ok commits=%d " % n):
+                    odd.append(("facts", n, v))
+        elif (st, err) == (1, "refused export-raced"):
+            raced += 1
+        else:
+            odd.append((st, err))
+    for t in ths:
+        t.join()
+    check("the export tool beside a server 4 clients write to: %d runs whole, each log verifies and each log with its facts (%d sets) has every commit's changes; %d runs say they raced a commit; nothing else"
+          % (whole, sets, raced), not odd and whole >= 3 and sets >= 1 and raced >= 1, odd[:3] or (whole, sets, raced))
+    # the writers done: one anchor, and everything at it
+    st, out, err = run("anchor")
+    n = int(out.split()[1]) if st == 0 else -1
+    files = {w: run(w, n) if w in ("log", "facts", "live") else run(w) for w in ("log", "facts", "tokens", "stmts", "live")}
+    for w in files:
+        with open(os.path.join(d, "e." + w), "wb") as fh:
+            fh.write(files[w][1])
+    good = n == 1 + 4 * 120 and all(files[w][0] == 0 for w in files)
+    for cmd in VERIFIERS:
+        v = subprocess.run(cmd.split() + [os.path.join(d, "e.log"), "--deltas", os.path.join(d, "e.facts"), "--live-dump", os.path.join(d, "e.live")], capture_output=True, text=True, cwd=ROOT)
+        v = (v.stdout + v.stderr).strip()
+        check("%s, on what the tool wrote beside the server once the writers are done (%d commits): ok, the rows compared" % (cmd, n), good and v.startswith("ok commits=%d " % n) and v.endswith(" final"), v)
+    srv.stop()
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1007,6 +1090,7 @@ def main():
         check("the server is still running at the end", srv.alive())
         srv.stop()
         several(d)
+        beside(d)
         logins(d)
         with_psql(d)
         with_cancho_pg(d)

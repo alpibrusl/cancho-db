@@ -27,6 +27,16 @@ for never in "the network" "signals" "other programs" "foreign code"; do
 done
 echo "L3a verifier authority ok: $got"
 
+# the export tool (docs/m3-engine.md 6av): the page file it is named, to read, and the console; it can write no file, and has no clock
+out=$("$CANCHO" authority proxy/logexport.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/execd.cho src/facts.cho src/token.cho src/ir.cho --std)
+got=$(performs_of "$out")
+want='args err_write file_read fs_read("") heap io_write '
+[ "$got" = "$want" ] || { echo "export tool authority changed: performs [$got], expected [$want]" >&2; exit 1; }
+for never in "the network" "signals" "other programs" "foreign code"; do
+    never_in "$out" "$never" || { echo "export tool: no longer says it never touches $never" >&2; exit 1; }
+done
+echo "export tool authority ok: $got"
+
 # the proxy: the network (unbounded: this compiler revision has one Net per program, so a program that listens and dials
 # cannot carry a narrowed one, docs/net-bounds.md section 1), the clock, the console, the filesystem (since P2c: the key file and the
 # log directory, nothing else is named, and the report does not narrow `fs_read("")`), and no signal, program or foreign code. When the report can bound the network this must change on purpose.

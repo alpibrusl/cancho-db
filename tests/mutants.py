@@ -3141,6 +3141,100 @@ WIRE = [
 ]
 
 
+# The export tool (docs/m3-engine.md 6av): judged by tests/engine_log.py with the mutant as the tool; those of the race, by tests/engine_wire.py.
+EXPORT = [
+    ("export: the anchor's id is the first commit's", 'proxy/logexport.cho',
+     '        build.id(rec[4..n - 64], ident);',
+     '        if seq == 0 {\n            build.id(rec[4..n - 64], ident);\n        }'),
+    ('export: `log N` is the whole log', 'proxy/logexport.cho',
+     'status = put_log(io, pg, w, root, stop, rec);',
+     'status = put_log(io, pg, w, root, n, rec);'),
+    ('export: `facts N` is every fact', 'proxy/logexport.cho',
+     'status = put_facts(io, pg, w, root, stop, rec);',
+     'status = put_facts(io, pg, w, root, n, rec);'),
+    ('export: one commit more than there are is not behind', 'proxy/logexport.cho',
+     'if status == 0 && upto > n {',
+     'if status == 0 && upto > n + 1 {'),
+    ('export: the rows now are given for an earlier head', 'proxy/logexport.cho',
+     'if upto >= 0 && upto != n {',
+     'if upto >= 0 && upto > n {'),
+    ('export: beside: a commit made meanwhile is not noticed', 'proxy/logexport.cho',
+     'if state_of(hh, fsr, arg(g, 1), contents(rw)) != seq {',
+     'if state_of(hh, fsr, arg(g, 1), contents(rw)) < 0 {'),
+    ("export: every fact is under the first commit's id", 'proxy/logexport.cho',
+     '                if seq != of {',
+     '                if of < 0 {'),
+    ("export: a fact's hashes are left out", 'proxy/logexport.cho',
+     'if int_of(fv[33 * side]) == 1 {',
+     'if int_of(fv[33 * side]) == 2 {'),
+    ('export: the statements are given for the tokens', 'proxy/logexport.cho',
+     'status = put_kept(io, pg, w, root, 7);',
+     'status = put_kept(io, pg, w, root, 8);'),
+    ('export: tables late in the alphabet are not dumped', 'proxy/logexport.cho',
+     'if int_of(at[4]) > 4 {',
+     "if int_of(at[4]) > 4 && int_of(at[4]) < 'n' {"),
+    ('export: a file with no log exports an empty one', 'proxy/logexport.cho',
+     'status = no_log();',
+     'status = 0;'),
+    ('export: a count that is not a number is no count', 'proxy/logexport.cho',
+     'good = upto >= 0;',
+     'good = true;'),
+    ('export: a count of 13 digits is read', 'proxy/logexport.cho',
+     'len(text) > 12',
+     'len(text) > 13'),
+    ("export: a row's two salts are the same one", 'proxy/logexport.cho',
+     'put_hex(io, contents(w.cur), 16, 32);',
+     'put_hex(io, contents(w.cur), 0, 16);'),
+    ('export: a refusal ends with status 0', 'proxy/logexport.cho',
+     '            if status != usage() {\n                status = 1;',
+     '            if status != usage() {\n                status = 0;'),
+    ('export: a damaged record ends the log quietly', 'proxy/logexport.cho',
+     '    if n < 0 {\n        return 0 - damaged();\n    }\n    return seq;',
+     '    return seq;'),
+    ('export: a page file that is not one is an empty database', 'proxy/logexport.cho',
+     '} else if seq < 0 {\n                                            status = damaged();',
+     '} else if seq < 0 {\n                                            status = 0;'),
+]
+
+
+def run_export(cancho):
+    """Each mutant is an export tool of its own, held against what the test assembles from the test program's output (build/enginecheck, not mutated here)."""
+    only = os.environ.get("MUTANT_ONLY")
+    table = [m for m in EXPORT if not only or only in m[0]]
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
+            "execw.cho", "execd.cho", "facts.cho", "token.cho", "ir.cho")
+    survivors = []
+    for label, rel, old, new in table:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            text = (ROOT / rel).read_text()
+            if text.count(old) != 1:
+                print("STALE  %-48s original text occurs %d times" % (label, text.count(old)), flush=True)
+                survivors.append(label)
+                continue
+            (work / "logexport.cho").write_text(text.replace(old, new))
+            exe = work / "logexport"
+            b = subprocess.run([cancho, "build", "--std", str(work / "logexport.cho")] + [str(ROOT / "src" / x) for x in srcs] + ["-o", str(exe)], capture_output=True, text=True)
+            if b.returncode != 0:
+                print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]), flush=True)
+                survivors.append(label)
+                continue
+            env = dict(os.environ, LOGEXPORT=str(exe))
+            if label.startswith("export: beside"):
+                cmd = [sys.executable, str(ROOT / "tests/engine_wire.py"), str(ROOT / "build/engine"), str(ROOT / "build/enginecheck"), "300", "1"]
+            else:
+                cmd = [sys.executable, str(ROOT / "tests/engine_log.py"), str(ROOT / "build/enginecheck"), "300", "1"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env)
+            if r.returncode != 0:
+                first = [l for l in (r.stdout + r.stderr).splitlines() if l.startswith("FAIL")]
+                print("killed   %-46s %s" % (label, (first[0] if first else "a crash")[:90]), flush=True)
+            else:
+                print("SURVIVED %-46s the test accepts what it wrote" % label, flush=True)
+                survivors.append(label)
+    print("%d mutants, %d not killed" % (len(table), len(survivors)))
+    return 1 if survivors else 0
+
+
 def run_wire(cancho):
     """Each mutant is a server of its own, built and held against the test program (build/enginecheck, which is not mutated here)."""
     import concurrent.futures
@@ -3241,6 +3335,8 @@ def run(kind, cancho):
         return run_engine(cancho)
     if kind == "wire":
         return run_wire(cancho)
+    if kind == "export":
+        return run_export(cancho)
     if kind == "guard":
         return run_guard(cancho)
     if kind == "build":

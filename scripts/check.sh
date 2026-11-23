@@ -59,6 +59,8 @@ quiet 4 python3 tests/eval_check.py build/evalcheck 4000 1
 quiet 4 python3 tests/eval_check.py build/evalcheck 4000 2
 echo "== the engine's statements against PostgreSQL (docs/m3-engine.md 6g, 6h): create, insert, update, delete, select; the changes; what must be answered, what must be refused, what must be gone from the file"
 "$CANCHO" build --std proxy/enginecheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/token.cho src/ir.cho -o build/enginecheck
+# the export tool (docs/m3-engine.md 6av): the log out of a page file, for tests/engine_log.py and tests/engine_wire.py below
+"$CANCHO" build --std proxy/logexport.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/execd.cho src/facts.cho src/token.cho src/ir.cho -o build/logexport
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 1
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 2
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 3
@@ -169,6 +171,7 @@ echo "== mutants, the engine's rows"; quiet 1 python3 tests/mutants.py row "$CAN
 echo "== mutants, the engine's expression evaluator"; quiet 1 python3 tests/mutants.py eval "$CANCHO"
 echo "== mutants, the engine's statements"; quiet 1 python3 tests/mutants.py engine "$CANCHO"
 echo "== mutants, the engine's server"; quiet 1 python3 tests/mutants.py wire "$CANCHO"
+echo "== mutants, the export tool";   quiet 1 python3 tests/mutants.py export "$CANCHO"
 echo "== mutants, capture SQL and cdb.fork"; quiet 1 python3 tests/mutants.py sql "$CANCHO"
 echo "== mutants, L3a verifier"; quiet 1 python3 tests/mutants.py l3a "$CANCHO"
 echo "== mutants, L3a verifier in cancho"; quiet 1 python3 tests/mutants.py l3a-cho "$CANCHO"
