@@ -8,6 +8,8 @@ import cdb.btree;
 import cdb.pager;
 import cdb.state;
 import cdb.exec;
+import cdb.ir;
+import std.map;
 
 // The facts of a transaction (docs/m3-engine.md 6af). Fold the changes the statement just made (`chg`) into the tree `froot` (0: none yet): a key is the table, a zero byte and the
 // plain key; a value is 66 bytes, for each of "when the transaction first touched the row" and "now" a byte (1: there is an image) and the hash of the image. The new root, or an error
@@ -49,13 +51,6 @@ pub fn take[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, froot: int) -> [file_r
         }
         var fk = exec.copy(contents(w.chg), at + 2, nl, contents(w.key), 0);
         contents(w.key)[fk] = byte_of(0);
-        // the table was written, whatever the facts net to: a key of the table alone says so (it is what the commit's effects are made of, 6ah)
-        contents(w.uval)[0] = byte_of(1);
-        let mk = btree.put(p, contents(w.sc), root, contents(w.key)[0..fk + 1], contents(w.uval)[0..1]);
-        if mk < 0 {
-            return exec.tree_err(mk);
-        }
-        root = mk;
         state.key_commit(contents(w.chg)[ia..ia + 16], contents(w.chg)[ka..ka + kl], contents(w.key)[fk + 1..fk + 33]);
         fk = fk + 33;
         side = 0;
@@ -126,8 +121,8 @@ pub fn changes[&q, &z, &o](p: &!z pager.Pager, w: &!q exec.Work, froot: int, out
             while z < nk && int_of(contents(w.key2)[z]) != 0 {
                 z = z + 1;
             }
-            if z + 1 == nk {
-                // the key of a table alone: it was written (`take`), which is no fact
+            if int_of(contents(w.key2)[0]) <= 3 {
+                // what the transaction's statements were (`say`): no fact
             } else {
                 if r % 1024 != 66 || n >= 4096 {
                     return exec.too_big();
@@ -161,7 +156,12 @@ pub fn changes[&q, &z, &o](p: &!z pager.Pager, w: &!q exec.Work, froot: int, out
 
 // The longest record `seal` writes: a commit of `build.max_effects()` is not made here, one of 32 tables is.
 pub fn max_record() -> [] int {
-    return 12288;
+    return 25000;
+}
+
+// How many statements one commit names here: a transaction of more is refused when it commits (6au).
+pub fn max_statements() -> [] int {
+    return 500;
 }
 
 // The commit a transaction is (docs/m3-engine.md 6ah). `root` is the branch's tree with the transaction in it and `froot` its facts (`take`). The record of the commit as the log
@@ -174,8 +174,9 @@ pub fn seal[&q, &z, &s, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int,
         let chg = alloc_slice[g](32, byte_of(0));
         let head = alloc_slice[g](72, byte_of(0));
         let zero = alloc_slice[g](32, byte_of(0));
-        let effs = alloc_slice[g](2048, byte_of(0));
-        let enc = alloc_slice[g](4096, byte_of(0));
+        let effs = alloc_slice[g](8192, byte_of(0));
+        let ids = alloc_slice[g](32 * max_statements(), byte_of(0));
+        let enc = alloc_slice[g](24000, byte_of(0));
         let sig = alloc_slice[g](64, byte_of(0));
         let st = alloc_slice[g](32, byte_of(0));
         let n = changes(p, w, froot, chg);
@@ -197,39 +198,61 @@ pub fn seal[&q, &z, &s, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int,
             }
             return exec.damaged();
         }
-        // a write for each table with a fact: the facts are in the order of their tables, so the next table is the first key after `table 0x01`
+        // its effects are those of its statements, as `say` inferred them (6au): the keys under 0x02, a kind and a target each
         var el = 0;
-        var kl = 0;
+        var kl = 1;
+        contents(w.key)[0] = byte_of(2);
         var more = froot != 0;
         while more {
             let r = btree.next_after(p, contents(w.sc), froot, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
-            if r == btree.not_found() {
+            if r == btree.not_found() || r >= 0 && int_of(contents(w.key2)[0]) != 2 {
                 more = false;
             } else if r < 0 {
                 return exec.tree_err(r);
             } else {
-                var z = 0;
-                while z < r / 1024 && int_of(contents(w.key2)[z]) != 0 {
-                    z = z + 1;
-                }
-                if el + 3 + z > len(effs) {
+                let nk = r / 1024;
+                if nk < 2 || el + 1 + nk > len(effs) {
                     return exec.too_big();
                 }
-                effs[el] = byte_of(1);
-                build.put_be(effs, el + 1, z, 2);
-                el = exec.copy(contents(w.key2), 0, z, effs, el + 3);
-                kl = exec.copy(contents(w.key2), 0, z, contents(w.key), 0);
-                contents(w.key)[kl] = byte_of(1);
-                kl = kl + 1;
+                effs[el] = contents(w.key2)[1];
+                build.put_be(effs, el + 1, nk - 2, 2);
+                el = exec.copy(contents(w.key2), 2, nk - 2, effs, el + 3);
+                kl = exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+            }
+        }
+        // and its statements, in the order they ran: the keys under 0x01, a number and a part; part 0 is the statement's id
+        var il = 0;
+        kl = 1;
+        contents(w.key)[0] = byte_of(1);
+        more = froot != 0;
+        while more {
+            let r = btree.next_after(p, contents(w.sc), froot, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+            if r == btree.not_found() || r >= 0 && int_of(contents(w.key2)[0]) != 1 {
+                more = false;
+            } else if r < 0 {
+                return exec.tree_err(r);
+            } else {
+                let nk = r / 1024;
+                if nk != 6 {
+                    return exec.damaged();
+                }
+                if int_of(contents(w.key2)[5]) == 0 {
+                    if r % 1024 != 32 || il + 32 > len(ids) {
+                        // more statements in one transaction than a commit names here
+                        return exec.too_big();
+                    }
+                    il = exec.copy(contents(w.cur), 0, 32, ids, il);
+                }
+                kl = exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
             }
         }
         state.state(np, head[40..40 + 32 * np], chg, st);
         // who and when (6at): the id of the token the commit was made under, its principal and the time, if the caller has them; zeros and 0 if not
         var en = 0;
         if len(who) >= who_fixed() {
-            en = build.encode(enc, head[8..8 + 32 * np], "main", seq, zero, zero[0..0], effs[0..el], who[0..32], who[32..64], zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], commit.be(who, 64, 8));
+            en = build.encode(enc, head[8..8 + 32 * np], "main", seq, zero, ids[0..il], effs[0..el], who[0..32], who[32..64], zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], commit.be(who, 64, 8));
         } else {
-            en = build.encode(enc, head[8..8 + 32 * np], "main", seq, zero, zero[0..0], effs[0..el], zero, zero, zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], 0);
+            en = build.encode(enc, head[8..8 + 32 * np], "main", seq, zero, ids[0..il], effs[0..el], zero, zero, zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], 0);
         }
         if en < 0 || 4 + en + 64 > len(out) {
             return exec.too_big();
@@ -259,7 +282,7 @@ pub fn seal[&q, &z, &s, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int,
         // the token, under its id, the first time a commit is made under it: a verifier is given the tokens with the log (6at)
         // (writing it again would write the same bytes: that it is written once is a saving, and no test can tell)
         if len(who) > who_fixed() {
-            let tk0 = tables.token_key(who[0..32], 0, contents(w.key));
+            let tk0 = tables.kept_key(7, who[0..32], 0, contents(w.key));
             let tr = btree.get(p, contents(w.sc), nw, contents(w.key)[0..tk0], contents(w.cur));
             if tr == btree.not_found() {
                 var ta = who_fixed();
@@ -272,7 +295,7 @@ pub fn seal[&q, &z, &s, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int,
                     if tpart >= 255 {
                         return exec.too_big();
                     }
-                    let tk1 = tables.token_key(who[0..32], tpart, contents(w.key));
+                    let tk1 = tables.kept_key(7, who[0..32], tpart, contents(w.key));
                     nw = btree.put(p, contents(w.sc), nw, contents(w.key)[0..tk1], who[ta..ta + tl]);
                     if nw < 0 {
                         return exec.tree_err(nw);
@@ -301,7 +324,32 @@ pub fn seal[&q, &z, &s, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int,
             ra = ra + pl;
             part = part + 1;
         }
-        // its facts, as they are in the transaction's tree (the note of a table is no fact)
+        // its statements' records, under their ids (6au)
+        kl = 1;
+        contents(w.key)[0] = byte_of(1);
+        more = froot != 0;
+        while more {
+            let r = btree.next_after(p, contents(w.sc), froot, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+            if r == btree.not_found() || r >= 0 && int_of(contents(w.key2)[0]) != 1 {
+                more = false;
+            } else if r < 0 {
+                return exec.tree_err(r);
+            } else {
+                kl = exec.copy(contents(w.key2), 0, r / 1024, contents(w.key), 0);
+                let part = int_of(contents(w.key2)[5]);
+                if part == 0 {
+                    // whose parts follow
+                    exec.copy(contents(w.cur), 0, 32, st, 0);
+                } else {
+                    let sk = tables.kept_key(8, st, part - 1, contents(w.lit));
+                    nw = btree.put(p, contents(w.sc), nw, contents(w.lit)[0..sk], contents(w.cur)[0..r % 1024]);
+                    if nw < 0 {
+                        return exec.tree_err(nw);
+                    }
+                }
+            }
+        }
+        // its facts, as they are in the transaction's tree (what its statements were is no fact)
         var fl = 0;
         var going = froot != 0;
         while going {
@@ -313,7 +361,7 @@ pub fn seal[&q, &z, &s, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int,
             } else {
                 let nk = r / 1024;
                 fl = exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
-                if r % 1024 == 66 {
+                if int_of(contents(w.key2)[0]) > 3 {
                     let dk = tables.fact_key(seq, contents(w.lit));
                     let dl = exec.copy(contents(w.key2), 0, nk, contents(w.lit), dk);
                     nw = btree.put(p, contents(w.sc), nw, contents(w.lit)[0..dl], contents(w.cur)[0..66]);
@@ -332,13 +380,13 @@ pub fn who_fixed() -> [] int {
     return 72;
 }
 
-// The token after the one of id `after[0..an]` (nothing: the first) as it is kept in the tree `root`: its id into `after` (32 bytes) and its bytes into `out`; its
-// length, 0 after the last, or an error.
-pub fn next_token[&q, &z, &a, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, after: &!a [byte], an: int, out: &!o [byte]) -> [file_read] int {
-    // (after every part of the token `after` names: its id and a part number above any)
-    var kl = tables.token_key(after[0..32], 255, contents(w.key));
+// What is kept with the log under an id (`kind` 7: a token, 6at; 8: a statement's record, 6au): the one after the id `after[0..an]` (nothing: the first) as it is in the
+// tree `root`, its id into `after` (32 bytes) and its bytes into `out`; its length, 0 after the last, or an error.
+pub fn next_kept[&q, &z, &a, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, kind: int, after: &!a [byte], an: int, out: &!o [byte]) -> [file_read] int {
+    // (after every part of the one `after` names: its id and a part number above any)
+    var kl = tables.kept_key(kind, after[0..32], 255, contents(w.key));
     if an == 0 {
-        kl = tables.token_key(after[0..32], 0, contents(w.key)) - 33;
+        kl = kl - 33;
     }
     let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
     if r == btree.not_found() {
@@ -347,7 +395,7 @@ pub fn next_token[&q, &z, &a, &o](p: &!z pager.Pager, w: &!q exec.Work, root: in
     if r < 0 {
         return exec.tree_err(r);
     }
-    if r / 1024 != 38 || commit.be(contents(w.key2), 0, 4) != tables.log_space() || int_of(contents(w.key2)[4]) != 7 {
+    if r / 1024 != 38 || commit.be(contents(w.key2), 0, 4) != tables.log_space() || int_of(contents(w.key2)[4]) != kind {
         return 0;
     }
     exec.copy(contents(w.key2), 5, 32, after, 0);
@@ -355,7 +403,7 @@ pub fn next_token[&q, &z, &a, &o](p: &!z pager.Pager, w: &!q exec.Work, root: in
     var part = 0;
     var more = true;
     while more {
-        let tk = tables.token_key(after[0..32], part, contents(w.key));
+        let tk = tables.kept_key(kind, after[0..32], part, contents(w.key));
         let g = btree.get(p, contents(w.sc), root, contents(w.key)[0..tk], contents(w.cur));
         if g == btree.not_found() {
             more = false;
@@ -369,6 +417,115 @@ pub fn next_token[&q, &z, &a, &o](p: &!z pager.Pager, w: &!q exec.Work, root: in
         }
     }
     return at;
+}
+
+// A statement that ran is told to the transaction (6au): for each IR in what the statement left (`exec.stmts_of`), its record as the log's third version has it with the
+// constants gone (docs/spec/ir.md section 8: the shape, the salted hash of its constants, and no payload) under the next number of the transaction's tree `froot`, and
+// its effects as the verifier infers them (`ir.infer`), each a key of that tree. The constants are never written anywhere: there is nothing of them for an erasure to
+// find. The new root, or an error.
+pub fn say[&h, &q, &z](heap: &!h Heap, p: &!z pager.Pager, w: &!q exec.Work, froot: int) -> [heap, file_read, file_write] int {
+    var root = froot;
+    var at = 0;
+    var i = 0;
+    while i < exec.stmts_count(w) && root >= 0 {
+        let n = commit.be(exec.stmts_of(w), at, 4);
+        var shape = box_slice(heap, n + 8, byte_of(0));
+        var vals = box_slice(heap, n + 8, byte_of(0));
+        var rec = box_slice(heap, n + 64, byte_of(0));
+        var set = map.empty(heap, 16, 0, 3);
+        region r {
+            let info = alloc_slice[r](4, 0);
+            let salt = alloc_slice[r](16, byte_of(0));
+            let id = alloc_slice[r](32, byte_of(0));
+            let num = alloc_slice[r](4, byte_of(0));
+            var lifted = 0 - 1;
+            var rn = 0;
+            borrow mut shape as &!sw in {
+                borrow mut vals as &!vw in {
+                    borrow mut rec as &!rw in {
+                        lifted = ir.lift(heap, exec.stmts_of(w)[at + 4..at + 4 + n], contents(sw), contents(vw), info);
+                        if lifted >= 0 && exec.fresh(w, salt) {
+                            rn = build.stmt3(contents(rw), 0, contents(sw)[0..info[0]], contents(vw)[0..info[1]], info[2], salt, id, true);
+                        }
+                        let (grown, good) = ir.infer(heap, set, exec.stmts_of(w)[at + 4..at + 4 + n], 2, info);
+                        set = grown;
+                        if lifted < 0 || rn <= 4 || !good {
+                            root = exec.unsupported();
+                        }
+                        // the statement's number in the transaction
+                        var count = 0;
+                        contents(w.key)[0] = byte_of(3);
+                        if root > 0 {
+                            let g = btree.get(p, contents(w.sc), root, contents(w.key)[0..1], contents(w.cur));
+                            if g == 4 {
+                                count = commit.be(contents(w.cur), 0, 4);
+                            }
+                        }
+                        if root >= 0 {
+                            build.put_be(num, 0, count + 1, 4);
+                            root = put(p, w, root, 1, num);
+                        }
+                        // its id, then its record in parts
+                        contents(w.key)[0] = byte_of(1);
+                        build.put_be(contents(w.key), 1, count, 4);
+                        contents(w.key)[5] = byte_of(0);
+                        if root >= 0 {
+                            root = put(p, w, root, 6, id);
+                        }
+                        var ra = 4;
+                        var part = 1;
+                        while ra < rn && root >= 0 {
+                            var pl = rn - ra;
+                            if pl > 700 {
+                                pl = 700;
+                            }
+                            if part > 255 {
+                                root = exec.too_big();
+                            } else {
+                                contents(w.key)[5] = byte_of(part);
+                                root = put(p, w, root, 6, contents(rw)[ra..ra + pl]);
+                            }
+                            ra = ra + pl;
+                            part = part + 1;
+                        }
+                    }
+                }
+            }
+        }
+        // its effects
+        borrow set as &sr in {
+            var e = 0;
+            while e < map.entries(sr) && root >= 0 {
+                if map.is_live(sr, e) {
+                    let key = map.key_at(sr, e);
+                    if len(key) + 1 > btree.max_key() {
+                        root = exec.too_big();
+                    } else {
+                        contents(w.key)[0] = byte_of(2);
+                        let kl = exec.copy(key, 0, len(key), contents(w.key), 1);
+                        root = put(p, w, root, kl, "e");
+                    }
+                }
+                e = e + 1;
+            }
+        }
+        map.drop(heap, set);
+        unbox_slice(heap, shape);
+        unbox_slice(heap, vals);
+        unbox_slice(heap, rec);
+        at = at + 4 + n;
+        i = i + 1;
+    }
+    return root;
+}
+
+// Put `value` under the first `kl` bytes of `w.key` in the tree `root`.
+fn put[&q, &z, &v](p: &!z pager.Pager, w: &!q exec.Work, root: int, kl: int, value: &v [byte]) -> [file_read, file_write] int {
+    let nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..kl], value);
+    if nw < 0 {
+        return exec.tree_err(nw);
+    }
+    return nw;
 }
 
 // The log's header as it is in the tree `root` (6as): `build.log_header` into `out`, its length; 0 if no commit was ever recorded there; or an error.

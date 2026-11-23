@@ -446,6 +446,10 @@ pub res struct Work {
     seed: Box[[byte]],
     seeded: bool,
     scount: int,
+    // the statement that ran, as the log is told it (docs/m3-engine.md 6au): its IR, and with RETURNING the IR of what it returns, each after its length; how many, how long
+    said: Box[[byte]],
+    nsaid: int,
+    lsaid: int,
 }
 
 pub fn rows_size() -> [] int {
@@ -457,11 +461,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0, said: box_slice(heap, 110000, byte_of(0)), nsaid: 0, lsaid: 0 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount, said, nsaid, lsaid } = w;
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -497,6 +501,7 @@ pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
     unbox_slice(heap, full);
     unbox_slice(heap, ofull);
     unbox_slice(heap, seed);
+    unbox_slice(heap, said);
     return 0;
 }
 
@@ -1243,6 +1248,41 @@ fn salt[&q](w: &!q Work, at: int) -> [] int {
 }
 
 // New salts for a row under a new key (`nsalts`): 0, or `no_entropy()`.
+// 16 bytes nobody can compute again, into `out`: false if there is no seed to make them of.
+pub fn fresh[&q, &o](w: &!q Work, out: &!o [byte]) -> [] bool {
+    if !w.seeded {
+        return false;
+    }
+    salt(w, 0);
+    copy(contents(w.nsalts), 0, 16, out, 0);
+    return true;
+}
+
+// What ran, for the log (6au): forgotten before a statement, added to as it runs, read when its commit is made.
+pub fn stmts_clear[&q](w: &!q Work) -> [] int {
+    w.nsaid = 0;
+    w.lsaid = 0;
+    return 0;
+}
+
+pub fn stmt_add[&q, &e](w: &!q Work, ir: &e [byte]) -> [] bool {
+    if w.lsaid + 4 + len(ir) > 110000 {
+        return false;
+    }
+    build.put_be(contents(w.said), w.lsaid, len(ir), 4);
+    w.lsaid = copy(ir, 0, len(ir), contents(w.said), w.lsaid + 4);
+    w.nsaid = w.nsaid + 1;
+    return true;
+}
+
+pub fn stmts_of[&q](w: &q Work) -> [] &q [byte] {
+    return contents(w.said)[0..w.lsaid];
+}
+
+pub fn stmts_count[&q](w: &q Work) -> [] int {
+    return w.nsaid;
+}
+
 pub fn new_salts[&q](w: &!q Work) -> [] int {
     if !w.seeded {
         return no_entropy();

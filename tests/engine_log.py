@@ -20,8 +20,10 @@ A column added to a table and a table dropped are in the history: each changes r
 
 No PostgreSQL is needed: nothing here asks whether the answers are right (tests/engine_check.py does), only whether the log tells what the engine did.
 """
+import base64
 import hashlib
 import random
+import struct
 import subprocess
 import sys
 import tempfile
@@ -31,6 +33,14 @@ ROOT = Path(__file__).resolve().parent.parent
 EXE, COUNT, SEED = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 VERIFIERS = sys.argv[4:] or ["python3 tools/l3a.py"]
 KEY = bytes(range(32)).hex()
+# who: a token of the test root that allows everything, so that the commits name a token and their statements can be judged (L2 with statements, docs/spec/ir.md section 4)
+PASSWORD = subprocess.run([sys.executable, str(ROOT / "tools/mint.py"), "password", "--effects", "r:*,w:*,d:*,c:*,n:*"], capture_output=True, text=True, check=True).stdout.strip()
+TOKEN = base64.urlsafe_b64decode(PASSWORD + "=" * (-len(PASSWORD) % 4))[:-32].hex()
+ROOT_KEY = subprocess.run([sys.executable, str(ROOT / "tools/mint.py"), "root"], capture_output=True, text=True, check=True).stdout.strip()
+WHO = ["!log " + KEY, "!token " + TOKEN]
+# the verifiers of L1 and L2: the reference, and the two others if the gate built them
+L2 = ["python3 tools/verify.py"] + [x for x in ("build/verify", "build/verify-go") if (ROOT / x).exists()]
+NEEDLE = "zq-needle-constant"
 FAILED = []
 
 
@@ -64,6 +74,9 @@ FIXED = [
     "insert into acct values (4, 'di', 4) on conflict do nothing",
     "insert into acct values (4, 'di', 5) on conflict do nothing",
     "update note set body = 'bye' where k = 'first' returning k",
+    "insert into note values ('needle', '%s')" % NEEDLE,          # a value that will be erased: it comes in a statement, and again in a condition
+    "update note set body = body || '!' where body = '%s'" % NEEDLE,
+    "begin", "select k from note where body = '%s!'" % NEEDLE, "update note set body = '%s' where k = 'needle'" % NEEDLE, "commit",
     "delete from pair",
     "select count(*) from acct",
     "alter table acct add column note text default 'n'",          # every row of the table is another row (6ai)
@@ -137,6 +150,8 @@ class Files:
 
     def __init__(self):
         self.header, self.records, self.deltas, self.pending, self.seq, self.fline, self.agree = None, [], [], [], 0, None, True
+        self.wrote = False
+        self.ran, self.named = 0, []       # how many statements ran in the transaction that is open (or the statement that is one); for each record, that number
 
     def unhex(self, f):
         return None if f == "-" else b"" if f == "." else bytes.fromhex(f)
@@ -146,6 +161,13 @@ class Files:
             f = line.split(" ")
             if f[0] in ("refused", "err"):
                 check("no statement of the history is refused", False, line)
+            if f[0] == "ok" and f[1] not in ("BEGIN", "COMMIT", "ROLLBACK"):
+                self.ran += 1
+                self.wrote = f[1] != "SELECT"
+            if f[0] == "N" and self.wrote:
+                # a write that returns what it wrote is two statements: the write, and the select of what it returns (6au)
+                self.ran += 1
+                self.wrote = False
             if f[0] == "C":
                 self.pending.append([self.unhex(x) for x in f[1:]])
             elif f[0] == "F":
@@ -163,6 +185,7 @@ class Files:
                 n = int.from_bytes(rec[:4], "big")
                 cid = commit_id(rec[4:4 + n])
                 self.records.append(rec)
+                self.named.append(self.ran)
                 # the `changes` the engine printed for the test (6af) is the one in the record
                 if self.fline is None or len(self.fline) != 3 or bytes.fromhex(self.fline[2]) not in rec:
                     self.agree = False
@@ -171,6 +194,7 @@ class Files:
                     self.seq += 1
                 self.pending = []
             elif line == "S I":
+                self.ran = 0
                 self.pending = []                                 # a statement that failed, a rollback: what it changed is not in any commit
 
     def log(self, skip=None):
@@ -217,7 +241,7 @@ def verdict(cmd, work, log, store, live):
 
 def read_back(path, extra=()):
     """The log, the facts and the rows as a process that wrote none of them reads them out of the page file (6as): (log bytes, records, store lines, live dump, rows)."""
-    out = run(path, list(extra) + ["!mark", "!records", "!store", "!mark"] + ["!rows " + t for t in TABLES])
+    out = run(path, list(extra) + ["!mark", "!records", "!store", "!tokens", "!stmts", "!mark"] + ["!rows " + t for t in TABLES])
     out = out[out.index("mark") + 1:]                             # what the process said while it ran `extra` is not the export
     cut = out.index("mark")
     recs = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("L ")]
@@ -230,7 +254,28 @@ def read_back(path, extra=()):
             # a line of the store with nothing but the hashes: the form of a line that has been erased (docs/spec/l3a.md section 9), for every line
             lines.append("\t".join([str(len(lines)), ids[int(f[1])].hex(), "public", f[2], f[3], "" if f[4] == "-" else f[4], "" if f[5] == "-" else f[5], "", "", "", "", "", ""]))
     live, n = dump(out[cut:], TABLES)
+    KEPT[0] = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("K ")]
+    KEPT[1] = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("Y ")]
     return b"".join(recs), recs[1:], lines, live, n, said
+
+
+KEPT = [[], []]      # the tokens and the statements' records of the last read
+
+
+def authority(work, log, tokens, stmts, name):
+    """L2 with statements: every commit under a token of the root's, its statements all in the store, and its effects exactly what they infer."""
+    (work / "a.log").write_bytes(log)
+    (work / "a.tok").write_bytes(b"CHODBTK1" + b"".join(struct.pack(">I", len(t)) + t for t in tokens))
+    store = lambda ss: b"CHODBST3" + b"".join(struct.pack(">I", len(x)) + x for x in ss)
+    cases = [("the statements as kept", store(stmts), "ok"), ("a statement's record taken out of the store", store(stmts[:len(stmts) // 2] + stmts[len(stmts) // 2 + 1:]), "reject rule=stmt-missing"),
+             ("a table's name changed in a statement", store([stmts[0][:3] + bytes([stmts[0][3] ^ 1]) + stmts[0][4:]] + stmts[1:]), "reject rule=stmt-")]
+    for cmd in L2:
+        for what, data, want in cases:
+            (work / "a.st").write_bytes(data)
+            r = subprocess.run(cmd.split() + [str(work / "a.log"), "--root", ROOT_KEY, "--tokens", str(work / "a.tok"), "--stmts", str(work / "a.st")], capture_output=True, text=True, cwd=ROOT)
+            v = (r.stdout + r.stderr).strip()
+            good = v.startswith(want) and (want != "ok" or v.endswith("level=2+ir"))
+            check("%s, %s: %s (%d statements): %s" % (cmd, name, what, len(stmts), "level=2+ir" if want == "ok" else want), good, v)
 
 
 def exported(work, path, files, live, nrows):
@@ -255,7 +300,7 @@ def exported(work, path, files, live, nrows):
             v = verdict(cmd, work, log, st, live)
             check("%s: %s is %s" % (cmd, name, want), v.startswith("reject rule=%s " % want), v)
     # a row deleted and then erased (its past and its salts destroyed, 6o), the file swept: the log and the store are what they were and one commit more, and still verify
-    log3, recs3, lines3, live3, n3, _ = read_back(path, ["!log " + KEY, "delete from note where k = 'first'", "!erase delete from note where k = 'first'", "!commit", "!sweep", "!commit"])
+    log3, recs3, lines3, live3, n3, _ = read_back(path, WHO + ["delete from note where k = 'first'", "!erase delete from note where k = 'first'", "!commit", "!sweep", "!commit"])
     log4, recs4, lines4, live4, n4, _ = read_back(path)
     check("after a delete and an erase: one commit more, what was there before unchanged, and the same read again by another process",
           recs3[:-1] == recs and len(lines3) == len(lines) + 1 and [l.split("\t")[1:] for l in lines3[:len(lines)]] == [l.split("\t")[1:] for l in lines] and (log4, lines4, live4) == (log3, lines3, live3) and n3 == n2 - 1,
@@ -263,11 +308,43 @@ def exported(work, path, files, live, nrows):
     for cmd in VERIFIERS:
         v = verdict(cmd, work, log4, store(lines4), live4)
         check("%s, after the erase: ok, the rows at the end compared" % cmd, v.startswith("ok commits=%d " % len(recs4)) and v.endswith(" final"), v)
+    # a commit names the statements of its transaction and no other: as many as ran in it (one more for each that returned what it wrote)
+    sys.path.insert(0, str(ROOT / "tools"))
+    import verify as l1  # noqa: E402
+    counts = [len(l1.decode(r[4:4 + int.from_bytes(r[:4], "big")])[3][5]) for r in recs]
+    # a renaming is two statements, one definition for each name (6au): the commits that define two names with one statement run are the renamings of the history
+    defined = [len([e for e in l1.decode(r[4:4 + int.from_bytes(r[:4], "big")])[3][3] if e[0] == 2]) for r in recs]
+    want = [n + 1 if n == 1 and d == 2 else n for n, d in zip(files.named, defined)]
+    check("the history has its two renamings", sum(1 for n, d in zip(files.named, defined) if n == 1 and d == 2) == 2)
+    check("each commit names the statements that ran in its transaction: %d statements in %d commits" % (sum(counts), len(counts)),
+          len(counts) == len(want) and counts == want and min(counts) >= 1, [(i, c, n) for i, (c, n) in enumerate(zip(counts, want)) if c != n][:5])
+    # who, what and when (6at, 6au): the log, the tokens and the statements out of the page file, judged at L2 with statements
+    authority(work, log4, KEPT[0], KEPT[1], "after the erase")
+    # the constants of the statements are nowhere: a row whose values came in statements, deleted and erased, leaves no byte of them in the file, which still has the
+    # statements' records (their shapes) and verifies
+    run(path, WHO + ["delete from note where k = 'needle'", "!erase delete from note where k = 'needle'", "!commit", "!sweep", "!commit", "!sweep"])
+    log6, recs6, lines6, live6, n6, _ = read_back(path)
+    data = open(path, "rb").read()
+    check("a value that came in three statements is in no byte of the page file once its row is erased; the statements are still in the log, as shapes",
+          NEEDLE.encode() not in data and b"needle" not in data and len(KEPT[1]) > 10 and len(recs6) == len(recs4) + 1, (NEEDLE.encode() in data, b"needle" in data, len(KEPT[1])))
+    authority(work, log6, KEPT[0], KEPT[1], "after the value was erased")
+    # a transaction of more statements than a commit names is refused when it commits, and rolled back
+    out = run(path, WHO + ["begin"] + ["insert into pair values (%d, 'big', 1)" % (1000 + i) for i in range(501)] + ["commit", "select count(*) from pair where b = 'big'", "insert into pair values (2000, 'small', 1)", "!commit"])
+    log7, recs7, lines7, live7, _, _ = read_back(path)
+    check("a transaction of 501 statements: refused when it commits (commit-too-large), nothing of it stays, and the next commit is made",
+          "refused commit-too-large" in out and "R 30" in out and len(recs7) == len(recs6) + 1, [l for l in out if l.startswith(("refused", "err", "R "))][:4])
+    # the engine's forms that have no IR are told as the IR that says what they did: a renaming defines both names, a truncate writes its table
+    run(path, WHO + ["insert into pair values (3000, 't', 1)", "alter table pair rename to pair2", "alter table pair2 rename to pair", "truncate pair", "!commit"])
+    log7, recs8, lines7, live7, _, _ = read_back(path)
+    effects = [sorted(l1.decode(r[4:4 + int.from_bytes(r[:4], "big")])[3][3]) for r in recs8[-3:]]
+    check("a renaming is told as a definition of both names, a truncate as a write of its table",
+          len(recs8) == len(recs7) + 4 and effects == [[(2, b"pair"), (2, b"pair2")], [(2, b"pair"), (2, b"pair2")], [(1, b"pair")]], effects)
+    authority(work, log7, KEPT[0], KEPT[1], "at the end")
     # one key signs a log: a commit signed with another is not made, with or without its record
     other = bytes(range(1, 33)).hex()
     out = run(path, ["!log " + other, "insert into acct values (777, 'other key', 1)", "!commit", "select count(*) from acct where id = 777"])
     log5, recs5, lines5, live5, n5, _ = read_back(path)
-    check("a commit signed with another key is not made: an error, no record, no row", any(l.startswith("err ") for l in out) and "R 30" in out and (log5, lines5, live5) == (log4, lines4, live4), [l for l in out if l[:2] in ("er", "ok", "R ", "L ")][:6])
+    check("a commit signed with another key is not made: an error, no record, no row", any(l.startswith("err ") for l in out) and "R 30" in out and (log5, lines5, live5) == (log7, lines7, live7), [l for l in out if l[:2] in ("er", "ok", "R ", "L ")][:6])
 
 
 def main():
@@ -280,9 +357,9 @@ def main():
         work = Path(tmp)
         path = str(work / "pages")
         files = Files()
-        files.take(run(path, ["!log " + KEY] + history[:cut] + ["!commit"]))
+        files.take(run(path, WHO + history[:cut] + ["!commit"]))
         first = len(files.records)
-        out = run(path, ["!log " + KEY] + history[cut:] + ["!commit", "!mark"] + ["!rows " + t for t in TABLES])
+        out = run(path, WHO + history[cut:] + ["!commit", "!mark"] + ["!rows " + t for t in TABLES])
         files.take(out[:out.index("mark")])
         live, nrows = dump(out[out.index("mark"):], TABLES)
         check("commits in both processes", first >= 3 and len(files.records) > first + 3, (first, len(files.records)))

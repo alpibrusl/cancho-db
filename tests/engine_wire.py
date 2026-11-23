@@ -296,10 +296,11 @@ def verified(d, path, history, what, login=False):
     import hashlib
     tables = sorted(set(re.findall(r"create table (?:if not exists )?(\w+)", " ".join(history)) + re.findall(r"rename to (\w+)", " ".join(history))))
     out = [l for b in ec.run_engine(path, ["select 1 from nosuchtable"]) for l in b]      # (the file opens)
-    r = subprocess.run([HARNESS, path], input="\n".join(["!records", "!store", "!tokens", "!mark"] + ["!rows " + t for t in tables]) + "\n", capture_output=True, text=True)
+    r = subprocess.run([HARNESS, path], input="\n".join(["!records", "!store", "!tokens", "!stmts", "!mark"] + ["!rows " + t for t in tables]) + "\n", capture_output=True, text=True)
     out = r.stdout.split("\n")
     cut = out.index("mark")
     tokens = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("K ")]
+    stmts = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("Y ")]
     recs = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("L ")]
     if not recs:
         check("%s: the server's page file has a log" % what, False, out[:3])
@@ -326,12 +327,15 @@ def verified(d, path, history, what, login=False):
         # L2 (docs/spec/token.md): every commit was made under a token of the root's that allows what the commit records, and was not expired then
         with open(os.path.join(d, "v.tokens"), "wb") as fh:
             fh.write(b"CHODBTK1" + b"".join(struct.pack(">I", len(t)) + t for t in tokens))
-        l2 = lambda root, toks: subprocess.run([sys.executable, os.path.join(ROOT, "tools", "verify.py"), os.path.join(d, "v.log"), "--root", root, "--tokens", toks], capture_output=True, text=True).stdout.strip()
+        # and with the statements (6au): each commit's statements are in the store the file kept, and its effects are exactly what they infer
+        with open(os.path.join(d, "v.stmts"), "wb") as fh:
+            fh.write(b"CHODBST3" + b"".join(struct.pack(">I", len(x)) + x for x in stmts))
+        l2 = lambda root, toks: subprocess.run([sys.executable, os.path.join(ROOT, "tools", "verify.py"), os.path.join(d, "v.log"), "--root", root, "--tokens", toks, "--stmts", os.path.join(d, "v.stmts")], capture_output=True, text=True).stdout.strip()
         with open(os.path.join(d, "v.none"), "wb") as fh:
             fh.write(b"CHODBTK1")
         v, other, none = l2(ROOT_KEY, os.path.join(d, "v.tokens")), l2("00" * 32, os.path.join(d, "v.tokens")), l2(ROOT_KEY, os.path.join(d, "v.none"))
-        check("%s: the log verifies at L2 under the root's key with the tokens the file kept (%d); not under another key, and not without the tokens" % (what, len(tokens)),
-              v.startswith("ok ") and v.endswith("level=2") and tokens and other.startswith("reject rule=token-bad-signature") and none.startswith("reject "), (v, other, none))
+        check("%s: the log verifies at L2 with statements under the root's key, with the tokens (%d) and the statements (%d) the file kept; not under another key, and not without the tokens" % (what, len(tokens), len(stmts)),
+              v.startswith("ok ") and v.endswith("level=2+ir") and tokens and other.startswith("reject rule=token-bad-signature") and none.startswith("reject "), (v, other, none))
     for cmd in VERIFIERS:
         v = subprocess.run(cmd.split() + [os.path.join(d, "v.log"), "--deltas", os.path.join(d, "v.deltas"), "--live-dump", os.path.join(d, "v.live")], capture_output=True, text=True, cwd=ROOT)
         v = (v.stdout + v.stderr).strip()
