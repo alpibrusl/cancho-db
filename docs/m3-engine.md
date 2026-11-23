@@ -1680,6 +1680,51 @@ the next; the argument is tested by the runs beside a server, not proved. Under 
 against a commit's 7). The tool reads the first branch only. A reader of the page file can read every row: the tool's authority bounds what it can *do*, not what it
 can see.
 
+## 6aw. The server takes back the pages its commits leave behind
+
+**Found (measured while timing 6av).** Every commit writes new pages and leaves the old ones (the tree is copied on write), and the pages nothing names any more are
+found and made free only by `pstore.sweep` (D-M3-2), which until now nothing but the test program's `!sweep` called. The server never called it. A table of two
+columns, 2,000 inserts and 1,000 updates, each its own commit, through `build/engine`: the page file is **147 MB** with the log on and 57.6 MB without; a sweep of
+that file frees 97% of its pages. A server under steady writes filled its disk.
+
+**Design.**
+
+- *When.* After a commit is durable, and only then: the connection is in no transaction, so no tree exists that the page file's roots do not name (a transaction
+  has the database to itself, 6aq). The sweep runs if the pages the last sweep freed are used up **and** the file has reached a size set by that sweep: twice the
+  pages then in use, and 8 MiB (2,048 pages), or the size the file had if that is more. So the file is held near twice what is in use, and a sweep, whose cost is
+  the size of the file, is paid for by at least as many pages written since the last.
+- *At a start.* The free pages are not kept in the file (a sweep finds them again), so a server that starts knows none: the first commit after a start sweeps.
+  *(Corrected while building: as first written a start set the mark at the file's size and 8 MiB, like a first sweep. Measured with a server killed and restarted
+  5 times in 3,000 commits: 46.4 MiB against 14.5, each start having cost its 8 MiB again.)*
+- *What stays.* What a tree names: the rows, the indexes, the history of the rows (6n) until it is erased, the log with its facts, tokens and statements. And
+  the trees of the superblock before the current one, which `pstore.sweep` keeps for a damaged current one to fall back to. So the reader of 6av that loaded one
+  state still reads whole pages until the commit after the next, and its check at the end (any commit: `export-raced`) covers it as before.
+- *A sweep that fails* is the page file not readable or writable: the server stops, as for a commit that fails (`58030`).
+- *Erasure.* A page freed is zeroed (D-M3-2). With the server sweeping, what an erase removed is gone from the file without anyone asking, at the latest when the
+  file has doubled; when exactly is not promised.
+
+*Not in this part:* giving the file's space back to the system (freed pages are reused, the file does not shrink); a sweep that does not stop the server while it
+runs; the free pages kept across a start.
+
+**Test.** `tests/engine_wire.py` (`reclaiming`): the 3,000 commits above through the server, killed with `SIGKILL` and restarted at 5 points of the run; the file
+stays under 20 MiB at every 500th commit, every acknowledged row is there at the end, and the log out of the file verifies with the L3a verifiers (a page zeroed
+that a tree named would fail one of the three). The differential, the 8 clients and the export beside a writing server (6av) all now run with sweeps among their
+commits.
+
+**Built.** `serve.reclaim`, called where the commit is made durable. Measured:
+
+- The 3,000 commits and 5 kills: the file ends at 14.4 to 14.5 MiB and is never larger (140.7 MiB with the sweep taken out, by the mutant); 2,000 rows, the 50
+  updated ones with their last value; the log's 3,000 commits verify to `final`. The slowest answer of the run 0.04 to 0.09 s.
+- Without a log the same history ends at 9.3 MB (57.6 before).
+- What a sweep costs: a file of 159 MiB (60,000 rows, 36,294 of its 40,676 pages free) is swept in 0.33 s, 0.23 s when the free pages are zeros already.
+- `tests/engine_wire.py` on 3 seeds, the crash test and the 500-insert floor: as before (3.6 to 3.8 s for 500 commits; 3.6 to 4.5 before).
+- 2 mutants (`reclaim:`, group `wire`), both killed: never sweeping (140.7 MiB), and sweeping once a start (32.7 MiB).
+
+*Limits.* **The server answers nobody while it sweeps**: about 0.3 s for 160 MiB here, so seconds for gigabytes, at a moment the clients do not choose. The file
+never shrinks. What is "in use" includes every old version of every row (the history is kept until erased) and the whole log: 14.5 MiB for 2,000 small rows after
+3,000 commits is mostly those, and they grow with every commit; nothing here bounds them. A failed sweep was not provoked (no test makes the disk fail). The free
+list holds 65,536 pages (256 MiB); more than that freed at once waits for the next sweep.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

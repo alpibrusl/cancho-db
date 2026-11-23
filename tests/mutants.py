@@ -3138,6 +3138,12 @@ WIRE = [
     ('serve: a place is not freed when its connection ends', 'src/serve.cho',
      '    conns.close(tab, slot);\n    st[0] = 0;',
      '    conns.close(tab, slot);'),
+    ('reclaim: the pages left behind are never looked for', 'src/serve.cho',
+     '    if pager.free_count(pg) > 0 || pager.next_page(pg) < gs[g_sweep_at()] {\n        return 0;\n    }',
+     '    if pager.next_page(pg) >= 0 {\n        return 0;\n    }'),
+    ('reclaim: after one sweep there is no other until the server starts again', 'src/serve.cho',
+     '    gs[g_sweep_at()] = next;',
+     '    gs[g_sweep_at()] = next + 100000000;'),
 ]
 
 

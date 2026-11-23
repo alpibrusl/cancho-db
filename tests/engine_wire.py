@@ -1082,6 +1082,46 @@ def beside(d):
     srv.stop()
 
 
+def reclaiming(d):
+    """The server takes back the pages its commits leave behind (6aw): the file stays within a bound whatever the number of commits, through kills and restarts, and loses nothing."""
+    import time
+    path = os.path.join(d, "grow.db")
+    srv = Server(path)
+    c = Client(srv.port)
+    c.query("create table g (a integer primary key, b text)")
+    sizes, slowest, acked, kills = [], 0.0, 0, 0
+    history = ["create table g (a integer primary key, b text)"]
+    for i in range(3000):
+        sql = "insert into g values (%d, 'row %d')" % (i, i) if i < 2000 else "update g set b = 'again %d' where a = %d" % (i, i % 50)
+        t = time.time()
+        got = c.query(sql)
+        slowest = max(slowest, time.time() - t)
+        if got[5] not in ("INSERT 0 1", "UPDATE 1"):
+            check("a statement of the load is answered", False, (i, got))
+            break
+        acked += 1
+        history.append(sql)
+        if (i + 1) % 500 == 0:
+            sizes.append(os.path.getsize(path))
+        if i in (700, 1300, 1900, 2400, 2900):
+            # killed wherever it is (a sweep is somewhere near: the file passed its mark several times), restarted: a page zeroed that a tree names would show now
+            srv.stop(signal.SIGKILL)
+            c.close(False)
+            kills += 1
+            srv = Server(path)
+            c = Client(srv.port)
+    n = c.query("select count(*) from g")[4]
+    again = c.query("select count(*) from g where b like 'again %'")[4]
+    top = c.query("select b from g where a = 49")[4]
+    c.close()
+    srv.stop()
+    mib = 1048576
+    check("3,000 commits of one row and %d kills: the page file ends at %.1f MiB (never over %.1f; without the sweeps 140), every acknowledged row is there; the slowest answer %.2f s"
+          % (kills, sizes[-1] / mib, max(sizes) / mib, slowest),
+          acked == 3000 and len(sizes) == 6 and max(sizes) < 20 * mib and n == [[b"2000"]] and again == [[b"50"]] and top == [[b"again 2999"]] and slowest < 5, (sizes, n, again, top, slowest))
+    verified(d, path, history, "after the sweeps and the kills")
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1091,6 +1131,7 @@ def main():
         srv.stop()
         several(d)
         beside(d)
+        reclaiming(d)
         logins(d)
         with_psql(d)
         with_cancho_pg(d)
