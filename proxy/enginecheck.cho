@@ -215,7 +215,7 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
     var out = root;
     borrow mut run as &!m in {
         // the statement is read, lowered and run by the engine (src/drive.cho); what is here is how its answer is written for a test to read
-        out = drive.run(pg, w, m, sql, root, mode, part);
+        out = drive.run(heap, pg, w, m, sql, root, mode, part, sql[0..0]);
         let o = drive.outcome(m);
         flag[0] = 0;
         if o == drive.o_ok() {
@@ -629,6 +629,34 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                             putchar(io, '\n');
                         }
                     }
+                } else if starts(all, ls, le, "!tokens") {
+                    // the tokens kept with the log (docs/m3-engine.md 6at): `K` and each in hex; `tokens N`
+                    region xr {
+                        let id = alloc_slice[xr](32, byte_of(0));
+                        let tk = alloc_slice[xr](16384, byte_of(0));
+                        var an = 0;
+                        var count = 0;
+                        var n = facts.next_token(pg, w, rs[cur], id, an, tk);
+                        while n > 0 {
+                            an = 32;
+                            put_str(io, "K ");
+                            var k = 0;
+                            while k < n {
+                                hex_byte(io, int_of(tk[k]));
+                                k = k + 1;
+                            }
+                            putchar(io, '\n');
+                            count = count + 1;
+                            n = facts.next_token(pg, w, rs[cur], id, an, tk);
+                        }
+                        if n < 0 {
+                            put_str(io, "tokens -\n");
+                        } else {
+                            put_str(io, "tokens ");
+                            put_int(io, count);
+                            putchar(io, '\n');
+                        }
+                    }
                 } else if starts(all, ls, le, "!store") {
                     // the facts of every commit as they are in the page file: `X`, the commit's number, then in hex the table, the commitment and the two hashes (`-`: none)
                     region xr {
@@ -780,7 +808,7 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                     key[k] = byte_of(fl[2 + k]);
                                     k = k + 1;
                                 }
-                                let nr = session.close(pg, w, fl[40..48], rs[cur], after, fl[0] != 0, key, rec);
+                                let nr = session.close(pg, w, fl[40..48], rs[cur], after, fl[0] != 0, key, key[0..0], rec);
                                 let said = session.said(fl[40..48]);
                                 if said == 1 {
                                     put_str(io, "ok BEGIN 0\nG BEGIN\n");

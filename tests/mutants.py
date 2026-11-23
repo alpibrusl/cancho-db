@@ -2654,8 +2654,8 @@ ENGINE = [
      '        ss[0] = idle();\n',
      ''),
     ("log: a transaction's commit is sealed on the branch's tree", 'src/session.cho',
-     'root = seal_on(p, w, ss, root, ss[2], key, rec);',
-     'root = seal_on(p, w, ss, branch, ss[2], key, rec);'),
+     'root = seal_on(p, w, ss, root, ss[2], key, who, rec);',
+     'root = seal_on(p, w, ss, branch, ss[2], key, who, rec);'),
     ("session: a transaction's facts stay for the next", 'src/session.cho',
      '            ss[2] = 0;\n            ss[3] = 0;\n            ss[5] = 1;',
      '            ss[3] = 0;\n            ss[5] = 1;'),
@@ -3023,6 +3023,69 @@ WIRE = [
     ('serve: with a key no commit is recorded', 'src/serve.cho',
      '            if gs[g_logs()] == 1 {\n                kn = 32;\n            }',
      ''),
+    ('login: with a root key a startup is served without a password', 'src/serve.cho',
+     '    } else if kind == login.kind_startup() && gs[g_login()] == 1 {\n        // a login',
+     '    } else if false {\n        // a login'),
+    ('login: any password is right', 'src/serve.cho',
+     '    if rule != login.login_ok() {\n        xi[token_len()] = 0;',
+     '    if false {\n        xi[token_len()] = 0;'),
+    ('login: a message that is no password is taken for one', 'src/serve.cho',
+     "    if int_of(buf[0]) != 'p' || n < 6 || n > len(buf) {",
+     '    if n < 6 || n > len(buf) {'),
+    ('login: any database is the branch', 'src/serve.cho',
+     '                xi[token_len()] = copy(buf, 4 + at[2], at[3], ar, token_at()) - token_at();',
+     '                xi[token_len()] = copy("main", 0, 4, ar, token_at()) - token_at();'),
+    ("login: the clock is at 0 when a token's expiry is checked", 'src/serve.cho',
+     '            let now = gs[g_now()];\n            rule = login.check(',
+     '            let now = 0;\n            rule = login.check('),
+    ('login: the token does not stay with the connection', 'src/serve.cho',
+     '    xi[token_len()] = tl;\n',
+     '    xi[token_len()] = 0;\n'),
+    ('login: a statement is held against no token', 'src/serve.cho',
+     'ar[token_at()..token_at() + xi[token_len()]], 0, out, op, roots, st);',
+     'ar[token_at()..token_at()], 0, out, op, roots, st);'),
+    ('login: an Execute is held against no token', 'src/serve.cho',
+     '    let tl = xi[token_len()];\n',
+     '    let tl = 0;\n'),
+    ("login: a denial is answered as a refusal of the engine's", 'src/serve.cho',
+     '            } else if said == 0 && o == drive.o_denied() {',
+     '            } else if false {'),
+    ('login: a record does not name its token', 'src/serve.cho',
+     '                token.prefix_id(tk, token.blocks(tk), who[0..32]);\n',
+     ''),
+    ('login: a record has no time', 'src/serve.cho',
+     '                build.put_be(who, 64, gs[g_now()], 8);\n',
+     ''),
+    ('login: the token is not kept with the log', 'src/serve.cho',
+     '                wn = facts.who_fixed() + len(tk);',
+     '                wn = facts.who_fixed();'),
+    ('login: the effects of a statement are not held against the token', 'src/drive.cho',
+     '        if !permitted(heap, tk, e) {\n            done(hw, o_denied(), kind);\n            return root;\n        }\n',
+     ''),
+    ('login: what a statement returns is not held against the token', 'src/drive.cho',
+     '                if !permitted(heap, tk, ir2[0..l2]) {',
+     '                if false {'),
+    ('login: a sequence is made whatever the token', 'src/drive.cho',
+     '        } else if !permitted_name(tk, sql, contents(m.tb), contents(m.nb)[6 * top + 1], 2) {\n            done(hw, o_denied(), 2);\n            return root;\n        } else {\n            rc = execw.create_sequence(',
+     '        } else {\n            rc = execw.create_sequence('),
+    ('login: a table is truncated whatever the token', 'src/drive.cho',
+     '        } else if !permitted_name(tk, sql, contents(m.tb), contents(m.nb)[6 * top + 1], 1) {',
+     '        } else if false {'),
+    ('login: a truncate is a definition', 'src/drive.cho',
+     'contents(m.nb)[6 * top + 1], 1) {',
+     'contents(m.nb)[6 * top + 1], 2) {'),
+    ('login: a table is renamed whatever the token', 'src/drive.cho',
+     '        } else if !permitted_name(tk, sql, contents(m.tb), contents(m.nb)[6 * top + 1], 2) || !permitted_name(tk, sql, contents(m.tb), contents(m.nb)[6 * top + 4], 2) {',
+     '        } else if false {'),
+    ('login: one effect allowed is enough', 'src/drive.cho',
+     '                yes = allows(tk, int_of(key[0]), key[1..len(key)]);',
+     '                yes = allows(tk, int_of(key[0]), key[1..len(key)]) || i > 0;'),
+    ("login: a record's time is 0", 'src/facts.cho',
+     'zero[0..0], chg, st, 0, zero[0..0], commit.be(who, 64, 8));',
+     'zero[0..0], chg, st, 0, zero[0..0], 0);'),
+    ("login: a record's principal is its token's id", 'src/facts.cho',
+     'effs[0..el], who[0..32], who[32..64],',
+     'effs[0..el], who[0..32], who[0..32],'),
     ('serve: a place is not freed when its connection ends', 'src/serve.cho',
      '    conns.close(tab, slot);\n    st[0] = 0;',
      '    conns.close(tab, slot);'),
@@ -3036,7 +3099,7 @@ def run_wire(cancho):
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in WIRE if not only or only in m[0]]
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
-            "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho")
+            "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "ir.cho")
 
     def one(mutant):
         label, rel, old, new = mutant
@@ -3079,7 +3142,7 @@ def run_engine(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho")
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
 
     def one(mutant):
         label, rel, old, new = mutant

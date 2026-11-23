@@ -168,7 +168,7 @@ pub fn max_record() -> [] int {
 // holds it (`build.log_record`: its length is 4, the encoding's length that its first four bytes say, and 64) is written to `out`, and the tree's head of the log is moved to it: the
 // new root, or an error. The commit's parent is the head the tree had (none: the first commit of the log, number 0), its `changes` are the facts', its `state` follows from the
 // parent's, its effects are one write for each table that has a fact, and it is signed with the key `seed` is the seed of.
-pub fn seal[&q, &z, &s, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, froot: int, seed: &s [byte], out: &!o [byte]) -> [file_read, file_write] int {
+pub fn seal[&q, &z, &s, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, froot: int, seed: &s [byte], who: &y [byte], out: &!o [byte]) -> [file_read, file_write] int {
     var nw = 0 - 1;
     region g {
         let chg = alloc_slice[g](32, byte_of(0));
@@ -224,7 +224,13 @@ pub fn seal[&q, &z, &s, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, fro
             }
         }
         state.state(np, head[40..40 + 32 * np], chg, st);
-        let en = build.encode(enc, head[8..8 + 32 * np], "main", seq, zero, zero[0..0], effs[0..el], zero, zero, zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], 0);
+        // who and when (6at): the id of the token the commit was made under, its principal and the time, if the caller has them; zeros and 0 if not
+        var en = 0;
+        if len(who) >= who_fixed() {
+            en = build.encode(enc, head[8..8 + 32 * np], "main", seq, zero, zero[0..0], effs[0..el], who[0..32], who[32..64], zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], commit.be(who, 64, 8));
+        } else {
+            en = build.encode(enc, head[8..8 + 32 * np], "main", seq, zero, zero[0..0], effs[0..el], zero, zero, zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], 0);
+        }
         if en < 0 || 4 + en + 64 > len(out) {
             return exec.too_big();
         }
@@ -249,6 +255,34 @@ pub fn seal[&q, &z, &s, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, fro
             }
         } else if lr != 32 || !exec.same(contents(w.cur), 0, 32, sig, 0, 32) {
             return exec.unsupported();
+        }
+        // the token, under its id, the first time a commit is made under it: a verifier is given the tokens with the log (6at)
+        // (writing it again would write the same bytes: that it is written once is a saving, and no test can tell)
+        if len(who) > who_fixed() {
+            let tk0 = tables.token_key(who[0..32], 0, contents(w.key));
+            let tr = btree.get(p, contents(w.sc), nw, contents(w.key)[0..tk0], contents(w.cur));
+            if tr == btree.not_found() {
+                var ta = who_fixed();
+                var tpart = 0;
+                while ta < len(who) {
+                    var tl = len(who) - ta;
+                    if tl > 700 {
+                        tl = 700;
+                    }
+                    if tpart >= 255 {
+                        return exec.too_big();
+                    }
+                    let tk1 = tables.token_key(who[0..32], tpart, contents(w.key));
+                    nw = btree.put(p, contents(w.sc), nw, contents(w.key)[0..tk1], who[ta..ta + tl]);
+                    if nw < 0 {
+                        return exec.tree_err(nw);
+                    }
+                    ta = ta + tl;
+                    tpart = tpart + 1;
+                }
+            } else if tr < 0 {
+                return exec.tree_err(tr);
+            }
         }
         // the record, in parts a value of the tree holds
         let rn = 4 + en + 64;
@@ -291,6 +325,50 @@ pub fn seal[&q, &z, &s, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, fro
         }
     }
     return nw;
+}
+
+// What `seal` is told of who commits and when (`who`): the token's id (32 bytes), the principal (32), the time in milliseconds (8), then the token itself.
+pub fn who_fixed() -> [] int {
+    return 72;
+}
+
+// The token after the one of id `after[0..an]` (nothing: the first) as it is kept in the tree `root`: its id into `after` (32 bytes) and its bytes into `out`; its
+// length, 0 after the last, or an error.
+pub fn next_token[&q, &z, &a, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, after: &!a [byte], an: int, out: &!o [byte]) -> [file_read] int {
+    // (after every part of the token `after` names: its id and a part number above any)
+    var kl = tables.token_key(after[0..32], 255, contents(w.key));
+    if an == 0 {
+        kl = tables.token_key(after[0..32], 0, contents(w.key)) - 33;
+    }
+    let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+    if r == btree.not_found() {
+        return 0;
+    }
+    if r < 0 {
+        return exec.tree_err(r);
+    }
+    if r / 1024 != 38 || commit.be(contents(w.key2), 0, 4) != tables.log_space() || int_of(contents(w.key2)[4]) != 7 {
+        return 0;
+    }
+    exec.copy(contents(w.key2), 5, 32, after, 0);
+    var at = 0;
+    var part = 0;
+    var more = true;
+    while more {
+        let tk = tables.token_key(after[0..32], part, contents(w.key));
+        let g = btree.get(p, contents(w.sc), root, contents(w.key)[0..tk], contents(w.cur));
+        if g == btree.not_found() {
+            more = false;
+        } else if g < 0 {
+            return exec.tree_err(g);
+        } else if at + g > len(out) {
+            return exec.too_big();
+        } else {
+            at = exec.copy(contents(w.cur), 0, g, out, at);
+            part = part + 1;
+        }
+    }
+    return at;
 }
 
 // The log's header as it is in the tree `root` (6as): `build.log_header` into `out`, its length; 0 if no commit was ever recorded there; or an error.

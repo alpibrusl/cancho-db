@@ -10,9 +10,10 @@ import cdb.serve;
 
 // The engine's server (docs/m3-engine.md 6al): PostgreSQL's protocol in front of the engine, with no PostgreSQL behind it.
 //
-//     engine PAGEFILE PORT [KEYFILE [IDLE_MS WRITE_MS]]
+//     engine PAGEFILE PORT [KEYFILE [ROOTFILE [IDLE_MS WRITE_MS]]]
 //
-// Up to 16 connections, from this machine only; no login. KEYFILE: 64 hexadecimal digits, the seed of the key that signs the log; with it every commit that changed rows is
+// Up to 16 connections, from this machine only. ROOTFILE: 64 hexadecimal digits, the public key of the root that signs capability tokens; with it a client logs in with a
+// token as its password (docs/m3-engine.md 6at); `-` or nothing: no login. KEYFILE: 64 hexadecimal digits, the seed of the key that signs the log; with it every commit that changed rows is
 // recorded in the page file with what it wrote (docs/m3-engine.md 6as), without it nothing is recorded. IDLE_MS: how long a transaction may idle while another connection waits for it (default 30000); WRITE_MS:
 // how long a client may take none of its answer (default 10000). It writes `listening` to standard error when it is, and ends when the listener fails or the page
 // file cannot be committed. Status 2: usage; 3: the file or the port cannot be opened; 5: the page file is not a database; 7: a commit of the page file failed.
@@ -25,6 +26,42 @@ fn hexval(c: int) -> [] int {
         return c - 'a' + 10;
     }
     return 0 - 1;
+}
+
+// The 32 bytes a file holds as 64 hexadecimal digits (and at most a newline): whether it does.
+fn hex_file[&f, &p, &o](fs: &f Fs(""), path: &p [byte], out: &!o [byte]) -> [fs_read(""), file_read] bool {
+    var ok = false;
+    region r {
+        let kb = alloc_slice[r](80, byte_of(0));
+        match open_read(fs, path) {
+            Opened::Ok(kf) => {
+                var kfile = kf;
+                borrow mut kfile as &!kw in {
+                    match file_read(kw, kb) {
+                        Read::Got(n) => {
+                            ok = n >= 64 && n <= 66;
+                            var i = 0;
+                            while i < 32 && ok {
+                                let hi = hexval(int_of(kb[2 * i]));
+                                let lo = hexval(int_of(kb[2 * i + 1]));
+                                ok = hi >= 0 && lo >= 0;
+                                out[i] = byte_of((hi * 16 + lo) % 256);
+                                i = i + 1;
+                            }
+                        }
+                        Read::End => {
+                        }
+                        Read::Failed(e) => {
+                        }
+                    }
+                }
+                file_close(kfile);
+            }
+            Opened::Failed(e) => {
+            }
+        }
+    }
+    return ok;
 }
 
 fn number_of[&t](text: &t [byte]) -> [] int {
@@ -44,7 +81,7 @@ fn number_of[&t](text: &t [byte]) -> [] int {
     return v;
 }
 
-fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y](heap: &!h Heap, io: &!o Io, net: &n Net(""), clk: &k Clock, port: int, idle_ms: int, write_ms: int, key: &y [byte], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub) -> [heap, err_write, net_in(""), conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
+fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j](heap: &!h Heap, io: &!o Io, net: &n Net(""), clk: &k Clock, port: int, idle_ms: int, write_ms: int, key: &y [byte], rootkey: &j [byte], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub) -> [heap, err_write, net_in(""), conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
     var roots = box_slice(heap, 16, 0);
     var globals = box_slice(heap, serve.globals(), 0);
     var states = box_slice(heap, serve.stride() * serve.max_clients(), 0);
@@ -67,6 +104,14 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y](heap: &!h Heap, io: &!o Io, net: &n
                 gs[serve.g_seq()] = seq;
                 gs[serve.g_idle_ms()] = idle_ms;
                 gs[serve.g_write_ms()] = write_ms;
+                if len(rootkey) == 32 {
+                    gs[serve.g_login()] = 1;
+                    var rk = 0;
+                    while rk < 32 {
+                        gs[serve.g_root() + rk] = int_of(rootkey[rk]);
+                        rk = rk + 1;
+                    }
+                }
                 if len(key) == 32 {
                     gs[serve.g_logs()] = 1;
                     var kk = 0;
@@ -83,6 +128,9 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y](heap: &!h Heap, io: &!o Io, net: &n
                             io.error_all(io, "listening\n");
                             if len(key) != 32 {
                                 io.error_all(io, "engine: no key file was named: commits are not recorded in the log\n");
+                            }
+                            if len(rootkey) != 32 {
+                                io.error_all(io, "engine: no root key was named: there is no login, and any client on this machine is served\n");
                             }
                             borrow mut states as &!sw in {
                                 borrow mut inb as &!ib in {
@@ -126,49 +174,30 @@ fn main(world: World) -> [] int {
         borrow args as &g in {
             var idle_ms = 30000;
             var write_ms = 10000;
-            if arg_count(g) == 6 {
-                idle_ms = number_of(arg(g, 4));
-                write_ms = number_of(arg(g, 5));
+            if arg_count(g) == 7 {
+                idle_ms = number_of(arg(g, 5));
+                write_ms = number_of(arg(g, 6));
             }
             // the seed of the signing key: 64 hexadecimal digits in a file (6as); a file named that is not that is a refusal to start, not a server that does not log
             var keyed = 0;
+            var rooted = 0;
             region kr {
-                let kb = alloc_slice[kr](80, byte_of(0));
                 let keyseed = alloc_slice[kr](32, byte_of(0));
+                let rootkey = alloc_slice[kr](32, byte_of(0));
                 if arg_count(g) >= 4 {
                     keyed = 0 - 1;
-                    match open_read(fsr, arg(g, 3)) {
-                        Opened::Ok(kf) => {
-                            var kfile = kf;
-                            borrow mut kfile as &!kw in {
-                                match file_read(kw, kb) {
-                                    Read::Got(n) => {
-                                        var ok = n >= 64 && n <= 66;
-                                        var i = 0;
-                                        while i < 32 && ok {
-                                            let hi = hexval(int_of(kb[2 * i]));
-                                            let lo = hexval(int_of(kb[2 * i + 1]));
-                                            ok = hi >= 0 && lo >= 0;
-                                            keyseed[i] = byte_of((hi * 16 + lo) % 256);
-                                            i = i + 1;
-                                        }
-                                        if ok {
-                                            keyed = 1;
-                                        }
-                                    }
-                                    Read::End => {
-                                    }
-                                    Read::Failed(e) => {
-                                    }
-                                }
-                            }
-                            file_close(kfile);
-                        }
-                        Opened::Failed(e) => {
-                        }
+                    if hex_file(fsr, arg(g, 3), keyseed) {
+                        keyed = 1;
                     }
                 }
-                if (arg_count(g) == 3 || arg_count(g) == 4 || arg_count(g) == 6) && number_of(arg(g, 2)) > 0 && number_of(arg(g, 2)) < 65536 && idle_ms > 0 && write_ms > 0 && keyed >= 0 {
+                // the root's public key (6at): with it a client must log in with a token the root signed; `-` in its place means no login
+                if arg_count(g) >= 5 && !(len(arg(g, 4)) == 1 && int_of(arg(g, 4)[0]) == '-') {
+                    rooted = 0 - 1;
+                    if hex_file(fsr, arg(g, 4), rootkey) {
+                        rooted = 1;
+                    }
+                }
+                if (arg_count(g) == 3 || arg_count(g) == 4 || arg_count(g) == 5 || arg_count(g) == 7) && number_of(arg(g, 2)) > 0 && number_of(arg(g, 2)) < 65536 && idle_ms > 0 && write_ms > 0 && keyed >= 0 && rooted >= 0 {
                     status = 3;
                     match open_new(fsr, arg(g, 1)) {
                         Opened::Ok(nf) => {
@@ -227,7 +256,7 @@ fn main(world: World) -> [] int {
                                                 borrow mut subs as &!sb in {
                                                     borrow net as &nn in {
                                                         borrow clock as &kk in {
-                                                            status = listen_on(hh, oo, nn, kk, number_of(arg(g, 2)), idle_ms, write_ms, keyseed[0..32 * keyed], pp, ww, sb);
+                                                            status = listen_on(hh, oo, nn, kk, number_of(arg(g, 2)), idle_ms, write_ms, keyseed[0..32 * keyed], rootkey[0..32 * rooted], pp, ww, sb);
                                                         }
                                                     }
                                                 }
