@@ -915,6 +915,14 @@ def logins(d):
           ro.query("create index li on lt (v)")]
     check("a token that may only read: it reads, and every write and every definition is 42501 effect-denied",
           r1[0][4] == [[b"1", b"a"], [b"2", b"b"]] and all((x[0], x[1]) == ("42501", "cancho-db: refused effect-denied") for x in r1[1:]) and ro.status == "I", [(x[0], x[1], x[5]) for x in r1])
+    # the head of the log is asked for by a call (6ax): a token allows it by name, and one that may only read tables does not have it
+    caller = Client(srv.port, password=mint("password", "--effects", "c:cancho_last_commit"), database="main")
+    head = [caller.query("select cancho_last_commit()"), ro.query("select cancho_last_commit()"), a.query("select cancho_last_commit()"), caller.query("select k from lt"),
+            caller.extended("select cancho_last_commit()", [])]
+    check("cancho_last_commit(): a token that may call it is given the number of commits and the last one's id, by both protocols; one that may only read is 42501; one that may only call reads no table",
+          head[0][4] == head[2][4] == head[4][4] and len(head[0][4]) == 1 and head[0][4][0][0] == b"2" and len(head[0][4][0][1]) == 64 and head[0][2] == [b"commits", b"id"]
+          and (head[1][0], head[1][1]) == ("42501", "cancho-db: refused effect-denied") and head[3][0] == "42501", [(x[0], x[1], x[2], x[4]) for x in head])
+    caller.close()
     one = Client(srv.port, password=mint("password", "--effects", "r:lt,r:lt.*,w:lt"), database="main")
     r2 = [one.query("insert into lt values (3, 'c')"), one.query("select v from lt where k = 3"), one.query("update lt set v = 'cc' where k = 3 returning k, v"), one.query("select v from lu"),
           one.query("insert into lu values (2, 'y')"), one.query("insert into lt values (4, 'd') returning k"), one.query("truncate lt")]
@@ -1010,6 +1018,7 @@ def beside(d):
     for i in range(4):
         c.query("create table w%d (k integer primary key, v text)" % i)
     c.query("insert into w0 values (-1, 'the first commit: a table made changes no row and is no commit')")
+    mine = c.query("select cancho_last_commit()")[4]               # what a client holds a later log to (6ax)
     c.close()
     done = [0]
 
@@ -1075,6 +1084,13 @@ def beside(d):
         with open(os.path.join(d, "e." + w), "wb") as fh:
             fh.write(files[w][1])
     good = n == 1 + 4 * 120 and all(files[w][0] == 0 for w in files)
+    c = Client(srv.port)
+    now = c.query("select cancho_last_commit()")[4]
+    c.close()
+    v = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "verify.py"), os.path.join(d, "e.log"), "--expect", mine[0][1].decode() if mine and mine[0][1] else "00" * 32], capture_output=True, text=True).stdout.strip()
+    v2 = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "verify.py"), os.path.join(d, "e.log"), "--expect", "ab" * 32], capture_output=True, text=True).stdout.strip()
+    check("the id a client was given by cancho_last_commit() after the first commit is in the log exported at the end (--expect), an id it was not given is not; the server's answer now is the tool's anchor",
+          mine and mine[0][0] == b"1" and v.startswith("ok commits=%d " % n) and v2.startswith("reject rule=expected-missing") and now == [[str(n).encode(), out.split()[2]]], (mine, v, v2, now, out))
     for cmd in VERIFIERS:
         v = subprocess.run(cmd.split() + [os.path.join(d, "e.log"), "--deltas", os.path.join(d, "e.facts"), "--live-dump", os.path.join(d, "e.live")], capture_output=True, text=True, cwd=ROOT)
         v = (v.stdout + v.stderr).strip()

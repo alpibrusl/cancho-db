@@ -11,6 +11,7 @@ import cdb.execs;
 import cdb.execw;
 import cdb.execd;
 import cdb.session;
+import cdb.facts;
 import cdb.build;
 import cdb.token;
 import cdb.ir;
@@ -506,6 +507,22 @@ fn permitted[&h, &k, &e](heap: &!h Heap, tk: &k [byte], e: &e [byte]) -> [heap] 
 
 // A statement of the IR for one of the engine's forms that has none, kept for the log: `tag` 3 a DELETE of the table named at the token `tok` with no condition, `tag` 4
 // a definition of `kind` (docs/spec/ir.md section 2) of that name.
+// Whether the IR is the statement `Call` of `cancho_last_commit` with no argument (docs/spec/ir.md section 2: the tag, the name, the count).
+fn is_last_commit[&e](e: &e [byte]) -> [] bool {
+    let name = "cancho_last_commit";
+    if len(e) != 7 + len(name) || int_of(e[0]) != 5 || int_of(e[1]) != 0 || int_of(e[2]) != len(name) {
+        return false;
+    }
+    var i = 0;
+    while i < len(name) {
+        if int_of(e[3 + i]) != int_of(name[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return int_of(e[len(e) - 1]) == 0 && int_of(e[len(e) - 2]) == 0 && int_of(e[len(e) - 3]) == 0 && int_of(e[len(e) - 4]) == 0;
+}
+
 fn keep_named[&q, &s, &t](w: &!q exec.Work, sql: &s [byte], toks: &t [int], tok: int, tag: int, kind: int) -> [] bool {
     var ok = false;
     region r {
@@ -591,6 +608,7 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
     var rc = 0;
     var kind = 0 - 1;
     var returned = 0 - 1;
+    var called = false;
     if mode == 3 {
         // the transaction has failed: nothing runs until it is ended
         rc = exec.e_aborted();
@@ -715,6 +733,11 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
         } else if kind == 4 && ln > 1 && int_of(e[1]) == 4 {
             rc = execw.drop_index(pg, w, root, e, sql, contents(m.tb), contents(m.nb), top);
             kind = answer.k_drop_index();
+        } else if kind == 5 && is_last_commit(e) {
+            // the head of the log, for a client to hold a later log to (6ax)
+            rc = facts.last(pg, w, root);
+            called = true;
+            kind = 6;
         } else {
             rc = exec.unsupported();
         }
@@ -745,7 +768,11 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
         return root;
     }
     hw[2] = kind;
-    if kind == 6 || returned >= 0 {
+    if called {
+        // the two columns of `cancho_last_commit()`
+        hw[3] = 1;
+        hw[4] = build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), 0, 7, 2), "commits"), 2, 2), "id");
+    } else if kind == 6 || returned >= 0 {
         // the names of the columns, as a client is sent them: what the lowering knows and the IR does not carry
         var top2 = top;
         if returned >= 0 {

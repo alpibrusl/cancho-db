@@ -1645,7 +1645,7 @@ whoever holds one runs any verifier with `--expect` on a later copy of the log.
   more commits than there are, or `live` asked at a head that is gone).
 
 *Not in this part:* carrying the output anywhere; an export that picks up where the last one ended (each run writes the whole log; measured below); the server
-giving an anchor to a client (`cancho_last_commit()` is the proxy's); `cancho-log` (6at saw it as the file a copy could be appended to: with whole exports there is
+giving an anchor to a client (`cancho_last_commit()` is the proxy's) *(corrected in 6ax: it is not; the specification names it and nothing had built it. 6ax does, in the engine)*; `cancho-log` (6at saw it as the file a copy could be appended to: with whole exports there is
 no file to append to yet, so it has no place in this part).
 
 **Test.** `tests/engine_log.py`: after its history, the tool's five outputs are byte for byte what the test assembles from the test program's commands; the
@@ -1724,6 +1724,41 @@ commits.
 never shrinks. What is "in use" includes every old version of every row (the history is kept until erased) and the whole log: 14.5 MiB for 2,000 small rows after
 3,000 commits is mostly those, and they grow with every commit; nothing here bounds them. A failed sweep was not provoked (no test makes the disk fail). The free
 list holds 65,536 pages (256 MiB); more than that freed at once waits for the next sweep.
+
+## 6ax. The head of the log, given to a client
+
+6av ends on its limit: no one but the operator holds an anchor. `docs/spec/commit.md` section 5 has said since M1 how a reader would hold one: *a reader that holds a
+commit id it was given earlier (`cancho_last_commit()`) can pass it as the expected id*. **A read, and a correction:** nothing answers that call. Not the proxy
+(`grep cancho_last_commit src proxy`: no line), not the engine, where it lowers to the IR's `Call` and is refused `engine-unsupported`. 6av said it was "the
+proxy's"; that was written without looking.
+
+**Design.**
+
+- `select cancho_last_commit()` is answered by the engine with one row of two columns: `commits`, an integer, the number of commits in the log, and `id`, text,
+  the id of the last in 64 hex digits; `0` and null when there is no commit. It is what `logexport ... anchor` prints, from the same key of the tree.
+- *It is the head of the log, not "my last commit".* Any commit a client's own commit comes before will do as its anchor: a log that holds the head holds all
+  before it. Asked right after its commit is acknowledged, the head is that commit or a later one.
+- *In a transaction* it is the head the transaction began on (its own commit is not made yet), and it is a statement of that transaction like another: the commit
+  names it, and its effect, `call cancho_last_commit`, is among the commit's.
+- *Authority.* The IR is the statement `Call`, whose effect is `call cancho_last_commit` (`docs/spec/ir.md` section 3); the server holds it against the token as
+  any effect (6at). A token must allow that call by name or all calls; one that may only read tables may not ask. That is a choice, and a strict one: the head's id
+  says nothing of any row, but an effect the token does not list is not run.
+- Only that name, in lower case as the lexer makes an unquoted name, with no argument. Everything else that is a call stays `engine-unsupported`.
+
+*Not in this part:* the same call in the proxy; a head per branch; the id of the commit a statement made, returned with its answer.
+
+**Test.** `tests/engine_log.py`: the call three times in the history (alone, in a transaction that commits, after it); each answer is the number of records made
+so far and the id of the last; the commit of the transaction names it and the log still verifies at L2. With no log: `0`, null. Another name of the same length,
+an argument, the name quoted: refused. `tests/engine_wire.py`: a client takes the head after the first commit of a run of 481; the log the export tool writes at the
+end is accepted with `--expect` of it and refused with an id never given; the server's answer at the end is the tool's anchor. Under a login: a token for
+`c:cancho_last_commit` is answered by both protocols and may read no table; a token for `r:*` is `42501`.
+
+**Built.** `facts.last`, `drive.is_last_commit`. Measured: all of the test above, on 3 seeds of each; the 63 steps of the gate before the mutants; 5 mutants
+(group `engine`, `log:`), all killed.
+
+*Limits.* A client that never asks holds nothing: the anchor is taken, not pushed. The id is given over the same clear connection as everything else. It is the
+engine's server only; a deployment still behind the proxy has no such call. Whoever holds an anchor still needs a copy of the log to check, which 6av writes and
+nothing carries.
 
 ## 7. Taking over, safely
 
