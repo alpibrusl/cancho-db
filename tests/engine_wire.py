@@ -17,6 +17,7 @@ Then, each on a server of its own:
   * an SSLRequest is answered N and the startup goes on;
   * garbage (random bytes for a startup, a message of a huge length, of no known type, half a message and a close, a query that is no string): the server answers the next
     connection as if nothing had happened;
+  * a login (6at): who is not let in and why, what a token that may only read, or only write one table, is refused, who and when in every record, and the log at L2;
   * more than one connection (6aq): statements interleaved, a statement that waits for another connection's transaction (to commit, to roll back, to be dropped), a
     transaction ended for idling while another waits, a 17th connection, a message over 1 MiB, a client that does not read its answer, eight clients at once.
 
@@ -85,14 +86,22 @@ def die_with_parent():
 
 
 class Server:
-    def __init__(self, path, *limits, key=True):
+    def __init__(self, path, *limits, key=True, login=False):
         self.path, self.port = path, free_port()
         args = [SERVER, path, str(self.port)]
         if key:
             # the seed of the key that signs the log (6as)
             with open(path + ".key", "w") as f:
                 f.write(bytes(range(32)).hex() + "\n")
-            args += [path + ".key"] + [str(x) for x in limits]
+            args += [path + ".key"]
+            root = "-"
+            if login:
+                # the root's public key: clients log in with a token it signed (6at)
+                root = path + ".root"
+                with open(root, "w") as f:
+                    f.write(ROOT_KEY + "\n")
+            if login or limits:
+                args += [root] + [str(x) for x in limits]
         self.p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=die_with_parent)
         STARTED.append(self.p)
         line = self.p.stderr.readline()
@@ -115,7 +124,7 @@ def message(t, body):
 class Client:
     """The simple query protocol, and the bytes of anything else."""
 
-    def __init__(self, port, ssl_first=False, rcvbuf=None):
+    def __init__(self, port, ssl_first=False, rcvbuf=None, password=None, database="anything"):
         self.s = socket.socket()
         if rcvbuf:
             self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
@@ -125,8 +134,13 @@ class Client:
         if ssl_first:
             self.s.sendall(struct.pack(">II", 8, 80877103))
             self.ssl_answer = self.s.recv(1)
-        body = struct.pack(">I", 196608) + b"user\0tester\0database\0anything\0\0"
+        body = struct.pack(">I", 196608) + b"user\0tester\0database\0" + database.encode() + b"\0\0"
         self.s.sendall(struct.pack(">I", len(body) + 4) + body)
+        self.asked = None
+        if password is not None:
+            # a server with a login asks for a password (AuthenticationCleartextPassword) before anything else
+            self.asked = self.msg()
+            self.s.sendall(message(b"p", password.encode() + b"\0"))
         self.first = self.until_ready()
 
     def msg(self):
@@ -142,7 +156,12 @@ class Client:
     def until_ready(self):
         out = []
         while True:
-            t, body = self.msg()
+            try:
+                t, body = self.msg()
+            except EOFError:
+                # the server closed the connection: what it said before is the answer (a login refused)
+                self.status = "closed"
+                return out
             out.append((t, body))
             if t == b"S":
                 k, v = body.rstrip(b"\0").split(b"\0")
@@ -264,14 +283,23 @@ def harness_view(block):
     return None, None, names, oids, rows, tag, state
 
 
-def verified(d, path, history, what):
+def mint(*args):
+    return subprocess.run([sys.executable, os.path.join(ROOT, "tools", "mint.py")] + list(args), capture_output=True, text=True, check=True).stdout.strip()
+
+
+ROOT_KEY = mint("root")
+ALL = "r:*,w:*,d:*,c:*,n:*"
+
+
+def verified(d, path, history, what, login=False):
     """The log the server left in its page file (6as), read out by the test program and given to the verifiers with the rows the file holds: the number of commits."""
     import hashlib
     tables = sorted(set(re.findall(r"create table (?:if not exists )?(\w+)", " ".join(history)) + re.findall(r"rename to (\w+)", " ".join(history))))
     out = [l for b in ec.run_engine(path, ["select 1 from nosuchtable"]) for l in b]      # (the file opens)
-    r = subprocess.run([HARNESS, path], input="\n".join(["!records", "!store", "!mark"] + ["!rows " + t for t in tables]) + "\n", capture_output=True, text=True)
+    r = subprocess.run([HARNESS, path], input="\n".join(["!records", "!store", "!tokens", "!mark"] + ["!rows " + t for t in tables]) + "\n", capture_output=True, text=True)
     out = r.stdout.split("\n")
     cut = out.index("mark")
+    tokens = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("K ")]
     recs = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("L ")]
     if not recs:
         check("%s: the server's page file has a log" % what, False, out[:3])
@@ -294,6 +322,16 @@ def verified(d, path, history, what):
             fh.write(data)
     v = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "verify.py"), os.path.join(d, "v.log")], capture_output=True, text=True).stdout.strip()
     check("%s: the log out of the server's page file verifies (chain, numbers, signatures; %d commits)" % (what, len(ids)), v.startswith("ok ") and "commits=%d" % len(ids) in v and len(ids) > 3, v)
+    if login:
+        # L2 (docs/spec/token.md): every commit was made under a token of the root's that allows what the commit records, and was not expired then
+        with open(os.path.join(d, "v.tokens"), "wb") as fh:
+            fh.write(b"CHODBTK1" + b"".join(struct.pack(">I", len(t)) + t for t in tokens))
+        l2 = lambda root, toks: subprocess.run([sys.executable, os.path.join(ROOT, "tools", "verify.py"), os.path.join(d, "v.log"), "--root", root, "--tokens", toks], capture_output=True, text=True).stdout.strip()
+        with open(os.path.join(d, "v.none"), "wb") as fh:
+            fh.write(b"CHODBTK1")
+        v, other, none = l2(ROOT_KEY, os.path.join(d, "v.tokens")), l2("00" * 32, os.path.join(d, "v.tokens")), l2(ROOT_KEY, os.path.join(d, "v.none"))
+        check("%s: the log verifies at L2 under the root's key with the tokens the file kept (%d); not under another key, and not without the tokens" % (what, len(tokens)),
+              v.startswith("ok ") and v.endswith("level=2") and tokens and other.startswith("reject rule=token-bad-signature") and none.startswith("reject "), (v, other, none))
     for cmd in VERIFIERS:
         v = subprocess.run(cmd.split() + [os.path.join(d, "v.log"), "--deltas", os.path.join(d, "v.deltas"), "--live-dump", os.path.join(d, "v.live")], capture_output=True, text=True, cwd=ROOT)
         v = (v.stdout + v.stderr).strip()
@@ -826,6 +864,106 @@ def several(d):
           (said, wrote, r.stdout[:100], bad.returncode, missing.returncode))
 
 
+def logins(d):
+    """A login, what a token allows, and who and when in the log (docs/m3-engine.md 6at)."""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import verify as l1  # noqa: E402  (to read a record's fields)
+    import hashlib
+    srv = Server(os.path.join(d, "login.db"), login=True)
+    full = mint("password", "--effects", ALL)
+    # who is not let in, each with the proxy's rule, and none of them served
+    refused = [("no password, a query in its place", None, "main", "08P01", "cancho-db: a password was asked for"),
+               ("a password that is no token", "nonsense", "main", "28P01", "cancho-db: refused login-bad-token"),
+               ("a token another root signed", mint("password", "--effects", ALL, "--foreign"), "main", "28P01", "cancho-db: refused login-bad-signature"),
+               ("a token without the seed of its last key", mint("password", "--effects", ALL, "--wrong-seed"), "main", "28P01", "cancho-db: refused login-bad-proof"),
+               ("a token that has expired", mint("password", "--effects", ALL, "--expiry", "1000"), "main", "28P01", "cancho-db: refused login-expired"),
+               ("a token for another branch", mint("password", "--effects", ALL, "--branch", "other"), "main", "3D000", "cancho-db: refused login-branch-denied"),
+               ("a database that is not the branch", full, "postgres", "3D000", "cancho-db: refused login-branch-denied")]
+    wrong = []
+    for name, password, database, state, text in refused:
+        if password is None:
+            c = Client.__new__(Client)
+            c.s = socket.create_connection(("127.0.0.1", srv.port), timeout=20)
+            c.buf, c.status, c.names, c.params = b"", "?", [], {}
+            body = struct.pack(">I", 196608) + b"user\0x\0database\0main\0\0"
+            c.s.sendall(struct.pack(">I", len(body) + 4) + body)
+            asked = c.msg()
+            c.s.sendall(message(b"Q", b"select 1 from nothing\0"))
+            got = c.answer(c.until_ready())
+        else:
+            c = Client(srv.port, password=password, database=database)
+            asked, got = c.asked, c.answer(c.first)
+        if asked != (b"R", struct.pack(">I", 3)) or (got[0], got[1], got[6], c.status) != (state, text, b"E", "closed"):
+            wrong.append((name, asked, got[0], got[1], got[6], c.status))
+        c.s.close()
+    check("not let in, each told why and closed with nothing served: %s" % "; ".join(r[0] for r in refused), not wrong, wrong)
+    # let in: asked for a password, then served as before
+    t0 = int(time.time() * 1000)
+    a = Client(srv.port, password=full, database="main")
+    made = [a.query("create table lt (k integer primary key, v text)"), a.query("create table lu (k integer primary key, v text)"), a.query("insert into lt values (1, 'a'), (2, 'b')"),
+            a.query("insert into lu values (1, 'x')")]
+    check("a token of the root's is let in: AuthenticationCleartextPassword, then the startup's answer, and it is served",
+          a.asked == (b"R", struct.pack(">I", 3)) and b"".join(t for t, _ in a.first) == b"RSSSSSSKZ" and [m[5] for m in made] == ["CREATE TABLE", "CREATE TABLE", "INSERT 0 2", "INSERT 0 1"], (a.asked, a.first[:1], made))
+    # what a token allows: a statement with an effect it does not is not run
+    ro = Client(srv.port, password=mint("password", "--effects", "r:*"), database="main")
+    r1 = [ro.query("select k, v from lt order by k"), ro.query("insert into lt values (3, 'c')"), ro.query("update lt set v = 'z'"), ro.query("delete from lt"), ro.query("truncate lt"),
+          ro.query("create table lz (k integer primary key)"), ro.query("drop table lu"), ro.query("alter table lt rename to lr"), ro.query("alter table lt add column w integer"), ro.query("create sequence ls"),
+          ro.query("create index li on lt (v)")]
+    check("a token that may only read: it reads, and every write and every definition is 42501 effect-denied",
+          r1[0][4] == [[b"1", b"a"], [b"2", b"b"]] and all((x[0], x[1]) == ("42501", "cancho-db: refused effect-denied") for x in r1[1:]) and ro.status == "I", [(x[0], x[1], x[5]) for x in r1])
+    one = Client(srv.port, password=mint("password", "--effects", "r:lt,r:lt.*,w:lt"), database="main")
+    r2 = [one.query("insert into lt values (3, 'c')"), one.query("select v from lt where k = 3"), one.query("update lt set v = 'cc' where k = 3 returning k, v"), one.query("select v from lu"),
+          one.query("insert into lu values (2, 'y')"), one.query("insert into lt values (4, 'd') returning k"), one.query("truncate lt")]
+    check("a token for one table: it writes and reads that table, with RETURNING too, and no other",
+          (r2[0][5], r2[1][4], r2[2][4], r2[5][4], r2[6][5]) == ("INSERT 0 1", [[b"c"]], [[b"3", b"cc"]], [[b"4"]], "TRUNCATE TABLE") and [x[0] for x in r2[3:5]] == ["42501", "42501"], [(x[0], x[4], x[5]) for x in r2])
+    blind = Client(srv.port, password=mint("password", "--effects", "w:lt"), database="main")
+    r3 = [blind.query("insert into lt values (5, 'e')"), blind.query("insert into lt values (6, 'f') returning v"), blind.query("update lt set v = 'g' where k = 5")]
+    check("a token that may write a table and not read it: an insert, but not what it returns, nor an update that reads to find its rows",
+          r3[0][5] == "INSERT 0 1" and [x[0] for x in r3[1:]] == ["42501", "42501"], [(x[0], x[5]) for x in r3])
+    # in a transaction a statement that is not allowed fails it; by the extended protocol it is the same refusal
+    one.query("begin")
+    t1 = [one.query("insert into lt values (7, 'h')"), one.query("insert into lu values (7, 'h')"), one.query("select v from lt"), one.query("commit")]
+    ext = one.extended("insert into lu values ($1, $2)", ["8", "i"])
+    here = a.query("select k from lt order by k")[4]
+    there = a.query("select k from lu order by k")[4]
+    check("a statement not allowed fails its transaction, and nothing of it stays; by the extended protocol the same refusal",
+          (t1[0][5], t1[1][0], t1[2][0], t1[3][5]) == ("INSERT 0 1", "42501", "25P02", "ROLLBACK") and (ext[0], ext[1], ext[6]) == ("42501", "cancho-db: refused effect-denied", b"12EZ")
+          and here == [[b"5"]] and there == [[b"1"]], (t1, ext, here, there))
+    for c in (a, ro, one, blind):
+        c.close()
+    t9 = int(time.time() * 1000)
+    srv.stop()
+    # who and when: every record names the token it was made under and the time, and the file kept each token
+    r = subprocess.run([HARNESS, os.path.join(d, "login.db")], input="!records\n!tokens\n", capture_output=True, text=True).stdout.split("\n")
+    recs = [bytes.fromhex(l.split()[1]) for l in r if l.startswith("L ")][1:]
+    kept = [bytes.fromhex(l.split()[1]) for l in r if l.startswith("K ")]
+    ids = set(hashlib.sha256(b"cancho-db/token/v1\0" + t).digest() for t in kept)
+    infos = [l1.decode(rec[4:4 + int.from_bytes(rec[:4], "big")])[3] for rec in recs]
+    times = [i[4] for i in infos]
+    check("every record names its token and its time: %d commits under %d tokens (the read-only one made none), each time within the test's and none before the one before" % (len(recs), len(kept)),
+          len(recs) >= 6 and len(kept) == 3 and all(i[2] in ids for i in infos) and len(set(i[2] for i in infos)) == 3 and all(t0 - 1000 <= t <= t9 + 1000 for t in times) and times == sorted(times)
+          and all(i[1] == bytes(32) for i in infos), (len(recs), len(kept), times[:3], t0, t9))
+    verified(d, os.path.join(d, "login.db"), ["create table lt ", "create table lu "], "a server with a login", login=True)
+    # the whole of a random history under a login, against the test program's answers (which is asked nothing about who): a token that allows everything changes no answer
+    srv = Server(os.path.join(d, "login2.db"), login=True)
+    c = Client(srv.port, password=full, database="main")
+    history = [st[0] for st in ec.generate(random.Random(SEED + 7), min(COUNT, 600))]
+    blocks = ec.run_engine(os.path.join(d, "login2h.db"), ec.lines(history))
+    bad = 0
+    for i, sql in enumerate(history):
+        params = getattr(sql, "params", None)
+        got = c.query(str(sql)) if params is None else c.extended(str(sql), params)
+        want = harness_view(blocks[i])
+        if (got[0], got[1] if got[0] == "0A000" else None, got[2], got[3], got[4], got[5], c.status) != want:
+            bad += 1
+            if bad <= 3:
+                print("FAIL %d: %s\n     server:       %s\n     test program: %s" % (i, str(sql)[:200], str(got)[:400], str(want)[:400]))
+    check("%d random statements under a login with a token that allows everything: answered as the test program answers them" % len(history), bad == 0, bad)
+    c.close()
+    srv.stop()
+    verified(d, os.path.join(d, "login2.db"), [str(x) for x in history], "a random history under a login", login=True)
+
+
 def with_psql(d):
     port = int(os.environ.get("PG_E2E_PORT", "5532"))
     if shutil.which("psql") is None or subprocess.run(["pg_isready", "-h", "127.0.0.1", "-p", str(port)], capture_output=True).returncode != 0:
@@ -865,6 +1003,7 @@ def main():
         check("the server is still running at the end", srv.alive())
         srv.stop()
         several(d)
+        logins(d)
         with_psql(d)
         with_cancho_pg(d)
     if FAILED:

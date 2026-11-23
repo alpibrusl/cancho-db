@@ -11,6 +11,8 @@ import cdb.exec;
 import cdb.drive;
 import cdb.session;
 import cdb.facts;
+import cdb.token;
+import cdb.build;
 import cdb.wire;
 
 // One connection of the engine's server (docs/m3-engine.md 6al): the startup, then a statement at a time, each answered after what it committed is on the disk.
@@ -55,11 +57,20 @@ pub fn g_key() -> [] int {
     return 8;
 }
 
-pub fn globals() -> [] int {
+// Whether a client must log in (6at), and the 32 bytes of the root's public key, one an int, from `g_root()`.
+pub fn g_login() -> [] int {
     return 40;
 }
 
-// What it keeps for one connection (`st`, `stride()` ints): 0 whether the place is taken (1: before its startup is answered, 2: after); 1 how many bytes of its buffer are
+pub fn g_root() -> [] int {
+    return 41;
+}
+
+pub fn globals() -> [] int {
+    return 80;
+}
+
+// What it keeps for one connection (`st`, `stride()` ints): 0 whether the place is taken (1: before its startup is answered, 3: its password is awaited, 2: it is served); 1 how many bytes of its buffer are
 // held; 2 whether its messages are skipped up to the next Sync (an error of the extended protocol); 3 whether it is to be closed; 4 how many bytes of a message too long to
 // hold are still to be read past; 5 when it last did something; 6 how many requests for TLS it has made; 7 whether it has a statement that waits for another connection's
 // transaction; 8 to 15 its session (src/session.cho); 16 whether the client has closed its side; 17 whether the server is reading it.
@@ -147,7 +158,10 @@ fn shift[&b](buf: &!b [byte], n: int, fill: int) -> [] int {
 
 // The first packets of a connection, one at a time, until a startup is answered: 1 if one was read, 0 if it is not whole yet. A request for TLS is answered `N` (there is
 // none: the client goes on in clear, or goes away); anything else that is no startup of protocol 3.0 ends the connection.
-fn startup_step[&t, &g, &b, &o, &s](tab: &!t conns.Table, slot: int, gs: &g [int], buf: &!b [byte], out: &!o [byte], st: &!s [int]) -> [conn_write, poll] int {
+fn startup_step[&t, &g, &b, &o, &s, &a, &x](tab: &!t conns.Table, slot: int, gs: &g [int], buf: &!b [byte], out: &!o [byte], st: &!s [int], ar: &!a [byte], xi: &!x [int]) -> [conn_write, poll] int {
+    if st[0] == 3 {
+        return password_step(tab, slot, gs, buf, out, st, ar, xi);
+    }
     if st[1] < 4 {
         return 0;
     }
@@ -163,6 +177,13 @@ fn startup_step[&t, &g, &b, &o, &s](tab: &!t conns.Table, slot: int, gs: &g [int
     region r {
         let at = alloc_slice[r](6, 0);
         kind = login.parse_startup(buf[4..4 + n], at);
+        if kind == login.kind_startup() && gs[g_login()] == 1 {
+            // the database it names is kept until its password comes: it must be the branch the token is for (6at)
+            xi[token_len()] = 0;
+            if at[3] <= max_token() {
+                xi[token_len()] = copy(buf, 4 + at[2], at[3], ar, token_at()) - token_at();
+            }
+        }
     }
     // what a client sent after this packet without waiting for the answer is the start of what follows
     st[1] = shift(buf, 4 + n, st[1]);
@@ -172,16 +193,16 @@ fn startup_step[&t, &g, &b, &o, &s](tab: &!t conns.Table, slot: int, gs: &g [int
         if st[6] > 3 || !push(tab, slot, gs, out[0..1]) {
             st[3] = 1;
         }
+    } else if kind == login.kind_startup() && gs[g_login()] == 1 {
+        // a login: the password is asked for, and nothing is served before it is right
+        let n9 = login.auth_cleartext(out);
+        if !push(tab, slot, gs, out[0..n9]) {
+            st[3] = 1;
+        }
+        st[0] = 3;
     } else if kind == login.kind_startup() {
         var p = wire.auth_ok(out, 0);
-        p = wire.parameter(out, p, "server_version", "16.0 (cancho-db engine)");
-        p = wire.parameter(out, p, "server_encoding", "UTF8");
-        p = wire.parameter(out, p, "client_encoding", "UTF8");
-        p = wire.parameter(out, p, "DateStyle", "ISO, MDY");
-        p = wire.parameter(out, p, "integer_datetimes", "on");
-        p = wire.parameter(out, p, "standard_conforming_strings", "on");
-        p = wire.key_data(out, p);
-        p = wire.ready(out, p, session.idle());
+        p = welcome(out, p);
         if p < 0 || !push(tab, slot, gs, out[0..p]) {
             st[3] = 1;
         }
@@ -189,6 +210,74 @@ fn startup_step[&t, &g, &b, &o, &s](tab: &!t conns.Table, slot: int, gs: &g [int
     } else {
         st[3] = 1;
     }
+    return 1;
+}
+
+// What follows AuthenticationOk: the parameters a client reads, a key, ReadyForQuery.
+fn welcome[&o](out: &!o [byte], at: int) -> [] int {
+    var p = wire.parameter(out, at, "server_version", "16.0 (cancho-db engine)");
+    p = wire.parameter(out, p, "server_encoding", "UTF8");
+    p = wire.parameter(out, p, "client_encoding", "UTF8");
+    p = wire.parameter(out, p, "DateStyle", "ISO, MDY");
+    p = wire.parameter(out, p, "integer_datetimes", "on");
+    p = wire.parameter(out, p, "standard_conforming_strings", "on");
+    p = wire.key_data(out, p);
+    return wire.ready(out, p, session.idle());
+}
+
+// The password of a login (6at): `base64url(token || seed of the token's last key)`, as for the proxy, judged by the proxy's `login.check` against the root's key, the
+// server's clock and the one branch there is. Right: the token stays with the connection, and it is served. Wrong: it is told why (the proxy's SQLSTATE and rule) and closed.
+fn password_step[&t, &g, &b, &o, &s, &a, &x](tab: &!t conns.Table, slot: int, gs: &g [int], buf: &!b [byte], out: &!o [byte], st: &!s [int], ar: &!a [byte], xi: &!x [int]) -> [conn_write, poll] int {
+    if st[1] < 5 {
+        return 0;
+    }
+    let n = 1 + commit.be(buf, 1, 4);
+    if int_of(buf[0]) != 'p' || n < 6 || n > len(buf) {
+        push(tab, slot, gs, out[0..wire.error(out, 0, true, wire.violation_state(), "cancho-db: a password was asked for", "")]);
+        st[3] = 1;
+        return 1;
+    }
+    if st[1] < n {
+        return 0;
+    }
+    var rule = login.login_bad_token();
+    var tl = 0;
+    region r {
+        let blob = alloc_slice[r](n, byte_of(0));
+        let root = alloc_slice[r](32, byte_of(0));
+        var k = 0;
+        while k < 32 {
+            root[k] = byte_of(gs[g_root() + k]);
+            k = k + 1;
+        }
+        var bn = 0 - 1;
+        if int_of(buf[n - 1]) == 0 {
+            bn = login.decode_b64url(buf[5..n - 1], blob);
+        }
+        if bn >= 0 {
+            let now = gs[g_now()];
+            rule = login.check(blob[0..bn], ar[token_at()..token_at() + xi[token_len()]], "main", root, now / 4294967296, now % 4294967296);
+            if rule == login.login_ok() && bn - 32 > max_token() {
+                rule = login.login_bad_token();
+            }
+            if rule == login.login_ok() {
+                tl = copy(blob, 0, bn - 32, ar, token_at()) - token_at();
+            }
+        }
+    }
+    st[1] = shift(buf, n, st[1]);
+    if rule != login.login_ok() {
+        xi[token_len()] = 0;
+        push(tab, slot, gs, out[0..wire.error(out, 0, true, login.sqlstate(rule), "cancho-db: refused ", login.rule_name(rule))]);
+        st[3] = 1;
+        return 1;
+    }
+    xi[token_len()] = tl;
+    let p = welcome(out, wire.auth_ok(out, 0));
+    if p < 0 || !push(tab, slot, gs, out[0..p]) {
+        st[3] = 1;
+    }
+    st[0] = 2;
     return 1;
 }
 
@@ -205,8 +294,17 @@ pub fn values_at() -> [] int {
     return 2097152;
 }
 
-pub fn arena_size() -> [] int {
+// The connection's token (6at), and before its login the name of the database it asked for: `xi[token_len()]` bytes from here.
+pub fn token_at() -> [] int {
     return 2097152 + 65536;
+}
+
+pub fn max_token() -> [] int {
+    return 8192;
+}
+
+pub fn arena_size() -> [] int {
+    return 2097152 + 65536 + 8192;
 }
 
 pub fn max_named() -> [] int {
@@ -214,6 +312,10 @@ pub fn max_named() -> [] int {
 }
 
 pub fn index_size() -> [] int {
+    return 8 + 4 * 64 + 1;
+}
+
+pub fn token_len() -> [] int {
     return 8 + 4 * 64;
 }
 
@@ -360,7 +462,7 @@ fn bind_message[&b, &a, &x, &o, &t](body: &b [byte], ar: &!a [byte], xi: &!x [in
 // Run one statement and write its answer into `out` from `at`, sending what does not fit: how much of `out` is still to send, or -1 if the connection is gone or the server
 // must stop (`st[1]`). `vals` are `nv` values to bind (as a Bind has them). `ext` 0: a simple query (a description before its rows, ReadyForQuery after); 1: an Execute whose
 // portal was described (a description, or NoData); 2: an Execute (the rows alone). An error or a refusal of an Execute sets `st[2]`: what follows is skipped up to the Sync.
-fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &o, &r, &t](heap: &!h Heap, tab: &!c conns.Table, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, sql: &s [byte], vals: &v [byte], nv: int, ext: int, out: &!o [byte], at: int, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, poll, file_read, file_write] int {
+fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &!c conns.Table, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, sql: &s [byte], vals: &v [byte], nv: int, tk: &y [byte], ext: int, out: &!o [byte], at: int, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, poll, file_read, file_write] int {
     exec.params_clear(w);
     var va = 0;
     var i = 0;
@@ -395,9 +497,9 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &o, &r, &t](heap: &!h Heap, tab: &!c c
         if !bound {
             // more values than the engine binds (6w): the statement does not run
         } else if pl >= 0 {
-            after = drive.run(pg, w, m, drive.text(sub)[0..pl], on, mode, true);
+            after = drive.run(heap, pg, w, m, drive.text(sub)[0..pl], on, mode, true, tk);
         } else {
-            after = drive.run(pg, w, m, sql, on, mode, false);
+            after = drive.run(heap, pg, w, m, sql, on, mode, false, tk);
         }
         let o = drive.outcome(m);
         var nr = 0;
@@ -414,7 +516,19 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &o, &r, &t](heap: &!h Heap, tab: &!c c
                 key[kk] = byte_of(gs[g_key() + kk]);
                 kk = kk + 1;
             }
-            nr = session.close(pg, w, st[8..16], roots[0], after, !bound || o != drive.o_ok() && o != drive.o_control(), key, rec);
+            // who and when (6at): the token's id, its principal, the server's clock, and the token for the log to keep
+            var wn = 0;
+            if kn > 0 && len(tk) > 0 {
+                wn = facts.who_fixed() + len(tk);
+            }
+            let who = alloc_slice[kr](wn, byte_of(0));
+            if wn > 0 {
+                token.prefix_id(tk, token.blocks(tk), who[0..32]);
+                token.principal_of(tk, who[32..64]);
+                build.put_be(who, 64, gs[g_now()], 8);
+                build.put_bytes(who, facts.who_fixed(), tk);
+            }
+            nr = session.close(pg, w, st[8..16], roots[0], after, !bound || o != drive.o_ok() && o != drive.o_control(), key, who, rec);
         }
         if nr >= 0 && nr != roots[0] {
             // durable before it is acknowledged: the page file's commit comes before the answer
@@ -441,6 +555,9 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &o, &r, &t](heap: &!h Heap, tab: &!c c
                 p = wire.error(out, p, false, wire.refused_state(), "cancho-db: refused ", "too-many-values");
             } else if said == 0 && o == drive.o_error() {
                 p = wire.error(out, p, false, exec.sqlstate(drive.code(m)), "cancho-db: error ", exec.sqlstate(drive.code(m)));
+            } else if said == 0 && o == drive.o_denied() {
+                // the token does not allow it (6at): PostgreSQL's code for a privilege that is missing
+                p = wire.error(out, p, false, "42501", "cancho-db: refused ", drive.refusal(m));
             } else if said == 0 && o != drive.o_ok() {
                 p = wire.error(out, p, false, wire.refused_state(), "cancho-db: refused ", drive.refusal(m));
             } else {
@@ -511,6 +628,7 @@ fn execute_message[&h, &c, &g, &z, &q, &b, &i, &a, &x, &o, &r, &t](heap: &!h Hea
         sa = xi[8 + 4 * xi[3] + 2];
         sl = xi[8 + 4 * xi[3] + 3];
     }
+    let tl = xi[token_len()];
     var ext = 2;
     if xi[4] == 1 {
         ext = 1;
@@ -527,7 +645,7 @@ fn execute_message[&h, &c, &g, &z, &q, &b, &i, &a, &x, &o, &r, &t](heap: &!h Hea
         }
         return wire.empty_query(out, p);
     }
-    return answer(heap, tab, slot, gs, pg, w, sub, ar[sa..sa + sl], ar[values_at()..values_at() + xi[7]], xi[6], ext, out, at, roots, st);
+    return answer(heap, tab, slot, gs, pg, w, sub, ar[sa..sa + sl], ar[values_at()..values_at() + xi[7]], xi[6], ar[token_at()..token_at() + tl], ext, out, at, roots, st);
 }
 
 // Describe and Close: a letter (`S` a statement, `P` a portal) and a name.
@@ -636,7 +754,7 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x](heap: &!h Heap, tab: &!c
                     } else if e == 0 {
                         op = wire.ready(out, wire.empty_query(out, op), session.state(st[8..16]));
                     } else {
-                        op = answer(heap, tab, slot, gs, pg, w, sub, buf[5..5 + e], buf[0..0], 0, 0, out, op, roots, st);
+                        op = answer(heap, tab, slot, gs, pg, w, sub, buf[5..5 + e], buf[0..0], 0, ar[token_at()..token_at() + xi[token_len()]], 0, out, op, roots, st);
                     }
                     more = false;
                 } else if t == 'S' {
@@ -708,7 +826,7 @@ fn finish[&c, &g, &z, &q, &r, &t](tab: &!c conns.Table, slot: int, gs: &!g [int]
             region kr {
                 let key = alloc_slice[kr](0, byte_of(0));
                 let rec = alloc_slice[kr](1, byte_of(0));
-                nr = session.close(pg, w, st[8..16], roots[0], session.is_rollback(), false, key, rec);
+                nr = session.close(pg, w, st[8..16], roots[0], session.is_rollback(), false, key, key, rec);
             }
         }
         if nr < 0 {
@@ -750,6 +868,7 @@ fn accept_all[&h, &l, &p, &g, &s, &x, &o](heap: &!h Heap, table: conns.Table, li
                                 k = k + 1;
                             }
                             forget(xis[index_size() * a..index_size() * a + index_size()]);
+                            xis[index_size() * a + token_len()] = 0;
                             if conns.watch(tw, poller, a, a + 1, 1) == 0 {
                                 st[0] = 1;
                                 st[5] = gs[g_now()];
@@ -837,8 +956,8 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x](heap: &!h Heap, l
                                     let buf = ins[in_size() * slot..in_size() * slot + in_size()];
                                     var did = 0;
                                     borrow mut tab as &!tw in {
-                                        if st[0] == 1 {
-                                            did = startup_step(tw, slot, gs, buf, out, st);
+                                        if st[0] == 1 || st[0] == 3 {
+                                            did = startup_step(tw, slot, gs, buf, out, st, ars[arena_size() * slot..arena_size() * slot + arena_size()], xis[index_size() * slot..index_size() * slot + index_size()]);
                                         } else {
                                             did = step(heap, tw, slot, gs, pg, w, sub, buf, out, roots, st, ars[arena_size() * slot..arena_size() * slot + arena_size()], xis[index_size() * slot..index_size() * slot + index_size()], gs[g_owner()] == 0 || gs[g_owner()] == slot + 1);
                                         }

@@ -85,11 +85,11 @@ pub fn open[&q, &z, &s](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], bra
 
 // The commit of the facts `fr` on the tree `root`, if a key was given (`key`: the seed of the signing key, or nothing): the tree with the commit recorded in it (6as), `root`
 // with no key, or an error.
-fn seal_on[&q, &z, &s, &k, &o](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], root: int, fr: int, key: &k [byte], rec: &!o [byte]) -> [file_read, file_write] int {
+fn seal_on[&q, &z, &s, &k, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], root: int, fr: int, key: &k [byte], who: &y [byte], rec: &!o [byte]) -> [file_read, file_write] int {
     if len(key) == 0 {
         return root;
     }
-    let nw = facts.seal(p, w, root, fr, key, rec);
+    let nw = facts.seal(p, w, root, fr, key, who, rec);
     if nw < 0 {
         // a commit that cannot be recorded is not made: the error is the caller's to stop on (6as)
         ss[7] = 0 - 1;
@@ -110,8 +110,8 @@ fn note_facts[&s](ss: &!s [int], fr: int) -> [] int {
 
 // After a statement: `after` is what running it gave (a tree, or `is_begin()`, `is_commit()`, `is_rollback()`), `fail` whether it ended in an error or a refusal. The branch's tree
 // from here on (`branch` itself unless something became durable-to-be), or an error. A statement outside a transaction that wrote is a commit of its own; inside one the statements
-// build on the transaction's tree, which becomes the branch's at COMMIT, with the facts of all of them as one commit's.
-pub fn close[&q, &z, &s, &k, &o](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], branch: int, after: int, fail: bool, key: &k [byte], rec: &!o [byte]) -> [file_read, file_write] int {
+// build on the transaction's tree, which becomes the branch's at COMMIT, with the facts of all of them as one commit's. `key` is the seed of the key that signs the log (nothing: no log) and `who` what `facts.seal` is told of who commits and when (nothing: nobody).
+pub fn close[&q, &z, &s, &k, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], branch: int, after: int, fail: bool, key: &k [byte], who: &y [byte], rec: &!o [byte]) -> [file_read, file_write] int {
     ss[5] = 0;
     ss[6] = 0 - 2;
     ss[7] = 0;
@@ -141,7 +141,7 @@ pub fn close[&q, &z, &s, &k, &o](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [
             }
             root = exec.mark_txn(p, w, after, last + 1);
             if wrote && root >= 0 {
-                root = seal_on(p, w, ss, root, fr, key, rec);
+                root = seal_on(p, w, ss, root, fr, key, who, rec);
             }
         }
         if ss[0] == idle() {
@@ -165,7 +165,7 @@ pub fn close[&q, &z, &s, &k, &o](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [
             }
             if ss[3] == 1 && root >= 0 {
                 note_facts(ss, ss[2]);
-                root = seal_on(p, w, ss, root, ss[2], key, rec);
+                root = seal_on(p, w, ss, root, ss[2], key, who, rec);
             }
             exec.seq_forget(w);
         } else {

@@ -1490,6 +1490,74 @@ signature and what the writes is not measured. C162's numbers are without a log.
 *Still not there:* the log covers the rows and nothing else. A commit says no schema, no principal, no statement, no time; a table made or dropped leaves no record
 unless it had rows; nobody is authenticated, so "who" is not a question the log could answer yet. It is the L3a half of what the proxy's log says.
 
+## 6at. A login, what a token allows, and who and when in the log
+
+After 6as the server records what changed. It does not know who asked: any client on the machine is served as anyone (6al), every commit's token and principal are
+zeros and its time is 0 (6ah). The proxy has had all of this since M1: a capability token as the password, checked against a root key; each statement's effects held
+against the token; the token's id, its principal and the time in every commit, so that a verifier with the root key can ask of a log *was each commit allowed* (L2,
+`docs/spec/token.md`). This part gives the engine's server the same, with the proxy's code.
+
+**Design.**
+
+- *Login.* The server is started with the root's public key in a file. A startup is then answered with a request for a password, and the password is what it is for the
+  proxy: `base64url(token || seed of the token's last key)`. `login.check` (the proxy's) decides: the chain of signatures from the root, the proof that the client holds
+  the last key, the expiry against the server's clock, the branch (the database named must be `main`, the one branch the server has), one principal at most. A refusal
+  is `FATAL` with the proxy's SQLSTATE and rule, and the connection is closed; nothing is served before. The token stays with the connection.
+  **With no root key file the server has no login, as before, and says so when it starts.**
+- *What a statement may do.* Before a statement runs, its effects are inferred from its IR by the verifier's own function (`ir.infer`: the tables and columns it reads,
+  the tables it writes, what it defines) and each is held against every block of the token (`token.effect_denied`). One that is not allowed is refused
+  (`42501`, `effect-denied`) and nothing of the statement runs; in a transaction that fails the transaction, as any error does. The engine's forms that have no IR are
+  given their effects here: `create sequence` defines its name, `truncate` writes its table, a rename defines both names. A statement with `returning` is held to the
+  effects of its hidden select as well. This is what the proxy's guard does, on the same two functions; the guard itself is not used because it refuses the engine's
+  own forms outright (6x), which behind PostgreSQL is right and here would refuse half of what the engine does.
+- *Who and when.* A commit's record carries the id of the connection's token, its principal (zeros if the token names none) and the server's clock in milliseconds.
+  The token itself is kept in the page file under its id, in the commit that first uses it, so that a verifier can be given the tokens with the log.
+- *What a verifier can then ask:* `tools/verify.py LOG --root KEY --tokens FILE`, L2: every commit names a token in the file, the token's chain verifies under the
+  root, it was not expired at the commit's time, its principal and branch fit, and **every effect the commit records is one the token allows**. The commit's effects
+  are still the writes only (a write for each table written, 6ah): L2 over this log says nobody wrote where they were not allowed to. That nobody *read* what they were
+  not allowed to is enforced by the server when the statement arrives, and is not in the log.
+
+*Not in this part:* **the statements** (a commit names none, so a verifier cannot recompute its effects from what was run: `--stmts` has nothing to read, and "what" is
+still the rows, not the SQL); revocation (the server reads no list of revoked tokens; a verifier can be given one); the schema hash; a commit for a statement that
+changes no row; TLS (the password travels in clear, on the loopback only).
+
+**Built.** `password_step` and the token's place with a connection (`src/serve.cho`); `permitted`, `permitted_name` and the outcome `o_denied` (`src/drive.cho`); `who`
+in `facts.seal`, the token kept under `0xFFFFFFFE 0x07`, `facts.next_token`; the root's key file as the server's fourth argument; `!tokens` in the test program.
+Measured (`tests/engine_wire.py`, `logins`):
+
+- **not let in**, each asked for a password, told why with the proxy's SQLSTATE and rule, and closed with nothing served: a query in place of the password (`08P01`); a
+  password that is no token, a token another root signed, one without the seed of its last key, one that has expired (`28P01`); a token for another branch, a database
+  that is not `main` (`3D000`);
+- **a token that may only read** reads, and an insert, an update, a delete, a truncate, a table made, dropped, renamed or given a column, a sequence and an index are
+  each `42501 effect-denied`; **a token for one table** writes and reads it, with `returning` too, and no other; **one that may write a table and not read it** inserts,
+  and is refused what the insert would return and an update that must read to find its rows;
+- a statement not allowed fails its transaction and nothing of it stays; by the extended protocol it is the same refusal;
+- **every record names its token and its time**: the commits of that session are under three tokens (the read-only one made none), each kept in the file once, each
+  time within the test's own clock and none before the one before;
+- **L2:** `tools/verify.py --root --tokens` says `ok ... level=2` on the log and the tokens read out of the server's page file; under another root's key
+  `token-bad-signature`, and without the tokens a rejection. The three L3a verifiers still say `ok ... final`;
+- 600 random statements under a login with a token that allows everything are answered as the test program answers them (it is asked nothing about who), and that
+  log verifies at L2 too.
+
+**`cancho-hooks` with a login**, tried by hand and not yet a test: started with `--pg-database main --pg-password <token>` it logs in (its driver answers a request
+for a cleartext password as it does PostgreSQL's), has both connections live, and the attempt it records is a commit under its own token, kept in the file beside the
+administrator's. One thing found: **hooks takes a password of at most 255 characters**, and a token is long: one with three grants (`r:*,w:*,c:*`) is exactly 255 as
+`mint.py` makes it, one with five is 266 and hooks refuses the setting. A token attenuated by a second block would not fit. That is a limit in hooks to raise, or a
+reason for a shorter presentation of a token; nothing is changed here.
+
+*What this does not give, said again where it is measured:* the token is a bearer's (whoever has the password is the principal, and it crosses the loopback in clear);
+a commit's effects are its writes, so L2 over the log is about writes; and a statement that changes no row (a table made by a token that may define it, a read) is
+in no record at all. "Who read what" is enforced and not recorded.
+
+**`cancho-log`, looked at for this** (its commit `43c492c`). It is a durable append-only log with a crash-swept recovery of a torn tail, and a "trail" mode that
+hash-chains events and checks a file against an anchor held elsewhere. It is not what this part needs: who may connect and what a record says are the token's and the
+commit format's, both already this project's. Nor would it replace 6as: the engine's log is in the page file precisely so that a commit and its record cannot come
+apart, and a second file would bring back the order-of-two-writes question 6as removed. **Where it would earn its place is the copy of the log that leaves the machine**
+(the next item after this one: a log an operator can rewrite proves nothing until a copy is somewhere they cannot reach). That copy is an append-only file with a
+recovery story, which is exactly `log.append`, `log.flush` and `log.recover`; and its anchor (`count`, head id) is the shape of what a third party would hold. Two
+things to settle then, not now: it writes one segment and does not roll yet, and its trail ids are lex-trail's hash of an event, where this log's records already carry
+their own chain and a signature, so trail mode would be a second chain over the first rather than a replacement.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
