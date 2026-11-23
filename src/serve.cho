@@ -66,8 +66,39 @@ pub fn g_root() -> [] int {
     return 41;
 }
 
+// The size of the page file, in pages, at which the pages nothing names are next looked for (6aw). 0 when the server starts: what was free is not kept in the file, so the
+// first commit looks.
+pub fn g_sweep_at() -> [] int {
+    return 73;
+}
+
 pub fn globals() -> [] int {
     return 80;
+}
+
+// How many pages the file may grow by beyond twice what is in use after a sweep (8 MiB).
+pub fn sweep_slack() -> [] int {
+    return 2048;
+}
+
+// After a commit, with no transaction open (docs/m3-engine.md 6aw): if the pages freed by the last sweep are used up and the file has reached the size set then, the
+// pages no tree names are zeroed and made free again (`pstore.sweep`), and the next size is set: twice the pages in use and the slack, or the size the file has if
+// that is more. 0 if nothing was due, the number of pages freed, or an error (the page file cannot be read or written: the server stops, as for a commit).
+pub fn reclaim[&h, &g, &z, &q, &r](heap: &!h Heap, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, roots: &r [int]) -> [heap, file_read, file_write] int {
+    if pager.free_count(pg) > 0 || pager.next_page(pg) < gs[g_sweep_at()] {
+        return 0;
+    }
+    let freed = pstore.sweep(heap, pg, exec.scratch(w), roots);
+    if freed < 0 {
+        return freed;
+    }
+    let size = pager.next_page(pg);
+    var next = 2 * (size - freed) + sweep_slack();
+    if next < size {
+        next = size;
+    }
+    gs[g_sweep_at()] = next;
+    return freed;
 }
 
 // What it keeps for one connection (`st`, `stride()` ints): 0 whether the place is taken (1: before its startup is answered, 3: its password is awaited, 2: it is served); 1 how many bytes of its buffer are
@@ -539,6 +570,11 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
                     nr = seq;
                 } else {
                     gs[g_seq()] = seq;
+                    // what the commits before left behind is taken back when the file has grown enough (6aw)
+                    let fr = reclaim(heap, gs, pg, w, roots);
+                    if fr < 0 {
+                        nr = fr;
+                    }
                 }
             }
         }
