@@ -597,7 +597,7 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
             if session.state(st[8..16]) == session.idle() {
                 // what the commits before left behind is taken back when the file has grown enough (6aw); the commit before a sweep says so in the tree (6az)
                 let due = sweep_due(gs, pg);
-                let told = announce(gs, pg, w, nr, due);
+                let told = announce(gs, pg, w, roots[0], due);
                 var seq = told;
                 if told >= 0 {
                     roots[0] = told;
