@@ -20,7 +20,8 @@ import cdb.pager;
 //
 //     0xFFFFFFFE 0x05            -> the public key the log is signed with (`log_key`); then a commit's number (8 bytes) and a part's (1): that part of its record (`record_key`)
 //     0xFFFFFFFE 0x06 then a commit's number (8 bytes), a table, a zero byte and a key's commitment -> that fact of the commit: for each of was and is a byte and a hash (`fact_key`)
-//     0xFFFFFFFE 0x07 then a token's id (32 bytes) and a part's number -> that part of the token, kept by the first commit made under it (`token_key`, 6at)
+//     0xFFFFFFFE 0x07 then a token's id (32 bytes) and a part's number -> that part of the token, kept by the first commit made under it (`kept_key`, 6at)
+//     0xFFFFFFFE 0x08 then a statement's id (32 bytes) and a part's number -> that part of the statement's record, its constants gone (`kept_key`, 6au)
 //
 // An entry: the table's number (`u32`), the length of its definition (`u16`), the definition (src/row.cho), then for each column one byte of marks (1: `not null`, 2: it has a default, 4: it has a
 // range, 8: it is an identity column, whose values the table's counter gives) and, if it has a default, the default as a stored value (a tag and the value, as in a stored row), and if it has a range (`check (c between lo and hi)`, docs/m3-engine.md 6x) the two
@@ -141,10 +142,10 @@ pub fn record_key[&o](seq: int, part: int, out: &!o [byte]) -> [] int {
     return 14;
 }
 
-// A part of a token kept with the log (6at): under 0x07, its id, the part's number.
-pub fn token_key[&i, &o](id: &i [byte], part: int, out: &!o [byte]) -> [] int {
+// A part of what is kept with the log under an id: under `kind` (7 a token, 6at; 8 a statement's record, 6au), the id, the part's number.
+pub fn kept_key[&i, &o](kind: int, id: &i [byte], part: int, out: &!o [byte]) -> [] int {
     build.put_be(out, 0, log_space(), 4);
-    out[4] = byte_of(7);
+    out[4] = byte_of(kind);
     var k = 0;
     while k < 32 {
         out[5 + k] = id[k];

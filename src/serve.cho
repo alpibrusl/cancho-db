@@ -528,7 +528,7 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
                 build.put_be(who, 64, gs[g_now()], 8);
                 build.put_bytes(who, facts.who_fixed(), tk);
             }
-            nr = session.close(pg, w, st[8..16], roots[0], after, !bound || o != drive.o_ok() && o != drive.o_control(), key, who, rec);
+            nr = session.close(heap, pg, w, st[8..16], roots[0], after, !bound || o != drive.o_ok() && o != drive.o_control(), key, who, rec);
         }
         if nr >= 0 && nr != roots[0] {
             // durable before it is acknowledged: the page file's commit comes before the answer
@@ -549,7 +549,10 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
         } else {
             let said = session.said(st[8..16]);
             var failed = true;
-            if said == 4 {
+            if said == 5 {
+                // the transaction was more than a record of the log holds (6au): it is rolled back, and the client is told
+                p = wire.error(out, p, false, "54000", "cancho-db: refused ", "commit-too-large");
+            } else if said == 4 {
                 p = wire.error(out, p, false, "25P02", "current transaction is aborted, commands ignored until end of transaction block", "");
             } else if !bound {
                 p = wire.error(out, p, false, wire.refused_state(), "cancho-db: refused ", "too-many-values");
@@ -818,7 +821,7 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x](heap: &!h Heap, tab: &!c
 
 // A connection ends: its transaction is rolled back (what it drew from counters stays drawn, 6y), the wait it caused ends, its place is free. If the rollback cannot be
 // done the server stops: it does not hand one client's transaction to the next.
-fn finish[&c, &g, &z, &q, &r, &t](tab: &!c conns.Table, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, roots: &!r [int], st: &!t [int]) -> [file_read, file_write] int {
+fn finish[&h, &c, &g, &z, &q, &r, &t](heap: &!h Heap, tab: &!c conns.Table, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, roots: &!r [int], st: &!t [int]) -> [heap, file_read, file_write] int {
     if st[0] == 2 && session.state(st[8..16]) != session.idle() && gs[g_stop()] == 0 {
         pager.begin(pg);
         var nr = session.open(pg, w, st[8..16], roots[0]);
@@ -826,7 +829,7 @@ fn finish[&c, &g, &z, &q, &r, &t](tab: &!c conns.Table, slot: int, gs: &!g [int]
             region kr {
                 let key = alloc_slice[kr](0, byte_of(0));
                 let rec = alloc_slice[kr](1, byte_of(0));
-                nr = session.close(pg, w, st[8..16], roots[0], session.is_rollback(), false, key, key, rec);
+                nr = session.close(heap, pg, w, st[8..16], roots[0], session.is_rollback(), false, key, key, rec);
             }
         }
         if nr < 0 {
@@ -972,7 +975,7 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x](heap: &!h Heap, l
                                         }
                                         if st[3] != 0 || st[16] != 0 && did == 0 {
                                             // it asked to end, cannot go on, or its client is gone and nothing whole is left of what it sent
-                                            finish(tw, slot, gs, pg, w, roots, st);
+                                            finish(heap, tw, slot, gs, pg, w, roots, st);
                                             progressed = true;
                                         } else {
                                             // a buffer that is full is not read into (its connection waits, or is being read past)
@@ -1005,7 +1008,7 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x](heap: &!h Heap, l
                             if waiting && gs[g_now()] - sts[stride() * owner + 5] > gs[g_idle_ms()] {
                                 borrow mut tab as &!tw in {
                                     push(tw, owner, gs, out[0..wire.error(out, 0, true, "25P03", "cancho-db: the transaction was idle while another connection waited", "")]);
-                                    finish(tw, owner, gs, pg, w, roots, sts[stride() * owner..stride() * owner + stride()]);
+                                    finish(heap, tw, owner, gs, pg, w, roots, sts[stride() * owner..stride() * owner + stride()]);
                                 }
                                 // those who waited are served now
                                 wait = 0;

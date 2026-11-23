@@ -17,6 +17,7 @@ import cdb.answer;
 import cdb.drive;
 import cdb.facts;
 import cdb.session;
+import cdb.token;
 import cdb.tables;
 import cdb.build;
 import cdb.row;
@@ -35,6 +36,9 @@ import cdb.row;
 //     !seed HEX      the seed of the salts is these 32 bytes, not the system's (for a test whose runs must write the same pages)  -> `seeded`
 //     !log HEX       commits of the first branch are records of the log, signed with the key of this seed (6ah)  -> `L` and the log's header in hex
 //     !rows T        every row of the table T with its salts (6ah)             -> `D key keysalt image salt` each, then `rows N`
+//     !token HEX     statements are held against this token and commits made under it (6at, 6au); `!token -` none  -> `token N`
+//     !tokens        the tokens kept with the log (6at)                         -> `K hex` each, then `tokens N`
+//     !stmts         the statements' records kept with the log (6au)            -> `Y hex` each, then `stmts N`
 //     !records       the log as it is in the page file (6as)                    -> `L` and the header, `L` and each record, `records N`
 //     !store         the facts of every commit as they are in the page file    -> `X seq table commitment was is` each, then `store N`
 //     !mark          nothing                                                  -> `mark` (a separator for a test that reads the output)
@@ -215,7 +219,15 @@ fn run_sql[&h, &i, &z, &q, &s, &f](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pag
     var out = root;
     borrow mut run as &!m in {
         // the statement is read, lowered and run by the engine (src/drive.cho); what is here is how its answer is written for a test to read
-        out = drive.run(heap, pg, w, m, sql, root, mode, part, sql[0..0]);
+        region kt {
+            let tk = alloc_slice[kt](flag[48], byte_of(0));
+            var ti = 0;
+            while ti < len(tk) {
+                tk[ti] = byte_of(flag[49 + ti]);
+                ti = ti + 1;
+            }
+            out = drive.run(heap, pg, w, m, sql, root, mode, part, tk);
+        }
         let o = drive.outcome(m);
         flag[0] = 0;
         if o == drive.o_ok() {
@@ -493,7 +505,7 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
     var status = 0;
     var cur = 0;
     var view = 0 - 1;
-    var flags = box_slice(heap, 48, 0);
+    var flags = box_slice(heap, 49 + 4096, 0);
     borrow mut flags as &!fw in {
         borrow mut roots as &!rw in {
             let rs = contents(rw);
@@ -600,6 +612,26 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                             put_str(io, "L -\n");
                         }
                     }
+                } else if begins(all, ls, le, "!token ") {
+                    // from here on statements are held against this token, and commits are made under it (docs/m3-engine.md 6at, 6au): the token in hex; `!token -` for none
+                    var tn = 0;
+                    var okt = (le - ls - 7) % 2 == 0 && (le - ls - 7) / 2 <= 4096;
+                    while okt && ls + 7 + 2 * tn + 1 < le {
+                        let hi = unhex(int_of(all[ls + 7 + 2 * tn]));
+                        let lo = unhex(int_of(all[ls + 8 + 2 * tn]));
+                        okt = hi >= 0 && lo >= 0;
+                        fl[49 + tn] = (hi * 16 + lo) % 256;
+                        tn = tn + 1;
+                    }
+                    if okt {
+                        fl[48] = tn;
+                        put_str(io, "token ");
+                        put_int(io, tn);
+                        putchar(io, '\n');
+                    } else {
+                        fl[48] = 0;
+                        put_str(io, "token -\n");
+                    }
                 } else if starts(all, ls, le, "!records") {
                     // the log as it is in the page file (docs/m3-engine.md 6as): `L` and the header, then `L` and each record, in hex; `records N`
                     region xr {
@@ -629,17 +661,25 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                             putchar(io, '\n');
                         }
                     }
-                } else if starts(all, ls, le, "!tokens") {
-                    // the tokens kept with the log (docs/m3-engine.md 6at): `K` and each in hex; `tokens N`
+                } else if starts(all, ls, le, "!tokens") || starts(all, ls, le, "!stmts") {
+                    // what is kept with the log under an id: the tokens (docs/m3-engine.md 6at; `K` and each in hex, `tokens N`), the statements' records (6au; `Y`, `stmts N`)
+                    var what = 7;
+                    if starts(all, ls, le, "!stmts") {
+                        what = 8;
+                    }
                     region xr {
                         let id = alloc_slice[xr](32, byte_of(0));
-                        let tk = alloc_slice[xr](16384, byte_of(0));
+                        let tk = alloc_slice[xr](60000, byte_of(0));
                         var an = 0;
                         var count = 0;
-                        var n = facts.next_token(pg, w, rs[cur], id, an, tk);
+                        var n = facts.next_kept(pg, w, rs[cur], what, id, an, tk);
                         while n > 0 {
                             an = 32;
-                            put_str(io, "K ");
+                            if what == 7 {
+                                put_str(io, "K ");
+                            } else {
+                                put_str(io, "Y ");
+                            }
                             var k = 0;
                             while k < n {
                                 hex_byte(io, int_of(tk[k]));
@@ -647,12 +687,16 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                             }
                             putchar(io, '\n');
                             count = count + 1;
-                            n = facts.next_token(pg, w, rs[cur], id, an, tk);
+                            n = facts.next_kept(pg, w, rs[cur], what, id, an, tk);
                         }
                         if n < 0 {
-                            put_str(io, "tokens -\n");
+                            put_str(io, "kept -\n");
                         } else {
-                            put_str(io, "tokens ");
+                            if what == 7 {
+                                put_str(io, "tokens ");
+                            } else {
+                                put_str(io, "stmts ");
+                            }
                             put_int(io, count);
                             putchar(io, '\n');
                         }
@@ -808,7 +852,22 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                     key[k] = byte_of(fl[2 + k]);
                                     k = k + 1;
                                 }
-                                let nr = session.close(pg, w, fl[40..48], rs[cur], after, fl[0] != 0, key, key[0..0], rec);
+                                // who (6at): the token given with `!token`, at time 0 (this program has no clock)
+                                var wn = 0;
+                                if fl[48] > 0 {
+                                    wn = facts.who_fixed() + fl[48];
+                                }
+                                let who = alloc_slice[cr](wn, byte_of(0));
+                                var wi = 0;
+                                while facts.who_fixed() + wi < wn {
+                                    who[facts.who_fixed() + wi] = byte_of(fl[49 + wi]);
+                                    wi = wi + 1;
+                                }
+                                if wn > 0 {
+                                    token.prefix_id(who[facts.who_fixed()..wn], token.blocks(who[facts.who_fixed()..wn]), who[0..32]);
+                                    token.principal_of(who[facts.who_fixed()..wn], who[32..64]);
+                                }
+                                let nr = session.close(heap, pg, w, fl[40..48], rs[cur], after, fl[0] != 0, key, who, rec);
                                 let said = session.said(fl[40..48]);
                                 if said == 1 {
                                     put_str(io, "ok BEGIN 0\nG BEGIN\n");
@@ -818,6 +877,8 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                     put_str(io, "ok ROLLBACK 0\nG ROLLBACK\n");
                                 } else if said == 4 {
                                     put_str(io, "error 25P02\n");
+                                } else if said == 5 {
+                                    put_str(io, "refused commit-too-large\n");
                                 }
                                 if nr < 0 {
                                     put_str(io, "err ");

@@ -1031,7 +1031,8 @@ verifiers that were written for the proxy's log read one the engine made.
   process that starts later goes on from where the file is. No commit yet: the first has number 0 and no parent.
 - *The commit is made of what the engine already has, with the code the proxy uses* (`build.encode`, `build.id`, `build.sign`, `state.state`): `changes` from the facts (6af),
   `state` from the parent's `state` and `changes`, one **write** effect for each table the transaction wrote. A transaction whose changes net to nothing (a row inserted and
-  deleted) still wrote: `facts.take` notes each table it sees under the key of the table alone, and the effects are made of those notes, not of the facts.
+  deleted) still wrote: `facts.take` notes each table it sees under the key of the table alone, and the effects are made of those notes, not of the facts. *(Changed in 6au: a commit's
+  effects are those of its statements, and the notes are gone.)*
 - *What the record does not say yet is said as nothing*, not invented: the schema hash, the token and the principal are zeros, there are no statement ids, the time is 0, the
   branch is always `main`. Each is a field the proxy fills from things the engine's driver does not have yet (a login, the lowered statements kept, a clock).
 - *The signing key* is given to the test program on a line (`!log` and the seed in hex). Where a server keeps its key is not decided here.
@@ -1557,6 +1558,63 @@ apart, and a second file would bring back the order-of-two-writes question 6as r
 recovery story, which is exactly `log.append`, `log.flush` and `log.recover`; and its anchor (`count`, head id) is the shape of what a third party would hold. Two
 things to settle then, not now: it writes one segment and does not roll yet, and its trail ids are lex-trail's hash of an event, where this log's records already carry
 their own chain and a signature, so trail mode would be a second chain over the first rather than a replacement.
+
+## 6au. What ran: the statements in the log
+
+After 6at a commit says who and when and which rows. It names no statement, so a verifier cannot ask the last question L2 has: *were the commit's effects what its
+statements do, and was each allowed?* The proxy answers it since M1 with a statement store beside the log (`docs/spec/ir.md` sections 4 and 8).
+
+**Design.**
+
+- *What is recorded.* Every statement that ran to an answer in a transaction that commits, in the order they ran, reads among them: a commit's `statements` are their
+  ids. A statement outside a transaction that changes no row is still no commit and in no record.
+- *As what.* As the IR the engine lowered it to, in the store's third form: the **shape** (the statement with each constant replaced by a hole of its type) and a salted
+  hash of the constants. A statement with `returning` is two statements, the write and the select of what it returns. The engine's forms that have no IR are told as
+  the IR that says what they did: a `truncate` is a `Delete` with no condition, a renaming is a definition (`Ddl`, alter) of each of the two names, `create sequence` a
+  definition of its name. `on conflict do nothing` is the `Insert` it is; the IR has no word for the clause.
+- **The constants are never written.** The third form allows a record whose constants have been erased: the shape, the hash, and nothing else. Every record is
+  written in that form from the start. So the log says *what kind of thing was done to which tables and columns*, the verifier can infer the effects of every statement,
+  and a value a client sent is in no byte of the page file because of the log. An erasure (6o) has nothing to find here, as it has nothing to find in the store of
+  facts (6as). What is given up is said plainly: **the log cannot show the values a statement carried**, erased or not; the rows' history can, while it is not erased.
+- *A commit's effects are its statements'.* Until now a commit recorded one write for each table written (6ah), noted table by table as the transaction went. Now its
+  effects are **exactly** the union of what `ir.infer` gives for its statements: reads of tables and columns, writes, definitions, calls. That is what the
+  specification asks (equality, not containment), it is what the server already held against the token (6at), and the table notes of 6ah are gone.
+- *Where.* A statement's record is kept in the page file under its id (`0xFFFFFFFE 0x08`), written by the commit that names it, in the same page-file commit as
+  everything else.
+- *A limit that is a refusal:* a commit names at most 500 statements and 8 KiB of effects. A transaction of more is refused **when it commits**
+  (`54000`, `commit-too-large`) and rolled back; it is not committed with a record that says less than it did.
+
+*Not in this part:* the values bound to parameters (the IR has `Param`, the store has no place for what was bound); the SQL text (the IR is what the verifier reads,
+and what the engine ran); the schema hash; statements that commit nothing.
+
+**Test.** `tests/engine_log.py` runs its histories under a token and gives the log, the tokens and the statements, all read out of the page file by another process, to
+`tools/verify.py --root --tokens --stmts` and to the two other verifiers of L2 the gate builds (`build/verify`, in cancho, and `build/verify-go`): each must say
+`level=2+ir`, and refuse a store with one statement taken out (`stmt-missing`) or a table's name changed in one. A row whose values came in three statements (an
+insert, a condition, an update) is deleted and erased: no byte of the page file holds the value, and the log still verifies with the statements. A transaction of 501
+statements is refused at its commit. `tests/engine_wire.py`: the same check on the log of a session over a socket, under a login.
+
+**Built.** `exec.stmt_add` (the IR of each statement that ran, kept while the transaction is open), `drive.run` and `keep_named` (the forms with no IR), `facts.say` (at the
+commit: `ir.lift`, a salt, `build.stmt3` with the constants left out, `ir.infer`), `facts.seal` (the ids and the effects in the record, the statements' records under
+`0xFFFFFFFE 0x08`), `session.close` (`commit-too-large`); `!stmts` in the test program. Measured:
+
+- 3 seeds of 2,000 random statements after the fixed history, in two processes on one page file: 1,268 statements in 1,029 commits, 1,191 in 937, 1,235 in 972; the
+  count of each commit is exactly the statements that ran in its transaction (a `returning` counted twice, a renaming twice). The log, the tokens and the statements
+  read out by another process verify at `level=2+ir` with `tools/verify.py`, `build/verify` and `build/verify-go`, before and after an erase; each refuses a store
+  with a statement taken out (`stmt-missing`) and one with a table's name changed. The three L3a verifiers still say `ok ... final`.
+- A renaming's commit has for effects the definition of both names and nothing else; a truncate's, the write of its table.
+- The value of the erased row, which came in an insert, in a condition and in an update, is in no byte of the page file; the log verifies after.
+- A transaction of 501 statements: `commit-too-large` at its commit, nothing of it there, the next commit made.
+- Over a socket, under a login (`tests/engine_wire.py`, 3 seeds): the log of a session verifies at `level=2+ir` with the tokens and the statements the file kept.
+- 20 seeds of 3,000 statements against PostgreSQL, the crash test, the big-table test and hooks' tests: as before.
+- Cost, 300 one-row commits by the test program with a key and a token: 1.75 s with the statements, 1.78 s at the commit before (no difference measured); the page
+  file is 9.57 MB against 8.33 MB, 15% more (a record of a statement is a page of the tree written again at each commit).
+- 18 mutants (`stmts:`), all killed. Four survived the first run and each said something true: the cap on statements was checked twice (`facts.say` and `facts.seal`;
+  the first is removed); the test counted a commit's statements between `n` and `2n` (now exactly); and no test looked at what a truncate's or a renaming's commit
+  says its effects are (now one does).
+
+*Limits.* The constants of a statement are in no record, by design: the log shows a statement's shape, not its values. What was bound to a parameter is not kept. A
+statement outside a transaction that changes no row leaves no record, so **reads outside a writing transaction are still enforced and not recorded**. The schema hash
+is still zeros. The 500-statement limit is a refusal at the commit, after the work was done.
 
 ## 7. Taking over, safely
 
