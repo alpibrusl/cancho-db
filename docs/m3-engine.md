@@ -1674,6 +1674,9 @@ is reached. `tests/authority.sh`: the tool's authority.
 *Found while testing.* `create table` changes no row, so it makes no commit (6ah): a server that has only made tables has no log, and the tool says `export-no-log`
 of it. That is the rule of 6ah showing, not a fault of the tool; it is one more reason the schema hash matters (still zeros).
 
+*(Corrected in 6az: the rule below, any commit, made the tool useless beside a busy server; what disturbs a reader is a sweep, and the server now says when one
+is coming. And each run no longer reads the whole log.)*
+
 *Limits.* Nothing here takes the output off the machine or gives the anchor to a third party: until someone else holds an anchor, the log is as rewritable as before.
 `export-raced` is detected by the superblock's number at the two ends of a run, on the argument that a page of the tree read is written again only by a commit after
 the next; the argument is tested by the runs beside a server, not proved. Under writers that never pause, a run long enough may never be whole (not met: 14 ms
@@ -1794,6 +1797,65 @@ the rows are exactly the acknowledged ones, the next insert is made, `cancho_las
 smaller than twice its data and 8 MiB (6aw's mark) stops at intervals rather than sweeping when it is short: the sweep is tied to the file's size, not to the room
 left, which the server does not ask about. A failing `fsync` and a write failing inside the file were not provoked. The clients connected when it stops are cut
 off; only the one whose commit failed is told why.
+
+## 6az. The server under load for a while, and what it found
+
+Nothing had run for longer than a test. `tests/engine_soak.py` holds the server to what must be true in any order of several clients: money moved between 200
+accounts in transactions is never made or lost (two readers ask for the sum throughout); a journal has one row for every transfer acknowledged and no other; the
+export tool keeps a copy of the log beside the running server; a client takes the head of the log (6ax) and the copy must come to hold it; the server is killed
+every 20 to 40 seconds and started again; at the end everything exported at one anchor verifies to `final`.
+
+**Found in the first minute: the export tool was of no use beside a busy server.** 6av's rule was that any commit made while the tool read made its output
+unbelievable. Measured with 4 writers (a commit every 10 to 15 ms): 8 runs whole against 110 `export-raced` in 45 seconds, and fewer as the log grew, because a
+run read the whole log again (9 ms for 1,000 commits, 6av) and so took longer than the time between two commits. 6av's own measure, "55 to 57 runs whole, 46 to
+73 raced", was of a log of 481 commits; its limit said a run "may never be whole" under writers that never pause, "not met". It is met at once.
+*(C189 and 6av corrected in place.)*
+
+**Changed, three things.**
+
+- *The anchor is one key.* `anchor` reads the head of the log (`tables.head_key`, as `cancho_last_commit()` does) and no record.
+- *A copy is kept up in parts.* `log UPTO FROM` and `facts UPTO FROM` write what a copy that has `FROM` commits lacks, with no header. For the parts of the
+  store to be numbered as the whole, a line's number is now its commit's number times 10,000,000 and its place in the commit (the specification asks only that
+  it be unique in the file and order a commit's lines).
+- *What disturbs a reader is a sweep, not a commit.* **A read (`src/pager.cho`, `src/pstore.cho`):** a page is written again only if it is on the pager's free
+  list, and only `pstore.sweep` puts pages there. A commit writes new pages and leaves the old; so a reader that loaded one state reads that state's pages whole
+  however many commits follow, until a sweep frees some of them. So the server now **says in the tree that a sweep is coming**: a number under the log's space
+  (`tables.sweeps_key`) that the commit before a sweep raises, and the first commit of every run (for the sweep made at the start, 6ay, which has no commit of its
+  own). The tool reads the number when it begins and, from the state the file is in when it ends, again: if it is not the same, `export-raced`. `logexport
+  PAGEFILE sweeps` prints it.
+
+*What that argument leaves.* (1) A reader that began before the server was stopped, where the server has started again (its sweep zeroing pages) and made no
+commit yet: the number is the same, and the reader may meet a zeroed page. A zeroed page does not pass its checksum, so the reader says `export-damaged` of a file
+that is not damaged; it does not believe a wrong page. (2) The second reading of the number is itself a read of the file, three pages; two sweeps would have to
+fall inside it for it to be wrong. Neither was provoked.
+
+**Test.** `tests/engine_wire.py` (`raced`), made certain and not left to chance: the tool is held in the middle of a log of 1,500 commits by its output not
+being taken (a pipe holds 64 KiB; the log is 500). While it is held: 20 commits and no sweep, and its log must be whole and verify; then commits until `sweeps`
+changes and 300 more to write over the freed pages, and it must say `export-raced`. `tests/engine_log.py`: the log and the store written in 5 parts are the
+whole, byte for byte. `tests/engine_soak.py` for 60 seconds is a step of the gate; the long runs are by hand, below.
+
+**Built.** `tests/engine_soak.py`; `tables.sweeps_key`, `sweeps`, `sweeps_raise`; `serve.sweep_due`, `announce`; in `proxy/logexport.cho` `count` (the head),
+`FROM`, `sweeps`, the check at the end. Measured:
+
+- **Ten minutes** (4 writers, 2 readers, the exporter, a kill every 20 to 40 s; seed 2): 52,292 commits through 18 kills. The sum read 26,490 times, always
+  200,000. The journal has the 52,287 transfers acknowledged and 1 of the 15 whose commit was sent and never answered, and no other; 290 transfers would have
+  overdrawn and were rolled back by their client. The exporter: 413 runs whole, 1 raced (before the change, 8 against 110 in 45 seconds); 206 parts appended,
+  206 times the copy came to hold a head a client had taken; the copy (51,595 commits) is the beginning of what is exported whole at the end, byte for byte. At
+  the end the log, the facts and the rows verify to `final` (5 s).
+- *Throughput did not fall:* 2,870 commits in the first 30 seconds, 2,758 in the last 34.
+- **The page file grows without bound, as 6aw's limit said, and this is its measure:** 23 MiB at 30 s, 143 at 282 s, 283 at the end; 5.5 KiB a commit, a straight
+  line. Nearly all of it is in use by 6aw's count: the old versions of 200 rows changed 100,000 times, and the log. At this load that is 1.7 GB an hour. Nothing
+  takes it back; what may be dropped, and when, is the next part.
+- The race made certain (`raced`): held through 20 commits, whole and verifying; held through a sweep, `export-raced`; held through a kill, a start and 5
+  commits, `export-raced`, the number one more.
+- The parts: 5 parts of the log and of the store are the whole, byte for byte; a part of nothing is empty.
+- Mutants: the export tool's 23 (6 new, 7 rewritten for the new code), 1 new of the server (`sweep:`), and those of 6aw and 6ay again: all killed. One written
+  and taken out: *a sweep made though the commit before it did not say so* survived, because the only way to it is the page of the catalog that the commit itself
+  writes crossing the mark, which no test reaches; the code asks the question once, before the commit, so that it cannot happen, and nothing holds that but
+  reading it.
+
+*Limits.* Ten minutes is not days. One machine, one disk, a loopback socket. The load is one shape (short transactions on two tables). The exporter and the
+server are on one machine: nothing was carried anywhere. What the argument about readers leaves is said above and was not provoked. The growth is unbounded.
 
 ## 7. Taking over, safely
 

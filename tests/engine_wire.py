@@ -1083,7 +1083,7 @@ def beside(d):
     for t in ths:
         t.join()
     check("the export tool beside a server 4 clients write to: %d runs whole, each log verifies and each log with its facts (%d sets) has every commit's changes; %d runs say they raced a commit; nothing else"
-          % (whole, sets, raced), not odd and whole >= 3 and sets >= 1 and raced >= 1, odd[:3] or (whole, sets, raced))
+          % (whole, sets, raced), not odd and whole >= 3 and sets >= 1, odd[:3] or (whole, sets, raced))
     # the writers done: one anchor, and everything at it
     st, out, err = run("anchor")
     n = int(out.split()[1]) if st == 0 else -1
@@ -1200,6 +1200,77 @@ def disk_full(d):
           % "; ".join("+".join(str(x) for x in o[1]) for o in outcomes), all(o[2] for o in outcomes), [o for o in outcomes if not o[2]][:2])
 
 
+def raced(d):
+    """What disturbs a reader of the page file and what does not (6az): the export tool held in the middle of its reading (its output not taken) while the server commits,
+    and then while it sweeps."""
+    import time
+    tool = os.environ.get("LOGEXPORT", os.path.join(ROOT, "build", "logexport"))
+    path = os.path.join(d, "raced.db")
+    srv = Server(path)
+    c = Client(srv.port)
+    c.query("create table r (a integer primary key, b text)")
+    for i in range(1500):
+        c.query("insert into r values (%d, 'a row for a log longer than a pipe holds %d')" % (i, i))
+
+    def say(what):
+        r = subprocess.run([tool, path, what], capture_output=True)
+        return r.stdout.decode().split()
+
+    def held():
+        p = subprocess.Popen([tool, path, "log"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        time.sleep(0.5)                                           # it has read the head and is stopped at a write nobody takes
+        return p
+
+    def let_go(p):
+        out, err = p.communicate()
+        return p.returncode, out, err.decode().strip()
+    n0, s0 = int(say("anchor")[1]), int(say("sweeps")[1])
+    # commits alone: the reader's pages are not written again
+    a = held()
+    stuck = a.poll() is None
+    for i in range(20):
+        c.query("update r set b = 'changed under a reader %d' where a = %d" % (i, i))
+    s1 = int(say("sweeps")[1])
+    st, out, err = let_go(a)
+    with open(os.path.join(d, "r.log"), "wb") as fh:
+        fh.write(out)
+    v = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "verify.py"), os.path.join(d, "r.log")], capture_output=True, text=True).stdout.strip()
+    check("a reader held in the middle of the log while 20 commits are made, no sweep among them: its log is whole, the %d commits there were when it began, and verifies" % n0,
+          stuck and s1 == s0 and (st, err) == (0, "") and v.startswith("ok commits=%d " % n0), (stuck, s0, s1, st, err, v))
+    # a sweep: the server says in the tree that one is coming, and the reader that began before is told it raced
+    b = held()
+    stuck = b.poll() is None
+    more = 0
+    while int(say("sweeps")[1]) == s1 and more < 6000:
+        for i in range(50):
+            c.query("update r set b = 'until the file is swept %d' where a = %d" % (more, more % 1500))
+            more += 1
+    s2 = int(say("sweeps")[1])
+    for i in range(300):
+        # the pages the sweep freed are written again
+        c.query("update r set b = 'over the pages the reader had not yet read %d' where a = %d" % (i, i))
+    st, out, err = let_go(b)
+    check("a reader held in the middle of the log while the server sweeps (after %d more commits) and writes the freed pages again: refused export-raced, status 1" % more,
+          stuck and s2 == s1 + 1 and (st, err) == (1, "refused export-raced"), (stuck, s1, s2, st, err, len(out)))
+    c.close(False)
+    # the server killed and started again: it sweeps before it serves (6ay), with no commit to say so; its first commit says it
+    s3 = int(say("sweeps")[1])
+    e = held()
+    stuck = e.poll() is None
+    srv.stop(signal.SIGKILL)
+    srv = Server(path)
+    c = Client(srv.port)
+    for i in range(5):
+        # few enough that no other sweep comes: the pages the start's sweep freed are far from used up
+        c.query("update r set b = 'after a start %d' where a = %d" % (i, i))
+    s4 = int(say("sweeps")[1])
+    st, out, err = let_go(e)
+    check("a reader held in the middle of the log while the server is killed, starts again (its sweep) and commits: refused export-raced; the first commit of a run raises the number",
+          stuck and s4 == s3 + 1 and (st, err) == (1, "refused export-raced"), (stuck, s3, s4, st, err, len(out)))
+    c.close()
+    srv.stop()
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1209,6 +1280,7 @@ def main():
         srv.stop()
         several(d)
         beside(d)
+        raced(d)
         reclaiming(d)
         disk_full(d)
         logins(d)

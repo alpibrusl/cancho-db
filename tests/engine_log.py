@@ -261,12 +261,14 @@ def read_back(path, extra=()):
     recs = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("L ")]
     said = [l for l in out[:cut] if l.startswith("records ") or l.startswith("store ")]
     ids = [commit_id(r[4:4 + int.from_bytes(r[:4], "big")]) for r in recs[1:]]
-    lines = []
+    lines, within = [], {}
     for l in out[:cut]:
         f = l.split()
         if f and f[0] == "X":
             # a line of the store with nothing but the hashes: the form of a line that has been erased (docs/spec/l3a.md section 9), for every line
-            lines.append("\t".join([str(len(lines)), ids[int(f[1])].hex(), "public", f[2], f[3], "" if f[4] == "-" else f[4], "" if f[5] == "-" else f[5], "", "", "", "", "", ""]))
+            # a line's number is its commit's and its place in the commit (6az), so that a part of the store is numbered as the whole
+            within[int(f[1])] = within.get(int(f[1]), -1) + 1
+            lines.append("\t".join([str(int(f[1]) * 10000000 + within[int(f[1])]), ids[int(f[1])].hex(), "public", f[2], f[3], "" if f[4] == "-" else f[4], "" if f[5] == "-" else f[5], "", "", "", "", "", ""]))
     live, n = dump(out[cut:], TABLES)
     KEPT[0] = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("K ")]
     KEPT[1] = [bytes.fromhex(l.split()[1]) for l in out[:cut] if l.startswith("Y ")]
@@ -404,6 +406,12 @@ def tool(work, path, early):
     st, part, _ = export(path, "log", n0)
     check("`log N` is the first N records, and `facts N` the facts of those", st == 0 and part == log[:40] + b"".join(recs[:n0])
           and export(path, "facts", n0)[1] == ("\n".join(["CHODBDL2"] + [l for l in lines if l.split("\t")[1] in {i.hex() for i in ids[:n0]}]) + "\n").encode())
+    # a copy kept up in parts (6az): what `log UPTO FROM` and `facts UPTO FROM` write is what to append to a copy that has FROM commits
+    cuts = [0, 1, n0, n0 + 1, len(recs) - 1, len(recs)]
+    parts = [(export(path, "log", b, a), export(path, "facts", b, a)) for a, b in zip(cuts, cuts[1:])]
+    check("the log and the facts written in %d parts, one after the other, are the whole log and the whole store, byte for byte; a part of none is empty" % len(parts),
+          all(x[0] == 0 and y[0] == 0 for x, y in parts) and b"".join(x[1] for x, _ in parts) == log and b"".join(y[1] for _, y in parts) == facts
+          and export(path, "log", n0, n0)[:2] == (0, b"") and export(path, "facts", n0, n0)[:2] == (0, b""), [(x[0], y[0], len(x[1]), len(y[1])) for x, y in parts])
     olog, otok, ost = export(other, "log")[1], export(other, "tokens")[1], export(other, "stmts")[1]
     for cmd in L2:
         v = judged(cmd, got["log"][1], id0)
@@ -427,14 +435,16 @@ def tool(work, path, early):
              ((str(work / "none"), "log"), 1, "export-no-file"), ((str(work / "short"), "log"), 1, "export-no-database"), ((str(work / "junk"), "log"), 1, "export-damaged"),
              ((nolog, "anchor"), 1, "export-no-log"), ((nolog, "log"), 1, "export-no-log"), ((nolog, "tokens"), 1, "export-no-log"),
              ((path,), 2, "export-usage"), ((path, "rows"), 2, "export-usage"), ((path, "log", "x"), 2, "export-usage"), ((path, "log", "-1"), 2, "export-usage"),
-             ((path, "anchor", 1), 2, "export-usage"), ((path, "tokens", 1), 2, "export-usage"), ((path, "log", 1, 2), 2, "export-usage"), ((path, "log", "9" * 13), 2, "export-usage")]
+             ((path, "anchor", 1), 2, "export-usage"), ((path, "tokens", 1), 2, "export-usage"), ((path, "log", 1, 0, 3), 2, "export-usage"), ((path, "log", "9" * 13), 2, "export-usage")]
     # a record of the log damaged where it lies in the page file (its length, in every copy the file has of it): the log does not end quietly before it
     whole = Path(path).read_bytes()
     victim = recs[len(recs) // 2]
     bent = whole.replace(victim[:40], victim[:3] + bytes([victim[3] ^ 1]) + victim[4:40])
     (work / "bent").write_bytes(bent)
     check("the damaged record is in the copy of the page file", bent != whole and len(bent) == len(whole))
-    cases += [((str(work / "bent"), w), 1, "export-damaged") for w in ("anchor", "log", "facts")]
+    cases += [((str(work / "bent"), w), 1, "export-damaged") for w in ("log", "facts")]
+    cases += [((path, "log", n0, n0 + 1), 1, "export-behind"), ((path, "facts", len(recs), len(recs) + 1), 1, "export-behind"),
+              ((path, "anchor", 1, 0), 2, "export-usage"), ((path, "live", len(recs), 0), 2, "export-usage"), ((path, "tokens", 1, 0), 2, "export-usage"), ((path, "log", 1, "x"), 2, "export-usage")]
     seen = [(export(*a)[0], export(*a)[2]) for a, _, _ in cases]
     check("the export tool's refusals, each with its tag and nothing believed of it: " + ", ".join(sorted({t for _, _, t in cases})), seen == [(st, t) for _, st, t in cases],
           [(a[1:], s) for (a, _, _), s in zip(cases, seen) if s != (_, _)][:0] or [(a[1:], s) for (a, st, t), s in zip(cases, seen) if s != (st, t)])
