@@ -6,10 +6,18 @@ CANCHO=${CANCHO:-cancho}
 export CANCHO
 mkdir -p build
 
+# What to run: `all` (the default: everything, as before), `checks` (everything but the mutants), or one shard of the mutants, `mutants-a` to `mutants-d`
+# (CI runs the five parts as five jobs at once, .github/workflows/ci.yml). A shard builds what the mutants are held against and runs the short checks, and
+# leaves out the long ones, which the `checks` part runs.
+PART=${1:-all}
+case "$PART" in all|checks|mutants-a|mutants-b|mutants-c|mutants-d) ;; *) echo "usage: check.sh [all|checks|mutants-a|mutants-b|mutants-c|mutants-d]" >&2; exit 2 ;; esac
+long() { case "$PART" in mutants-*) return 1 ;; *) return 0 ;; esac; }
+
 # run a command, keep ITS exit status (a pipe into tail would hide it in sh), and show its last N lines; on failure show all.
 quiet() {
     n=$1
     shift
+    long || return 0
     if out=$("$@" 2>&1); then
         printf '%s\n' "$out" | tail -n "$n"
     else
@@ -19,6 +27,21 @@ quiet() {
     fi
 }
 
+# a group of mutants, in its shard: `mutants SHARD GROUP [the compiler]`
+mutants() {
+    shard=$1
+    shift
+    case "$PART" in all|mutants-$shard) ;; *) return 0 ;; esac
+    if out=$(python3 tests/mutants.py "$@" 2>&1); then
+        printf '%s\n' "$out" | tail -n 1
+    else
+        printf '%s\n' "$out"
+        echo "FAILED: mutants $*" >&2
+        exit 1
+    fi
+}
+
+echo "== the parts of this script are the jobs CI runs"; for p in checks mutants-a mutants-b mutants-c mutants-d; do grep -q "^ *- $p\$" .github/workflows/ci.yml || { echo "ci.yml has no job for $p" >&2; exit 1; }; done; [ "$(grep -c '^ *- \(checks\|mutants-[a-z]\)$' .github/workflows/ci.yml)" = 5 ] || { echo "ci.yml names a part this script does not have" >&2; exit 1; }
 echo "== formatting";                "$CANCHO" fmt --check src
 echo "== vectors are reproducible";  rm -rf build/vectors && python3 tools/gen_vectors.py build/vectors >/dev/null && diff -r vectors build/vectors
 echo "== the landing page (docs/index.html, served by Pages from branch main, folder /docs): its counts are current"; python3 scripts/site.py --check
@@ -75,7 +98,7 @@ E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/stmts_v3_e2e.
 echo "== the extended protocol through the proxy (raw messages, a real PostgreSQL)"
 E2E_VERIFIERS="build/verify" quiet 3 python3 tests/ext_e2e.py build/proxy
 echo "== real drivers through the proxy (psycopg 3, psycopg2, pg8000, asyncpg, node-postgres)"
-sh scripts/drivers_setup.sh
+long && sh scripts/drivers_setup.sh
 E2E_VERIFIERS="build/verify" quiet 3 python3 tests/drivers_e2e.py build/proxy
 echo "== row-delta capture (sql/capture.sql) against a snapshot diff, in a real PostgreSQL"
 quiet 3 python3 tests/capture_check.py
@@ -155,25 +178,25 @@ quiet 2 python3 tests/pstore_check.py build/btcheck
 echo "== command lines";             python3 tests/cli_test.py vectors build/verify
 echo "== attenuation property";       python3 tests/properties.py 4000 1
 echo "== fuzz (three verifiers, no crash)"; python3 tests/fuzz.py vectors build/verify 3000 1
-echo "== mutants, python";           quiet 1 python3 tests/mutants.py py
-echo "== mutants, cancho";           quiet 1 python3 tests/mutants.py cho "$CANCHO"
-echo "== mutants, login";            quiet 1 python3 tests/mutants.py login "$CANCHO"
-echo "== mutants, lexer";            quiet 1 python3 tests/mutants.py lex "$CANCHO"
-echo "== mutants, parser";          quiet 1 python3 tests/mutants.py parse "$CANCHO"
-echo "== mutants, statements";      quiet 1 python3 tests/mutants.py stmt "$CANCHO"
-echo "== mutants, lowering";        quiet 1 python3 tests/mutants.py lower "$CANCHO"
-echo "== mutants, facts and state"; quiet 1 python3 tests/mutants.py state "$CANCHO"
-echo "== mutants, guard";           quiet 1 python3 tests/mutants.py guard "$CANCHO"
-echo "== mutants, commit builder"; quiet 1 python3 tests/mutants.py build "$CANCHO"
-echo "== mutants, log directory"; quiet 1 python3 tests/mutants.py store "$CANCHO"
-echo "== mutants, B+tree, pages and superblocks"; quiet 1 python3 tests/mutants.py btree "$CANCHO"
-echo "== mutants, the engine's rows"; quiet 1 python3 tests/mutants.py row "$CANCHO"
-echo "== mutants, the engine's expression evaluator"; quiet 1 python3 tests/mutants.py eval "$CANCHO"
-echo "== mutants, the engine's statements"; quiet 1 python3 tests/mutants.py engine "$CANCHO"
-echo "== mutants, the engine's server"; quiet 1 python3 tests/mutants.py wire "$CANCHO"
-echo "== mutants, the export tool";   quiet 1 python3 tests/mutants.py export "$CANCHO"
-echo "== mutants, capture SQL and cdb.fork"; quiet 1 python3 tests/mutants.py sql "$CANCHO"
-echo "== mutants, L3a verifier"; quiet 1 python3 tests/mutants.py l3a "$CANCHO"
-echo "== mutants, L3a verifier in cancho"; quiet 1 python3 tests/mutants.py l3a-cho "$CANCHO"
-echo "== mutants, proxy (end to end, four at once)"; quiet 1 python3 tests/mutants.py proxy "$CANCHO"
+echo "== mutants, python";  mutants a py
+echo "== mutants, cancho";  mutants a cho "$CANCHO"
+echo "== mutants, login";  mutants a login "$CANCHO"
+echo "== mutants, lexer";  mutants a lex "$CANCHO"
+echo "== mutants, parser";  mutants a parse "$CANCHO"
+echo "== mutants, statements";  mutants a stmt "$CANCHO"
+echo "== mutants, lowering";  mutants a lower "$CANCHO"
+echo "== mutants, facts and state";  mutants a state "$CANCHO"
+echo "== mutants, guard";  mutants a guard "$CANCHO"
+echo "== mutants, commit builder";  mutants a build "$CANCHO"
+echo "== mutants, log directory";  mutants a store "$CANCHO"
+echo "== mutants, B+tree, pages and superblocks";  mutants a btree "$CANCHO"
+echo "== mutants, the engine's rows";  mutants a row "$CANCHO"
+echo "== mutants, the engine's expression evaluator";  mutants a eval "$CANCHO"
+echo "== mutants, the engine's statements";  mutants b engine "$CANCHO"
+echo "== mutants, the engine's server";  mutants c wire "$CANCHO"
+echo "== mutants, the export tool";  mutants c export "$CANCHO"
+echo "== mutants, capture SQL and cdb.fork";  mutants a sql "$CANCHO"
+echo "== mutants, L3a verifier";  mutants a l3a "$CANCHO"
+echo "== mutants, L3a verifier in cancho";  mutants a l3a-cho "$CANCHO"
+echo "== mutants, proxy (end to end, four at once)";  mutants d proxy "$CANCHO"
 echo "all green"
