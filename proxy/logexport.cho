@@ -24,7 +24,10 @@ import cdb.row;
 //              copy that has FROM)
 //     facts    a version-2 delta store, the hashes only, of every commit (of the first UPTO; with FROM, as for `log`)
 //     tokens   `CHODBTK1` and each token kept with the log
-//     stmts    `CHODBST3` and each statement's record kept with the log
+//     stmts    `CHODBST3` and each statement's record kept with the log (with UPTO: those the commits FROM to UPTO name, in their order)
+//     floor    `floor N`: the first commit this file still has the record of (docs/m3-engine.md 6ba); with FROM below it, `log`, `facts` and `stmts` are
+//              refused `export-archived`
+//     usage    what the tree holds, by what it is for: `usage KIND entries bytes` for each
 //     sweeps   `sweeps N`: how many times the server has said a sweep was coming (docs/m3-engine.md 6az); a reader that sees it change was raced
 //     live     a version-2 dump of every row of every table (with UPTO: only if the log has exactly that many commits)
 //
@@ -130,6 +133,10 @@ fn raced() -> [] int {
     return 8;
 }
 
+fn archived() -> [] int {
+    return 9;
+}
+
 fn rule(code: int) -> [] &static [byte] {
     if code == usage() {
         return "export-usage";
@@ -148,6 +155,9 @@ fn rule(code: int) -> [] &static [byte] {
     }
     if code == raced() {
         return "export-raced";
+    }
+    if code == archived() {
+        return "export-archived";
     }
     return "export-damaged";
 }
@@ -309,6 +319,57 @@ fn put_kept[&i, &q, &z](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root:
     return status;
 }
 
+// The records of the statements the commits `from` to `upto` (not included) name, in the order they name them; the store's header first if `from` is 0. What to
+// append to a copy of the statement store that has those of the first `from` commits (docs/m3-engine.md 6ba).
+fn put_stmts[&i, &q, &z, &r](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, from: int, upto: int, rec: &!r [byte]) -> [io_write, file_read] int {
+    if from == 0 {
+        put_str(io, "CHODBST3");
+    }
+    var status = 0;
+    region g {
+        let info = alloc_slice[g](commit.out_len(), 0);
+        let item = alloc_slice[g](60000, byte_of(0));
+        var seq = from;
+        while seq < upto && status == 0 {
+            let rn = facts.record(pg, w, root, seq, rec);
+            if rn <= 0 || commit.decode(rec[4..rn - 64], info) != commit.ok() {
+                status = damaged();
+            } else {
+                var k = 0;
+                while k < info[commit.f_stmts_n()] && status == 0 {
+                    let at = 4 + info[commit.f_stmts_at()] + 32 * k;
+                    var n = 0;
+                    var part = 0;
+                    var more = true;
+                    while more && status == 0 {
+                        let kk = tables.kept_key(8, rec[at..at + 32], part, contents(w.key));
+                        let got = btree.get(pg, contents(w.sc), root, contents(w.key)[0..kk], contents(w.cur));
+                        if got == btree.not_found() {
+                            more = false;
+                        } else if got < 0 || n + got > len(item) {
+                            status = damaged();
+                        } else {
+                            n = exec.copy(contents(w.cur), 0, got, item, n);
+                            part = part + 1;
+                        }
+                    }
+                    if status == 0 && n == 0 {
+                        // a commit names a statement the file does not have
+                        status = damaged();
+                    }
+                    if status == 0 {
+                        put_u32(io, n);
+                        put_raw(io, item, 0, n);
+                    }
+                    k = k + 1;
+                }
+            }
+            seq = seq + 1;
+        }
+    }
+    return status;
+}
+
 // Every row of the table `name` as lines of a version-2 dump: the schema, the table, the key, its salt, the image, its salt.
 fn put_table[&i, &z, &q, &n](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, name: &n [byte]) -> [io_write, file_read] int {
     let el = tables.find(pg, contents(w.sc), root, name, contents(w.key), contents(w.nrow));
@@ -399,6 +460,83 @@ fn put_live[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root:
     return status;
 }
 
+// What the tree `root` holds, by what it is for: for each kind a line `usage KIND entries bytes` (the bytes of the keys and the values; the pages they are in hold
+// about twice that), so that who keeps the file can see what makes it grow (docs/m3-engine.md 6ba).
+fn put_usage[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int) -> [io_write, file_read] int {
+    var status = 0;
+    region g {
+        let at = alloc_slice[g](1024, byte_of(0));
+        let next = alloc_slice[g](1024, byte_of(0));
+        let ent = alloc_slice[g](1024, byte_of(0));
+        let sums = alloc_slice[g](16, 0);
+        var al = 0;
+        var more = root != 0;
+        var first = true;
+        while more && status == 0 {
+            var r = 0;
+            if first {
+                // the first key of the tree: at or after the one byte that is before every key
+                at[0] = byte_of(0);
+                r = btree.next_after(pg, contents(w.sc), root, at[0..1], true, next, ent);
+                first = false;
+            } else {
+                r = btree.next_after(pg, contents(w.sc), root, at[0..al], false, next, ent);
+            }
+            if r == btree.not_found() {
+                more = false;
+            } else if r < 0 || r / 1024 < 4 {
+                status = damaged();
+            } else {
+                let nk = r / 1024;
+                al = exec.copy(next, 0, nk, at, 0);
+                let space = commit.be(at, 0, 4);
+                // 0 the catalog, 1 the rows, 2 the history of the rows, 3 the log's records, 4 its facts, 5 its tokens, 6 its statements, 7 the rest
+                var kind = 1;
+                if space == 0 {
+                    kind = 0;
+                } else if space == 4294967295 {
+                    kind = 2;
+                } else if space == tables.log_space() {
+                    kind = 7;
+                    if nk > 4 && int_of(at[4]) >= 5 && int_of(at[4]) <= 8 {
+                        kind = int_of(at[4]) - 2;
+                    }
+                }
+                sums[2 * kind] = sums[2 * kind] + 1;
+                sums[2 * kind + 1] = sums[2 * kind + 1] + nk + r % 1024;
+            }
+        }
+        var k = 0;
+        while k < 8 && status == 0 {
+            put_str(io, "usage ");
+            if k == 0 {
+                put_str(io, "catalog");
+            } else if k == 1 {
+                put_str(io, "rows");
+            } else if k == 2 {
+                put_str(io, "history");
+            } else if k == 3 {
+                put_str(io, "records");
+            } else if k == 4 {
+                put_str(io, "facts");
+            } else if k == 5 {
+                put_str(io, "tokens");
+            } else if k == 6 {
+                put_str(io, "statements");
+            } else {
+                put_str(io, "other");
+            }
+            putchar(io, ' ');
+            put_int(io, sums[2 * k]);
+            putchar(io, ' ');
+            put_int(io, sums[2 * k + 1]);
+            putchar(io, '\n');
+            k = k + 1;
+        }
+    }
+    return status;
+}
+
 // The thing asked for, from the tree `root`: 0, or a refusal's code.
 fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, what: &a [byte], upto: int, from: int, swept: int) -> [io_write, file_read] int {
     var status = 0;
@@ -425,7 +563,21 @@ fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, roo
         if status == 0 && from > stop {
             status = behind();
         }
+        var kept = 0;
+        if status == 0 && logged > 0 {
+            kept = facts.floor(pg, w, root);
+            if kept < 0 {
+                status = damaged();
+            }
+        }
+        let ranged = same(what, "log") || same(what, "facts") || same(what, "stmts") && upto >= 0;
+        if status == 0 && ranged && from < kept && from < stop {
+            // the commits before the floor were taken out of this file by whoever has them elsewhere (6ba)
+            status = archived();
+        }
         if status != 0 {
+        } else if same(what, "usage") {
+            status = put_usage(io, pg, w, root);
         } else if same(what, "sweeps") {
             put_str(io, "sweeps ");
             put_int(io, swept);
@@ -455,8 +607,14 @@ fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, roo
             status = put_facts(io, pg, w, root, from, stop, rec);
         } else if same(what, "tokens") {
             status = put_kept(io, pg, w, root, 7);
+        } else if same(what, "stmts") && upto >= 0 {
+            status = put_stmts(io, pg, w, root, from, stop, rec);
         } else if same(what, "stmts") {
             status = put_kept(io, pg, w, root, 8);
+        } else if same(what, "floor") {
+            put_str(io, "floor ");
+            put_int(io, kept);
+            putchar(io, '\n');
         } else {
             status = usage();
         }
@@ -529,10 +687,10 @@ fn main(world: World) -> [] int {
             }
             if good && arg_count(g) == 5 {
                 from = number(arg(g, 4));
-                good = from >= 0 && (same(arg(g, 2), "log") || same(arg(g, 2), "facts"));
+                good = from >= 0 && (same(arg(g, 2), "log") || same(arg(g, 2), "facts") || same(arg(g, 2), "stmts"));
             }
             if good {
-                good = (same(arg(g, 2), "anchor") || same(arg(g, 2), "sweeps")) && arg_count(g) == 3 || same(arg(g, 2), "log") || same(arg(g, 2), "facts") || same(arg(g, 2), "live") || (same(arg(g, 2), "tokens") || same(arg(g, 2), "stmts")) && arg_count(g) == 3;
+                good = (same(arg(g, 2), "anchor") || same(arg(g, 2), "sweeps") || same(arg(g, 2), "usage") || same(arg(g, 2), "floor")) && arg_count(g) == 3 || same(arg(g, 2), "log") || same(arg(g, 2), "facts") || same(arg(g, 2), "live") || same(arg(g, 2), "stmts") || same(arg(g, 2), "tokens") && arg_count(g) == 3;
             }
             if good {
                 status = no_file();
@@ -596,7 +754,7 @@ fn main(world: World) -> [] int {
     }
     borrow mut io as &!oo in {
         if status == usage() {
-            io.error_all(oo, "usage: logexport PAGEFILE anchor|log|facts|tokens|stmts|live|sweeps [UPTO [FROM]]\n");
+            io.error_all(oo, "usage: logexport PAGEFILE anchor|log|facts|tokens|stmts|live|sweeps|floor|usage [UPTO [FROM]]\n");
         }
         if status != 0 {
             io.error_all(oo, "refused ");

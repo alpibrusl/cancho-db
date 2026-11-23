@@ -982,6 +982,29 @@ def logins(d):
     c.close()
     srv.stop()
     verified(d, os.path.join(d, "login2.db"), [str(x) for x in history], "a random history under a login", login=True)
+    # taking the log's oldest part out of the file (6ba) is a call too: for a token that names it, and not for one that reads, or that may take the head.
+    # (Last: what it takes out, the checks above read.)
+    srv = Server(os.path.join(d, "login2.db"), login=True)
+    ro = Client(srv.port, password=mint("password", "--effects", "r:*"), database="main")
+    caller = Client(srv.port, password=mint("password", "--effects", "c:cancho_last_commit"), database="main")
+    keeper = Client(srv.port, password=mint("password", "--effects", "c:cancho_log_archive"), database="main")
+    head = caller.query("select cancho_last_commit()")[4]
+    n = int(head[0][0]) if head else 0
+    arch = [ro.query("select cancho_log_archive(1)"), caller.query("select cancho_log_archive(1)"), keeper.query("select cancho_log_archive(%d)" % (n + 1)), keeper.query("select cancho_log_archive(1)"),
+            keeper.extended("select cancho_log_archive(2)", []), caller.query("select cancho_last_commit()")]
+    srv.stop(signal.SIGKILL)                                      # the answer was given: what was taken out stays out
+    for cl in (ro, caller, keeper):
+        cl.close(False)
+    srv = Server(os.path.join(d, "login2.db"), login=True)
+    keeper = Client(srv.port, password=mint("password", "--effects", "c:cancho_log_archive"), database="main")
+    again = keeper.query("select cancho_log_archive(1)")
+    keeper.close()
+    srv.stop()
+    check("cancho_log_archive(): refused to a token that reads and to one that may only take the head (42501); a token that names it takes commits out, by both protocols (the floor 1, then 2, of %d); "
+          "more than there are is archive-ahead; the head stays; killed after the answer and started again, the floor is where it was" % n,
+          n > 3 and [x[0] for x in arch[:2]] == ["42501", "42501"] and (arch[2][0], arch[2][1]) == ("0A000", "cancho-db: refused archive-ahead") and arch[3][4] == [[b"1", str(n).encode()]]
+          and arch[3][2] == [b"floor", b"commits"] and arch[4][4] == [[b"2", str(n).encode()]] and arch[5][4] == head and again[4] == [[b"2", str(n).encode()]],
+          [(x[0], x[1], x[4]) for x in arch] + [again[4]])
 
 
 def with_psql(d):

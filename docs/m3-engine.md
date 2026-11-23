@@ -1857,6 +1857,70 @@ whole, byte for byte. `tests/engine_soak.py` for 60 seconds is a step of the gat
 *Limits.* Ten minutes is not days. One machine, one disk, a loopback socket. The load is one shape (short transactions on two tables). The exporter and the
 server are on one machine: nothing was carried anywhere. What the argument about readers leaves is said above and was not provoked. The growth is unbounded.
 
+## 6ba. What the page file grows by, and the log's oldest part taken out of it
+
+6az measured the growth (5.5 KiB a commit, without bound) and guessed at its parts. This measures them and takes out the largest.
+
+**Measured first** (`logexport PAGEFILE usage`, new: the entries and the bytes of keys and values under each kind of key; 5,000 transfers of 6az's load in one
+process, swept):
+
+| what | bytes a commit | share |
+|---|---|---|
+| the log's records | 497 | 31% |
+| the statements' records (6au) | 500 | 31% |
+| the facts (6as) | 355 | 22% |
+| the history of the rows (6n) | 176 | 11% |
+| the rows (the journal's, which is data) | 82 | 5% |
+
+1,610 bytes of keys and values a commit, 2,849 of pages in use; between two sweeps up to twice that is on the disk. **The log is 84% of it; the history of the
+rows, which is what I had proposed to trim, 11%.** That proposal was made before measuring and would have done little.
+
+**Design. The log's place is the copy, not the page file.** The page file holds the log so that a commit and its record cannot come apart (6as). Once a part of
+it has been written out by the export tool and is kept elsewhere, the page file's copy of that part is a second copy. So:
+
+- `select cancho_log_archive(N)` takes out of the tree the record, the facts and the statements' records of every commit before `N` that it still has, and
+  writes under the log's space the number of the first commit it still has (the **floor**). It answers `floor` and `commits`. The head of the log stays: the next
+  commit chains to it as before, and `cancho_last_commit()` answers as before.
+- *It is the caller's word that the copy exists.* The engine cannot know. So it is a call a token must name (`call cancho_log_archive`), nothing does it
+  unasked, and what it takes out is gone from this file. **Nothing is dropped automatically.**
+- *At most 128 commits a call* (`facts.archive_step`): the others wait while a statement runs; the caller calls again until the floor is where it asked.
+- *More commits than the log has* is refused, `archive-ahead`. Less than the floor changes nothing.
+- *The tool knows the floor.* `logexport PAGEFILE floor`; `log`, `facts` and `stmts` from before it are refused `export-archived`. And since the statements'
+  store was written whole or not at all, `stmts UPTO FROM` now writes those the commits `FROM` to `UPTO` name, so that the copy has them before they are taken
+  out.
+- *It makes no commit of the log* (it changes no row, as a table made does not, 6ah): the log does not say that it was archived, or by whom. The floor in the
+  tree says where; who, nothing.
+
+*Not in this part:* the history of the rows (11%, and no statement of the server reads it: `AS OF` is the test program's alone); a verifier that reads a log
+that begins after its first commit (the copy is whole, so none is needed); a floor per branch.
+
+**Found while building, by hand before any test:** the call was sealed as a commit of the log carrying the facts of the statement *before* it. A commit is made
+when a statement "changed rows", read from a count the statement leaves in the work area, and the new call left the last statement's count there. It now clears
+it, the test runs a row-changing statement first in the same process, and a mutant puts the fault back.
+
+**Test.** `tests/engine_log.py` (`archiving`): a copy of the first five sixths of the log is taken; the call is refused for one commit too many and for what is
+not a number; the commits go out 128 a call; `usage` after shows the facts and the statements of the commits left and of no other, and every row; the tool
+writes the rest from the floor and is refused from before it; the copy and the rest are the log, the facts and the statements as they were; a commit made after
+continues the copy, which verifies at `level=2+ir` with the three L2 verifiers and to `final` with the L3a ones against the rows the file holds.
+`tests/engine_wire.py`: through the server, who may call it, both protocols, and the floor after a kill. `tests/engine_soak.py ... archive`: the exporter has the
+server take out what the copy has, through the load.
+
+**Built.** `facts.archive`, `forget`, `floor`; `tables.floor_key`; `drive.archive_upto`; in the tool `usage`, `floor`, `put_stmts`, `export-archived`.
+Measured:
+
+- 3 seeds of 2,000 statements (944 to 1,036 commits): all of the test above.
+- **Ten minutes of 6az's load with the exporter archiving** (seed 2, 18 kills): 65,542 commits (52,292 without: the tree is smaller and the server a quarter
+  faster). The page file **79.4 MiB against 283**, 1.2 KiB a commit against 5.5. The floor at the end is 64,587, where the copy ended. Money, the journal, the
+  copy's 188 parts and the replay to `final`: as in 6az.
+- What that file holds at the end: rows 5.3 MB (the journal: data), history 11.5 MB, and of the log what the copy had not yet taken, 1.3 MB. So what still grows
+  without bound is **the history of the rows, 175 bytes a commit, two thirds of what is left**, and the data itself.
+- 12 mutants (8 of the engine, 4 of the tool), all killed. One written and taken out: *a count below zero is archived to* is the same program, the number being
+  refused as negative a line later.
+
+*Limits.* **Whoever calls it without a copy has lost that part of the log**, and the engine cannot tell. The call leaves no record of itself in the log. The
+history of the rows still grows without bound and nothing reads it in the server. The file does not shrink (6aw): the space is used again, not given back. A
+copy is now the only place the old log is: how it is kept, and that it is, is not this repository's.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

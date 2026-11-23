@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The engine's server under load for a while (docs/m3-engine.md 6az).
 
-    python3 tests/engine_soak.py SERVER_BINARY ENGINECHECK_BINARY SECONDS [SEED]
+    python3 tests/engine_soak.py SERVER_BINARY ENGINECHECK_BINARY SECONDS [SEED [archive]]
 
 Not a differential: several clients at once have no single order to compare with. What is held is what must be true whatever the order:
 
@@ -27,6 +27,7 @@ import time
 
 SERVER, HARNESS, SECONDS = sys.argv[1], sys.argv[2], int(sys.argv[3])
 SEED = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+ARCHIVE = len(sys.argv) > 5 and sys.argv[5] == "archive"       # the exporter has the server take out of the page file what the copy has (6ba)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.argv = ["engine_wire.py", SERVER, HARNESS, "0", str(SEED)]
 sys.path.insert(0, os.path.join(ROOT, "tests"))
@@ -184,7 +185,7 @@ def main():
         t0 = time.time()
         whole = raced = sets = kills = held = 0
         odd, sizes, anchor, last_n = [], [], None, 0
-        have, copy_log, copy_facts = 0, b"", b""
+        have, copy_log, copy_facts, copy_stmts, archived = 0, b"", b"", b"", 0
         next_line, next_kill = t0 + 30, t0 + rng.uniform(20, 40)
         while time.time() - t0 < SECONDS:
             time.sleep(rng.uniform(0.2, 0.6))
@@ -205,19 +206,37 @@ def main():
                     odd.append(("the log got shorter", n, last_n))
                 last_n = n
                 # the copy is kept up in parts (6az): what is new since the last part, appended
-                a, b = export(path, "log", n, have), export(path, "facts", n, have)
-                for st2, _, err2 in (a, b):
+                a, b, c3 = export(path, "log", n, have), export(path, "facts", n, have), export(path, "stmts", n, have)
+                for st2, _, err2 in (a, b, c3):
                     if st2 == 0:
                         whole += 1
                     elif (st2, err2) == (1, "refused export-raced"):
                         raced += 1
                     else:
                         odd.append((st2, err2))
-                if a[0] == 0 and b[0] == 0:
+                if a[0] == 0 and b[0] == 0 and c3[0] == 0:
                     copy_log += a[1]
                     copy_facts += b[1]
+                    copy_stmts += c3[1]
                     have = n
                     sets += 1
+                    if ARCHIVE:
+                        # the copy has them: the server may take them out of its file (128 commits a call)
+                        try:
+                            cc = ew.Client(sh.port)
+                            floor = -1
+                            for _ in range(200):
+                                got = cc.query("select cancho_log_archive(%d)" % have)
+                                if cc.status == "closed" or not got[4]:
+                                    break
+                                floor = int(got[4][0][0])
+                                if floor >= have:
+                                    break
+                            cc.close()
+                            if floor >= 0:
+                                archived = max(archived, floor)
+                        except Exception:
+                            pass
                     if sets % 10 == 0 or anchor:
                         v = verify(d, copy_log, ["--expect", anchor] if anchor else [])
                         if not v.startswith("ok commits=%d " % n):
@@ -279,19 +298,30 @@ def main():
               % (whole, held, sets, raced), not odd and whole > 0 and (held > 0 or SECONDS < 20), odd[:3])
         st, out, err = export(path, "anchor")
         n = int(out.split()[1]) if st == 0 else -1
-        files = {w: export(path, w, n) if w in ("log", "facts", "live") else export(path, w) for w in ("log", "facts", "live")}
+        floor = int(export(path, "floor")[1].split()[1])
+        # what the copy lacks, from where it ends; the copy with it is the whole log
+        rest = {w: export(path, w, n, have) for w in ("log", "facts", "stmts")}
+        files = {"log": (rest["log"][0], copy_log + rest["log"][1]), "facts": (rest["facts"][0], copy_facts + rest["facts"][1]), "live": export(path, "live", n)}
         for w in files:
             with open(os.path.join(d, "e." + w), "wb") as f:
                 f.write(files[w][1])
-        check("the copy kept up in parts through the load (%d commits of %d) is the beginning of the log and of the store exported whole at the end, byte for byte" % (have, n),
-              have > 0 and files["log"][1].startswith(copy_log) and files["facts"][1].startswith(copy_facts), (have, n, len(copy_log), len(copy_facts)))
+        if ARCHIVE:
+            check("the server took out of its file what the copy had: the floor is %d of %d commits (the copy has %d), and from before the floor the tool is refused export-archived"
+                  % (floor, n, have), 0 < floor <= have and floor == archived and export(path, "log", n, 0)[::2] == (1, "refused export-archived"), (floor, archived, have, n))
+        else:
+            whole = export(path, "log", n, 0), export(path, "facts", n, 0)
+            check("the copy kept up in parts through the load (%d commits of %d) and what it lacks are the log and the store exported whole at the end, byte for byte" % (have, n),
+                  have > 0 and floor == 0 and whole[0][1] == files["log"][1] and whole[1][1] == files["facts"][1], (have, n, floor))
         t1 = time.time()
         v = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "l3a.py"), os.path.join(d, "e.log"), "--deltas", os.path.join(d, "e.facts"), "--live-dump", os.path.join(d, "e.live")],
                            capture_output=True, text=True).stdout.strip()
-        check("at the end, %d commits through %d kills: the log, the facts and the rows the tool exports verify, the replay ending at the rows the file holds (%.0f s to verify)"
+        check("at the end, %d commits through %d kills: the copy's log and facts and the rows the file holds verify, the replay ending at those rows (%.0f s to verify)"
               % (n, kills, time.time() - t1), all(files[w][0] == 0 for w in files) and v.startswith("ok commits=%d " % n) and v.endswith(" final"), v)
+        use = export(path, "usage")[1].decode().strip().replace("usage ", "").replace("\n", "; ")
+        print("     what the file holds (entries, bytes): " + use)
         size = os.path.getsize(path)
-        check("the page file: %.1f MiB after %d commits, %.1f KiB a commit (the history of every row and the whole log are in it)" % (size / 1048576, n, size / 1024 / max(n, 1)),
+        check("the page file: %.1f MiB after %d commits, %.1f KiB a commit (%s)" % (size / 1048576, n, size / 1024 / max(n, 1),
+              "the log taken out as it is copied: the rows and their history are what grows" if ARCHIVE else "the history of every row and the whole log are in it"),
               n > 0 and size / max(n, 1) < 64 * 1024, sizes[-3:])
         print("sizes (s, commits, bytes): " + " ".join("%d:%d:%d" % s for s in sizes))
     if FAILED:

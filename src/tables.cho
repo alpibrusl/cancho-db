@@ -190,6 +190,13 @@ pub fn sweeps_raise[&q, &s, &k, &o](p: &!q pager.Pager, sc: &!s [byte], root: in
     return btree.put(p, sc, root, key[0..kl], out[0..8]);
 }
 
+// The number of the first commit whose record the tree still holds (docs/m3-engine.md 6ba): those before it were archived, 8 bytes under the log's space.
+pub fn floor_key[&o](out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, log_space(), 4);
+    out[4] = byte_of(10);
+    return 5;
+}
+
 pub fn fact_key[&o](seq: int, out: &!o [byte]) -> [] int {
     build.put_be(out, 0, log_space(), 4);
     out[4] = byte_of(6);

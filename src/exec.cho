@@ -50,6 +50,11 @@ pub fn no_entropy() -> [] int {
     return 0 - 17;
 }
 
+// `cancho_log_archive(n)` with more commits than the log has (docs/m3-engine.md 6ba).
+pub fn archive_ahead() -> [] int {
+    return 0 - 20;
+}
+
 pub fn refusal_name(code: int) -> [] &static [byte] {
     if code == order_dependent() {
         return "engine-order-dependent";
@@ -71,6 +76,9 @@ pub fn refusal_name(code: int) -> [] &static [byte] {
     }
     if code == no_entropy() {
         return "engine-no-entropy";
+    }
+    if code == archive_ahead() {
+        return "archive-ahead";
     }
     return "engine-unsupported";
 }

@@ -456,6 +456,77 @@ def tool(work, path, early):
           and export(path, "live", len(recs))[1] == got["live"][1], export(nolog, "live"))
 
 
+def archiving(work, path):
+    """The log's oldest part taken out of the page file by whoever has a copy (6ba): the copy and what the file still has are the whole log, and it goes on."""
+    import verify as l1  # noqa: E402  (tools/ is on the path since `exported`)
+    log, recs, lines, live, _, _ = read_back(path)
+    n = len(recs)
+    facts = ("\n".join(["CHODBDL2"] + lines) + "\n").encode()
+    kept = sorted(KEPT[1])
+    toks = export(path, "tokens")[1]
+    cut = n * 5 // 6
+
+    def usage():
+        return {l.split()[1]: int(l.split()[2]) for l in export(path, "usage")[1].decode().strip().split("\n")}
+
+    def packed(data):
+        out, at = [], 8
+        while at < len(data):
+            m = struct.unpack(">I", data[at:at + 4])[0]
+            out.append(data[at + 4:at + 4 + m])
+            at += 4 + m
+        return out
+    before = usage()
+    # the copy: everything before `cut`, taken while the file has it
+    copy = [export(path, w, cut, 0) for w in ("log", "facts", "stmts")]
+    whole_stmts = export(path, "stmts", n, 0)
+    check("the statements of the commits, by range, are the store's (%d), in the order the commits name them; the copy of the first %d commits is taken" % (len(kept), cut),
+          whole_stmts[0] == 0 and sorted(packed(whole_stmts[1])) == kept and all(c[0] == 0 for c in copy) and export(path, "floor")[1] == b"floor 0\n", [c[0] for c in copy])
+    calls = ["select cancho_log_archive(%d)" % (n + 2), "select cancho_log_archive(-1)", "select cancho_log_archive('x')"] + ["select cancho_log_archive(%d)" % cut] * (cut // 128 + 2) + ["select cancho_log_archive(1)"]
+    # (a statement that changed a row runs first in the same process: what it reported must not be taken for the archive's, which changes none)
+    out = run(path, WHO + ["insert into acct values (515151, 'before the archive', 1)"] + calls + ["!commit", "!sweep", "!commit", "!sweep"])
+    n = n + 1
+    said = [l for l in out if l[:2] in ("R ", "re", "er")]
+    steps = [(int(bytes.fromhex(l.split()[1])), int(bytes.fromhex(l.split()[2]))) for l in said if l.startswith("R ")]
+    want = [(min(cut, 128 * (i + 1)), n) for i in range(cut // 128 + 2)] + [(cut, n)]
+    check("cancho_log_archive: more commits than there are is refused archive-ahead, a number that is none is no such call; %d commits are taken out 128 a call (%d calls), and a call for less than is gone changes nothing"
+          % (cut, cut // 128 + 1), said[:3] == ["refused archive-ahead", "refused engine-unsupported", "refused engine-unsupported"] and steps == want, (said[:3], steps[:4], want[:4]))
+    after = usage()
+    gone = sum(len(l1.decode(r[4:4 + int.from_bytes(r[:4], "big")])[3][5]) for r in recs[:cut])
+    before["facts"] += 1                                          # (the insert before the archive: a fact and a statement more)
+    before["statements"] += 1
+    check("what the file holds after: the facts and the statements of the %d commits left and of no other (facts %d of %d, statements %d of %d), fewer parts of records, every row and all the history"
+          % (n - cut, after["facts"], before["facts"], after["statements"], before["statements"]),
+          after["facts"] == 1 + len([l for l in lines if int(l.split("\t")[0]) // 10000000 >= cut]) and after["statements"] == before["statements"] - gone and after["records"] < before["records"]
+          and (after["rows"], after["tokens"], after["catalog"]) == (before["rows"] + 1, before["tokens"], before["catalog"]) and after["history"] > before["history"], (before, after))
+    rest = [export(path, w, n, cut) for w in ("log", "facts", "stmts")]
+    refused = [export(path, w, n, a)[::2] for w in ("log", "facts", "stmts") for a in (0, cut - 1)] + [export(path, "log")[::2], export(path, "facts")[::2]]
+    check("the tool after: the floor is %d; from the floor it writes the rest; from before it, export-archived; the anchor is what it was" % cut,
+          export(path, "floor")[1] == b"floor %d\n" % cut and all(r[0] == 0 for r in rest) and all(r == (1, "export-archived") for r in refused)
+          and export(path, "anchor")[1].startswith(b"anchor %d " % n), (export(path, "floor"), [r[0] for r in rest], refused))
+    check("the copy and the rest are the log and the store of facts as they were and one commit more, byte for byte, and its statements; the commit before the archive is one commit",
+          (copy[0][1] + rest[0][1]).startswith(log) and (copy[1][1] + rest[1][1]).startswith(facts) and set(kept) <= set(packed(copy[2][1] + rest[2][1]))
+          and len(packed(copy[2][1] + rest[2][1])) == len(kept) + 1 and len(copy[0][1] + rest[0][1]) > len(log))
+    # the log goes on from its head, and what is exported from the floor continues the copy
+    out = run(path, WHO + ["insert into acct values (424242, 'after the archive', 1)", "select cancho_last_commit()", "!commit"])
+    more = [export(path, w, n + 1, n) for w in ("log", "facts", "stmts")]
+    full = [copy[i][1] + rest[i][1] + more[i][1] for i in range(3)]
+    (work / "z.log").write_bytes(full[0])
+    (work / "z.tok").write_bytes(toks)
+    (work / "z.st").write_bytes(full[2])
+    live2 = export(path, "live")[1]
+    for cmd in L2:
+        r = subprocess.run(cmd.split() + [str(work / "z.log"), "--root", ROOT_KEY, "--tokens", str(work / "z.tok"), "--stmts", str(work / "z.st")], capture_output=True, text=True, cwd=ROOT)
+        v = (r.stdout + r.stderr).strip()
+        check("%s: a commit made after the archive continues the copy: %d commits, level=2+ir" % (cmd, n + 1), v.startswith("ok commits=%d " % (n + 1)) and v.endswith("level=2+ir"), v)
+    for cmd in VERIFIERS:
+        v = verdict(cmd, work, full[0], full[1], live2)
+        check("%s: the copy, its facts and the rows the file holds now: ok, final" % cmd, all(m[0] == 0 for m in more) and v.startswith("ok commits=%d " % (n + 1)) and v.endswith(" final"), v)
+    nolog = str(work / "nolog")
+    out = [l for l in run(nolog, ["select cancho_log_archive(0)", "select cancho_log_archive(1)"]) if l[:2] in ("R ", "re")]
+    check("with no log there is nothing to archive: 0 of 0, and one commit is ahead", out == ["R 30 30", "refused archive-ahead"], out)
+
+
 def main():
     rng = random.Random(SEED)
     history = FIXED + random_history(rng, COUNT)
@@ -500,6 +571,7 @@ def main():
                 check("%s: %s is %s" % (cmd, name, want), v.startswith("reject rule=%s " % want), v)
         exported(work, path, files, live, nrows)
         tool(work, path, early)
+        archiving(work, path)
         print("commits %d, changes %d, rows at the end %d" % (len(files.records), len(files.deltas), nrows))
     if FAILED:
         print("FAIL engine log: %d failed" % len(FAILED))
