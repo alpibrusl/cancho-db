@@ -1108,6 +1108,23 @@ fn alter_table[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], f
     }
     let table = st[9];
     var how = 0;
+    if parse.kw(sql, toks, pos, end, "rename") && parse.kw(sql, toks, pos + 1, end, "to") {
+        // RENAME TO name: the table under another name (a column's or a constraint's renaming is not this)
+        engine_form(st, parse.e_unsupported_statement());
+        pos = plain_name(sql, toks, pos + 2, end, st);
+        if pos < 0 {
+            return pos;
+        }
+        if pos < end {
+            return parse.fail(st, pos, parse.e_syntax());
+        }
+        let root = parse.mk(nodes, kids, st, parse.n_rename(), table, tmp, 0, st[9], 0 - 1);
+        if root < 0 {
+            return parse.fail(st, from, 0 - root);
+        }
+        st[2] = root;
+        return end;
+    }
     if parse.kw(sql, toks, pos, end, "alter") {
         // ALTER [COLUMN] c [SET DATA] TYPE type: a column definition of the name and the type
         how = 2;
@@ -1232,6 +1249,29 @@ fn create_index[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], 
 }
 
 // CREATE SEQUENCE [IF NOT EXISTS] name [MINVALUE n] [START [WITH] n]: no other option, and no negative number (docs/m3-engine.md 6ad). One of the engine's forms.
+// `truncate [table] NAME`: one table, and none of the options (several tables, `restart identity`, `cascade`).
+fn truncate_table[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
+    st[10] = 0;
+    engine_form(st, parse.e_unsupported_statement());
+    var at = from + 1;
+    if parse.kw(sql, toks, at, end, "table") {
+        at = at + 1;
+    }
+    let pos = plain_name(sql, toks, at, end, st);
+    if pos < 0 {
+        return pos;
+    }
+    if pos < end {
+        return parse.fail(st, pos, parse.e_unsupported_statement());
+    }
+    let root = parse.mk(nodes, kids, st, parse.n_truncate(), st[9], tmp, 0, 0 - 1, 0 - 1);
+    if root < 0 {
+        return parse.fail(st, from, 0 - root);
+    }
+    st[2] = root;
+    return end;
+}
+
 fn create_sequence[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int]) -> [] int {
     st[10] = 0;
     engine_form(st, parse.e_unsupported_statement());
@@ -1376,6 +1416,9 @@ pub fn statement[&s, &t, &n, &k, &v, &o, &g, &c, &x](sql: &s [byte], toks: &t [i
     }
     if parse.kw(sql, toks, from, end, "drop") && (parse.kw(sql, toks, from + 1, end, "table") || parse.kw(sql, toks, from + 1, end, "index")) {
         return drop_object(sql, toks, from, end, nodes, kids, tmp, st);
+    }
+    if parse.kw(sql, toks, from, end, "truncate") {
+        return truncate_table(sql, toks, from, end, nodes, kids, tmp, st);
     }
     return parse.fail(st, from, parse.e_unsupported_statement());
 }

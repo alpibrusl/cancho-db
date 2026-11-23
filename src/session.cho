@@ -1,0 +1,188 @@
+edition 9;
+module cdb.session;
+
+import cdb.pager;
+import cdb.exec;
+import cdb.facts;
+
+// A session over a branch (docs/m3-engine.md 6aj): which tree each statement runs on, when a transaction's tree becomes the branch's, when the facts of a commit are taken and
+// the commit is made. A session's state is `size()` ints: whether a transaction is open (`idle`, `open_txn`, `failed`), the transaction's tree, the tree of its facts (below 0: they
+// are not to be had) and whether it wrote; then what `open` and `close` leave for the caller to answer with (`said`, `facts_of`, `sealed`).
+pub fn size() -> [] int {
+    return 8;
+}
+
+pub fn idle() -> [] int {
+    return 0;
+}
+
+pub fn open_txn() -> [] int {
+    return 1;
+}
+
+pub fn failed() -> [] int {
+    return 2;
+}
+
+// What running a statement gives in place of a tree when the statement is BEGIN, COMMIT or ROLLBACK.
+pub fn is_begin() -> [] int {
+    return 0 - 20;
+}
+
+pub fn is_commit() -> [] int {
+    return 0 - 21;
+}
+
+pub fn is_rollback() -> [] int {
+    return 0 - 22;
+}
+
+// Whether a transaction is open, or has failed.
+pub fn state[&s](ss: &s [int]) -> [] int {
+    return ss[0];
+}
+
+// What the last statement is answered with beyond its own answer: 0 nothing, 1 BEGIN, 2 COMMIT, 3 ROLLBACK, 4 the error of a BEGIN in a transaction that has failed (25P02).
+pub fn said[&s](ss: &s [int]) -> [] int {
+    return ss[5];
+}
+
+// The facts of the commit the last statement made: their tree, -1 if they are not to be had, -2 if it made none that changed a row.
+pub fn facts_of[&s](ss: &s [int]) -> [] int {
+    return ss[6];
+}
+
+// Whether `close` wrote the record of a commit: 1, 0 if none was asked for or made, -1 if one was due and could not be made (`close` then gave the error, and the commit
+// is not made).
+pub fn sealed[&s](ss: &s [int]) -> [] int {
+    return ss[7];
+}
+
+// How the next statement is run: 0, or 3 in a transaction that has failed (it is refused unless it ends the transaction).
+pub fn mode[&s](ss: &s [int]) -> [] int {
+    if ss[0] == failed() {
+        return 3;
+    }
+    return 0;
+}
+
+// Before a statement: the tree it runs on (the branch's, or the open transaction's), or an error. The statement's writes take the number after the branch's last; outside a
+// transaction a key is written once, inside one what it held before the transaction is its first record (6n).
+pub fn open[&q, &z, &s](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], branch: int) -> [file_read] int {
+    let last = exec.last_txn(p, w, branch);
+    if last < 0 {
+        return last;
+    }
+    ss[4] = last;
+    exec.set_txn(w, last + 1);
+    exec.set_once(w, ss[0] == idle());
+    exec.draw_set(w, 0, 0);
+    if ss[0] == idle() {
+        return branch;
+    }
+    return ss[1];
+}
+
+// The commit of the facts `fr` on the tree `root`, if a key was given (`key`: the seed of the signing key, or nothing): the tree with the commit recorded in it (6as), `root`
+// with no key, or an error.
+fn seal_on[&q, &z, &s, &k, &o](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], root: int, fr: int, key: &k [byte], rec: &!o [byte]) -> [file_read, file_write] int {
+    if len(key) == 0 {
+        return root;
+    }
+    let nw = facts.seal(p, w, root, fr, key, rec);
+    if nw < 0 {
+        // a commit that cannot be recorded is not made: the error is the caller's to stop on (6as)
+        ss[7] = 0 - 1;
+        return nw;
+    }
+    ss[7] = 1;
+    return nw;
+}
+
+fn note_facts[&s](ss: &!s [int], fr: int) -> [] int {
+    if fr < 0 {
+        ss[6] = 0 - 1;
+    } else {
+        ss[6] = fr;
+    }
+    return 0;
+}
+
+// After a statement: `after` is what running it gave (a tree, or `is_begin()`, `is_commit()`, `is_rollback()`), `fail` whether it ended in an error or a refusal. The branch's tree
+// from here on (`branch` itself unless something became durable-to-be), or an error. A statement outside a transaction that wrote is a commit of its own; inside one the statements
+// build on the transaction's tree, which becomes the branch's at COMMIT, with the facts of all of them as one commit's.
+pub fn close[&q, &z, &s, &k, &o](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], branch: int, after: int, fail: bool, key: &k [byte], rec: &!o [byte]) -> [file_read, file_write] int {
+    ss[5] = 0;
+    ss[6] = 0 - 2;
+    ss[7] = 0;
+    let last = ss[4];
+    var root = branch;
+    if ss[0] == idle() {
+        if after == is_begin() {
+            ss[0] = open_txn();
+            ss[1] = branch;
+            ss[2] = 0;
+            ss[3] = 0;
+            ss[5] = 1;
+        } else if after == is_commit() {
+            ss[5] = 2;
+        } else if after == is_rollback() {
+            ss[5] = 3;
+        } else if fail {
+            // the statement failed, or was refused: what it drew from a counter stays drawn (6y)
+            root = exec.seq_replay(p, w, branch);
+        } else if after != branch {
+            // the statement wrote: it is a commit, with its facts (6af) and its number
+            var fr = 0;
+            let wrote = exec.changes_of(w) > 0;
+            if wrote {
+                fr = facts.take(p, w, 0);
+                note_facts(ss, fr);
+            }
+            root = exec.mark_txn(p, w, after, last + 1);
+            if wrote && root >= 0 {
+                root = seal_on(p, w, ss, root, fr, key, rec);
+            }
+        }
+        if ss[0] == idle() {
+            // nothing is left to roll back: the tree that stays has what was drawn
+            exec.seq_forget(w);
+        }
+        return root;
+    }
+    if after == is_begin() {
+        // in a transaction that has failed BEGIN is refused like any other statement; in one that is open PostgreSQL warns and goes on
+        if ss[0] == failed() {
+            ss[5] = 4;
+        } else {
+            ss[5] = 1;
+        }
+    } else if after == is_commit() || after == is_rollback() {
+        if after == is_commit() && ss[0] == open_txn() {
+            ss[5] = 2;
+            if ss[1] != branch {
+                root = exec.mark_txn(p, w, ss[1], last + 1);
+            }
+            if ss[3] == 1 && root >= 0 {
+                note_facts(ss, ss[2]);
+                root = seal_on(p, w, ss, root, ss[2], key, rec);
+            }
+            exec.seq_forget(w);
+        } else {
+            // a rollback, or the commit of a transaction that failed: what its statements drew from counters stays drawn
+            ss[5] = 3;
+            root = exec.seq_replay(p, w, branch);
+        }
+        ss[0] = idle();
+    } else if fail {
+        // an error, or a refusal: the transaction has failed
+        ss[0] = failed();
+    } else {
+        ss[1] = after;
+        if exec.changes_of(w) > 0 && ss[2] >= 0 {
+            ss[2] = facts.take(p, w, ss[2]);
+            ss[3] = 1;
+        }
+    }
+    return root;
+}

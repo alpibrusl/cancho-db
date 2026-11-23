@@ -612,6 +612,9 @@ def ddl_more(g, counter):
     if r < 0.95:
         # a sequence (docs/m3-engine.md 6ad): its name among the tables' and the indexes'
         return "create sequence %s%s%s%s" % ("if not exists " if g.r.random() < 0.3 else "", g.pick(["sq1", "sq1", "sq2", "ix1", "ta"]), g.pick(["", "", " minvalue 0", " minvalue 5"]), g.pick(["", "", " start 0", " start 7", " start with 3"]))
+    if r < 0.975:
+        # every row of a table at once (docs/m3-engine.md 6ao)
+        return "truncate %s%s" % (g.pick(["", "table "]), g.pick([t.name, t.name, t.name, "nope"]))
     return "drop index %s" % g.pick(["ix1", "ix2", "ix3"])
 
 
@@ -791,6 +794,10 @@ def compare(pg, stmts, eng, must):
     if len(eng) != len(stmts):
         raise SystemExit("engine_check: %d answers for %d statements" % (len(eng), len(stmts)))
     def snapshot(name):
+        # (a table that is not there is asked about without an error: an error would fail the transaction this may be in)
+        _, _, there, _ = pg.query("select to_regclass('%s') is not null" % name)
+        if not there or there[0][0] != b"t":
+            return None
         # the key's columns, in the key's order, as PostgreSQL has them
         _, _, kr, _ = pg.query("select a.attname from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey) where i.indrelid = to_regclass('%s') and i.indisprimary "
                                "order by array_position(i.indkey, a.attnum)" % name)
@@ -860,6 +867,10 @@ def compare(pg, stmts, eng, must):
             if rows:
                 fail(i, "no facts for a commit that changed rows")
             return
+        if not rows:
+            # a statement or a transaction that changed no row is no commit
+            fail(i, "facts for a commit that changed no row")
+            return
         if line[0] == "F -":
             if must:
                 fail(i, "the facts of this commit are not to be had")
@@ -906,6 +917,11 @@ def compare(pg, stmts, eng, must):
                 fail(i, "the transaction is %s, PostgreSQL's: %s" % (state, pg.status))
                 raise SystemExit("engine_check: the two are out of step; stopping")
             continue
+        # a column added, a table dropped and a table truncated change rows too (docs/m3-engine.md 6ai, 6ao): every row of the table is another row, or gone
+        rowsddl = how == "ddl" and sql.startswith(("alter table ", "drop table ", "truncate "))
+        if rowsddl:
+            how = "write"
+            tname = re.match(r"(?:(?:alter|drop) table (?:if exists )?|truncate (?:table )?)(\w+)", sql).group(1)
         before = snapshot(tname) if how == "write" and pre != "E" else None
         err, oids, rows, tag = pg.query(sql)
         if err is None:
@@ -967,12 +983,19 @@ def compare(pg, stmts, eng, must):
                 continue
             count("agree-returning")
         changes = [line for line in body[1:] if line.startswith("C ")]
+        if rowsddl:
+            count("agree-ddl")
         if how == "write" and before is not None:
-            after = snapshot(tname)
+            after = snapshot(tname) or {}
             want = set()
             for k in set(before) | set(after):
                 if before.get(k) != after.get(k):
                     want.add((tname.encode(), k, before.get(k), after.get(k)))
+            renamed = re.match(r"alter table \w+ rename to (\w+)$", sql)
+            if renamed:
+                # a table renamed (6ar): its rows left the table of the old name (above: it is not there any more) and are rows of the table of the new one
+                for k, image in (snapshot(renamed.group(1)) or {}).items():
+                    want.add((renamed.group(1).encode(), k, None, image))
             got = set()
             rows = []
             for line in changes:
@@ -1004,15 +1027,6 @@ def compare(pg, stmts, eng, must):
                     facts_agree(i, body, tx)
                 # the transaction's rows are the branch's now
                 live.update(over)
-            elif sql not in ("begin", "commit", "rollback") and pre == "T":
-                # DDL in a transaction: its commit's facts are not compared
-                tx_ddl[0] = True
-            if sql.startswith("drop table ") and head.startswith("ok "):
-                # its rows went with it, and their salts
-                gone = sql.split()[2].encode()
-                for d in (live, over):
-                    for key in [key for key in d if key[0] == gone]:
-                        d[key] = None
     return counts, fails, refused_answered, answered
 
 
@@ -1518,6 +1532,100 @@ FIXED += [
     ("select * from ff2 order by a, b", "order"),
 ]
 
+FIXED += [
+    # BEGIN in a transaction that has failed is the error every statement there gets
+    ("begin", "ddl"),
+    ("select 1 / (k - k) from ff", "set"),
+    ("begin", "ddl"),
+    ("select 1 from ff", "set"),
+    ("rollback", "ddl"),
+    # a transaction that writes nothing, after one that wrote, is no commit
+    ("create table fid (k integer primary key, v integer)", "ddl"),
+    ("begin", "ddl"),
+    ("insert into fid values (1, 1), (2, 2)", "write"),
+    ("commit", "ddl"),
+    ("begin", "ddl"),
+    ("select count(*) from fid", "set"),
+    ("commit", "ddl"),
+    ("drop table fid", "ddl"),
+]
+# more counters drawn from, with no failure between, than a session remembers at once (32): what was drawn is forgotten whenever nothing is left to roll back
+FIXED += [("create table fid%d (k integer generated always as identity primary key, v integer)" % i, "ddl") for i in range(34)]
+FIXED += [("insert into fid%d (v) values (%d)" % (i, i), "write") for i in range(34)]
+FIXED += [("drop table fid%d" % i, "ddl") for i in range(34)]
+
+FIXED += [
+    # truncate (6ao): every row goes, the table and its counter stay; it is taken back by a rollback like any write
+    ("create table ftr (k integer generated always as identity primary key, v text)", "ddl"),
+    ("insert into ftr (v) values ('a'), ('b'), ('c')", "write"),
+    ("truncate ftr", "ddl"),
+    ("select count(*) from ftr", "set"),
+    ("truncate table ftr", "ddl"),
+    ("insert into ftr (v) values ('d') returning k", "write"),
+    ("begin", "ddl"),
+    ("insert into ftr (v) values ('e')", "write"),
+    ("truncate ftr", "ddl"),
+    ("select count(*) from ftr", "set"),
+    ("rollback", "ddl"),
+    ("select k, v from ftr order by k", "order"),
+    ("begin", "ddl"),
+    ("truncate ftr", "ddl"),
+    ("insert into ftr (v) values ('f')", "write"),
+    ("commit", "ddl"),
+    ("select k, v from ftr order by k", "order"),
+    ("truncate nosuchtable", "ddl"),
+    ("drop table ftr", "ddl"),
+]
+
+FIXED += [
+    # an insert that lists no columns and has fewer values than the table has columns: the values are for its first columns (6ap)
+    ("create table ffv (k integer primary key, a text not null, b integer not null default 7, c text)", "ddl"),
+    ("insert into ffv values (1, 'one')", "write"),
+    ("insert into ffv values (2, 'two', 2), (3, 'three', 3)", "write"),
+    ("insert into ffv values (4)", "write"),
+    ("insert into ffv values (5, 'five', 5, 'c')", "write"),
+    ("insert into ffv values (6, 'six') returning k, b, c", "write"),
+    ("insert into ffv values (1, 'dup') on conflict do nothing", "write"),
+    ("select * from ffv order by k", "order"),
+    ("drop table ffv", "ddl"),
+]
+
+FIXED += [
+    # a table renamed (6ar): the same rows under another name, its counter and its indexes with it
+    ("create table frn (k integer generated always as identity primary key, v text)", "ddl"),
+    ("insert into frn (v) values ('x'), ('y')", "write"),
+    ("create index frni on frn (v)", "ddl"),
+    ("create table frno (k integer primary key)", "ddl"),
+    ("alter table frn rename to frno", "ddl"),
+    ("alter table frn rename to frni", "ddl"),
+    ("alter table frnope rename to frnz", "ddl"),
+    ("alter table frn rename to frn2", "ddl"),
+    ("select * from frn2 order by k", "order"),
+    ("insert into frn2 (v) values ('z') returning k", "write"),
+    ("update frn2 set v = v || '!' where k = 1", "write"),
+    ("create index frni on frno (k)", "ddl"),
+    ("begin", "ddl"),
+    ("alter table frn2 rename to frn3", "ddl"),
+    ("insert into frn3 (v) values ('t')", "write"),
+    ("rollback", "ddl"),
+    ("select count(*) from frn2", "set"),
+    ("begin", "ddl"),
+    ("alter table frn2 rename to frn", "ddl"),
+    ("delete from frn where k = 2", "write"),
+    ("commit", "ddl"),
+    ("select * from frn order by k", "order"),
+    ("drop table frn", "ddl"),
+    ("create index frni on frno (k)", "ddl"),
+    # an index goes with its table under whatever name the table has when it is dropped
+    ("create table frn4 (k integer primary key, v text)", "ddl"),
+    ("create index frnx on frn4 (k)", "ddl"),
+    ("alter table frn4 rename to frn5", "ddl"),
+    ("insert into frn5 values (1, 'a'), (2, 'a')", "write"),
+    ("drop table frn5", "ddl"),
+    ("create index frnx on frno (k)", "ddl"),
+    ("drop table frno", "ddl"),
+]
+
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)",
              "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
@@ -1628,6 +1736,13 @@ UNSUP = [
     ("update fz set n = nextval('fzs')", None),
     ("create sequence fzt start 0", "22023"),
     ("create sequence fzt increment 2", None),
+    ("insert into fz values (9, 9, 9)", "42601"),                                                     # more values than the table has columns
+    ("insert into fz values (8, 8), (7)", "42601"),                                                  # rows of different lengths
+    ("alter table fz rename column n to m", None),                                                   # the engine renames a table, not what is in it
+    ("alter table fz rename to fzz cascade", "42601"),
+    ("truncate fz restart identity", None),                                                          # the options of TRUNCATE are not the engine's
+    ("truncate fz, fw", None),
+    ("truncate fz cascade", None),
     ("update fi set c = 7", "428C9"),                                                                # an identity column is given no value
     ("insert into fi values (2, 9)", "428C9"),
     ("insert into fi (c, k) values (9, 2)", "428C9"),
@@ -1674,7 +1789,7 @@ def order_dependent(pg):
         pg.query("begin")
         err, _, _, _ = pg.query(sql)
         pg.query("rollback")
-        if ans[:1] not in (["refused engine-unsupported"], ["refused subquery"], ["refused insert-select"], ["refused nondeterministic"], ["refused unsupported-statement"]):
+        if ans[:1] not in (["refused engine-unsupported"], ["refused subquery"], ["refused insert-select"], ["refused nondeterministic"], ["refused unsupported-statement"], ["refused syntax"]):
             raise SystemExit("engine_check: %s: the engine says %s, and this is one it does not answer" % (sql, ans))
         if err != want:
             if PGMAJOR[0] == 16:
@@ -1800,6 +1915,15 @@ def history(seed):
         r = subprocess.run([EXE, path], input="!asof %d\ninsert into ta (k) values (1)\n" % points[0][0], capture_output=True, text=True)
         if "refused engine-as-of-write" not in r.stdout:
             raise SystemExit("engine_check: history: a write AS OF a past transaction: %s" % r.stdout[-200:])
+        r = subprocess.run([EXE, path], input="!asof %d\nalter table ta rename to tren\n" % points[0][0], capture_output=True, text=True)
+        if "refused engine-unsupported" not in r.stdout or "ok " in r.stdout:
+            raise SystemExit("engine_check: history: a table renamed AS OF a past transaction: %s" % r.stdout[-200:])
+        r = subprocess.run([EXE, path], input="!asof %d\ntruncate ta\n" % points[0][0], capture_output=True, text=True)
+        if "refused engine-unsupported" not in r.stdout or "ok " in r.stdout:
+            raise SystemExit("engine_check: history: a truncate AS OF a past transaction: %s" % r.stdout[-200:])
+        r = subprocess.run([EXE, path], input="!asof %d\ncreate sequence hsq\n!asof -\nselect nextval('hsq')\n" % points[0][0], capture_output=True, text=True)
+        if "refused engine-unsupported" not in r.stdout or "ok " in r.stdout:
+            raise SystemExit("engine_check: history: a sequence made AS OF a past transaction: %s" % r.stdout[-200:])
         return len(points), len(forked)
 
 
@@ -1868,11 +1992,19 @@ def erasure():
         out = run_engine(path, ["!asof 5", "select s from er order by k", "!asof 2", "select s from er order by k"])
         if texts(out[0]) != [newer] or texts(out[1]) != [three]:
             raise SystemExit("engine_check: a dropped table AS OF before the drop reads %s" % out)
-        # with no seed to make salts of, a statement that writes a row is refused and one that reads is not (6ag)
+        # with no seed to make salts of, a statement that writes a row is refused and one that reads is not (6ag); a column added writes every row of its table (6ai)
         out = run_engine(path, ["create table ns (k integer primary key, v integer)", "insert into ns values (1, 1), (2, 2)", "!unseed", "insert into ns values (3, 3)", "update ns set v = 9 where k = 1",
                                 "update ns set k = 7 where k = 2", "update ns set v = 1 where k = 1", "delete from ns where k = 2", "select count(*) from ns", "alter table ns add column z integer default 0"])
-        if heads(out) != ["ok CREATE 0", "ok INSERT 2", "refused engine-no-entropy", "refused engine-no-entropy", "refused engine-no-entropy", "ok UPDATE 1", "ok DELETE 1", "ok SELECT 1", "ok ALTER 0"]:
+        if heads(out) != ["ok CREATE 0", "ok INSERT 2", "refused engine-no-entropy", "refused engine-no-entropy", "refused engine-no-entropy", "ok UPDATE 1", "ok DELETE 1", "ok SELECT 1", "refused engine-no-entropy"]:
             raise SystemExit("engine_check: with no seed the statements answered %s" % heads(out))
+        # where a statement is refused is said by its tag: where it is read (the lexer's, the parser's), where it is lowered, or by the engine; and a parameter in a statement that
+        # is no query is refused where the statement is lowered or made (docs/m3-engine.md 6ak)
+        out = run_engine(os.path.join(d, "tags.db"), ["create table q (k integer primary key, v integer)", "select 'abc", "select from where", "select nosuch from q", "select k from q where k in (select k from q)",
+                                                      "!params 35", "create table zz (k integer primary key, v integer default $1)", "!params 35", "alter table q add column c integer default $1",
+                                                      "!params 35", "create index qi on q (v) where k = $1", "!params 35", "create sequence sq start $1", "select count(*) from q"])
+        want = ["ok CREATE 0", "refused unterminated", "refused reserved-word", "refused unknown-column", "refused subquery", "refused unknown-construct", "refused unknown-construct", "refused engine-unsupported", "refused syntax", "ok SELECT 1"]
+        if [h for h in heads(out) if h and not h.startswith("params")] != want:
+            raise SystemExit("engine_check: the tags of refusals are %s" % heads(out))
         # text that is not UTF-8 is refused (PostgreSQL would not take it either), and the engine goes on
         r = subprocess.run([EXE, path], input=b"create table u8 (k integer primary key, s text)\ninsert into u8 values (1, '\xff\xfe')\ninsert into u8 values (2, 'a\xc3')\ninsert into u8 values (3, '\xc3\xb1')\nselect k from u8\n", capture_output=True)
         heads = [b.split(b"\n")[0] for b in r.stdout.split(b"\n.\n")]
@@ -1880,15 +2012,8 @@ def erasure():
             raise SystemExit("engine_check: text that is not UTF-8: %s" % heads)
 
 
-def main():
-    admin("drop database if exists %s" % DB)
-    r = admin("create database %s encoding 'UTF8' lc_collate 'C' lc_ctype 'C' template template0" % DB)
-    if r.returncode != 0:
-        raise SystemExit("engine_check: " + r.stderr)
-    pg = Pg(DB)
-    version = pg.query("show server_version")[2][0][0].decode().split()[0]
-    PGMAJOR[0] = int(version.split(".")[0])
-    rng = random.Random(SEED)
+def generate(rng, n, params=True):
+    """A random history of `n` statements, as (sql, how it is compared, the table it is about); `params`: some go with parameters, by the extended protocol."""
     g = Gen(rng)
     tables = {}
     stmts = []   # (sql, how, table name)
@@ -1898,7 +2023,7 @@ def main():
     spare = 0
     added = [0]
     open_txn = False
-    while len(stmts) < N:
+    while len(stmts) < n:
         # a transaction now and then: a few statements, then a commit or a rollback (and, rarely, one of those out of place)
         rt = rng.random()
         if not open_txn and rt < 0.03:
@@ -1948,12 +2073,24 @@ def main():
         else:
             sql, how = g.select()
             stmts.append((sql, how, g.t.name))
-        if stmts[-1][1] != "ddl" and rng.random() < 0.3:
+        if params and stmts[-1][1] != "ddl" and rng.random() < 0.3:
             stmts[-1] = (parametrise(rng, stmts[-1][0]),) + stmts[-1][1:]
+    if open_txn:
+        stmts.append(("commit", "ddl", "ta"))
+    return stmts
+
+
+def main():
+    admin("drop database if exists %s" % DB)
+    r = admin("create database %s encoding 'UTF8' lc_collate 'C' lc_ctype 'C' template template0" % DB)
+    if r.returncode != 0:
+        raise SystemExit("engine_check: " + r.stderr)
+    pg = Pg(DB)
+    version = pg.query("show server_version")[2][0][0].decode().split()[0]
+    PGMAJOR[0] = int(version.split(".")[0])
+    stmts = generate(random.Random(SEED), N)
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "engine.db")
-        if open_txn:
-            stmts.append(("commit", "ddl", "ta"))
         # the two processes part where no transaction is open
         half = len(stmts) // 2
         inside = False
@@ -1973,7 +2110,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (f[ksonmrcef]\d?|fq2)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (frn\d?|ffv|ftr|fid\d*|f[ksonmrcef]\d?|fq2)\b", sql)
         if m:
             return m.group(1)
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")

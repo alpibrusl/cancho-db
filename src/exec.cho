@@ -1259,13 +1259,12 @@ pub fn salted[&q, &v](w: &!q Work, v: &v [byte]) -> [] int {
 }
 
 // Store the row `v` at the key `k`. `how` 0: a new row (a new key salt and a new row salt); 1: the row last read, changed (`old`: what it was; its key salt stays, its row salt is
-// new); 2: the row last read, written again as part of a change of its table's definition (its salts stay). The new root, or an error.
+// new); 3: the row last read, written again as a row of its table under another name (6ar): what it was is kept as for 1, and both its salts are new. The new root, or an
+// error.
 pub fn row_put[&q, &z, &k, &v, &o](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int, v: &v [byte], old: &o [byte], how: int) -> [file_read, file_write] int {
-    if how == 2 {
-        copy(contents(w.salts), 0, 32, contents(w.nsalts), 0);
-    } else if !w.seeded {
+    if !w.seeded {
         return no_entropy();
-    } else if how == 0 {
+    } else if how == 0 || how == 3 {
         salt(w, 0);
         salt(w, 16);
     } else {
@@ -1556,6 +1555,11 @@ pub fn passes[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int], wpos: int)
 
 // Record a change of the bound table: the row `old` (if `has_old`) became the row `new` (if `has_new`). 0, or `too_big()`.
 pub fn change[&q, &o, &n](w: &!q Work, old: &o [byte], has_old: bool, new: &n [byte], has_new: bool) -> [] int {
+    return change_def(w, old, has_old, new, has_new, 0);
+}
+
+// The same, where the table's definition changes with the row (docs/m3-engine.md 6ai): `new` is a row of the definition of `ndl` bytes in `ent` (0: of the bound table's, as `old` is).
+pub fn change_def[&q, &o, &n](w: &!q Work, old: &o [byte], has_old: bool, new: &n [byte], has_new: bool, ndl: int) -> [] int {
     var at = w.cfill;
     let nl = w.nlen;
     let dl = w.dlen;
@@ -1593,7 +1597,12 @@ pub fn change[&q, &o, &n](w: &!q Work, old: &o [byte], has_old: bool, new: &n [b
         return too_big();
     }
     if has_new {
-        let il = row.image(contents(w.ctx)[64..64 + dl], new, contents(w.chg)[at + 4..rows_size()]);
+        var il = 0;
+        if ndl > 0 {
+            il = row.image(contents(w.ent)[6..6 + ndl], new, contents(w.chg)[at + 4..rows_size()]);
+        } else {
+            il = row.image(contents(w.ctx)[64..64 + dl], new, contents(w.chg)[at + 4..rows_size()]);
+        }
         if il < 0 {
             return too_big();
         }

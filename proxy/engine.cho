@@ -1,0 +1,255 @@
+edition 9;
+
+import std.io;
+import cdb.pager;
+import cdb.pstore;
+import cdb.exec;
+import cdb.drive;
+import cdb.wire;
+import cdb.serve;
+
+// The engine's server (docs/m3-engine.md 6al): PostgreSQL's protocol in front of the engine, with no PostgreSQL behind it.
+//
+//     engine PAGEFILE PORT [KEYFILE [IDLE_MS WRITE_MS]]
+//
+// Up to 16 connections, from this machine only; no login. KEYFILE: 64 hexadecimal digits, the seed of the key that signs the log; with it every commit that changed rows is
+// recorded in the page file with what it wrote (docs/m3-engine.md 6as), without it nothing is recorded. IDLE_MS: how long a transaction may idle while another connection waits for it (default 30000); WRITE_MS:
+// how long a client may take none of its answer (default 10000). It writes `listening` to standard error when it is, and ends when the listener fails or the page
+// file cannot be committed. Status 2: usage; 3: the file or the port cannot be opened; 5: the page file is not a database; 7: a commit of the page file failed.
+
+fn hexval(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0 - 1;
+}
+
+fn number_of[&t](text: &t [byte]) -> [] int {
+    var v = 0;
+    var i = 0;
+    if len(text) == 0 || len(text) > 5 {
+        return 0 - 1;
+    }
+    while i < len(text) {
+        let c = int_of(text[i]);
+        if c < '0' || c > '9' {
+            return 0 - 1;
+        }
+        v = v * 10 + c - '0';
+        i = i + 1;
+    }
+    return v;
+}
+
+fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y](heap: &!h Heap, io: &!o Io, net: &n Net(""), clk: &k Clock, port: int, idle_ms: int, write_ms: int, key: &y [byte], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub) -> [heap, err_write, net_in(""), conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
+    var roots = box_slice(heap, 16, 0);
+    var globals = box_slice(heap, serve.globals(), 0);
+    var states = box_slice(heap, serve.stride() * serve.max_clients(), 0);
+    var inb = box_slice(heap, serve.in_size() * serve.max_clients(), byte_of(0));
+    var outb = box_slice(heap, 1048576, byte_of(0));
+    var arena = box_slice(heap, serve.arena_size() * serve.max_clients(), byte_of(0));
+    var index = box_slice(heap, serve.index_size() * serve.max_clients(), 0);
+    var status = 0;
+    borrow mut roots as &!rw in {
+        borrow mut globals as &!gw in {
+            let rs = contents(rw);
+            let gs = contents(gw);
+            var seq = pstore.load(pg, exec.scratch(w), rs);
+            if seq == pstore.no_database() {
+                seq = pstore.init(pg, exec.scratch(w));
+            }
+            if seq < 0 {
+                status = 5;
+            } else {
+                gs[serve.g_seq()] = seq;
+                gs[serve.g_idle_ms()] = idle_ms;
+                gs[serve.g_write_ms()] = write_ms;
+                if len(key) == 32 {
+                    gs[serve.g_logs()] = 1;
+                    var kk = 0;
+                    while kk < 32 {
+                        gs[serve.g_key() + kk] = int_of(key[kk]);
+                        kk = kk + 1;
+                    }
+                }
+                match tcp_listen(net, port, 64, 0) {
+                    Listening::Ok(l) => {
+                        var listener = l;
+                        borrow mut listener as &!lh in {
+                            listener_nonblocking(lh);
+                            io.error_all(io, "listening\n");
+                            if len(key) != 32 {
+                                io.error_all(io, "engine: no key file was named: commits are not recorded in the log\n");
+                            }
+                            borrow mut states as &!sw in {
+                                borrow mut inb as &!ib in {
+                                    borrow mut outb as &!ob in {
+                                        borrow mut arena as &!ab in {
+                                            borrow mut index as &!xb in {
+                                                status = serve.run(heap, lh, clk, pg, w, sub, contents(ib), contents(ob), rs, gs, contents(sw), contents(ab), contents(xb));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        listener_close(listener);
+                    }
+                    Listening::Failed(e) => {
+                        status = 3;
+                    }
+                }
+            }
+        }
+    }
+    unbox_slice(heap, roots);
+    unbox_slice(heap, globals);
+    unbox_slice(heap, states);
+    unbox_slice(heap, inb);
+    unbox_slice(heap, outb);
+    unbox_slice(heap, arena);
+    unbox_slice(heap, index);
+    return status;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(tty);
+    release(ffi);
+    release(signals);
+    release(exec);
+    var status = 2;
+    borrow fs as &fsr in {
+        borrow args as &g in {
+            var idle_ms = 30000;
+            var write_ms = 10000;
+            if arg_count(g) == 6 {
+                idle_ms = number_of(arg(g, 4));
+                write_ms = number_of(arg(g, 5));
+            }
+            // the seed of the signing key: 64 hexadecimal digits in a file (6as); a file named that is not that is a refusal to start, not a server that does not log
+            var keyed = 0;
+            region kr {
+                let kb = alloc_slice[kr](80, byte_of(0));
+                let keyseed = alloc_slice[kr](32, byte_of(0));
+                if arg_count(g) >= 4 {
+                    keyed = 0 - 1;
+                    match open_read(fsr, arg(g, 3)) {
+                        Opened::Ok(kf) => {
+                            var kfile = kf;
+                            borrow mut kfile as &!kw in {
+                                match file_read(kw, kb) {
+                                    Read::Got(n) => {
+                                        var ok = n >= 64 && n <= 66;
+                                        var i = 0;
+                                        while i < 32 && ok {
+                                            let hi = hexval(int_of(kb[2 * i]));
+                                            let lo = hexval(int_of(kb[2 * i + 1]));
+                                            ok = hi >= 0 && lo >= 0;
+                                            keyseed[i] = byte_of((hi * 16 + lo) % 256);
+                                            i = i + 1;
+                                        }
+                                        if ok {
+                                            keyed = 1;
+                                        }
+                                    }
+                                    Read::End => {
+                                    }
+                                    Read::Failed(e) => {
+                                    }
+                                }
+                            }
+                            file_close(kfile);
+                        }
+                        Opened::Failed(e) => {
+                        }
+                    }
+                }
+                if (arg_count(g) == 3 || arg_count(g) == 4 || arg_count(g) == 6) && number_of(arg(g, 2)) > 0 && number_of(arg(g, 2)) < 65536 && idle_ms > 0 && write_ms > 0 && keyed >= 0 {
+                    status = 3;
+                    match open_new(fsr, arg(g, 1)) {
+                        Opened::Ok(nf) => {
+                            file_close(nf);
+                        }
+                        Opened::Failed(e) => {
+                        }
+                    }
+                    match open_rw(fsr, arg(g, 1)) {
+                        Opened::Failed(e) => {
+                        }
+                        Opened::Ok(rf) => {
+                            var f = rf;
+                            var size = 0;
+                            borrow mut f as &!fw in {
+                                match file_size(fw) {
+                                    Done::Ok(n) => {
+                                        size = n;
+                                    }
+                                    Done::Failed(e) => {
+                                    }
+                                }
+                            }
+                            borrow mut heap as &!hh in {
+                                var pg = pager.new_pager(hh, f, size);
+                                var wk = exec.new_work(hh);
+                                var subs = drive.new(hh);
+                                var seeded = false;
+                                borrow mut wk as &!ww in {
+                                    // the seed of the salts (docs/m3-engine.md 6ag): 32 bytes from the system, kept nowhere. With none there is no server
+                                    region sr {
+                                        let sd = alloc_slice[sr](32, byte_of(0));
+                                        match open_read(fsr, "/dev/urandom") {
+                                            Opened::Ok(uf) => {
+                                                var u = uf;
+                                                borrow mut u as &!uw in {
+                                                    match file_read(uw, sd) {
+                                                        Read::Got(n) => {
+                                                            seeded = n == 32 && exec.seed(ww, sd);
+                                                        }
+                                                        Read::End => {
+                                                        }
+                                                        Read::Failed(e) => {
+                                                        }
+                                                    }
+                                                }
+                                                file_close(u);
+                                            }
+                                            Opened::Failed(e) => {
+                                            }
+                                        }
+                                    }
+                                    if seeded {
+                                        borrow mut io as &!oo in {
+                                            borrow mut pg as &!pp in {
+                                                borrow mut subs as &!sb in {
+                                                    borrow net as &nn in {
+                                                        borrow clock as &kk in {
+                                                            status = listen_on(hh, oo, nn, kk, number_of(arg(g, 2)), idle_ms, write_ms, keyseed[0..32 * keyed], pp, ww, sb);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                drive.free(hh, subs);
+                                exec.drop_work(hh, wk);
+                                pager.drop_pager(hh, pg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    release(fs);
+    release(args);
+    release(io);
+    release(heap);
+    release(net);
+    release(clock);
+    return status;
+}

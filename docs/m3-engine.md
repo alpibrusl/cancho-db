@@ -977,7 +977,7 @@ one the engine prints at each commit. So the engine's `changes` is checked again
 the engine's `changes` equals the reference's for every commit compared, statements of their own and transactions of several. 30 fixed statements for the netting (a row inserted
 and updated, updated and put back, inserted and deleted, deleted and inserted again, a key of two columns, two tables in one transaction, a rollback). 7 mutants.
 
-*What the test program still does itself:* it decides when a transaction's facts begin and end (as it decides which tree a transaction runs on, 6v). Those lines have no mutants.
+*What the test program still did itself:* it decided when a transaction's facts begin and end (as it decided which tree a transaction runs on, 6v). Those lines had no mutants *(they are `src/session.cho` since 6aj, with mutants)*.
 
 ## 6ag. J4, second part: salts, so that what is erased cannot be guessed back
 
@@ -1001,7 +1001,7 @@ with the process. A statement that writes with no seed given is refused (`engine
 *The cost.* 32 bytes a row, so the longest row is 748 bytes where it was 780. **A page file written before this change is not readable after it** (a row's first 32 bytes would be
 taken for salts): nothing was promised about page files, and none exists outside a test.
 
-*Not decided here:* `alter table ... add column` rewrites every row with its salts as they were and no fact, which is what PostgreSQL's capture does too (no trigger fires), and
+*Not decided here (decided in 6ai, which corrects this: the rewrite did leave the log unable to verify, and a column added now gives each row a new salt and a fact):* `alter table ... add column` rewrites every row with its salts as they were and no fact, which is what PostgreSQL's capture does too (no trigger fires), and
 leaves the next fact of each row starting from an image the log never committed to. That is a question for the log (what a change of definition is, there), not for the salts.
 
 **Test.** For every change the engine reports the three salts beside the key and the images. The differential (a) already holds the key and the images against PostgreSQL's; (b) now
@@ -1046,9 +1046,8 @@ follows, and replaying the facts from nothing gives exactly the rows the engine 
 
 *Not in this part, and pinned by the test as the refusals they are:*
 
-- **a column added** rewrites every row's image with no fact (6ag), so the next change of such a row is `replay-precondition`; **a table dropped** takes its rows with no fact,
-  so the end is `replay-final`. The log has no notion of a change of definition yet; until it has, a log of an engine whose tables were altered does not verify. This is the first
-  thing the log needs before it can be relied on;
+- *(corrected in 6ai)* as first built, **a column added** rewrote every row's image with no fact, so the next change of such a row was `replay-precondition`, and **a table
+  dropped** took its rows with no fact, so the end was `replay-final`; the test pinned both refusals. 6ai makes each a change of rows, and the pins are gone;
 - commits on a fork (no record is made off the first branch), the erasure of a row from the store (the store here is the test's, made of what the engine printed), statements
   that change no row (DDL, a sequence's value) which are in no commit;
 - **the log is not written by the engine.** The test program prints records and the test keeps them. A crash after a record was given out and before the page file's commit
@@ -1057,6 +1056,439 @@ follows, and replaying the facts from nothing gives exactly the rows the engine 
 **Built.** `facts.seal`, the table notes in `facts.take`, `tables.head_key`; `!log` and `!rows` in the test program. Measured: 12 seeds of 2,000 random statements (885 to 1,039
 commits and 3,018 to 4,332 changes each) and the fixed history: the log and all three verifiers `ok ... final`, every tampered file refused with its rule. 12 mutants, each
 killed by a verifier's own rule (`seq-gap`, `parent-count`, `bad-signature`, `state-mismatch`, `store-foreign-row`) or by a record the engine could no longer make.
+
+*Found after this was pushed, and corrected:* `tests/engine_crash.py` failed in about half its runs (6 of 12 here). It learns from one whole run at which durable step each commit
+ends and then stops other runs at every step; with the table notes in the facts' tree, a commit's facts no longer fit one page for its larger statements, and the tree, keyed
+by commitments, takes its pages in an order the salts decide. Two runs with different seeds wrote different pages at the same step number. The property the test checks (the
+tables after a crash are those of the last commit) was never violated; its bookkeeping was. The test program takes a seed on a line (`!seed`) and the crash test gives every run
+the same one: 12 of 12 runs pass.
+
+## 6ai. A column added and a table dropped are changes of rows
+
+6ah found that a log of the engine did not verify once a table had a column added (every row's image changes, and no fact said so) or was dropped (its rows are gone, and no
+fact said so). PostgreSQL's capture has the same hole: no row trigger fires for either. The engine does not need to inherit it.
+
+**Design.** Both are what they do to rows:
+
+- `alter table ... add column` writes every row of the table again with the new column's value. That is an update of each row: its key salt stays, **its row salt is new**,
+  and the statement reports the change from the image under the old definition to the image under the new one (`exec.change_def`), which is a fact of the commit. (6ag kept the
+  salts as they were; that is corrected there.) A consequence: with no seed to make salts of, a column added to a table that has rows is refused (`engine-no-entropy`);
+- `drop table` reports each row it removes as a row deleted.
+
+A table made again under a dropped one's name has other rows: new key salts, so other commitments. Nothing changes for a table with no rows, for `add column if not exists` of
+a column that is there, or for an index.
+
+*The cost* is the one an update of every row has: a fact a row, the 16 MiB a statement's changes may take (beyond it the statement is refused, as an update is).
+
+*Not in this part:* the definition itself. The log now tells every change of every row, so a replay ends at the rows there are; it does not say that a column was added or what
+its type is (a commit's schema hash is still zeros, 6ah).
+
+**Test.** The differential (`tests/engine_check.py`) treats both statements as writes: PostgreSQL's table is read before and after (`to_jsonb` of each row; after a drop, no
+rows), and the engine's reported changes must be exactly the difference, with the salts following each row's history and the commit's `changes` equal to the reference's over
+them, inside transactions too (a transaction with DDL in it was skipped by the facts' comparison before; it is not any more). `tests/engine_log.py` has both in its fixed
+history and its random one (a column added to the random table, the table dropped and made again), and the three verifiers must still say `ok ... final`.
+
+## 6aj. The session is the engine's, and tested as it is
+
+Since 6v the test program decided which tree a statement runs on and when a transaction's tree becomes the branch's; since 6af when the facts of a commit begin and end; since
+6ah when a commit is sealed. Each of those sections ended with the same sentence: *those lines have no mutants*. They were about 130 lines of the test program, and a server
+would have had to write them again.
+
+**Design.** `src/session.cho` holds a session's state (idle, in a transaction, in one that has failed; the transaction's tree; its facts) and two functions the driver calls
+around every statement:
+
+- `open`: the tree the statement runs on (the branch's, or the open transaction's), the number its writes take, whether a key written twice keeps its first record (6n);
+- `close`: given what running the statement gave (a tree, or that it was `begin`, `commit` or `rollback`) and whether it failed. Outside a transaction a statement that wrote
+  is a commit: its facts are taken, its number marked, the commit sealed. Inside one the statement's tree becomes the transaction's and its facts are folded into the
+  transaction's; `commit` marks, seals and hands the tree to the branch; `rollback`, or the `commit` of a transaction that failed, gives back what was drawn from counters (6y)
+  and nothing else. It leaves what the driver answers with: the command, the facts to show, the record.
+
+The driver keeps what is its own: reading a statement, running it (`run_sql`), writing answers. The test program is that driver, and is 102 lines shorter.
+
+*Not moved:* a branch other than the first, `AS OF` a point, and erasing are still chosen by the test program's own commands; the seed of the salts and the signing key are
+still handed over by it. A server will have to decide where each comes from.
+
+**Test.** Nothing new is claimed: every test that ran through the test program's lines runs through `session` (the differential's transactions, C165; the facts, C175; the
+log, C177). What is new is that a fault in those decisions is now caught: 20 mutants in `src/session.cho` judged by the differential and 1 by the log's verifiers.
+
+## 6ak. Running a statement is the engine's too
+
+After 6ae (the text pass) and 6aj (the session), what the test program still did itself was the middle: read a statement, lower it, decide which of the engine's functions runs
+it (a SELECT, a write, a write with RETURNING and its two reads, a table made or dropped, a sequence, an erase), and turn what came back into "answered", "an error with this
+code" or "refused with this tag". 250 lines, none with a mutant, and all of it what a server does for every message.
+
+**Design.** `drive.run` (`src/drive.cho`) does that for one statement over one tree and leaves how it went in a `Run`: the outcome (answered; refused where it was read, where
+it was lowered, or by the engine, each with its tag; an error with its SQLSTATE; or `begin`, `commit`, `rollback`, which are the session's to answer), the statement's kind,
+whether the answer has rows, and the names of its columns. The rows and the changes stay where they were (`exec`). The driver's part is what is left: the bytes in and the
+bytes out. The test program writes the answer as lines for a test to read; a server will write PostgreSQL's messages from the same `Run` (`src/answer.cho`, C164).
+
+*One check was found dead and removed.* The test program refused a statement that is not a query if it had parameters bound. With the check gone, every such statement is
+still refused: a parameter in a default or in a sequence's start is refused where the statement is lowered or read (`unknown-construct`, `syntax`), one in an index's
+condition by the index (`engine-unsupported`), one bound and not named by `params_fit`. The test now pins those tags, so the day a form of DDL takes a parameter it is seen.
+
+**Test.** As for 6aj, nothing new is claimed and every test runs through the moved code. 13 mutants in `drive.run`; they needed two new cases: a sequence made on a tree
+read `AS OF` (refused), and the exact tag of a refusal at each stage (the lexer's, the parser's, the lowering's, the engine's).
+
+*The test program is now 874 lines where it was 1,155 before 6aj.* What it still decides: which branch, which point `AS OF`, when to commit the page file, and the lines
+of its own protocol.
+
+## 6al. A server: PostgreSQL's protocol in front of the engine, first part
+
+Until here the engine was reached by a test program that reads lines. This is the first program a PostgreSQL client can connect to with no PostgreSQL behind it.
+
+**Scope of this part, deliberately small:** one connection at a time, the simple query protocol, no authentication, no log written. Each of the four is its own later part and
+is listed below as what it is.
+
+**Design.** `build/engine PAGEFILE PORT` (`proxy/engine.cho`) listens on a port and serves one connection to its end, then the next.
+
+- *Who may connect.* A client from this machine (the loopback addresses), as for the proxy; any other is closed unread. **There is no login**: a startup message is answered
+  `AuthenticationOk` whatever user it names. The proxy's token login (`src/login.cho`) is the next part; until then the server is for a test and a developer's own machine.
+- *Startup.* An `SSLRequest` or `GSSENCRequest` is answered `N` (no TLS: loopback only). A startup of protocol 3.0 is answered `AuthenticationOk`, the parameters a client
+  reads (`server_version`, `server_encoding` and `client_encoding` `UTF8`, `DateStyle`, `integer_datetimes`, `standard_conforming_strings`), `BackendKeyData` and
+  `ReadyForQuery`. A cancel request is closed: nothing runs long enough to cancel.
+- *A query* (`Q`) is one statement. The server does what the test program does and nothing else: `session.open`, `drive.prepare`, `drive.run`, `session.close` (6ae, 6aj,
+  6ak). The answer is written from the `Run` and the rows where they are: `RowDescription` (each column's name and type; no table or column number, the engine has none to
+  give that a client could use), a `DataRow` per row in text, `CommandComplete` with the tag (C164); or `ErrorResponse` with the SQLSTATE the engine gave; then
+  `ReadyForQuery` with the session's state (`I`, `T`, `E`). An empty query is `EmptyQueryResponse`.
+- *A refusal is an error a client can tell from PostgreSQL's:* SQLSTATE `0A000` (feature not supported) and the message `cancho-db: refused <tag>`, the tag being the rule
+  that refused. In a transaction it fails the transaction, as any error does (6v).
+- *Durable before acknowledged.* When a statement left a commit (a statement of its own that wrote, or `commit`), the page file is committed (`pstore.commit`: the write and
+  the `fsync` of the superblock) **before** `CommandComplete` is sent. If that fails the client is told `58030` and the server stops; it does not go on over a file it could
+  not write.
+- *A connection that ends inside a transaction* rolls it back.
+- *The extended protocol* (`Parse`, `Bind`, ...) is refused, properly: one `ErrorResponse` (`0A000`, `extended-protocol`), everything up to `Sync` skipped, `ReadyForQuery`
+  at `Sync`. `Terminate` ends the connection. Any other message type, a length under 4 or over 16 MiB ends the connection with an error: there is no way to find the next
+  message after it. *(Corrected in 6aq: a message is at most 1 MiB, and a longer one is refused and read past; only a length under 4 and an unknown type end the connection.)*
+
+`src/wire.cho` holds the messages (pure: bytes into a buffer), so that they have mutants; the program holds the socket.
+
+*Not in this part:* **the extended protocol**, which is what `cancho-pg` and so `cancho-hooks` speak for every statement with a parameter (the engine already runs those,
+6w; the server cannot be sent them yet). **The log**: the server commits the page file and writes no log, so nothing it does can be verified yet (6ah made the records; where
+they are written, and in what order with the page file, is not designed). **Authentication. More than one connection** (a second client waits until the first is gone).
+`AS OF`, forks and erasure, which the test program reaches by its own commands and SQL has no form for yet.
+
+**Test** (`tests/engine_wire.py`; no PostgreSQL). The oracle is the test program, whose answers are held against PostgreSQL's for the same statements (C150, C164): a history
+from the differential's own generator is run through the test program and, over a socket, through the server; for every statement the two must agree on the outcome (the
+tag and count, or the SQLSTATE, or the refusal's tag), the column names and type oids, every row's text, and the transaction's state. Then the server is stopped and the
+test program opens **the server's page file**: every table must hold what the test program's own file holds. And: the server is killed (`SIGKILL`) after an acknowledged
+commit and the rows are there on restart; a connection dropped inside a transaction leaves nothing of it; `psql` (a client this project did not write) runs a script
+against it and against PostgreSQL and must print the same (skipped, and said so, where no PostgreSQL is at hand; the gate has one); the extended protocol is refused and
+the connection goes on; garbage (random bytes, a huge length, a half message and a close) never stops the server.
+
+**Built.** `src/wire.cho` (the messages), `src/serve.cho` (one connection: startup, a statement at a time, the commit before the answer, the rollback at the end),
+`proxy/engine.cho` (the listener and the page file; 192 lines). Measured, 3 seeds: 2,031 statements each (570 fixed, 1,461 random) answered by the server as by the test
+program (for seed 1: 722 commands, 555 answers with rows, 449 errors, 305 refusals), and the server's page file read by the test program as its own, 20 tables. A run takes
+17 to 22 s here, every write committed to the disk before its answer (500 single-row inserts: about 0.5 s on this machine's disk, which is a sandbox's). `psql` 16 prints the same 54 lines for a script of 15 statements against the server and against
+PostgreSQL 16.15. 54 kinds of garbage; the server answers the next connection after each.
+
+*Found while testing, and corrected:*
+
+- the design said a client that sends more than its startup before it is answered is closed. It was closed without a word, and nothing is wrong with such a client: what
+  follows the startup is now kept and read as the messages it is;
+- a connection that ended inside a transaction was rolled back twice over (the session was also reset when the next connection began), and the reset hid that the rollback
+  could fail unseen. The reset is gone; a rollback that cannot be done stops the server rather than hand one client's transaction to the next;
+- **a select of one row took 44 ms.** The first version wrote the row's description to the socket, then the row, then the end: three small writes, and the second waits
+  for the client to acknowledge the first (500 selects: 22 s; 500 inserts, whose answer is one message: 0.5 s). The differential did not see it, because it asks nothing
+  about time. An answer is now written in as few writes as the buffer allows (500 selects: 0.07 s; an answer of 30,000 rows and 2.4 MB, larger than the buffer, arrives whole
+  in 0.05 s), and the test has both the large answer and a floor for the speed. Turning off the socket's delay as well changed nothing measurable, so it is not done;
+- what the test did not see until a mutant survived: a message arriving in two pieces, a value drawn from a counter in a transaction the connection took with it (it stays
+  drawn), the server closing its side at `Terminate`, a second refused batch of the extended protocol, and that the server says why (`08P01`) before it closes on a message
+  it cannot read past.
+
+31 mutants (16 of the messages, 15 of the connection), each built into a server of its own and judged by this test.
+
+*What the test cannot reach:* the page file failing under the server (`58030` and the stop): there is no way to make it fail from outside. The crash test (C156) covers the
+page file's own behaviour at every step; the server's two lines around it are read, not run.
+
+## 6am. The server, second part: the extended protocol, as `cancho-pg` speaks it
+
+`cancho-pg` (`src/pg.cho`, read at its commit of this date) sends four shapes, and `cancho-hooks` reaches the database through three of them:
+
+| | what is sent | what PostgreSQL answers |
+|---|---|---|
+| a statement with values (`execute`) | `Parse` (unnamed, no types), `Bind` (text), `Describe` the portal, `Execute`, `Sync` | `1 2 T D.. C Z`, or `1 2 n C Z` with no rows |
+| prepare under a name (`parse_named`) | `Parse` (named), `Sync` | `1 Z` |
+| run a prepared one (`bind_named`) | `Bind` (text), `Execute`, `Sync` | `2 D.. C Z` |
+| ask what a statement takes and gives (`describe`) | `Parse`, `Describe` the statement, `Sync` | `1 t T Z` |
+
+The engine already runs a statement with values bound as text and no types given (6w, C166): that is exactly what the first and third send. So this part is the protocol
+around it, not the engine.
+
+**Design.**
+
+- *`Parse`* keeps the statement's text under its name (the unnamed one is replaced by the next; a name twice is `42P05`) and reads none of it: **what PostgreSQL finds at
+  `Parse`** (a syntax error, a table that is not there, a type that does not fit) **the engine finds when it runs the statement, and says then.** A client that prepares
+  its statements when it connects, to learn early that one is wrong, learns it at the first use instead. (The text pass of 6ae rewrites some statements before they are
+  read, with the values in hand; reading the text at `Parse` would refuse statements the engine runs.) Parameter types given by the client are refused unless they are all
+  0 ("infer"), which is what `cancho-pg` sends.
+- *`Bind`* keeps the values (text only: a binary format is refused; at most 64 values and 64 KiB, the engine's limit of 6w) for the unnamed portal (a named portal is
+  refused). A statement that was never prepared is `26000`.
+- *`Describe` of the portal* sends nothing yet: the columns are known when the statement has run. *`Execute`* runs it, through the same code a simple query goes through
+  (`session`, `drive`), and then sends the description if one was asked for (`RowDescription`, or `NoData` for a command with no rows), the rows, and `CommandComplete`.
+  **For a statement that succeeds the bytes are in PostgreSQL's order** (the description and the rows are next to each other either way). For one that fails at run
+  time, PostgreSQL has already sent the description and the engine has not; a client that reads to `ReadyForQuery`, as `cancho-pg` does, sees the error either way. A client
+  that asks for the description and waits for it before `Execute` (a `Flush` between them) would wait for ever, so that `Flush` is refused (`describe-before-execute`).
+- *One `Execute` to a `Sync` outside a transaction.* PostgreSQL runs everything up to a `Sync` as one transaction; the engine commits each statement. So a second
+  `Execute` before the `Sync` is refused (`pipeline`) unless a transaction is open, rather than answered with a different meaning.
+- *`Execute` with a row limit* is refused (`row-limit`: a portal is not kept half read). *`Describe` of a statement* is refused (`describe-statement`): the types of the
+  parameters are not known before values are bound (6w). That is the fourth shape, which `cancho-pg`'s generator of typed code uses at build time; it needs a PostgreSQL.
+- *`Close`* forgets a statement or the portal. *`Sync`* answers `ReadyForQuery` and ends what an error started: after any error everything up to the `Sync` is skipped, as
+  the protocol says.
+- A simple query drops the unnamed statement and the portal, as in PostgreSQL.
+- *Answers leave when the server next waits for the client*, not message by message: the five answers to a batch are one write (6al found what three writes cost).
+
+A connection holds at most 64 named statements and 1 MiB of their text *(3 MiB as first built; 6aq gives each of 16 connections its own)*, and a statement prepared is at
+most 1 MiB; more is refused (`53200`, `54000`), not truncated.
+
+**Test** (`tests/engine_wire.py`). The differential now sends the generator's statements with parameters (about a third of the writes and reads) by the first shape, and
+holds the answer against the test program's for the same statement and values, and the order of the messages against the table above. Then: statements prepared by name
+and run by name several times with other values, against the test program; a name twice, a name never prepared, a statement closed and prepared again; each refusal above
+with its tag; an error in a batch skips to the `Sync` and the next batch is answered; a transaction opened by a simple `begin` and written to by prepared statements.
+And **`cancho-pg` itself**: a program written with it (its own example, built from its repository beside this one) logs in to the server, creates a table, writes and reads
+with parameters, and prints what it prints against PostgreSQL. That step needs the repository and is skipped, and says so, where it is not there.
+
+**Built.** The handlers in `src/serve.cho` (`parse_message`, `bind_message`, `describe_message`, `execute_message`, `close_message`; `answer` is the one path a simple query
+and an `Execute` both take), four readers in `src/wire.cho`. Measured, 3 seeds: 2,070 statements each, 360 to 369 of them with parameters by the extended protocol, answered
+by the server as by the test program, the messages in the order of the table above. `cancho-pg`'s example client (`examples/psql.cho` at its commit `2068e4e`, built here)
+prints the same 34 lines for 13 statements (inserts, selects, an update and a delete with values bound, `returning`, a null, a value with a quote and a semicolon in it, a
+duplicate key) against the server and against PostgreSQL 16.15, an error compared by its SQLSTATE. **The gate does not have `cancho-pg`'s repository, so that step is
+measured here and skipped there.**
+
+29 mutants added to the group `wire` (60 now: 18 of the messages, 42 of the connection), all killed; they needed five more cases (an error at an `Execute` followed by
+another, the unnamed statement and the portal closed, a portal whose statement was replaced, a closed statement's place taken again).
+
+*Found while building:* a closed statement's place was not used again, so a client that prepares and closes would have been refused at its 65th statement whatever it had
+closed; places are reused now (the text is not: 1 MiB of statements ever prepared on a connection, 3 MiB before 6aq, then `53200`).
+
+*Not in this part:* `Describe` of a statement (so `cancho-pg`'s code generator cannot be pointed at the engine); binary values; named portals and row limits; more than one
+`Execute` to a `Sync` outside a transaction. Each is refused with a tag, and the test pins each. **`cancho-hooks` itself has not been run against the server**: its queries
+are answered by the engine (14 of 16, C167) and its driver's messages are served, but a program is more than its queries (what it does at connect, in what order, under
+what timeouts), and that is the next thing to measure, not to assume.
+
+## 6an. `cancho-hooks`, the program, on the engine: a first measurement
+
+6w made `cancho-hooks` the first user and counted how many of its statements the engine answers. 6am ended on the sentence that a program is more than its queries. This
+section is the measurement, made as soon as there was a server to make it against, and nothing is built in it.
+
+**What was run** (`tests/hooks_server.py`). `cancho-hooks` at its commit `40b2ce0`, built from its repository with its own script (`scripts/build.sh --pure`, with this
+compiler rather than the one it pins), started with `--pg-host` at `build/engine` and nothing else changed. Its schema applied with `psql`, one endpoint in its table, a
+receiver for it to deliver to, 12 events posted.
+
+**What happened.** The service read its endpoint from the engine and said it was ready; delivered the 12 events; wrote 12 rows of its attempt history through the engine
+(`hooks_history_rows_total{result="written"} 12`, none failed, none dropped); answered `GET /events/:id/attempts` for each from the engine; and after it was stopped the 12
+rows were read from the engine with `psql`. **No PostgreSQL was running.**
+
+**What it also showed, which is the point of measuring:**
+
+- **"1 of 2 connections live."** The service opens two connections; the server takes one at a time (6al), so the second waited for the whole run. The service went on
+  with one, as it is built to. Anything that needs the second (a request while the first is busy) was not exercised;
+- **hooks' own test of this feature does not run.** `tests/history_test.py` of its repository, pointed at the engine, stops at its first step: it empties its table with
+  `truncate attempts`, which the engine refuses (`unsupported-statement`). Past that it reads the tables with `psql` *while the service is connected*, which one
+  connection at a time cannot serve. So: `truncate`, then more than one connection, then whatever the 11 scenarios of that test find. Its scenarios (a database that goes
+  away, that never answers, that answers with an error) are about the service, but each needs the server to behave as PostgreSQL does when cut off or slow, and none of
+  that has been tried;
+- the two queries the engine does not answer (C167: deleting an endpoint, pruning old attempts) were not reached by 12 deliveries. The service prepares them when it
+  connects, and the server says nothing at `Parse` (6am); it will refuse them the first time they are run.
+
+*So the honest state is:* a `cancho-hooks` that only delivers and records runs on the engine today, on one connection, with nothing it does verifiable (no log, 6al) and
+no login. It is a demonstration, not a deployment. The order of work this measurement gives: more than one connection, `truncate`, hooks' own tests as the gate for
+"hooks runs on the engine", then the log and the login.
+
+*The gate skips this test:* it needs a `cancho-hooks` binary (`HOOKS_BIN`), and the gate does not build one. It is measured on a developer's machine, as C180's step
+with `cancho-pg`'s client is.
+
+## 6ao. `truncate`
+
+The first thing `cancho-hooks`' own test asks of its database (6an). Small, and the engine had everything for it.
+
+**Design.** `truncate [table] NAME`, one table, none of the options (several tables, `restart identity`, `cascade`: refused, `unsupported-statement`). Every row of the
+table is removed and is a row deleted: a change the statement reports and a fact of the commit, as for a table dropped (6ai). The table stays, with its indexes and its
+definition, and **its counter goes on from where it was**, which is PostgreSQL's default (`continue identity`). In a transaction it is taken back by a rollback like any
+write. Behind PostgreSQL's capture a `truncate` fires no row trigger and tells the log nothing; here it does.
+
+It is one of the engine's own forms (no IR; the guard refuses it behind PostgreSQL, as it refuses `create sequence`), refused on a tree read `AS OF` and with parameters.
+
+**Test.** The differential's generator truncates a table now and then, and the fixed statements have it alone, with `table`, on a table that is not there (`42P01`), in a
+transaction rolled back and in one committed, and before an insert that must draw the next value of the counter, not the first. As for a table dropped, the rows the
+engine reports are held against PostgreSQL's table read before and after, and the commit's `changes` against the reference's. The three options are pinned as refused.
+`tests/engine_log.py` has it in both histories. 20 seeds of 3,000 statements; 6 mutants; 6 cases of the statement test.
+
+## 6ap. An insert with fewer values than the table has columns
+
+The second thing `cancho-hooks`' own test asks (6an): `insert into endpoints values (0, '127.0.0.1', 9100, '...')` into a table of more columns. The lowering refused it
+(`syntax`): with no columns listed it wanted a value for every column. That was a limit of the lowering since M2, written down and never lifted, and it held for the proxy
+too: a statement PostgreSQL accepts was refused before it reached PostgreSQL.
+
+**Design.** With no columns listed, the values of a row are for the table's first columns, as many as the row has; the others take their defaults, exactly as if those
+first columns had been listed (the IR says so: it lists them). More values than the table has columns, and rows of different lengths, stay refused (`syntax`; PostgreSQL:
+`42601`). Nothing else changes: a column with no value and no default that takes no null is `23502`, as it is when columns are listed.
+
+**Test.** The differential's fixed statements have it with one value fewer, with only the key, with every value, with `returning` and with `on conflict`, and the two
+refusals pinned against PostgreSQL's `42601`. The lowering's hand-written cases have the IR of two such statements byte for byte (one was the pinned refusal). 2 mutants.
+
+## 6aq. The server, third part: more than one connection
+
+6an measured it: `cancho-hooks` opens two connections and got one, and its own test reads the tables with `psql` while the service is connected. One connection at a time
+(6al) was the scope of a first part, not a design.
+
+**Design.** Still one process and one thread: the engine runs one statement at a time, and nothing here changes that. What changes is that the server no longer waits on one
+client. It waits on all of them (a poller over the listener and every connection), reads what each has sent as it comes, and runs a statement when its message is whole.
+
+- *Up to 16 connections*, each with its own buffer for what it sends (1 MiB), its own session (6aj) and its own prepared statements (6am). The 17th is told `53300` and
+  closed. A message longer than the buffer is not the end of a connection any more: it is read past and refused (`54000`, `statement-too-long`), which is what the first
+  part could not do. *(The first part took a message of 16 MiB. The engine never ran a statement near that: the longest row is 748 bytes and a statement's values 64 KiB
+  with parameters. 1 MiB a connection is what 16 connections can be given without the server holding a quarter of a gigabyte for buffers nobody fills.)*
+- *Statements outside a transaction* run in the order their last byte arrives, each its own commit, each on the disk before its answer (6al). Two clients never see half
+  of one.
+- **A transaction has the database to itself.** A transaction's statements build on a tree of their own that becomes the branch's at `commit` (6v). Two of them open at
+  once would each start from the same tree, and the second to commit would undo the first: a lost update, silently. The engine has no row locks and no way to merge two
+  trees, so the server does the one thing that is certainly right: while a connection is in a transaction, **what the other connections send waits** (unread past its
+  buffer, unanswered) until that transaction ends. Every history the server produces is then one a single client could have produced, which is also one PostgreSQL could
+  have produced; what PostgreSQL would have run side by side runs one after the other.
+  - The cost is the obvious one, and it is stated as a limit: a client that says `begin` and goes quiet stops everyone. So a transaction that has been idle for 30 s while
+    another connection waits is ended by the server: its connection is told `25P03` (PostgreSQL's code for exactly this, `idle_in_transaction_session_timeout`) and
+    closed, its transaction rolled back. With nobody waiting, a transaction may idle as long as it likes.
+  - Reads by the others wait too. They could be answered from the branch's tree as it stands (it is what is committed), and are not, yet: one rule first.
+- *Fairness:* each pass over the connections runs at most one statement of each, in turn, starting after the one that was first the pass before.
+- *Writing an answer* is the one place the server still waits on a single client: an answer is written to its connection before the next statement of anyone runs, and a
+  client that does not take it stops the others while it does not. After 10 s of a client taking nothing, its connection is closed. An answer of any size to a client
+  that reads costs the others only the time it takes to send.
+- A connection that ends, however it ends, gives back what it held: its transaction is rolled back (6al), the wait of the others ends, its place is free.
+
+*Not in this part:* more than one statement at a time (there is one engine, one page file, one thread; this part is about not making clients queue for a connection, not
+about speed); reads beside a transaction; a limit on what one address may open; the log, the login.
+
+**Test** (`tests/engine_wire.py`). Everything the first two parts test, unchanged, on the new loop. Then, with several clients: statements of two connections interleaved,
+each answered and all of it there at the end; a second client served while the first sits idle (the thing 6al could not do); a client in a transaction and another that
+writes: the second's answer comes only after the first commits, and both writes are there, in that order; the same with a rollback; the same when the first disconnects
+instead; a transaction idle for the limit while another waits is ended with `25P03` and the waiter is served, and one idle with nobody waiting is not; a 17th connection
+is told `53300` and the 16 go on; a message over 1 MiB is refused and the connection goes on; a client that sends a query and never reads is dropped after the limit and
+the others are served; many clients at once, each with its own table, against the test program's answers for the same statements. And `cancho-hooks` again (6an): both of
+its connections live.
+
+**Built.** `serve.run` (the loop), `step` (a connection's next unit of work), `accept_all`, `receive`, `finish`, `push` (`src/serve.cho`); the program allocates what 16
+connections hold (about 52 MiB) and takes the two limits as arguments, so that a test does not wait 30 s. The handlers of 6al and 6am are unchanged but for where their
+bytes go. Measured: the differential of 6al and 6am (3 seeds, 2,070 statements each) unchanged on the new loop; the cases above, with limits of 1.5 s: a waiting statement
+is answered 1.5 s after the transaction it waits for went idle and the idle connection reads `25P03`; a client that reads none of a 10 MB answer is dropped after 1.5 s
+having been sent 2.8 MB, and the other client is answered then; 8 clients at once, 161 statements each, answered as the test program answers each alone.
+
+**And `cancho-hooks` (6an), which is why this was built.** The service now says `2 of 2 connections live`. Its own test of the feature, `tests/history_test.py` of its
+repository, run against the engine unchanged (with `truncate`, 6ao, and the short insert, 6ap): **scenarios 1 to 7 pass, 22 checks** (every attempt a row; the reasons
+that are not a status; a replay's rows; a database not there at start; one that never answers; one cut in the middle; none named). It stops at scenario 8, which renames
+the table away (`alter table attempts rename to ...`) to see what the service does when its table is gone; the engine has no rename. *(6ar adds it, and measures the
+rest.)*
+
+*What changed from the first part and is corrected there:* a message of 16 MiB was read and one longer ended the connection; a message is now at most 1 MiB and a longer
+one is refused and read past. The named statements of a connection may hold 1 MiB of text, not 3.
+
+13 mutants added to the group `wire` (72 now: 16 of the messages, 56 of the connection); all killed. Three that survived at first were of code the new loop had
+made dead (the old function that found a message's end; a length check the smaller buffer made impossible to fail), which is removed.
+
+*Not tested, and said:* that a connection whose buffer is full is not read from (so that the loop sleeps rather than spins while it waits) is in the code and no test can
+see it, since a loop that spins gives the same answers. Fairness between connections is by construction (the pass starts one place later each time) and is not measured.
+
+## 6ar. A table renamed, and `cancho-hooks`' own test of its history, in full
+
+Scenario 8 of hooks' test (6aq) takes the service's table away by renaming it and brings it back. The engine had no rename.
+
+**Design.** `alter table NAME rename to NEW`. The table keeps its number, so its rows stay where they are in the tree; its entry in the catalog moves to the new name (the
+old name is free, and stays in the history as a dropped table's does), and its indexes become indexes of the table under its new name. The new name must be free of
+tables, indexes and sequences (`42P07`), the old one a table (`42P01`).
+
+*For the log a row is a row of the table named.* A fact is (table, key, before, after), so the same rows under another name are other facts. Each row **leaves the table of
+the old name and enters the table of the new one**, with new salts (it is another row to the log, and no salt is given twice, 6ag): two facts a row, and a replay of the
+log ends at the rows there are, under the names they have. PostgreSQL's capture tells its log nothing of a rename. The cost is a write of every row, as for a column added
+(6ai). Renaming a column or a constraint is not this and is refused.
+
+**Test.** Fixed statements against PostgreSQL: the rename, onto a table's name, an index's name, of a table that is not there; reads and writes under the new name; the
+counter going on; an index that goes with the table when it is dropped under its new name; in a transaction rolled back and in one committed. The rows the engine reports
+are held against PostgreSQL's two tables (the old name gone, the new one read). In the log's test a table is renamed, written to and renamed back, and the three verifiers
+say `ok ... final`. 9 mutants; one survived until the test dropped a table under its new name.
+
+**`cancho-hooks`' own test, measured** (`tests/hooks_server.py` with `HOOKS_REPO`; hooks at its commit `40b2ce0`, its test `tests/history_test.py`, 11 scenarios):
+
+- **unchanged, it passes 24 checks and stops at scenario 9**, which makes a PostgreSQL role (`create role hooks login`, grants) and looks for the service's connections in
+  `pg_stat_activity`. That is the administration of a PostgreSQL. The engine has no roles and no login at all yet (6al); when it has one, it will be its own.
+- **with those lines cut from a copy** (seven statements and one check; nothing else touched) **it passes all it has left: 43 checks, scenarios 1 to 11.** A database that
+  is not there at start, that never answers, that is cut in the middle, that answers with an error, a table renamed away and back, the history read back through the
+  service's API while the database is slow, gone or wrong.
+
+*Run three times.* Twice all 43 passed. Once, while this machine was also running two mutant groups and the gate, one check of scenario 11 failed (a request that should
+have waited and timed out was refused at once: `503`). The scenario is about the service's own waiting slots while a proxy in front of the database stalls; whether the
+service, its test or the engine's server under load was late is **not known**. It is written here so that it is not forgotten, not because it is understood.
+
+*What this is and is not.* It is the first time a program this project did not write for the purpose has had its own test of a database feature pass against the engine.
+It is one test of one feature of one service, on one machine; the gate cannot run it (no hooks binary there). The two queries of C167 the engine refuses are not in this
+test. Nothing the server does is logged or verifiable yet, and anyone on the machine may connect.
+
+## 6as. The log is in the page file
+
+6ah made a commit's record and gave it to the test program to print; 6al's server commits and writes no log. 6ah left open where a server writes the log and in what
+order with the page file, across a crash. This part answers it by not having the question.
+
+**Design.** The record of a commit, and the facts it commits to, are written **into the branch's tree**, in the same tree and the same page-file commit as the rows the
+transaction wrote and the head of the log (6ah):
+
+- `0xFFFFFFFE 0x05`, the commit's number, a part number: the record as the log holds it (`build.log_record`), in parts of at most 700 bytes (a value of the tree is at most
+  800);
+- `0xFFFFFFFE 0x06`, the commit's number, then the table, a zero byte and the key's commitment: for each fact of the commit, the two hashes (was, is), each after a byte
+  that says whether it is there. This is what `facts.seal` already walks to compute `changes`; it is copied, not recomputed.
+
+So a commit, its record and its facts are durable together or not at all: a crash cannot leave a record without its rows or rows without their record, and the crash test
+of the page file (C156) covers the log with nothing added. The log file a verifier reads is an **export**: the header and the records in order, read back from the tree.
+
+*The store has no images.* The delta store a verifier reads (`docs/spec/l3a.md` section 9) has for each change the hashes and, where they have not been erased, the key,
+the images and the salts. What is kept here is the hashes only, which is the form of a line that has been erased, for every line. The verifiers check exactly what they
+check for an erased line: that the facts hash to the commit's `changes`, that each `state` follows, that a replay of the facts ends at the rows there are (whose keys,
+images and salts the live dump gives). They do not check that an image hashes to its fact, since no image is given; the engine's history holds the old rows with their
+salts for as long as they are not erased (6n), and showing them is a matter of reading the history, not of a second copy. **Erasure therefore has nothing to do in the
+store:** what it destroys (rows, salts) was never there, and what is there (salted hashes, commitments) says nothing once the salts are gone (6ag).
+
+*The cost:* a write to the tree for each fact, beside the row's own. Measured below.
+
+*The server* takes the seed of its signing key from a file named on its command line and logs every commit of the first branch that changed rows. With no key file it
+logs nothing, as before, and says so when it starts. How a key is kept, rotated or put in hardware is not this part.
+
+*Not in this part:* the log as a file the server appends to and ships (it is read out of the page file on request, by the test program's commands; a tool of its own for
+an operator is not written); commits that change no row (a table made, a sequence drawn) are in no record, as before; the schema hash, token, principal, statements and
+time of a record are still zeros (6ah); branches other than the first.
+
+**Test.** `tests/engine_log.py`: after the history, **a process that did not write it** reads the records and the facts out of the page file, and those are what goes to
+`tools/verify.py` and the three L3a verifiers, with the live dump; they must be byte for byte what the writing process printed at each commit. Then a row is erased
+(`!erase`), the file swept, and the export verified again: the same log, the same store, the row gone from the dump and its facts still accounted for.
+`tests/engine_wire.py`: the server is started with a key; after the differential's history (2,070 statements over a socket, a third by the extended protocol) it is
+stopped, the log is read out of its page file and verified. That is the first log of a client's session through the server that a verifier has read.
+
+**Built.** `facts.seal` writes the record and the facts with the head; `facts.header`, `facts.record`, `facts.next_fact` read them back; `!records` and `!store` in the
+test program; the server's key file. Measured:
+
+- `tests/engine_log.py`, 3 seeds of 2,000 statements (933 to 1,025 commits): the log and the facts read out of the page file by another process are the ones printed,
+  record for record; `tools/verify.py` and the three L3a verifiers say `ok ... final` on them (every line of the store counted as erased, since none has an image); a fact
+  removed and a hash changed are each `changes-mismatch`; after a delete, an erase and a sweep, one commit more and still `ok ... final`; a record of 40 tables is kept in
+  two parts and read back whole.
+- `tests/engine_wire.py`: **the log of a session of 929 statements over a socket** (the differential's fixed statements and 300 random ones, a third of the parametrised
+  by the extended protocol; 225 commits, 1,859 facts), read out of the server's page file after it stopped, verifies with `tools/verify.py` and the three L3a verifiers,
+  the replay ending at the 69 rows the file holds; at the gate's size, 2,129 statements, 328 and 333 commits for seeds 1 and 2. The same for the server that 8 clients wrote to at once, with transactions that waited, one that was ended and
+  connections that were dropped.
+- **One key signs a log:** a commit signed with another key is refused, and (which was not so as the session was first written in 6ah and 6aj: a commit whose
+  record failed was made without one) **a commit that cannot be recorded is not made**: the statement is an error and its rows are not there. The server stops on it rather than go on unrecorded.
+
+*The cost, measured on this machine while it was busy with other work, the two servers side by side:* 300 commits of one row take 1.57 s with no key and 4.46 s with
+one, 2.8 times as long (9.6 ms a commit more); one update of 1,200 rows 0.028 s and 0.044 s; the page file after both, 22 MB and 45 MB. What of the 9.6 ms is the
+signature and what the writes is not measured. C162's numbers are without a log.
+
+*Found while building, and corrected:*
+
+- the log was first put in the catalog (`0x00000000 0x05`, `0x06`). **Every statement reads the catalog from end to end** to know the tables, so every statement read
+  the whole log: after 30,000 facts a select of one row took 200 ms. The floor of 6al's test (500 selects under 5 s) failed, which is what it is for. The log is under a
+  number of its own, and the 500 selects take 0.04 s again;
+- a test that fails did not stop its server. Two servers built with a mutant that loops had been running for 38 minutes on every processor of this machine when that
+  was noticed, during which a check of hooks' test failed once (6ar) and several timings in this document were taken. The test now kills what it started however it
+  ends. **The timings of 6al and 6am were taken before those servers existed; those of 6aq and the cost above were not, and are marked so.** The hooks failure of 6ar may
+  have been this load; it has not been seen since, in 2 runs, which proves nothing.
+
+*Still not there:* the log covers the rows and nothing else. A commit says no schema, no principal, no statement, no time; a table made or dropped leaves no record
+unless it had rows; nobody is authenticated, so "who" is not a question the log could answer yet. It is the L3a half of what the proxy's log says.
 
 ## 7. Taking over, safely
 

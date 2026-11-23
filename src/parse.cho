@@ -237,6 +237,16 @@ pub fn n_create_seq() -> [] int {
     return 51;
 }
 
+// TRUNCATE of one table (one of the engine's forms): data = the name's token.
+pub fn n_truncate() -> [] int {
+    return 52;
+}
+
+// ALTER TABLE ... RENAME TO (one of the engine's forms): data = the table's token, ex = the new name's.
+pub fn n_rename() -> [] int {
+    return 53;
+}
+
 // The ways a parse is refused: `expr` answers `0 - code`, and `st[3]` is the token index it stopped at.
 pub fn e_syntax() -> [] int {
     return 1;

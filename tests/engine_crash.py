@@ -58,8 +58,10 @@ HISTORY = [
 
 def run(path, lines, crash=None):
     args = [EXE, path] + ([str(crash[0]), str(crash[1])] if crash else [])
-    r = subprocess.run(args, input="\n".join(lines) + "\n", capture_output=True, text=True)
-    return r.returncode, r.stdout
+    # the salts are made of a seed given here, the same in every run: the pages a commit's facts take depend on the salts (their tree is keyed by commitments, docs/m3-engine.md
+    # 6ag), and this test counts on a run stopped at step n having written what the whole run wrote up to step n
+    r = subprocess.run(args, input="\n".join(["!seed " + "5a" * 32] + lines) + "\n", capture_output=True, text=True)
+    return r.returncode, r.stdout[len("seeded\n"):] if r.stdout.startswith("seeded\n") else r.stdout
 
 
 def dump(path):
