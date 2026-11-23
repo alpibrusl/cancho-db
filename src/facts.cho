@@ -9,6 +9,7 @@ import cdb.pager;
 import cdb.state;
 import cdb.exec;
 import cdb.ir;
+import cdb.row;
 import std.map;
 
 // The facts of a transaction (docs/m3-engine.md 6af). Fold the changes the statement just made (`chg`) into the tree `froot` (0: none yet): a key is the table, a zero byte and the
@@ -591,4 +592,60 @@ pub fn next_fact[&q, &z, &a, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int
     }
     exec.copy(contents(w.cur), 0, 66, out, 0);
     return exec.copy(contents(w.key2), 5, nk - 5, after, 0);
+}
+
+// The answer to `select cancho_last_commit()` (docs/m3-engine.md 6ax), made in `w` as a SELECT's is: one row, the number of commits the log in the tree `root` has (an
+// integer) and the id of the last in hex (text; null when there is none). 0, or an error.
+pub fn last[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_read] int {
+    var n = 0;
+    var fill = 0;
+    region g {
+        let ident = alloc_slice[g](32, byte_of(0));
+        let hk = tables.head_key(contents(w.key));
+        let hr = btree.get(p, contents(w.sc), root, contents(w.key)[0..hk], contents(w.cur));
+        if hr == 72 {
+            n = commit.be(contents(w.cur), 0, 8) + 1;
+            exec.copy(contents(w.cur), 8, 32, ident, 0);
+        } else if hr != btree.not_found() {
+            if hr < 0 {
+                return exec.tree_err(hr);
+            }
+            return exec.damaged();
+        }
+        let rows = contents(w.rows);
+        rows[0] = byte_of(1);
+        exec.put_i64(rows, 1, n);
+        if n == 0 {
+            rows[9] = byte_of(0);
+            fill = 10;
+        } else {
+            rows[9] = byte_of(3);
+            build.put_be(rows, 10, 64, 2);
+            var k = 0;
+            while k < 32 {
+                let b = int_of(ident[k]);
+                var hi = '0' + b / 16;
+                if b / 16 > 9 {
+                    hi = 'a' + b / 16 - 10;
+                }
+                var lo = '0' + b % 16;
+                if b % 16 > 9 {
+                    lo = 'a' + b % 16 - 10;
+                }
+                rows[12 + 2 * k] = byte_of(hi);
+                rows[13 + 2 * k] = byte_of(lo);
+                k = k + 1;
+            }
+            fill = 76;
+        }
+    }
+    contents(w.pos)[exec.p_itype()] = row.t_int();
+    contents(w.pos)[exec.p_itype() + 1] = row.t_text();
+    contents(w.idx)[0] = 0;
+    w.first = 0;
+    w.count = 1;
+    w.nitems = 2;
+    w.rfill = fill;
+    w.root = root;
+    return 0;
 }

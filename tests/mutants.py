@@ -2852,6 +2852,21 @@ ENGINE = [
      'nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..hk2], head);', 'nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..hk2], head[0..40]);'),
     ('log: the head is no table of the schema', 'src/tables.cho',
      '} else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 {', '} else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 {'),
+    ('log: the head a client is given counts one commit too few', 'src/facts.cho',
+     '            n = commit.be(contents(w.cur), 0, 8) + 1;\n            exec.copy(contents(w.cur), 8, 32, ident, 0);',
+     '            n = commit.be(contents(w.cur), 0, 8);\n            exec.copy(contents(w.cur), 8, 32, ident, 0);'),
+    ("log: the id a client is given is the state's, not the commit's", 'src/facts.cho',
+     'exec.copy(contents(w.cur), 8, 32, ident, 0);',
+     'exec.copy(contents(w.cur), 40, 32, ident, 0);'),
+    ('log: with no commit a client is given an id of zeros', 'src/facts.cho',
+     '        if n == 0 {\n            rows[9] = byte_of(0);',
+     '        if n < 0 {\n            rows[9] = byte_of(0);'),
+    ("log: any call of a name that long is the head's", 'src/drive.cho',
+     '        if int_of(e[3 + i]) != int_of(name[i]) {\n            return false;\n        }\n        i = i + 1;\n    }\n    return int_of(e[len(e) - 1]) == 0',
+     '        if false {\n            return false;\n        }\n        i = i + 1;\n    }\n    return int_of(e[len(e) - 1]) == 0'),
+    ('log: the head is given under no column names', 'src/drive.cho',
+     '    if called {\n',
+     '    if false {\n'),
 ]
 
 # The engine's server (docs/m3-engine.md 6al): the messages and one connection. Judged by tests/engine_wire.py, which holds the server against the test program.
@@ -3144,6 +3159,12 @@ WIRE = [
     ('reclaim: after one sweep there is no other until the server starts again', 'src/serve.cho',
      '    gs[g_sweep_at()] = next;',
      '    gs[g_sweep_at()] = next + 100000000;'),
+    ('disk: a commit the page file refused is acknowledged', 'src/serve.cho',
+     '                if seq < 0 {\n                    nr = seq;\n                } else {\n                    gs[g_seq()] = seq;',
+     '                if false {\n                    nr = seq;\n                } else {\n                    gs[g_seq()] = seq;'),
+    ('disk: the server goes on after the page file refused a write', 'src/serve.cho',
+     '        if nr < 0 {\n            gs[g_stop()] = 7;\n            push(',
+     '        if nr < 0 {\n            gs[g_stop()] = 0;\n            push('),
 ]
 
 

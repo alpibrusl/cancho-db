@@ -10,8 +10,18 @@ env:
   CANCHO_REV: 1d3ec24d1b96b39f0b1b474d46ebff7ae94a10e3
 
 jobs:
+  # The gate in five parts, run at once (scripts/check.sh says what each is and checks that this list is its own): the checks, and four shards of the mutants.
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part:
+          - checks
+          - mutants-a
+          - mutants-b
+          - mutants-c
+          - mutants-d
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,4 +61,4 @@ jobs:
         working-directory: db
         env:
           CANCHO: ${{ github.workspace }}/cancho/target/release/cancho
-        run: sh scripts/check.sh
+        run: sh scripts/check.sh ${{ matrix.part }}

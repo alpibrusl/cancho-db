@@ -1645,7 +1645,7 @@ whoever holds one runs any verifier with `--expect` on a later copy of the log.
   more commits than there are, or `live` asked at a head that is gone).
 
 *Not in this part:* carrying the output anywhere; an export that picks up where the last one ended (each run writes the whole log; measured below); the server
-giving an anchor to a client (`cancho_last_commit()` is the proxy's); `cancho-log` (6at saw it as the file a copy could be appended to: with whole exports there is
+giving an anchor to a client (`cancho_last_commit()` is the proxy's) *(corrected in 6ax: it is not; the specification names it and nothing had built it. 6ax does, in the engine)*; `cancho-log` (6at saw it as the file a copy could be appended to: with whole exports there is
 no file to append to yet, so it has no place in this part).
 
 **Test.** `tests/engine_log.py`: after its history, the tool's five outputs are byte for byte what the test assembles from the test program's commands; the
@@ -1693,7 +1693,7 @@ that file frees 97% of its pages. A server under steady writes filled its disk.
   has the database to itself, 6aq). The sweep runs if the pages the last sweep freed are used up **and** the file has reached a size set by that sweep: twice the
   pages then in use, and 8 MiB (2,048 pages), or the size the file had if that is more. So the file is held near twice what is in use, and a sweep, whose cost is
   the size of the file, is paid for by at least as many pages written since the last.
-- *At a start.* The free pages are not kept in the file (a sweep finds them again), so a server that starts knows none: the first commit after a start sweeps.
+- *At a start.* The free pages are not kept in the file (a sweep finds them again), so a server that starts knows none: the first commit after a start sweeps. *(Corrected in 6ay: the server sweeps before it serves; a first commit on a full disk could not be made to get to its sweep.)*
   *(Corrected while building: as first written a start set the mark at the file's size and 8 MiB, like a first sweep. Measured with a server killed and restarted
   5 times in 3,000 commits: 46.4 MiB against 14.5, each start having cost its 8 MiB again.)*
 - *What stays.* What a tree names: the rows, the indexes, the history of the rows (6n) until it is erased, the log with its facts, tokens and statements. And
@@ -1724,6 +1724,76 @@ commits.
 never shrinks. What is "in use" includes every old version of every row (the history is kept until erased) and the whole log: 14.5 MiB for 2,000 small rows after
 3,000 commits is mostly those, and they grow with every commit; nothing here bounds them. A failed sweep was not provoked (no test makes the disk fail). The free
 list holds 65,536 pages (256 MiB); more than that freed at once waits for the next sweep.
+
+## 6ax. The head of the log, given to a client
+
+6av ends on its limit: no one but the operator holds an anchor. `docs/spec/commit.md` section 5 has said since M1 how a reader would hold one: *a reader that holds a
+commit id it was given earlier (`cancho_last_commit()`) can pass it as the expected id*. **A read, and a correction:** nothing answers that call. Not the proxy
+(`grep cancho_last_commit src proxy`: no line), not the engine, where it lowers to the IR's `Call` and is refused `engine-unsupported`. 6av said it was "the
+proxy's"; that was written without looking.
+
+**Design.**
+
+- `select cancho_last_commit()` is answered by the engine with one row of two columns: `commits`, an integer, the number of commits in the log, and `id`, text,
+  the id of the last in 64 hex digits; `0` and null when there is no commit. It is what `logexport ... anchor` prints, from the same key of the tree.
+- *It is the head of the log, not "my last commit".* Any commit a client's own commit comes before will do as its anchor: a log that holds the head holds all
+  before it. Asked right after its commit is acknowledged, the head is that commit or a later one.
+- *In a transaction* it is the head the transaction began on (its own commit is not made yet), and it is a statement of that transaction like another: the commit
+  names it, and its effect, `call cancho_last_commit`, is among the commit's.
+- *Authority.* The IR is the statement `Call`, whose effect is `call cancho_last_commit` (`docs/spec/ir.md` section 3); the server holds it against the token as
+  any effect (6at). A token must allow that call by name or all calls; one that may only read tables may not ask. That is a choice, and a strict one: the head's id
+  says nothing of any row, but an effect the token does not list is not run.
+- Only that name, in lower case as the lexer makes an unquoted name, with no argument. Everything else that is a call stays `engine-unsupported`.
+
+*Not in this part:* the same call in the proxy; a head per branch; the id of the commit a statement made, returned with its answer.
+
+**Test.** `tests/engine_log.py`: the call three times in the history (alone, in a transaction that commits, after it); each answer is the number of records made
+so far and the id of the last; the commit of the transaction names it and the log still verifies at L2. With no log: `0`, null. Another name of the same length,
+an argument, the name quoted: refused. `tests/engine_wire.py`: a client takes the head after the first commit of a run of 481; the log the export tool writes at the
+end is accepted with `--expect` of it and refused with an id never given; the server's answer at the end is the tool's anchor. Under a login: a token for
+`c:cancho_last_commit` is answered by both protocols and may read no table; a token for `r:*` is `42501`.
+
+**Built.** `facts.last`, `drive.is_last_commit`. Measured: all of the test above, on 3 seeds of each; the 63 steps of the gate before the mutants; 5 mutants
+(group `engine`, `log:`), all killed.
+
+*Limits.* A client that never asks holds nothing: the anchor is taken, not pushed. The id is given over the same clear connection as everything else. It is the
+engine's server only; a deployment still behind the proxy has no such call. Whoever holds an anchor still needs a copy of the log to check, which 6av writes and
+nothing carries.
+
+## 6ay. A disk that fills under the server
+
+What the server does when the page file cannot be written was designed (section 2: a failed write or sync ends the process; 6al: `58030`) and never met: no test
+made a write fail under `build/engine`. The crash tests stop the process at every durable step, which is the disk's state after a failure, not the server's conduct
+during one.
+
+**How a write is made to fail, without a hook in the server.** The test starts the server with the kernel's limit on the size of a file it may write
+(`RLIMIT_FSIZE`), the signal that comes with it ignored. A write that would take the page file past the limit is cut short or refused (`EFBIG`), which is what a
+full disk does: writes inside the file still succeed, the file cannot grow, and the last page may be written in part. It is a real failure of a real `write`, at a
+size the test chooses. What it does not make is a failing `fsync`, or a write that fails inside the file.
+
+**What must hold.** The commit that meets the limit is not acknowledged: the client is answered `58030` and the server stops (status 7). Every commit acknowledged
+before is in the file. Started again, the server has exactly those rows, and the log verifies.
+
+**Found.** All of that held as built. What did not: **started again on the same full disk, the server never served a write again.** The file was mostly pages
+nothing named, and 6aw's sweep would have freed them, but it came after the first commit, which needed new pages first. Measured at a limit of 9 MiB: 660 commits,
+stop; then 0 commits in each of three further lives.
+
+**Changed.** The server sweeps before it serves: `serve.reclaim` at the start, in place of 6aw's "the first commit after a start sweeps" *(6aw corrected by this)*.
+A start costs a pass over the file (0.3 s for 160 MiB, 6aw).
+
+**Test.** `tests/engine_wire.py` (`disk_full`), at four limits (two on a page's edge, two inside a page): a client inserts until it is refused; three lives under
+the same limit, then one with room.
+
+**Measured.** At 3 MiB, 3 MiB and 1,500 bytes, 5 MiB and 7 pages and 100 bytes, 9 MiB: every life ends with `58030` on the commit that met the limit and status 7,
+the file never over the limit; commits in the three lives 95+80+77, 97+80+76, 153+134+128, 665+186+180 (0 in the second and third before the change); with room,
+the rows are exactly the acknowledged ones, the next insert is made, `cancho_last_commit()` counts them, and the log verifies to `final` with the L3a verifiers.
+2 mutants (`disk:`, group `wire`), both killed: a refused commit acknowledged, and a server that goes on. The sweep at the start has no mutant (it is in
+`proxy/engine.cho`, which the group does not mutate); it is held by the test's "each life serves", which failed before the change.
+
+*Limits.* **A full disk still stops the server**; someone has to start it again, and it then has only what its own file can give back. A server whose disk is
+smaller than twice its data and 8 MiB (6aw's mark) stops at intervals rather than sweeping when it is short: the sweep is tied to the file's size, not to the room
+left, which the server does not ask about. A failing `fsync` and a write failing inside the file were not provoked. The clients connected when it stops are cut
+off; only the one whose commit failed is told why.
 
 ## 7. Taking over, safely
 

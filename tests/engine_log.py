@@ -79,6 +79,9 @@ FIXED = [
     "update note set body = body || '!' where body = '%s'" % NEEDLE,
     "begin", "select k from note where body = '%s!'" % NEEDLE, "update note set body = '%s' where k = 'needle'" % NEEDLE, "commit",
     "delete from pair",
+    "select cancho_last_commit()",                                # the head of the log, as a client is given it (6ax): alone, and in a transaction that commits
+    "begin", "insert into pair values (5, 'h', 1)", "select cancho_last_commit()", "delete from pair where a = 5", "insert into pair values (6, 'h', 1)", "commit", "delete from pair",
+    "select cancho_last_commit()",
     "select count(*) from acct",
     "alter table acct add column note text default 'n'",          # every row of the table is another row (6ai)
     "update acct set note = 'm' where id = 2",
@@ -151,7 +154,7 @@ class Files:
 
     def __init__(self):
         self.header, self.records, self.deltas, self.pending, self.seq, self.fline, self.agree = None, [], [], [], 0, None, True
-        self.wrote = False
+        self.wrote, self.asked, self.heads = False, False, 0
         self.ran, self.named = 0, []       # how many statements ran in the transaction that is open (or the statement that is one); for each record, that number
 
     def unhex(self, f):
@@ -169,6 +172,16 @@ class Files:
                 # a write that returns what it wrote is two statements: the write, and the select of what it returns (6au)
                 self.ran += 1
                 self.wrote = False
+            if f[0] == "N" and f[1:] == [b"commits".hex(), b"id".hex()]:
+                self.asked = True
+            elif f[0] == "R" and self.asked:
+                # the answer of cancho_last_commit() is the log so far: how many records, and the id of the last
+                self.asked = False
+                self.heads += 1
+                last = self.records[-1] if self.records else None
+                want = [str(len(self.records)).encode().hex(), commit_id(last[4:4 + int.from_bytes(last[:4], "big")]).hex().encode().hex() if last else "-"]
+                if f[1:] != want:
+                    check("cancho_last_commit() is the number of records and the id of the last", False, (f[1:], want))
             if f[0] == "C":
                 self.pending.append([self.unhex(x) for x in f[1:]])
             elif f[0] == "F":
@@ -425,6 +438,9 @@ def tool(work, path, early):
     seen = [(export(*a)[0], export(*a)[2]) for a, _, _ in cases]
     check("the export tool's refusals, each with its tag and nothing believed of it: " + ", ".join(sorted({t for _, _, t in cases})), seen == [(st, t) for _, st, t in cases],
           [(a[1:], s) for (a, _, _), s in zip(cases, seen) if s != (_, _)][:0] or [(a[1:], s) for (a, st, t), s in zip(cases, seen) if s != (st, t)])
+    out = [l for l in run(nolog, ["select cancho_last_commit()", "select cancho_last_commix()", "select cancho_last_commit(1)", 'select "Cancho_last_commit"()']) if l[:2] in ("R ", "re", "ok", "er")]
+    check("with no log cancho_last_commit() is 0 and no id; another name of the same length, an argument, or the name in other letters is no such call",
+          out == ["ok SELECT 1", "R 30 -", "refused engine-unsupported", "refused engine-unsupported", "refused unknown-construct"], out)
     check("a page file with no log still has its rows to export; `live N` at the head it is at is the dump",
           export(nolog, "live")[0] == 0 and export(nolog, "live")[1].startswith(b"CHODBLV2\npublic\t74\t") and export(nolog, "live")[1].count(b"\n") == 2
           and export(path, "live", len(recs))[1] == got["live"][1], export(nolog, "live"))
@@ -447,6 +463,7 @@ def main():
         out = run(path, WHO + history[cut:] + ["!commit", "!mark"] + ["!rows " + t for t in TABLES])
         files.take(out[:out.index("mark")])
         live, nrows = dump(out[out.index("mark"):], TABLES)
+        check("cancho_last_commit() was asked 3 times in the history and answered with the log's head each time", files.heads == 3, files.heads)
         check("commits in both processes", first >= 3 and len(files.records) > first + 3, (first, len(files.records)))
         check("the changes printed for the test are the records'", files.agree)
         (work / "log").write_bytes(files.log())
