@@ -98,6 +98,11 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j](heap: &!h Heap, io: &!o Io, net
             if seq == pstore.no_database() {
                 seq = pstore.init(pg, exec.scratch(w));
             }
+            // before anyone is served, the pages the last run left behind are taken back (docs/m3-engine.md 6ay): a server stopped by a full disk starts again with
+            // the room there is in its own file
+            if seq >= 0 && serve.reclaim(heap, gs, pg, w, rs) < 0 {
+                seq = 0 - 1;
+            }
             if seq < 0 {
                 status = 5;
             } else {

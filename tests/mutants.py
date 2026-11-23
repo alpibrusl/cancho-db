@@ -3159,6 +3159,12 @@ WIRE = [
     ('reclaim: after one sweep there is no other until the server starts again', 'src/serve.cho',
      '    gs[g_sweep_at()] = next;',
      '    gs[g_sweep_at()] = next + 100000000;'),
+    ('disk: a commit the page file refused is acknowledged', 'src/serve.cho',
+     '                if seq < 0 {\n                    nr = seq;\n                } else {\n                    gs[g_seq()] = seq;',
+     '                if false {\n                    nr = seq;\n                } else {\n                    gs[g_seq()] = seq;'),
+    ('disk: the server goes on after the page file refused a write', 'src/serve.cho',
+     '        if nr < 0 {\n            gs[g_stop()] = 7;\n            push(',
+     '        if nr < 0 {\n            gs[g_stop()] = 0;\n            push('),
 ]
 
 

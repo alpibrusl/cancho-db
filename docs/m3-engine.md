@@ -1693,7 +1693,7 @@ that file frees 97% of its pages. A server under steady writes filled its disk.
   has the database to itself, 6aq). The sweep runs if the pages the last sweep freed are used up **and** the file has reached a size set by that sweep: twice the
   pages then in use, and 8 MiB (2,048 pages), or the size the file had if that is more. So the file is held near twice what is in use, and a sweep, whose cost is
   the size of the file, is paid for by at least as many pages written since the last.
-- *At a start.* The free pages are not kept in the file (a sweep finds them again), so a server that starts knows none: the first commit after a start sweeps.
+- *At a start.* The free pages are not kept in the file (a sweep finds them again), so a server that starts knows none: the first commit after a start sweeps. *(Corrected in 6ay: the server sweeps before it serves; a first commit on a full disk could not be made to get to its sweep.)*
   *(Corrected while building: as first written a start set the mark at the file's size and 8 MiB, like a first sweep. Measured with a server killed and restarted
   5 times in 3,000 commits: 46.4 MiB against 14.5, each start having cost its 8 MiB again.)*
 - *What stays.* What a tree names: the rows, the indexes, the history of the rows (6n) until it is erased, the log with its facts, tokens and statements. And
@@ -1759,6 +1759,41 @@ end is accepted with `--expect` of it and refused with an id never given; the se
 *Limits.* A client that never asks holds nothing: the anchor is taken, not pushed. The id is given over the same clear connection as everything else. It is the
 engine's server only; a deployment still behind the proxy has no such call. Whoever holds an anchor still needs a copy of the log to check, which 6av writes and
 nothing carries.
+
+## 6ay. A disk that fills under the server
+
+What the server does when the page file cannot be written was designed (section 2: a failed write or sync ends the process; 6al: `58030`) and never met: no test
+made a write fail under `build/engine`. The crash tests stop the process at every durable step, which is the disk's state after a failure, not the server's conduct
+during one.
+
+**How a write is made to fail, without a hook in the server.** The test starts the server with the kernel's limit on the size of a file it may write
+(`RLIMIT_FSIZE`), the signal that comes with it ignored. A write that would take the page file past the limit is cut short or refused (`EFBIG`), which is what a
+full disk does: writes inside the file still succeed, the file cannot grow, and the last page may be written in part. It is a real failure of a real `write`, at a
+size the test chooses. What it does not make is a failing `fsync`, or a write that fails inside the file.
+
+**What must hold.** The commit that meets the limit is not acknowledged: the client is answered `58030` and the server stops (status 7). Every commit acknowledged
+before is in the file. Started again, the server has exactly those rows, and the log verifies.
+
+**Found.** All of that held as built. What did not: **started again on the same full disk, the server never served a write again.** The file was mostly pages
+nothing named, and 6aw's sweep would have freed them, but it came after the first commit, which needed new pages first. Measured at a limit of 9 MiB: 660 commits,
+stop; then 0 commits in each of three further lives.
+
+**Changed.** The server sweeps before it serves: `serve.reclaim` at the start, in place of 6aw's "the first commit after a start sweeps" *(6aw corrected by this)*.
+A start costs a pass over the file (0.3 s for 160 MiB, 6aw).
+
+**Test.** `tests/engine_wire.py` (`disk_full`), at four limits (two on a page's edge, two inside a page): a client inserts until it is refused; three lives under
+the same limit, then one with room.
+
+**Measured.** At 3 MiB, 3 MiB and 1,500 bytes, 5 MiB and 7 pages and 100 bytes, 9 MiB: every life ends with `58030` on the commit that met the limit and status 7,
+the file never over the limit; commits in the three lives 95+80+77, 97+80+76, 153+134+128, 665+186+180 (0 in the second and third before the change); with room,
+the rows are exactly the acknowledged ones, the next insert is made, `cancho_last_commit()` counts them, and the log verifies to `final` with the L3a verifiers.
+2 mutants (`disk:`, group `wire`), both killed: a refused commit acknowledged, and a server that goes on. The sweep at the start has no mutant (it is in
+`proxy/engine.cho`, which the group does not mutate); it is held by the test's "each life serves", which failed before the change.
+
+*Limits.* **A full disk still stops the server**; someone has to start it again, and it then has only what its own file can give back. A server whose disk is
+smaller than twice its data and 8 MiB (6aw's mark) stops at intervals rather than sweeping when it is short: the sweep is tied to the file's size, not to the room
+left, which the server does not ask about. A failing `fsync` and a write failing inside the file were not provoked. The clients connected when it stops are cut
+off; only the one whose commit failed is told why.
 
 ## 7. Taking over, safely
 

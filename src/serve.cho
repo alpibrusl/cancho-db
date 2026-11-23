@@ -67,7 +67,7 @@ pub fn g_root() -> [] int {
 }
 
 // The size of the page file, in pages, at which the pages nothing names are next looked for (6aw). 0 when the server starts: what was free is not kept in the file, so the
-// first commit looks.
+// server looks before it serves (6ay).
 pub fn g_sweep_at() -> [] int {
     return 73;
 }

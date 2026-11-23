@@ -86,7 +86,7 @@ def die_with_parent():
 
 
 class Server:
-    def __init__(self, path, *limits, key=True, login=False):
+    def __init__(self, path, *limits, key=True, login=False, fsize=None):
         self.path, self.port = path, free_port()
         args = [SERVER, path, str(self.port)]
         if key:
@@ -102,7 +102,15 @@ class Server:
                     f.write(ROOT_KEY + "\n")
             if login or limits:
                 args += [root] + [str(x) for x in limits]
-        self.p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=die_with_parent)
+        def before():
+            die_with_parent()
+            if fsize is not None:
+                # a disk that fills (6ay): the kernel refuses to let a file of this process grow past `fsize` bytes; a write that would is cut short or fails
+                # (EFBIG), as on a full disk. The signal that comes with it is ignored, so that the write's own failure is what the server meets.
+                import resource
+                signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+                resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
+        self.p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=before)
         STARTED.append(self.p)
         line = self.p.stderr.readline()
         if line != b"listening\n":
@@ -1138,6 +1146,60 @@ def reclaiming(d):
     verified(d, path, history, "after the sweeps and the kills")
 
 
+def disk_full(d):
+    """The page file cannot grow any more (6ay): the commit that meets it is not acknowledged, the server stops, and the file is whole at the last acknowledged commit;
+    started again on the same full disk, it takes back what its own file has free and serves again."""
+    mib = 1048576
+    outcomes = []
+    for limit in (3 * mib, 3 * mib + 1500, 5 * mib + 4096 * 7 + 100, 9 * mib):
+        path = os.path.join(d, "full%d.db" % limit)
+        acked, lives, bad = 0, [], []
+        for life in range(3):
+            srv = Server(path, fsize=limit)
+            c = Client(srv.port)
+            if life == 0:
+                made = c.query("create table f (a integer primary key, b text)")
+            before, last = acked, None
+            for i in range(4000):
+                try:
+                    got = c.query("insert into f values (%d, 'row %d of a disk that fills')" % (acked, acked))
+                except Exception as e:                           # the connection may end with the server
+                    got = ("closed", str(e), None, None, None, None, None)
+                if got[5] == "INSERT 0 1":
+                    acked += 1
+                else:
+                    last = got
+                    break
+            c.close(False)
+            try:
+                status = srv.p.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                status = None
+                srv.p.kill()
+                srv.p.wait()
+            srv.p.stderr.close()
+            lives.append(acked - before)
+            if last is None or (last[0], last[1]) != ("58030", "cancho-db: the page file cannot be written") or status != 7 or os.path.getsize(path) > limit:
+                bad.append((life, last and last[:2], status, os.path.getsize(path)))
+        # started again with room: what was acknowledged is there, and nothing else
+        srv2 = Server(path)
+        c = Client(srv2.port)
+        n = c.query("select count(*) from f")[4]
+        top = c.query("select max(a) from f")[4]
+        more = c.query("insert into f values (100000, 'after')")[5]
+        head = c.query("select cancho_last_commit()")[4]
+        c.close()
+        srv2.stop()
+        ok = (made[5] == "CREATE TABLE" and not bad and min(lives) > 0 and n == [[str(acked).encode()]] and top == [[str(acked - 1).encode()]] and more == "INSERT 0 1"
+              and bool(head) and head[0][0] == str(acked + 1).encode())
+        outcomes.append((limit, lives, ok, bad, n, top, more, head and head[0][0]))
+        if ok:
+            verified(d, path, ["create table f (a integer primary key, b text)"], "a disk full at %d bytes, three times, after %d commits" % (limit, acked))
+    check("a page file that cannot grow past 4 different sizes: the commit that meets the limit is answered 58030 and not made and the server stops with status 7; started again on "
+          "the same full disk it serves again, each of 3 times (commits: %s); with room at last it has exactly the acknowledged rows and goes on"
+          % "; ".join("+".join(str(x) for x in o[1]) for o in outcomes), all(o[2] for o in outcomes), [o for o in outcomes if not o[2]][:2])
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1148,6 +1210,7 @@ def main():
         several(d)
         beside(d)
         reclaiming(d)
+        disk_full(d)
         logins(d)
         with_psql(d)
         with_cancho_pg(d)
