@@ -15,19 +15,25 @@ import cdb.row;
 
 // The log out of a page file, for someone else to keep (docs/m3-engine.md 6av):
 //
-//     logexport PAGEFILE WHAT [UPTO]
+//     logexport PAGEFILE WHAT [UPTO [FROM]]
 //
 // writes one thing to the standard output, in the form the verifiers read, and nothing anywhere else:
 //
 //     anchor   `anchor N ID`: the number of commits in the log and the id of the last, in hex (`anchor 0 -`: none yet)
-//     log      `CHODBLG1`, the key, each record (the first UPTO, if given)
-//     facts    a version-2 delta store, the hashes only, of every commit (of the first UPTO)
+//     log      `CHODBLG1`, the key, each record (the first UPTO, if given; with FROM, the records of commits FROM to UPTO and no header: what to append to a
+//              copy that has FROM)
+//     facts    a version-2 delta store, the hashes only, of every commit (of the first UPTO; with FROM, as for `log`)
 //     tokens   `CHODBTK1` and each token kept with the log
-//     stmts    `CHODBST3` and each statement's record kept with the log
+//     stmts    `CHODBST3` and each statement's record kept with the log (with UPTO: those the commits FROM to UPTO name, in their order)
+//     floor    `floor N`: the first commit this file still has the record of (docs/m3-engine.md 6ba); with FROM below it, `log`, `facts` and `stmts` are
+//              refused `export-archived`
+//     usage    what the tree holds, by what it is for: `usage KIND entries bytes` for each
+//     sweeps   `sweeps N`: how many times the server has said a sweep was coming (docs/m3-engine.md 6az); a reader that sees it change was raced
 //     live     a version-2 dump of every row of every table (with UPTO: only if the log has exactly that many commits)
 //
-// It opens PAGEFILE to read and never writes to it. A server may be writing the file meanwhile: if a commit was made while this program read, what it wrote is not to be
-// believed, and it says so (`refused export-raced`, status 1). Status 0: the output is whole. Status 2: usage. Every other refusal is status 1 with its tag on the error stream.
+// It opens PAGEFILE to read and never writes to it. A server may be writing the file meanwhile: commits do not disturb a reader, a sweep may (it frees pages for
+// the commits after it to write again), and the server says in the tree when one is coming. If that happened while this program read, what it wrote is not to be believed, and it
+// says so (`refused export-raced`, status 1). Status 0: the output is whole. Status 2: usage. Every other refusal is status 1 with its tag on the error stream.
 
 fn digit(v: int) -> [] int {
     if v < 10 {
@@ -127,6 +133,10 @@ fn raced() -> [] int {
     return 8;
 }
 
+fn archived() -> [] int {
+    return 9;
+}
+
 fn rule(code: int) -> [] &static [byte] {
     if code == usage() {
         return "export-usage";
@@ -145,6 +155,9 @@ fn rule(code: int) -> [] &static [byte] {
     }
     if code == raced() {
         return "export-raced";
+    }
+    if code == archived() {
+        return "export-archived";
     }
     return "export-damaged";
 }
@@ -167,29 +180,30 @@ fn number[&a](text: &a [byte]) -> [] int {
     return v;
 }
 
-// How many commits the log in the tree `root` has (each record read whole), and the id of the last into `ident`; or minus a refusal's code.
-fn count[&q, &z, &r, &d](pg: &!z pager.Pager, w: &!q exec.Work, root: int, rec: &!r [byte], ident: &!d [byte]) -> [file_read] int {
-    var seq = 0;
-    var n = facts.record(pg, w, root, 0, rec);
-    while n > 0 {
-        build.id(rec[4..n - 64], ident);
-        seq = seq + 1;
-        n = facts.record(pg, w, root, seq, rec);
+// How many commits the log in the tree `root` has, and the id of the last into `ident`: what the head of the log says (one key of the tree); or minus a refusal's code.
+fn count[&q, &z, &d](pg: &!z pager.Pager, w: &!q exec.Work, root: int, ident: &!d [byte]) -> [file_read] int {
+    let hk = tables.head_key(contents(w.key));
+    let hr = btree.get(pg, contents(w.sc), root, contents(w.key)[0..hk], contents(w.cur));
+    if hr == btree.not_found() {
+        return 0;
     }
-    if n < 0 {
+    if hr != 72 {
         return 0 - damaged();
     }
-    return seq;
+    exec.copy(contents(w.cur), 8, 32, ident, 0);
+    return commit.be(contents(w.cur), 0, 8) + 1;
 }
 
-// The log: the header and the first `upto` records.
-fn put_log[&i, &q, &z, &r](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, upto: int, rec: &!r [byte]) -> [io_write, file_read] int {
+// The log: the header (if `from` is 0) and the records of the commits `from` to `upto` (not included).
+fn put_log[&i, &q, &z, &r](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, from: int, upto: int, rec: &!r [byte]) -> [io_write, file_read] int {
     var n = facts.header(pg, w, root, rec);
     if n <= 0 {
         return damaged();
     }
-    put_raw(io, rec, 0, n);
-    var seq = 0;
+    if from == 0 {
+        put_raw(io, rec, 0, n);
+    }
+    var seq = from;
     while seq < upto {
         n = facts.record(pg, w, root, seq, rec);
         if n <= 0 {
@@ -202,8 +216,10 @@ fn put_log[&i, &q, &z, &r](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, ro
 }
 
 // The facts of the first `upto` commits, as lines of a version-2 delta store that hold the hashes and nothing else (docs/spec/l3a.md section 9: the form of an erased line).
-fn put_facts[&i, &q, &z, &r](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, upto: int, rec: &!r [byte]) -> [io_write, file_read] int {
-    put_str(io, "CHODBDL2\n");
+fn put_facts[&i, &q, &z, &r](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, from: int, upto: int, rec: &!r [byte]) -> [io_write, file_read] int {
+    if from == 0 {
+        put_str(io, "CHODBDL2\n");
+    }
     var status = 0;
     region g {
         let fk = alloc_slice[g](256, byte_of(0));
@@ -212,6 +228,11 @@ fn put_facts[&i, &q, &z, &r](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, 
         var of = 0 - 1;
         var an = 0;
         var line = 0;
+        if from > 0 {
+            // the first fact of commit `from` or after: the key that is the commit's number alone is before them all
+            build.put_be(fk, 0, from, 8);
+            an = 8;
+        }
         var n = facts.next_fact(pg, w, root, fk, an, fv);
         while n > 0 && status == 0 {
             an = n;
@@ -227,10 +248,15 @@ fn put_facts[&i, &q, &z, &r](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, 
                     } else {
                         build.id(rec[4..rn - 64], ident);
                         of = seq;
+                        line = 0;
                     }
                 }
+                if status == 0 && line >= line_space() {
+                    status = damaged();
+                }
                 if status == 0 {
-                    put_int(io, line);
+                    // a line's number is its commit's and its place in the commit: the same whatever part of the store is written
+                    put_int(io, seq * line_space() + line);
                     putchar(io, '\t');
                     put_hex(io, ident, 0, 32);
                     put_str(io, "\tpublic\t");
@@ -262,6 +288,11 @@ fn put_facts[&i, &q, &z, &r](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, 
     return status;
 }
 
+// A line of the store is numbered by its commit and its place among the commit's lines; a commit has fewer lines than this.
+fn line_space() -> [] int {
+    return 10000000;
+}
+
 // What is kept with the log under an id: the tokens (kind 7), the statements' records (kind 8).
 fn put_kept[&i, &q, &z](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, kind: int) -> [io_write, file_read] int {
     if kind == 7 {
@@ -283,6 +314,57 @@ fn put_kept[&i, &q, &z](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root:
         }
         if n < 0 {
             status = damaged();
+        }
+    }
+    return status;
+}
+
+// The records of the statements the commits `from` to `upto` (not included) name, in the order they name them; the store's header first if `from` is 0. What to
+// append to a copy of the statement store that has those of the first `from` commits (docs/m3-engine.md 6ba).
+fn put_stmts[&i, &q, &z, &r](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, from: int, upto: int, rec: &!r [byte]) -> [io_write, file_read] int {
+    if from == 0 {
+        put_str(io, "CHODBST3");
+    }
+    var status = 0;
+    region g {
+        let info = alloc_slice[g](commit.out_len(), 0);
+        let item = alloc_slice[g](60000, byte_of(0));
+        var seq = from;
+        while seq < upto && status == 0 {
+            let rn = facts.record(pg, w, root, seq, rec);
+            if rn <= 0 || commit.decode(rec[4..rn - 64], info) != commit.ok() {
+                status = damaged();
+            } else {
+                var k = 0;
+                while k < info[commit.f_stmts_n()] && status == 0 {
+                    let at = 4 + info[commit.f_stmts_at()] + 32 * k;
+                    var n = 0;
+                    var part = 0;
+                    var more = true;
+                    while more && status == 0 {
+                        let kk = tables.kept_key(8, rec[at..at + 32], part, contents(w.key));
+                        let got = btree.get(pg, contents(w.sc), root, contents(w.key)[0..kk], contents(w.cur));
+                        if got == btree.not_found() {
+                            more = false;
+                        } else if got < 0 || n + got > len(item) {
+                            status = damaged();
+                        } else {
+                            n = exec.copy(contents(w.cur), 0, got, item, n);
+                            part = part + 1;
+                        }
+                    }
+                    if status == 0 && n == 0 {
+                        // a commit names a statement the file does not have
+                        status = damaged();
+                    }
+                    if status == 0 {
+                        put_u32(io, n);
+                        put_raw(io, item, 0, n);
+                    }
+                    k = k + 1;
+                }
+            }
+            seq = seq + 1;
         }
     }
     return status;
@@ -378,8 +460,85 @@ fn put_live[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root:
     return status;
 }
 
+// What the tree `root` holds, by what it is for: for each kind a line `usage KIND entries bytes` (the bytes of the keys and the values; the pages they are in hold
+// about twice that), so that who keeps the file can see what makes it grow (docs/m3-engine.md 6ba).
+fn put_usage[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int) -> [io_write, file_read] int {
+    var status = 0;
+    region g {
+        let at = alloc_slice[g](1024, byte_of(0));
+        let next = alloc_slice[g](1024, byte_of(0));
+        let ent = alloc_slice[g](1024, byte_of(0));
+        let sums = alloc_slice[g](16, 0);
+        var al = 0;
+        var more = root != 0;
+        var first = true;
+        while more && status == 0 {
+            var r = 0;
+            if first {
+                // the first key of the tree: at or after the one byte that is before every key
+                at[0] = byte_of(0);
+                r = btree.next_after(pg, contents(w.sc), root, at[0..1], true, next, ent);
+                first = false;
+            } else {
+                r = btree.next_after(pg, contents(w.sc), root, at[0..al], false, next, ent);
+            }
+            if r == btree.not_found() {
+                more = false;
+            } else if r < 0 || r / 1024 < 4 {
+                status = damaged();
+            } else {
+                let nk = r / 1024;
+                al = exec.copy(next, 0, nk, at, 0);
+                let space = commit.be(at, 0, 4);
+                // 0 the catalog, 1 the rows, 2 the history of the rows, 3 the log's records, 4 its facts, 5 its tokens, 6 its statements, 7 the rest
+                var kind = 1;
+                if space == 0 {
+                    kind = 0;
+                } else if space == 4294967295 {
+                    kind = 2;
+                } else if space == tables.log_space() {
+                    kind = 7;
+                    if nk > 4 && int_of(at[4]) >= 5 && int_of(at[4]) <= 8 {
+                        kind = int_of(at[4]) - 2;
+                    }
+                }
+                sums[2 * kind] = sums[2 * kind] + 1;
+                sums[2 * kind + 1] = sums[2 * kind + 1] + nk + r % 1024;
+            }
+        }
+        var k = 0;
+        while k < 8 && status == 0 {
+            put_str(io, "usage ");
+            if k == 0 {
+                put_str(io, "catalog");
+            } else if k == 1 {
+                put_str(io, "rows");
+            } else if k == 2 {
+                put_str(io, "history");
+            } else if k == 3 {
+                put_str(io, "records");
+            } else if k == 4 {
+                put_str(io, "facts");
+            } else if k == 5 {
+                put_str(io, "tokens");
+            } else if k == 6 {
+                put_str(io, "statements");
+            } else {
+                put_str(io, "other");
+            }
+            putchar(io, ' ');
+            put_int(io, sums[2 * k]);
+            putchar(io, ' ');
+            put_int(io, sums[2 * k + 1]);
+            putchar(io, '\n');
+            k = k + 1;
+        }
+    }
+    return status;
+}
+
 // The thing asked for, from the tree `root`: 0, or a refusal's code.
-fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, what: &a [byte], upto: int) -> [io_write, file_read] int {
+fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int, what: &a [byte], upto: int, from: int, swept: int) -> [io_write, file_read] int {
     var status = 0;
     region g {
         let rec = alloc_slice[g](facts.max_record(), byte_of(0));
@@ -389,7 +548,7 @@ fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, roo
         if logged < 0 {
             status = damaged();
         } else if logged > 0 {
-            n = count(pg, w, root, rec, ident);
+            n = count(pg, w, root, ident);
             if n < 0 {
                 status = 0 - n;
             }
@@ -401,7 +560,28 @@ fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, roo
         if upto >= 0 {
             stop = upto;
         }
+        if status == 0 && from > stop {
+            status = behind();
+        }
+        var kept = 0;
+        if status == 0 && logged > 0 {
+            kept = facts.floor(pg, w, root);
+            if kept < 0 {
+                status = damaged();
+            }
+        }
+        let ranged = same(what, "log") || same(what, "facts") || same(what, "stmts") && upto >= 0;
+        if status == 0 && ranged && from < kept && from < stop {
+            // the commits before the floor were taken out of this file by whoever has them elsewhere (6ba)
+            status = archived();
+        }
         if status != 0 {
+        } else if same(what, "usage") {
+            status = put_usage(io, pg, w, root);
+        } else if same(what, "sweeps") {
+            put_str(io, "sweeps ");
+            put_int(io, swept);
+            putchar(io, '\n');
         } else if same(what, "live") {
             if upto >= 0 && upto != n {
                 // the rows are the rows now: they are of the log asked for only if nothing was committed since
@@ -422,13 +602,19 @@ fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, roo
             }
             putchar(io, '\n');
         } else if same(what, "log") {
-            status = put_log(io, pg, w, root, stop, rec);
+            status = put_log(io, pg, w, root, from, stop, rec);
         } else if same(what, "facts") {
-            status = put_facts(io, pg, w, root, stop, rec);
+            status = put_facts(io, pg, w, root, from, stop, rec);
         } else if same(what, "tokens") {
             status = put_kept(io, pg, w, root, 7);
+        } else if same(what, "stmts") && upto >= 0 {
+            status = put_stmts(io, pg, w, root, from, stop, rec);
         } else if same(what, "stmts") {
             status = put_kept(io, pg, w, root, 8);
+        } else if same(what, "floor") {
+            put_str(io, "floor ");
+            put_int(io, kept);
+            putchar(io, '\n');
         } else {
             status = usage();
         }
@@ -436,9 +622,20 @@ fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, roo
     return status;
 }
 
-// The sequence number of the page file's state as a pager that has read nothing of it sees it (and the roots of its trees into `roots`), or a negative number.
-fn state_of[&h, &f, &p, &r](heap: &!h Heap, fs: &f Fs(""), path: &p [byte], roots: &!r [int]) -> [heap, fs_read(""), file_read] int {
-    var seq = 0 - 1;
+// How many sweeps the tree `root` says were announced (`tables.sweeps`), or a negative number.
+fn sweeps_of[&z, &q](pg: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_read] int {
+    var n = 0 - 1;
+    region g {
+        let key = alloc_slice[g](8, byte_of(0));
+        let num = alloc_slice[g](1024, byte_of(0));
+        n = tables.sweeps(pg, exec.scratch(w), root, key, num);
+    }
+    return n;
+}
+
+// The same number as a pager that has read nothing of the file sees it now, in the state the file is in now; or a negative number.
+fn sweeps_now[&h, &f, &p, &r](heap: &!h Heap, fs: &f Fs(""), path: &p [byte], roots: &!r [int]) -> [heap, fs_read(""), file_read] int {
+    var n = 0 - 1;
     match open_read(fs, path) {
         Opened::Failed(e) => {
         }
@@ -447,8 +644,8 @@ fn state_of[&h, &f, &p, &r](heap: &!h Heap, fs: &f Fs(""), path: &p [byte], root
             var size = 0;
             borrow mut f as &!fw in {
                 match file_size(fw) {
-                    Done::Ok(n) => {
-                        size = n;
+                    Done::Ok(sz) => {
+                        size = sz;
                     }
                     Done::Failed(e) => {
                     }
@@ -458,14 +655,16 @@ fn state_of[&h, &f, &p, &r](heap: &!h Heap, fs: &f Fs(""), path: &p [byte], root
             var wk = exec.new_work(heap);
             borrow mut pg as &!pp in {
                 borrow mut wk as &!ww in {
-                    seq = pstore.load(pp, exec.scratch(ww), roots);
+                    if pstore.load(pp, exec.scratch(ww), roots) >= 0 {
+                        n = sweeps_of(pp, ww, roots[0]);
+                    }
                 }
             }
             exec.drop_work(heap, wk);
             pager.drop_pager(heap, pg);
         }
     }
-    return seq;
+    return n;
 }
 
 fn main(world: World) -> [] int {
@@ -480,13 +679,18 @@ fn main(world: World) -> [] int {
     borrow fs as &fsr in {
         borrow args as &g in {
             var upto = 0 - 1;
-            var good = arg_count(g) == 3 || arg_count(g) == 4;
-            if arg_count(g) == 4 {
+            var from = 0;
+            var good = arg_count(g) >= 3 && arg_count(g) <= 5;
+            if good && arg_count(g) >= 4 {
                 upto = number(arg(g, 3));
                 good = upto >= 0;
             }
+            if good && arg_count(g) == 5 {
+                from = number(arg(g, 4));
+                good = from >= 0 && (same(arg(g, 2), "log") || same(arg(g, 2), "facts") || same(arg(g, 2), "stmts"));
+            }
             if good {
-                good = same(arg(g, 2), "anchor") && arg_count(g) == 3 || same(arg(g, 2), "log") || same(arg(g, 2), "facts") || same(arg(g, 2), "live") || (same(arg(g, 2), "tokens") || same(arg(g, 2), "stmts")) && arg_count(g) == 3;
+                good = (same(arg(g, 2), "anchor") || same(arg(g, 2), "sweeps") || same(arg(g, 2), "usage") || same(arg(g, 2), "floor")) && arg_count(g) == 3 || same(arg(g, 2), "log") || same(arg(g, 2), "facts") || same(arg(g, 2), "live") || same(arg(g, 2), "stmts") || same(arg(g, 2), "tokens") && arg_count(g) == 3;
             }
             if good {
                 status = no_file();
@@ -510,6 +714,7 @@ fn main(world: World) -> [] int {
                             var wk = exec.new_work(hh);
                             var roots = box_slice(hh, 16, 0);
                             var seq = 0 - 1;
+                            var swept = 0 - 1;
                             borrow mut roots as &!rw in {
                                 borrow mut pg as &!pp in {
                                     borrow mut wk as &!ww in {
@@ -519,15 +724,21 @@ fn main(world: World) -> [] int {
                                         } else if seq < 0 {
                                             status = damaged();
                                         } else {
-                                            borrow mut io as &!oo in {
-                                                status = export(oo, pp, ww, contents(rw)[0], arg(g, 2), upto);
+                                            swept = sweeps_of(pp, ww, contents(rw)[0]);
+                                            if swept < 0 {
+                                                status = damaged();
+                                            } else {
+                                                borrow mut io as &!oo in {
+                                                    status = export(oo, pp, ww, contents(rw)[0], arg(g, 2), upto, from, swept);
+                                                }
                                             }
                                         }
                                     }
                                 }
-                                if seq >= 0 && status != usage() {
-                                    // a commit made while this program read may have written again a page it read: then what it wrote is not to be believed
-                                    if state_of(hh, fsr, arg(g, 1), contents(rw)) != seq {
+                                if swept >= 0 && status != usage() {
+                                    // pages are written again only after a sweep has freed them, and the commit before a sweep raises a number in the tree
+                                    // (docs/m3-engine.md 6az): if it is not what it was when this program began, a page it read may have been another's
+                                    if sweeps_now(hh, fsr, arg(g, 1), contents(rw)) != swept {
                                         status = raced();
                                     }
                                 }
@@ -543,7 +754,7 @@ fn main(world: World) -> [] int {
     }
     borrow mut io as &!oo in {
         if status == usage() {
-            io.error_all(oo, "usage: logexport PAGEFILE anchor|log|facts|tokens|stmts|live [UPTO]\n");
+            io.error_all(oo, "usage: logexport PAGEFILE anchor|log|facts|tokens|stmts|live|sweeps|floor|usage [UPTO [FROM]]\n");
         }
         if status != 0 {
             io.error_all(oo, "refused ");

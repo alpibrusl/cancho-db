@@ -507,10 +507,9 @@ fn permitted[&h, &k, &e](heap: &!h Heap, tk: &k [byte], e: &e [byte]) -> [heap] 
 
 // A statement of the IR for one of the engine's forms that has none, kept for the log: `tag` 3 a DELETE of the table named at the token `tok` with no condition, `tag` 4
 // a definition of `kind` (docs/spec/ir.md section 2) of that name.
-// Whether the IR is the statement `Call` of `cancho_last_commit` with no argument (docs/spec/ir.md section 2: the tag, the name, the count).
-fn is_last_commit[&e](e: &e [byte]) -> [] bool {
-    let name = "cancho_last_commit";
-    if len(e) != 7 + len(name) || int_of(e[0]) != 5 || int_of(e[1]) != 0 || int_of(e[2]) != len(name) {
+// Whether the IR is the statement `Call` of the function `name` with `argc` arguments (docs/spec/ir.md section 2: the tag, the name, the count, the arguments).
+fn is_call[&e](e: &e [byte], name: &static [byte], argc: int) -> [] bool {
+    if len(e) < 7 + len(name) || int_of(e[0]) != 5 || int_of(e[1]) != 0 || int_of(e[2]) != len(name) {
         return false;
     }
     var i = 0;
@@ -520,7 +519,27 @@ fn is_last_commit[&e](e: &e [byte]) -> [] bool {
         }
         i = i + 1;
     }
-    return int_of(e[len(e) - 1]) == 0 && int_of(e[len(e) - 2]) == 0 && int_of(e[len(e) - 3]) == 0 && int_of(e[len(e) - 4]) == 0;
+    let c = 3 + len(name);
+    return int_of(e[c]) == 0 && int_of(e[c + 1]) == 0 && int_of(e[c + 2]) == 0 && int_of(e[c + 3]) == argc;
+}
+
+fn is_last_commit[&e](e: &e [byte]) -> [] bool {
+    return is_call(e, "cancho_last_commit", 0) && len(e) == 7 + 18;
+}
+
+// The one argument of `cancho_log_archive(n)`, a whole number written as a constant: its value, or -1 if the IR is anything else.
+fn archive_upto[&e](e: &e [byte]) -> [] int {
+    let c = 7 + 18;
+    if !is_call(e, "cancho_log_archive", 1) || len(e) != c + 10 || int_of(e[c]) != 1 || int_of(e[c + 1]) != 1 || int_of(e[c + 2]) >= 128 {
+        return 0 - 1;
+    }
+    var v = 0;
+    var i = 0;
+    while i < 8 {
+        v = v * 256 + int_of(e[c + 2 + i]);
+        i = i + 1;
+    }
+    return v;
 }
 
 fn keep_named[&q, &s, &t](w: &!q exec.Work, sql: &s [byte], toks: &t [int], tok: int, tag: int, kind: int) -> [] bool {
@@ -609,6 +628,7 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
     var kind = 0 - 1;
     var returned = 0 - 1;
     var called = false;
+    var archived = false;
     if mode == 3 {
         // the transaction has failed: nothing runs until it is ended
         rc = exec.e_aborted();
@@ -733,6 +753,12 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
         } else if kind == 4 && ln > 1 && int_of(e[1]) == 4 {
             rc = execw.drop_index(pg, w, root, e, sql, contents(m.tb), contents(m.nb), top);
             kind = answer.k_drop_index();
+        } else if kind == 5 && archive_upto(e) >= 0 {
+            // the log's oldest part taken out of the page file by whoever has it elsewhere (6ba)
+            rc = facts.archive(pg, w, root, archive_upto(e));
+            called = true;
+            archived = true;
+            kind = 6;
         } else if kind == 5 && is_last_commit(e) {
             // the head of the log, for a client to hold a later log to (6ax)
             rc = facts.last(pg, w, root);
@@ -772,6 +798,9 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
         // the two columns of `cancho_last_commit()`
         hw[3] = 1;
         hw[4] = build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), 0, 7, 2), "commits"), 2, 2), "id");
+        if archived {
+            hw[4] = build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), 0, 5, 2), "floor"), 7, 2), "commits");
+        }
     } else if kind == 6 || returned >= 0 {
         // the names of the columns, as a client is sent them: what the lowering knows and the IR does not carry
         var top2 = top;

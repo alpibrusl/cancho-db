@@ -14,6 +14,7 @@ import cdb.facts;
 import cdb.token;
 import cdb.build;
 import cdb.wire;
+import cdb.tables;
 
 // One connection of the engine's server (docs/m3-engine.md 6al): the startup, then a statement at a time, each answered after what it committed is on the disk.
 
@@ -72,6 +73,11 @@ pub fn g_sweep_at() -> [] int {
     return 73;
 }
 
+// Whether a commit of this run has raised the tree's count of sweeps (6az): the first does, for the sweep made at the start.
+pub fn g_raised() -> [] int {
+    return 74;
+}
+
 pub fn globals() -> [] int {
     return 80;
 }
@@ -81,11 +87,35 @@ pub fn sweep_slack() -> [] int {
     return 2048;
 }
 
+// Whether a sweep is due after the commit about to be made (6aw): the pages freed by the last sweep are used up and the file has reached the size set then. It is
+// asked before the commit, because the commit must say that a sweep follows it (6az).
+pub fn sweep_due[&g, &z](gs: &g [int], pg: &z pager.Pager) -> [] bool {
+    return pager.free_count(pg) == 0 && pager.next_page(pg) >= gs[g_sweep_at()];
+}
+
+// What a commit does before it is made durable when a sweep follows it, and the first commit of a run always (the sweep at the start had no commit to say so): it
+// raises the tree's count of sweeps. The new root, or an error.
+pub fn announce[&g, &z, &q](gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, root: int, due: bool) -> [file_read, file_write] int {
+    if !due && gs[g_raised()] == 1 {
+        return root;
+    }
+    var nr = root;
+    region r {
+        let key = alloc_slice[r](8, byte_of(0));
+        let num = alloc_slice[r](1024, byte_of(0));
+        nr = tables.sweeps_raise(pg, exec.scratch(w), root, key, num);
+    }
+    if nr >= 0 {
+        gs[g_raised()] = 1;
+    }
+    return nr;
+}
+
 // After a commit, with no transaction open (docs/m3-engine.md 6aw): if the pages freed by the last sweep are used up and the file has reached the size set then, the
 // pages no tree names are zeroed and made free again (`pstore.sweep`), and the next size is set: twice the pages in use and the slack, or the size the file has if
 // that is more. 0 if nothing was due, the number of pages freed, or an error (the page file cannot be read or written: the server stops, as for a commit).
-pub fn reclaim[&h, &g, &z, &q, &r](heap: &!h Heap, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, roots: &r [int]) -> [heap, file_read, file_write] int {
-    if pager.free_count(pg) > 0 || pager.next_page(pg) < gs[g_sweep_at()] {
+pub fn reclaim[&h, &g, &z, &q, &r](heap: &!h Heap, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, roots: &r [int], due: bool) -> [heap, file_read, file_write] int {
+    if !due {
         return 0;
     }
     let freed = pstore.sweep(heap, pg, exec.scratch(w), roots);
@@ -565,13 +595,19 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
             // durable before it is acknowledged: the page file's commit comes before the answer
             roots[0] = nr;
             if session.state(st[8..16]) == session.idle() {
-                let seq = pstore.commit(pg, exec.scratch(w), roots, gs[g_seq()]);
+                // what the commits before left behind is taken back when the file has grown enough (6aw); the commit before a sweep says so in the tree (6az)
+                let due = sweep_due(gs, pg);
+                let told = announce(gs, pg, w, roots[0], due);
+                var seq = told;
+                if told >= 0 {
+                    roots[0] = told;
+                    seq = pstore.commit(pg, exec.scratch(w), roots, gs[g_seq()]);
+                }
                 if seq < 0 {
                     nr = seq;
                 } else {
                     gs[g_seq()] = seq;
-                    // what the commits before left behind is taken back when the file has grown enough (6aw)
-                    let fr = reclaim(heap, gs, pg, w, roots);
+                    let fr = reclaim(heap, gs, pg, w, roots, due);
                     if fr < 0 {
                         nr = fr;
                     }

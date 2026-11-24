@@ -100,7 +100,7 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j](heap: &!h Heap, io: &!o Io, net
             }
             // before anyone is served, the pages the last run left behind are taken back (docs/m3-engine.md 6ay): a server stopped by a full disk starts again with
             // the room there is in its own file
-            if seq >= 0 && serve.reclaim(heap, gs, pg, w, rs) < 0 {
+            if seq >= 0 && serve.reclaim(heap, gs, pg, w, rs, true) < 0 {
                 seq = 0 - 1;
             }
             if seq < 0 {

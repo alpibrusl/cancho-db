@@ -6,11 +6,11 @@ CANCHO=${CANCHO:-cancho}
 export CANCHO
 mkdir -p build
 
-# What to run: `all` (the default: everything, as before), `checks` (everything but the mutants), or one shard of the mutants, `mutants-a` to `mutants-d`
-# (CI runs the five parts as five jobs at once, .github/workflows/ci.yml). A shard builds what the mutants are held against and runs the short checks, and
+# What to run: `all` (the default: everything, as before), `checks` (everything but the mutants), or one shard of the mutants, `mutants-a` to `mutants-e`
+# (CI runs the six parts as six jobs at once, .github/workflows/ci.yml). A shard builds what the mutants are held against and runs the short checks, and
 # leaves out the long ones, which the `checks` part runs.
 PART=${1:-all}
-case "$PART" in all|checks|mutants-a|mutants-b|mutants-c|mutants-d) ;; *) echo "usage: check.sh [all|checks|mutants-a|mutants-b|mutants-c|mutants-d]" >&2; exit 2 ;; esac
+case "$PART" in all|checks|mutants-a|mutants-b|mutants-c|mutants-d|mutants-e) ;; *) echo "usage: check.sh [all|checks|mutants-a|mutants-b|mutants-c|mutants-d|mutants-e]" >&2; exit 2 ;; esac
 long() { case "$PART" in mutants-*) return 1 ;; *) return 0 ;; esac; }
 
 # run a command, keep ITS exit status (a pipe into tail would hide it in sh), and show its last N lines; on failure show all.
@@ -41,7 +41,7 @@ mutants() {
     fi
 }
 
-echo "== the parts of this script are the jobs CI runs"; for p in checks mutants-a mutants-b mutants-c mutants-d; do grep -q "^ *- $p\$" .github/workflows/ci.yml || { echo "ci.yml has no job for $p" >&2; exit 1; }; done; [ "$(grep -c '^ *- \(checks\|mutants-[a-z]\)$' .github/workflows/ci.yml)" = 5 ] || { echo "ci.yml names a part this script does not have" >&2; exit 1; }
+echo "== the parts of this script are the jobs CI runs"; for p in checks mutants-a mutants-b mutants-c mutants-d mutants-e; do grep -q "^ *- $p\$" .github/workflows/ci.yml || { echo "ci.yml has no job for $p" >&2; exit 1; }; done; [ "$(grep -c '^ *- \(checks\|mutants-[a-z]\)$' .github/workflows/ci.yml)" = 6 ] || { echo "ci.yml names a part this script does not have" >&2; exit 1; }
 echo "== formatting";                "$CANCHO" fmt --check src
 echo "== vectors are reproducible";  rm -rf build/vectors && python3 tools/gen_vectors.py build/vectors >/dev/null && diff -r vectors build/vectors
 echo "== the landing page (docs/index.html, served by Pages from branch main, folder /docs): its counts are current"; python3 scripts/site.py --check
@@ -130,6 +130,8 @@ for seed in 1 2 3; do quiet 2 python3 tests/engine_log.py build/enginecheck 2000
 echo "== the engine's server (docs/m3-engine.md 6al): PostgreSQL's protocol over a socket, held against the test program; kill, dropped connections, garbage, psql"
 "$CANCHO" build --std proxy/engine.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/wire.cho src/serve.cho src/login.cho src/token.cho src/ir.cho -o build/engine
 for seed in 1 2 3; do quiet 2 python3 tests/engine_wire.py build/engine build/enginecheck 1500 $seed "python3 tools/l3a.py" build/l3averify "python3 tests/third/l3a_third.py"; done
+echo "== the engine's server under load for a minute (docs/m3-engine.md 6az): money never made or lost, the journal, a copy of the log kept up beside it, kills"
+quiet 9 python3 tests/engine_soak.py build/engine build/enginecheck 60 1 archive
 echo "== cancho-hooks, the program, on the engine's server (docs/m3-engine.md 6an): skipped unless HOOKS_BIN names a hooks binary"
 quiet 2 python3 tests/hooks_server.py build/engine
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
@@ -189,14 +191,14 @@ echo "== mutants, facts and state";  mutants a state "$CANCHO"
 echo "== mutants, guard";  mutants a guard "$CANCHO"
 echo "== mutants, commit builder";  mutants a build "$CANCHO"
 echo "== mutants, log directory";  mutants a store "$CANCHO"
-echo "== mutants, B+tree, pages and superblocks";  mutants a btree "$CANCHO"
-echo "== mutants, the engine's rows";  mutants a row "$CANCHO"
-echo "== mutants, the engine's expression evaluator";  mutants a eval "$CANCHO"
+echo "== mutants, B+tree, pages and superblocks";  mutants e btree "$CANCHO"
+echo "== mutants, the engine's rows";  mutants e row "$CANCHO"
+echo "== mutants, the engine's expression evaluator";  mutants e eval "$CANCHO"
 echo "== mutants, the engine's statements";  mutants b engine "$CANCHO"
 echo "== mutants, the engine's server";  mutants c wire "$CANCHO"
 echo "== mutants, the export tool";  mutants c export "$CANCHO"
-echo "== mutants, capture SQL and cdb.fork";  mutants a sql "$CANCHO"
-echo "== mutants, L3a verifier";  mutants a l3a "$CANCHO"
-echo "== mutants, L3a verifier in cancho";  mutants a l3a-cho "$CANCHO"
+echo "== mutants, capture SQL and cdb.fork";  mutants e sql "$CANCHO"
+echo "== mutants, L3a verifier";  mutants e l3a "$CANCHO"
+echo "== mutants, L3a verifier in cancho";  mutants e l3a-cho "$CANCHO"
 echo "== mutants, proxy (end to end, four at once)";  mutants d proxy "$CANCHO"
 echo "all green"

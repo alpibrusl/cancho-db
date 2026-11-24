@@ -155,6 +155,48 @@ pub fn kept_key[&i, &o](kind: int, id: &i [byte], part: int, out: &!o [byte]) ->
     return 38;
 }
 
+// How many times the pages nothing names were about to be taken back (docs/m3-engine.md 6az): a number in the tree, under the log's space, that a commit raises
+// before the sweep that follows it. A reader of the file that finds it changed knows pages it read may have been written again.
+pub fn sweeps_key[&o](out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, log_space(), 4);
+    out[4] = byte_of(9);
+    return 5;
+}
+
+// That number in the tree `root` (0 if it was never raised), or an error. `key` and `out` are scratch (5 and 8 bytes at least).
+pub fn sweeps[&q, &s, &k, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &!k [byte], out: &!o [byte]) -> [file_read] int {
+    let kl = sweeps_key(key);
+    let n = btree.get(p, sc, root, key[0..kl], out);
+    if n == btree.not_found() {
+        return 0;
+    }
+    if n < 0 {
+        return n;
+    }
+    if n != 8 {
+        return btree.err_bad();
+    }
+    return commit.be(out, 0, 8);
+}
+
+// The tree `root` with that number one more: the new root, or an error.
+pub fn sweeps_raise[&q, &s, &k, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &!k [byte], out: &!o [byte]) -> [file_read, file_write] int {
+    let n = sweeps(p, sc, root, key, out);
+    if n < 0 {
+        return n;
+    }
+    build.put_be(out, 0, n + 1, 8);
+    let kl = sweeps_key(key);
+    return btree.put(p, sc, root, key[0..kl], out[0..8]);
+}
+
+// The number of the first commit whose record the tree still holds (docs/m3-engine.md 6ba): those before it were archived, 8 bytes under the log's space.
+pub fn floor_key[&o](out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, log_space(), 4);
+    out[4] = byte_of(10);
+    return 5;
+}
+
 pub fn fact_key[&o](seq: int, out: &!o [byte]) -> [] int {
     build.put_be(out, 0, log_space(), 4);
     out[4] = byte_of(6);
