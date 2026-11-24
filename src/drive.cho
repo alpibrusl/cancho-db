@@ -629,6 +629,7 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
     var returned = 0 - 1;
     var called = false;
     var archived = false;
+    var trimmed = false;
     if mode == 3 {
         // the transaction has failed: nothing runs until it is ended
         rc = exec.e_aborted();
@@ -753,6 +754,12 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
         } else if kind == 4 && ln > 1 && int_of(e[1]) == 4 {
             rc = execw.drop_index(pg, w, root, e, sql, contents(m.tb), contents(m.nb), top);
             kind = answer.k_drop_index();
+        } else if kind == 5 && is_call(e, "cancho_history_trim", 0) && len(e) == 7 + 19 {
+            // what the rows were before, taken out of the page file (6bb)
+            rc = facts.trim(pg, w, root);
+            called = true;
+            trimmed = true;
+            kind = 6;
         } else if kind == 5 && archive_upto(e) >= 0 {
             // the log's oldest part taken out of the page file by whoever has it elsewhere (6ba)
             rc = facts.archive(pg, w, root, archive_upto(e));
@@ -798,6 +805,9 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
         // the two columns of `cancho_last_commit()`
         hw[3] = 1;
         hw[4] = build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), 0, 7, 2), "commits"), 2, 2), "id");
+        if trimmed {
+            hw[4] = build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), 0, 7, 2), "removed"), 11, 2), "transaction");
+        }
         if archived {
             hw[4] = build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), build.put_bytes(contents(m.ir), build.put_be(contents(m.ir), 0, 5, 2), "floor"), 7, 2), "commits");
         }

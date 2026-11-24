@@ -791,11 +791,16 @@ pub fn archive[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, upto: in
             }
         }
     }
+    return two(w, nw, at, n);
+}
+
+// The answer of a call that changes no row, made in `w` as a SELECT's: one row of two whole numbers; and the tree the call left. 0.
+fn two[&q](w: &!q exec.Work, root: int, a: int, b: int) -> [] int {
     let rows = contents(w.rows);
     rows[0] = byte_of(1);
-    exec.put_i64(rows, 1, at);
+    exec.put_i64(rows, 1, a);
     rows[9] = byte_of(1);
-    exec.put_i64(rows, 10, n);
+    exec.put_i64(rows, 10, b);
     contents(w.pos)[exec.p_itype()] = row.t_int();
     contents(w.pos)[exec.p_itype() + 1] = row.t_int();
     contents(w.idx)[0] = 0;
@@ -806,6 +811,57 @@ pub fn archive[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, upto: in
     // it changed no row: what the statement before reported is not this one's (a commit of the log is made of a statement's changes)
     w.nchg = 0;
     w.cfill = 0;
-    w.root = nw;
+    w.root = root;
     return 0;
+}
+
+// How many entries of the history a call of `trim` takes out at most.
+pub fn trim_step() -> [] int {
+    return 256;
+}
+
+// `select cancho_history_trim()` (docs/m3-engine.md 6bb): what the rows were before the transactions that have ended (the undo entries of 6n, up to the tree's last
+// transaction) is taken out of the tree `root`, at most `trim_step()` entries a call, and the tree says up to which transaction. The entries of a transaction that
+// is open are of a later number and stay: its commit needs them. The answer, made in `w` as a SELECT's: how many entries this call took out (0: there are no more)
+// and the number of that transaction. 0, or an error.
+pub fn trim[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_read, file_write] int {
+    let last = exec.last_txn(p, w, root);
+    if last < 0 {
+        return last;
+    }
+    var nw = root;
+    var gone = 0;
+    region g {
+        let from = alloc_slice[g](12, byte_of(0));
+        build.put_be(from, 0, 4294967295, 4);
+        build.put_be(from, 4, 9223372036854775807 - last, 8);
+        var more = root != 0;
+        while more && gone < trim_step() {
+            let r = btree.next_after(p, contents(w.sc), nw, from, true, contents(w.key2), contents(w.cur));
+            if r == btree.not_found() {
+                more = false;
+            } else if r < 0 {
+                return exec.tree_err(r);
+            } else if r / 1024 < 12 || commit.be(contents(w.key2), 0, 4) != 4294967295 {
+                more = false;
+            } else {
+                let d = btree.del(p, contents(w.sc), nw, contents(w.key2)[0..r / 1024]);
+                if d < 0 {
+                    return exec.tree_err(d);
+                }
+                nw = d;
+                gone = gone + 1;
+            }
+        }
+        if gone > 0 {
+            let num = alloc_slice[g](8, byte_of(0));
+            build.put_be(num, 0, last, 8);
+            let tk = tables.trim_key(contents(w.key));
+            nw = btree.put(p, contents(w.sc), nw, contents(w.key)[0..tk], num);
+            if nw < 0 {
+                return exec.tree_err(nw);
+            }
+        }
+    }
+    return two(w, nw, gone, last);
 }

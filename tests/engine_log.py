@@ -525,6 +525,37 @@ def archiving(work, path):
     nolog = str(work / "nolog")
     out = [l for l in run(nolog, ["select cancho_log_archive(0)", "select cancho_log_archive(1)"]) if l[:2] in ("R ", "re")]
     check("with no log there is nothing to archive: 0 of 0, and one commit is ahead", out == ["R 30 30", "refused archive-ahead"], out)
+    return full, toks, n + 1
+
+
+def trimming(work, path, full, toks, n):
+    """What the rows were before, taken out of the page file (6bb): every entry of the transactions that have ended, and none of one that is open, whose commit is made as before."""
+    def usage():
+        return {l.split()[1]: int(l.split()[2]) for l in export(path, "usage")[1].decode().strip().split("\n")}
+    before = usage()
+    calls = before["history"] // 256 + 2
+    out = run(path, WHO + ["!txn", "!asof 1", "select count(*) from acct", "!asof -", "begin", "insert into acct values (616161, 'in a transaction that is open', 1)"]
+              + ["select cancho_history_trim()"] * calls + ["update acct set cents = 2 where id = 616161", "delete from note where k = 'second'", "commit", "!txn", "!asof 1", "!commit", "!sweep"])
+    said = [l for l in out if l[:2] in ("R ", "re", "er", "tx", "as")]
+    removed = [int(bytes.fromhex(l.split()[1])) for l in said if l.startswith("R ") and len(l.split()) == 3][-calls:]
+    txns = [int(l.split()[1]) for l in said if l.startswith("txn ")]
+    after = usage()
+    check("cancho_history_trim: before it the tree is read as of its first transaction; %d entries of the history go out 256 a call (%d calls, the last finding none), every one of the transactions ended "
+          "and none of the one open (%d left, its own); after it the tree as of what was trimmed is refused history-trimmed" % (before["history"], calls, after["history"]),
+          "asof 1" in said and sum(removed) == before["history"] - 1 and removed[-1] == 0 and max(removed) == 256 and len(txns) == 2 and txns[1] == txns[0] + 1
+          and 1 <= after["history"] - 1 <= 4 and said[-1] == "err -21" and (after["rows"], after["catalog"]) == (before["rows"], before["catalog"]), (said[:3], removed, txns, before, after, said[-2:]))
+    # the transaction that was open while its history was trimmed around it commits as any other: its facts are in the log
+    more = [export(path, w, n + 1, n) for w in ("log", "facts", "stmts")]
+    (work / "y.log").write_bytes(full[0] + more[0][1])
+    (work / "y.tok").write_bytes(toks)
+    (work / "y.st").write_bytes(full[2] + more[2][1])
+    for cmd in L2:
+        r = subprocess.run(cmd.split() + [str(work / "y.log"), "--root", ROOT_KEY, "--tokens", str(work / "y.tok"), "--stmts", str(work / "y.st")], capture_output=True, text=True, cwd=ROOT)
+        v = (r.stdout + r.stderr).strip()
+        check("%s: the commit of the transaction that was open through the trim continues the copy: %d commits, level=2+ir" % (cmd, n + 1), v.startswith("ok commits=%d " % (n + 1)) and v.endswith("level=2+ir"), v)
+    for cmd in VERIFIERS:
+        v = verdict(cmd, work, full[0] + more[0][1], full[1] + more[1][1], export(path, "live")[1])
+        check("%s: after the trim, the copy, its facts and the rows the file holds: ok, final" % cmd, all(m[0] == 0 for m in more) and v.startswith("ok commits=%d " % (n + 1)) and v.endswith(" final"), v)
 
 
 def main():
@@ -571,7 +602,7 @@ def main():
                 check("%s: %s is %s" % (cmd, name, want), v.startswith("reject rule=%s " % want), v)
         exported(work, path, files, live, nrows)
         tool(work, path, early)
-        archiving(work, path)
+        trimming(work, path, *archiving(work, path))
         print("commits %d, changes %d, rows at the end %d" % (len(files.records), len(files.deltas), nrows))
     if FAILED:
         print("FAIL engine log: %d failed" % len(FAILED))

@@ -55,6 +55,11 @@ pub fn archive_ahead() -> [] int {
     return 0 - 20;
 }
 
+// The tree as it was at a transaction whose history has been trimmed away (6bb).
+pub fn trimmed() -> [] int {
+    return 0 - 21;
+}
+
 pub fn refusal_name(code: int) -> [] &static [byte] {
     if code == order_dependent() {
         return "engine-order-dependent";
@@ -79,6 +84,9 @@ pub fn refusal_name(code: int) -> [] &static [byte] {
     }
     if code == archive_ahead() {
         return "archive-ahead";
+    }
+    if code == trimmed() {
+        return "history-trimmed";
     }
     return "engine-unsupported";
 }
@@ -1867,6 +1875,15 @@ pub fn as_of[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, t: int) -> [fil
     var out = root;
     if root == 0 {
         return 0;
+    }
+    // what was before the history was trimmed (6bb) cannot be put back: it is refused, not answered with what is there
+    let fk = tables.trim_key(contents(w.key));
+    let fr = btree.get(p, contents(w.sc), root, contents(w.key)[0..fk], contents(w.cur));
+    if fr == 8 && t < commit.be(contents(w.cur), 0, 8) {
+        return trimmed();
+    }
+    if fr != 8 && fr != btree.not_found() {
+        return damaged();
     }
     build.put_be(contents(w.key), 0, 4294967295, 4);
     var kl = 4;
