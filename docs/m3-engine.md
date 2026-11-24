@@ -2099,6 +2099,53 @@ bounds it. One commit a statement, every table of it. No self-join. The handle i
 "an hour ago". A commit's handle goes with its record when the log is archived, though the rows' past may still be there. The past of a row that was erased is
 not there, which is what an erase is for.
 
+## 6bf. A row erased, through the server
+
+The engine has been able to erase a row and its past since 6n, and only the test program could ask (`!erase`). The proxy's clients have had a statement for it
+since M2g: `select cancho_erase('<table>', '<key>')` (`docs/m2g-erasure.md` 6d). This is that statement, answered by the engine.
+
+**Design.**
+
+- *The statement.* `select cancho_erase('<table>', '<key>')` and nothing else: the key a JSON array of one value, a whole number or a string, for a table whose
+  key is one column of that kind. Anything else that is the call is refused, `erase-malformed`: a key of the other kind, of two values, a table that is not
+  there, a table keyed by two columns (the engine erases by one, 6n). A statement of its own, outside a transaction (`25001 erase-in-transaction`), with no
+  parameters.
+- *What a token needs:* the call `cancho_erase`, and what the DELETE of that row needs (to write the table and read its key). Either missing is `42501`.
+- *The row is deleted first, as a DELETE deletes it.* The test program's erase removes a row that is there with no fact for the log, which is what it was made
+  for (a row already deleted) and would leave a log whose replay still has the row. So the server runs the DELETE, with its fact, and then the erase of the key:
+  the row's history entries, and its key wherever the tree kept it (6bc).
+- *The log.* The commit names one statement, the call, its two constants left out like every statement's (6au), and its effect is `call cancho_erase`: the
+  specification does not open a call into what it did, and the fact says a row left the table. So the log says **that** an erase was done, by whom and when, and
+  that a row left that table; not which key. An erase that removed only a past (the row deleted before) is a commit too. One that found nothing changes nothing
+  and is none.
+- *Gone when the client is answered.* Erased pages are zeroed by a sweep, and a sweep keeps what either of the file's two last states names. Left to 6aw's rule
+  the row would stay in the file until the file had next grown enough. So an erase commits, **commits again**, so that both states are the one without the row,
+  and sweeps, before it answers.
+- *The answer:* `row` (1 if the row was there) and `past` (how many entries of its history went).
+
+*Not in this part:* erase by a key of several columns; by a condition; of a table that was dropped; of the statements that named the subject (the engine's
+records never held their constants, 6au, so there is nothing of the subject in them to erase); a branch.
+
+**Test.** `tests/engine_wire.py` (`erasing`): 40 people in two tables (a text key, one with a quote in it; a number key; an index on a text column), each
+updated; five erased from each, one of them deleted first. When the last erase is answered, with the server running, the file is searched for each erased key,
+value, earlier value and indexed value, whole and their first 10 bytes. The rows not erased are whole; the table as of a commit before the erases has the
+others and not the erased. The refusals. After a kill the file still has nothing of them; each erase that removed something is a commit whose only effect is the
+call; the log verifies with the tokens and the statements, and the replay ends at the rows the file holds.
+
+**Built.** `drive.erase_text` (the statement read, the DELETE written, the call as the log is told it), `may_erase`, `keep_erase`; the server's mode of an
+erase in `drive.run` (the DELETE, then `execw.erase`); in `serve.answer` the refusals, the second commit and the sweep; `exec.stmts_define` takes the call for
+a statement that commits. Measured: all of the test. 10 mutants (`erasing:`, group `wire`), all killed; one survived the first run, a table keyed by two columns
+erased by one of them, which no test had: with it the DELETE written names one column and would have deleted every row with that value.
+
+*Found while building.* Erased through the server, the row was first still in the file after the answer: zeroed only by a sweep, and a sweep was not due. The
+second commit and the sweep at once are for that. And a token whose effects are listed out of order is no token (`login-bad-token`): the specification's order,
+which the test's first token did not have; nothing of the server's.
+
+*Limits.* **An erase costs a pass over the whole file** (the sweep: 0.3 s for 160 MiB, 6aw) and the server answers nobody meanwhile: it is for the request of
+a person, not for a batch. One column of key. The log does not say which key was erased; whoever must show that a given person's row was erased has the
+commit, its time and its token, and the absence of the row. What is erased is erased in this file: a copy of the page file made before, a backup, the disk
+under the file system, are not this program's. The log's copy elsewhere (6ba) holds the row's facts as hashes, with salts that are gone.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
