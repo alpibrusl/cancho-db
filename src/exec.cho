@@ -1295,6 +1295,19 @@ pub fn stmts_of[&q](w: &q Work) -> [] &q [byte] {
     return contents(w.said)[0..w.lsaid];
 }
 
+// Whether a statement kept since `stmts_clear` is a definition (the IR's `Ddl`, tag 4): a table, an index or a sequence made, changed or dropped (6bc).
+pub fn stmts_define[&q](w: &q Work) -> [] bool {
+    let said = contents(w.said);
+    var at = 0;
+    while at + 5 <= w.lsaid {
+        if int_of(said[at + 4]) == 4 {
+            return true;
+        }
+        at = at + 4 + commit.be(said, at, 4);
+    }
+    return false;
+}
+
 pub fn stmts_count[&q](w: &q Work) -> [] int {
     return w.nsaid;
 }

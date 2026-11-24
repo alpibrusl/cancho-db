@@ -91,6 +91,8 @@ echo "== the first user's schema and queries on the engine (docs/m3-engine.md 6w
 quiet 20 python3 tests/hooks_check.py build/enginecheck
 echo "== the engine's statements across a crash at every durable step (gate 2 at the level of SQL): the tables after a restart are those of a commit, and the file takes writes again"
 quiet 3 python3 tests/engine_crash.py build/enginecheck
+echo "== an erased row leaves nothing of itself in the page file, wherever the tree had put it (docs/m3-engine.md 6bc): 600 rows, half erased, the whole file searched"
+for seed in 1 2 3; do quiet 1 python3 tests/engine_erase.py build/enginecheck $seed; done
 echo "== statements larger than the pager's cache: 30,000 rows rewritten five times, read back as a model says"
 quiet 2 python3 tests/engine_big.py build/enginecheck
 echo "== the statement store of a real session is version 3, and erasing one subject's constants leaves a log that verifies"

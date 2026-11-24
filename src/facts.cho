@@ -169,12 +169,17 @@ pub fn max_statements() -> [] int {
 // holds it (`build.log_record`: its length is 4, the encoding's length that its first four bytes say, and 64) is written to `out`, and the tree's head of the log is moved to it: the
 // new root, or an error. The commit's parent is the head the tree had (none: the first commit of the log, number 0), its `changes` are the facts', its `state` follows from the
 // parent's, its effects are one write for each table that has a fact, and it is signed with the key `seed` is the seed of.
-pub fn seal[&q, &z, &s, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, froot: int, seed: &s [byte], who: &y [byte], out: &!o [byte]) -> [file_read, file_write] int {
+pub fn seal[&q, &z, &s, &y, &m, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int, froot: int, seed: &s [byte], who: &y [byte], schema: &m [byte], out: &!o [byte]) -> [file_read, file_write] int {
     var nw = 0 - 1;
     region g {
         let chg = alloc_slice[g](32, byte_of(0));
         let head = alloc_slice[g](72, byte_of(0));
         let zero = alloc_slice[g](32, byte_of(0));
+        // the hash of the schema the transaction began with (6bc), if the caller has it; zeros if not
+        let sch = alloc_slice[g](32, byte_of(0));
+        if len(schema) == 32 {
+            exec.copy(schema, 0, 32, sch, 0);
+        }
         let effs = alloc_slice[g](8192, byte_of(0));
         let ids = alloc_slice[g](32 * max_statements(), byte_of(0));
         let enc = alloc_slice[g](24000, byte_of(0));
@@ -251,9 +256,9 @@ pub fn seal[&q, &z, &s, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, root: int,
         // who and when (6at): the id of the token the commit was made under, its principal and the time, if the caller has them; zeros and 0 if not
         var en = 0;
         if len(who) >= who_fixed() {
-            en = build.encode(enc, head[8..8 + 32 * np], "main", seq, zero, ids[0..il], effs[0..el], who[0..32], who[32..64], zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], commit.be(who, 64, 8));
+            en = build.encode(enc, head[8..8 + 32 * np], "main", seq, sch, ids[0..il], effs[0..el], who[0..32], who[32..64], zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], commit.be(who, 64, 8));
         } else {
-            en = build.encode(enc, head[8..8 + 32 * np], "main", seq, zero, ids[0..il], effs[0..el], zero, zero, zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], 0);
+            en = build.encode(enc, head[8..8 + 32 * np], "main", seq, sch, ids[0..il], effs[0..el], zero, zero, zero[0..0], 0, zero[0..0], chg, st, 0, zero[0..0], 0);
         }
         if en < 0 || 4 + en + 64 > len(out) {
             return exec.too_big();

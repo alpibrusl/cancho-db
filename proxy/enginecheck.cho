@@ -41,6 +41,7 @@ import cdb.row;
 //     !stmts         the statements' records kept with the log (6au)            -> `Y hex` each, then `stmts N`
 //     !records       the log as it is in the page file (6as)                    -> `L` and the header, `L` and each record, `records N`
 //     !store         the facts of every commit as they are in the page file    -> `X seq table commitment was is` each, then `store N`
+//     !schema        the schema as the lowering reads it (6bc)                 -> `M` and the text in hex
 //     !mark          nothing                                                  -> `mark` (a separator for a test that reads the output)
 //     anything else  one SQL statement, which is run and, if it is done, becomes the state the next one sees
 //                    (`begin`, `commit` and `rollback` are answered here: the statements between them build on the transaction's own tree)
@@ -753,6 +754,26 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                     }
                 } else if begins(all, ls, le, "!rows ") {
                     put_table(io, pg, w, rs[cur], all[ls + 6..le]);
+                } else if starts(all, ls, le, "!schema") {
+                    // the schema as the lowering reads it, whose hash a commit records (docs/m3-engine.md 6bc): `M` and the text in hex (`.`: none)
+                    region xr {
+                        let text = alloc_slice[xr](32768, byte_of(0));
+                        let n = exec.schema(pg, w, rs[cur], text);
+                        if n < 0 {
+                            put_str(io, "M -\n");
+                        } else {
+                            put_str(io, "M ");
+                            if n == 0 {
+                                putchar(io, '.');
+                            }
+                            var k = 0;
+                            while k < n {
+                                hex_byte(io, int_of(text[k]));
+                                k = k + 1;
+                            }
+                            putchar(io, '\n');
+                        }
+                    }
                 } else if starts(all, ls, le, "!mark") {
                     put_str(io, "mark\n");
                 } else if starts(all, ls, le, "!steps") {

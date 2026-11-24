@@ -1960,6 +1960,56 @@ call it. `tests/engine_soak.py ... archive`: the exporter trims after it archive
 the history it keeps until trimmed is of use to nobody; whether to write it at all when nothing will read it is a question this does not answer. The call leaves
 no record in the log. The file does not shrink.
 
+## 6bc. The schema a commit began with, definitions as commits, and what an erase had left behind
+
+**What was missing.** A commit's `schema` field was zeros (6ah), and a statement that made, changed or dropped a table, an index or a sequence was no commit
+unless it also changed rows: the log could not say that the schema had changed, and a server that had only made tables had no log (6av found that).
+
+**Design.**
+
+- *`schema` is what the proxy's is* (`docs/m1-proxy.md`: "the hash of the snapshot read before the transaction's first statement"): SHA-256 of the text the
+  lowering reads (`exec.schema`), taken of the tree the transaction began on. It is computed when the commit is made, from that tree, which the transaction did
+  not change.
+- *A definition is a commit.* A statement whose IR is a `Ddl` (and the engine's forms told as one: a renaming, a sequence made, 6au) makes a commit though it
+  changes no row: its statements, its effects (`define`), who and when, and no fact. In a transaction, a definition makes the transaction one that commits to the
+  log. A definition rolled back, a select, a transaction that only reads: none, as before. With no key there is no log and nothing changes.
+- So two commits one after the other with different `schema` say that a definition lies between them, and the commit between says which names and who.
+
+*What the hash is of, said plainly.* The snapshot is the names: each table with its columns, and each index with its table. **A column's type is not in it**, nor
+a default, nor a key. That is the proxy's snapshot (it is what the lowering needs), not a description of the schema. A sequence is not in it at all: making one
+is a commit that changes no `schema`.
+
+**Test.** `tests/engine_log.py`: the schema is asked for (`!schema`, new in the test program) before every statement outside a transaction and before every
+`begin`; each commit's `schema` is the hash of the last one asked before it. `definitions`: a table made, a transaction of two definitions, a sequence, a
+renaming and a table dropped are five commits with exactly their definitions for effects; a reading transaction, a select and a definition rolled back are none;
+the log of the five verifies.
+
+**Found by this, and nothing to do with schemas: an erase left the key of the row in the file.** The new commits moved where pages of the tree were split, and
+the test that erases one row and searches the file for it (6au's needle) failed: the row's key was in the file, in an internal page of the tree. **A read
+(`src/btree.cho`, the header):** an internal page's key is "the least key that can be in" a child. It is copied from a leaf when a page is split, and when that
+entry is deleted the copy stays, a bound as good as before. So the key of a row that was deleted and erased, and the keys of its history entries (which hold the
+row's key), could remain. The older tests erased one row or three, and passed by where the splits fell. C158 said "no byte" of them is in the file; that was
+measured for its three rows and is false in general.
+
+- *Measured first, with a test that does not leave it to chance* (`tests/engine_erase.py`: 600 rows with text keys in each of two tables, one with an index on a
+  text column, a third updated, half erased, some after an ordinary delete; two commits and a sweep; the whole file searched for each erased row's key, value,
+  later value and indexed value, whole and their first 12 bytes): **26 to 32 of 300 erased keys were still in the file**, every one in an internal page, on each
+  of 3 seeds.
+- *Fixed* (`btree.scrub`, called by `execw.erase` for the row's key and for each history entry's): on the path to where the key was, an internal page's key
+  equal to it is replaced by the first bytes (as many, or fewer) of the least key the child now holds. That is a bound as good, and no longer, so the page needs
+  no room. If the least key there begins with the erased one, it stays: the file has those bytes in a row that is there. After the fix: none found, on 5 seeds,
+  and the rows not erased are read whole by key and by the index.
+
+**Built.** `session.schema_hash`, `exec.stmts_define`, the `schema` given to `facts.seal`; `btree.scrub`, `least`; `!schema`. Measured: 3 seeds of 2,000
+statements, every commit's `schema` the one before its transaction (dozens of different schemas a history); `definitions`; the erase test on 3 seeds in the gate;
+the server's tests with every table made now a commit (a load of 480 rows in 4 tables is 485 commits). 9 mutants (5 of the log, 4 of the scrub), all killed.
+
+*Limits.* The hash is of names, not of types. **An erase is still the test program's command**: the server has no statement for it, so no client could have been
+told a row was erased that was not; what was false was the claim. The scrub covers the path to the key in the tree as it is when the erase runs: a tree of
+another branch that shares the page (a fork) keeps the page until it is swept, as it keeps the row. An ordinary delete still leaves its key in an internal page,
+as it leaves the row in the history: only an erase promises otherwise. A key cut short may still show the first bytes of a neighbour's key, which is a row
+that is there.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

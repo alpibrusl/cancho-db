@@ -859,6 +859,12 @@ pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
     } else if d != btree.not_found() {
         return exec.tree_err(d);
     }
+    // and no internal page of the tree keeps the key as the bound of a child (6bc), whether the row was there or went before
+    let sr = btree.scrub(p, contents(w.sc), nroot, contents(w.tmp)[65536..65540 + kn]);
+    if sr < 0 {
+        return exec.tree_err(sr);
+    }
+    nroot = sr;
     build.put_be(contents(w.key), 0, 4294967295, 4);
     var kl = 4;
     var more = true;
@@ -878,7 +884,12 @@ pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
                 if nw < 0 {
                     return exec.tree_err(nw);
                 }
-                nroot = nw;
+                // (the entry's key holds the row's: no internal page keeps it either)
+                let sw = btree.scrub(p, contents(w.sc), nw, contents(w.key2)[0..nk]);
+                if sw < 0 {
+                    return exec.tree_err(sw);
+                }
+                nroot = sw;
                 w.count = w.count + 1;
             }
             exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);

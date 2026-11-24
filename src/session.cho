@@ -4,6 +4,7 @@ module cdb.session;
 import cdb.pager;
 import cdb.exec;
 import cdb.facts;
+import std.crypto;
 
 // A session over a branch (docs/m3-engine.md 6aj): which tree each statement runs on, when a transaction's tree becomes the branch's, when the facts of a commit are taken and
 // the commit is made. A session's state is `size()` ints: whether a transaction is open (`idle`, `open_txn`, `failed`), the transaction's tree, the tree of its facts (below 0: they
@@ -86,7 +87,24 @@ pub fn open[&q, &z, &s](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], bra
 
 // The commit of the facts `fr` on the tree `root`, if a key was given (`key`: the seed of the signing key, or nothing): the tree with the commit recorded in it (6as), `root`
 // with no key, or an error.
-fn seal_on[&q, &z, &s, &k, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], root: int, fr: int, key: &k [byte], who: &y [byte], rec: &!o [byte]) -> [file_read, file_write] int {
+// The hash of the schema the tree `root` holds, as the lowering reads it (`exec.schema`: the text of the snapshot), into the 32 bytes of `out`: what a commit says
+// of the schema its transaction began with (docs/m3-engine.md 6bc; the proxy's `schema`, docs/m1-proxy.md). 0, or a refusal.
+fn schema_hash[&h, &q, &z, &o](heap: &!h Heap, p: &!z pager.Pager, w: &!q exec.Work, root: int, out: &!o [byte]) -> [heap, file_read] int {
+    var text = box_slice(heap, 65536, byte_of(0));
+    var r = 0;
+    borrow mut text as &!t in {
+        let n = exec.schema(p, w, root, contents(t));
+        if n < 0 {
+            r = n;
+        } else {
+            crypto.sha256(contents(t)[0..n], out);
+        }
+    }
+    unbox_slice(heap, text);
+    return r;
+}
+
+fn seal_on[&h, &q, &z, &s, &k, &y, &o](heap: &!h Heap, p: &!z pager.Pager, w: &!q exec.Work, ss: &!s [int], root: int, fr: int, key: &k [byte], who: &y [byte], rec: &!o [byte], before: int) -> [heap, file_read, file_write] int {
     if len(key) == 0 {
         return root;
     }
@@ -95,7 +113,15 @@ fn seal_on[&q, &z, &s, &k, &y, &o](p: &!z pager.Pager, w: &!q exec.Work, ss: &!s
         ss[7] = 0 - 1;
         return fr;
     }
-    let nw = facts.seal(p, w, root, fr, key, who, rec);
+    var nw = 0 - 1;
+    region g {
+        // the schema as it was before the transaction: the tree `before`
+        let sh = alloc_slice[g](32, byte_of(0));
+        nw = schema_hash(heap, p, w, before, sh);
+        if nw >= 0 {
+            nw = facts.seal(p, w, root, fr, key, who, sh, rec);
+        }
+    }
     if nw < 0 {
         // a commit that cannot be recorded is not made: the error is the caller's to stop on (6as)
         ss[7] = 0 - 1;
@@ -149,9 +175,12 @@ pub fn close[&h, &q, &z, &s, &k, &y, &o](heap: &!h Heap, p: &!z pager.Pager, w: 
         } else if after != branch {
             // the statement wrote: it is a commit, with its facts (6af) and its number
             var fr = 0;
-            let wrote = exec.changes_of(w) > 0;
+            // (a statement that defines a table, an index or a sequence is a commit too, though it changes no row: the log says the schema changed, 6bc)
+            let wrote = exec.changes_of(w) > 0 || len(key) > 0 && exec.stmts_define(w);
             if wrote {
-                fr = facts.take(p, w, 0);
+                if exec.changes_of(w) > 0 {
+                    fr = facts.take(p, w, 0);
+                }
                 if fr >= 0 && len(key) > 0 {
                     // a commit says what ran (6au)
                     fr = facts.say(heap, p, w, fr);
@@ -160,7 +189,7 @@ pub fn close[&h, &q, &z, &s, &k, &y, &o](heap: &!h Heap, p: &!z pager.Pager, w: 
             }
             root = exec.mark_txn(p, w, after, last + 1);
             if wrote && root >= 0 {
-                root = seal_on(p, w, ss, root, fr, key, who, rec);
+                root = seal_on(heap, p, w, ss, root, fr, key, who, rec, branch);
             }
             if root == exec.too_big() {
                 root = too_large(p, w, ss, branch);
@@ -187,7 +216,7 @@ pub fn close[&h, &q, &z, &s, &k, &y, &o](heap: &!h Heap, p: &!z pager.Pager, w: 
             }
             if ss[3] == 1 && root >= 0 {
                 note_facts(ss, ss[2]);
-                root = seal_on(p, w, ss, root, ss[2], key, who, rec);
+                root = seal_on(heap, p, w, ss, root, ss[2], key, who, rec, branch);
             }
             if root == exec.too_big() {
                 root = too_large(p, w, ss, branch);
@@ -207,6 +236,10 @@ pub fn close[&h, &q, &z, &s, &k, &y, &o](heap: &!h Heap, p: &!z pager.Pager, w: 
         ss[1] = after;
         if exec.changes_of(w) > 0 && ss[2] >= 0 {
             ss[2] = facts.take(p, w, ss[2]);
+            ss[3] = 1;
+        }
+        if len(key) > 0 && exec.stmts_define(w) {
+            // a definition makes the transaction one that commits to the log, rows changed or not (6bc)
             ss[3] = 1;
         }
         if ss[2] >= 0 && len(key) > 0 {
