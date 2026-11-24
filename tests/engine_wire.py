@@ -86,7 +86,7 @@ def die_with_parent():
 
 
 class Server:
-    def __init__(self, path, *limits, key=True, login=False, fsize=None):
+    def __init__(self, path, *limits, key=True, login=False, fsize=None, revoked=None):
         self.path, self.port = path, free_port()
         args = [SERVER, path, str(self.port)]
         if key:
@@ -100,8 +100,13 @@ class Server:
                 root = path + ".root"
                 with open(root, "w") as f:
                     f.write(ROOT_KEY + "\n")
+            if revoked is not None and not limits:
+                limits = (30000, 10000)
             if login or limits:
                 args += [root] + [str(x) for x in limits]
+            if revoked is not None:
+                # the root's list of revoked tokens (6bd)
+                args += [revoked]
         def before():
             die_with_parent()
             if fsize is not None:
@@ -1302,6 +1307,76 @@ def raced(d):
     srv.stop()
 
 
+def revocations(d):
+    """The root's list of revoked tokens, read by the server as it grows (6bd): a token on it, or made from one on it, is not let in and runs nothing more."""
+    import time
+    listed = os.path.join(d, "revoked")
+    with open(listed, "wb") as fh:
+        fh.write(b"CHODBRV1")
+    srv = Server(os.path.join(d, "rev.db"), login=True, revoked=listed)
+    pa = mint("password", "--effects", ALL)
+    pb = mint("password", "--effects", "r:*", "--blocks", "2")
+    pc = mint("password", "--effects", ALL, "--expiry", "99999999999999")
+
+    def add(*entry):
+        with open(listed, "ab") as fh:
+            fh.write(bytes.fromhex(mint("revoke", *entry)))
+        time.sleep(1.3)                                           # the server looks at its file at every turn, and turns at least once a second
+
+    def refused(password):
+        c = Client(srv.port, password=password, database="main")
+        got = c.answer(c.first)
+        c.s.close()
+        return got[0], got[1], c.status
+    now = int(time.time() * 1000)
+    a = Client(srv.port, password=pa, database="main")
+    b = Client(srv.port, password=pb, database="main")
+    c = Client(srv.port, password=pc, database="main")
+    first = [a.query("create table rv (k integer primary key, v text)")[5], a.query("insert into rv values (1, 'before')")[5], b.query("select v from rv")[4], c.query("select v from rv")[4]]
+    # the token B's was made from, revoked: B runs nothing more and is not let in again; the others go on
+    add(pb, str(now - 1000), "--prefix", "1")
+    after_b = [b.query("select v from rv"), a.query("insert into rv values (2, 'a goes on')")[5], c.query("select count(*) from rv")[4]]
+    check("an empty list lets everyone in; a token made from one that is then revoked runs nothing more (28P01 token-revoked, its connection ended) and is not let in again (login-revoked); "
+          "the tokens not on the list go on",
+          first == ["CREATE TABLE", "INSERT 0 1", [[b"before"]], [[b"before"]]] and (after_b[0][0], after_b[0][1], b.status) == ("28P01", "cancho-db: refused token-revoked", "closed")
+          and after_b[1:] == ["INSERT 0 1", [[b"2"]]] and refused(pb) == ("28P01", "cancho-db: refused login-revoked", "closed"), (first, after_b[0][:2], b.status, after_b[1:], refused(pb)))
+    # a revocation from a time that has not come changes nothing yet
+    add(pc, str(now + 3600000))
+    later = [c.query("select count(*) from rv")[4], refused(pc)[2]]
+    # revoked inside a transaction: what it wrote is not there
+    a.query("begin")
+    a.query("insert into rv values (3, 'in a transaction of a token about to be revoked')")
+    # (from this moment, not from before: a revocation dated back would make the commits the token made before it revoked too, which is what the verifier would say)
+    add(pa, str(int(time.time() * 1000)))
+    ended = a.query("commit")
+    rows = c.query("select k from rv order by k")[4]
+    check("a revocation from a time not yet come changes nothing; a token revoked while its transaction is open commits nothing of it (the commit is refused, the connection ended, the row not there)",
+          later == [[[b"2"]], "I"] and (ended[0], ended[1], a.status) == ("28P01", "cancho-db: refused token-revoked", "closed") and rows == [[b"1"], [b"2"]], (later, ended[:2], a.status, rows))
+    # the verifier, given the same list, accepts what the server let through
+    c.close()
+    time.sleep(0.2)
+    r = subprocess.run([HARNESS, os.path.join(d, "rev.db")], input="!records\n!tokens\n", capture_output=True, text=True).stdout.split("\n")
+    with open(os.path.join(d, "rv.log"), "wb") as fh:
+        fh.write(b"".join(bytes.fromhex(l.split()[1]) for l in r if l.startswith("L ")))
+    with open(os.path.join(d, "rv.tok"), "wb") as fh:
+        toks = [bytes.fromhex(l.split()[1]) for l in r if l.startswith("K ")]
+        fh.write(b"CHODBTK1" + b"".join(struct.pack(">I", len(t)) + t for t in toks))
+    v = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "verify.py"), os.path.join(d, "rv.log"), "--root", ROOT_KEY, "--tokens", os.path.join(d, "rv.tok"), "--revoked", listed],
+                       capture_output=True, text=True).stdout.strip()
+    check("the verifier, given the server's log, its tokens and the same list, accepts every commit: none was made under a token after it was revoked", v.startswith("ok commits=3 ") and v.endswith("level=2"), v)
+    # a list that does not check is no list to go by: nobody is let in, and who is in runs nothing more
+    c = Client(srv.port, password=pc, database="main")
+    with open(listed, "ab") as fh:
+        fh.write(bytes.fromhex(mint("revoke", pc, str(now - 1000), "--foreign")))
+    time.sleep(1.3)
+    bad = [c.query("select count(*) from rv"), refused(mint("password", "--effects", "r:rv"))]
+    check("an entry the root did not sign makes the list one not to go by: nobody is let in (login-revocations-unreadable) and who is in runs nothing more (revocations-unreadable)",
+          (bad[0][0], bad[0][1], c.status) == ("28P01", "cancho-db: refused revocations-unreadable", "closed") and bad[1] == ("28P01", "cancho-db: refused login-revocations-unreadable", "closed"),
+          (bad[0][:2], c.status, bad[1]))
+    check("the server is still running", srv.alive())
+    srv.stop()
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1315,6 +1390,7 @@ def main():
         reclaiming(d)
         disk_full(d)
         logins(d)
+        revocations(d)
         with_psql(d)
         with_cancho_pg(d)
     if FAILED:

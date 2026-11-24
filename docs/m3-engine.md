@@ -2010,6 +2010,45 @@ another branch that shares the page (a fork) keeps the page until it is swept, a
 as it leaves the row in the history: only an erase promises otherwise. A key cut short may still show the first bytes of a neighbour's key, which is a row
 that is there.
 
+## 6bd. The root's list of revoked tokens, read by the server
+
+A token is a bearer's: whoever has it is let in until it expires (6at), and the server read no list of the ones the root has taken back. The list exists since M1
+(`docs/spec/token.md` section 3: `CHODBRV1`, then entries of a token's id, a time `since`, and the root's signature over both) and the verifiers read it; only
+the server did not. So a commit the server made under a revoked token was one a verifier would refuse afterwards, and nothing stopped it being made.
+
+**Design.**
+
+- *The server is given the file* (`engine ... IDLE_MS WRITE_MS REVOKEDFILE`, with a root key). It reads it when it starts and again whenever the file's size is
+  not what it was, looked at on every turn of its loop, which is at least once a second. The specification's list is added to and never rewritten, so its size
+  says whether it changed.
+- *Every entry is checked under the root's key.* **A list that does not check is no list to go by**: a file cut short, another magic, an entry the root did
+  not sign, more than 256 entries. Until it checks again nobody is let in (`login-revocations-unreadable`) and who is in runs nothing more
+  (`revocations-unreadable`). The other choice, to go on with the last list that checked, lets whoever can damage the file undo a revocation.
+- *A token is revoked if it, or any token it was made from, is on the list* with a `since` that has come (each prefix of its blocks: the specification's rule,
+  and the verifier's).
+- *At the login:* refused, `28P01 login-revoked`. *After it:* the next message of a connection whose token has been revoked since is answered
+  `28P01 token-revoked` and the connection is ended; a transaction it had open is rolled back, as for any connection that ends.
+- The list is kept among the server's own numbers (ten for an entry), so every place that judges a statement has it without being handed it.
+
+*Not in this part:* TLS (the token still travels in clear: it is to be ended in front of the server, and until it is, a token read off the wire can be revoked
+but not kept secret); a way to tell the server to look now (it looks within a second); a list larger than 256; the proxy, which still reads none.
+
+**Test.** `tests/engine_wire.py` (`revocations`), with `tools/mint.py revoke` (new) making entries. An empty list lets everyone in. A token made from one that
+is then revoked runs nothing more and is not let in again, and the others go on. A revocation from a time not yet come changes nothing. A token revoked while its
+transaction is open: the commit is refused, the connection ended, the row not there. `tools/verify.py --revoked` with the same list accepts the server's log.
+An entry signed by another root: nobody is let in, and who is in runs nothing more.
+
+**Built.** `src/revoke.cho` (`load`, `hit`), `serve.revocations`, `standing`; the eighth word of the server's command line. Measured: all of the test; the
+revocation takes effect at the token's next message, within the 1.3 s the test waits. 7 mutants (`revoke:`, group `wire`), all killed.
+
+*Found while testing.* A revocation dated before commits the token had already made makes the verifier refuse those commits, which is the specification's
+meaning of `since` and not a fault: the root can say "from then on this token was not to be trusted". The server cannot undo what it let through before it was
+told; the test dates its revocations at the moment they are written.
+
+*Limits.* The token is still sent in clear. Between a revocation being written and the server's next turn (a second at most) a statement can still run. A
+damaged list stops everyone, by design: whoever can write the file can stop the server's clients, as they could by deleting the page file. 256 entries. The
+clock is the server's.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

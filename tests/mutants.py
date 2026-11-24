@@ -3234,6 +3234,27 @@ WIRE = [
     ('sweep: the commit before a sweep does not say one is coming', 'src/serve.cho',
      '    if !due && gs[g_raised()] == 1 {\n        return root;\n    }',
      '    if !due {\n        return root;\n    }'),
+    ('revoke: a token on the list is let in', 'src/serve.cho',
+     '    if rule == login.login_ok() && !standing(gs, ar[token_at()..token_at() + tl]) {',
+     '    if rule == login.login_ok() && false {'),
+    ('revoke: a token revoked since its login goes on', 'src/serve.cho',
+     "            } else if t != 'X' && !standing(gs, ar[token_at()..token_at() + xi[token_len()]]) {",
+     "            } else if t != 'X' && false {"),
+    ('revoke: only the whole token is looked for, not what it was made from', 'src/revoke.cho',
+     '        var k = 1;\n        while k <= blocks && !found {',
+     '        var k = blocks;\n        while k <= blocks && !found {'),
+    ('revoke: a revocation from a time not yet come counts', 'src/revoke.cho',
+     '                if same && token.cmp64(gs[ea + 8], gs[ea + 9], now / 4294967296, now % 4294967296) <= 0 {',
+     '                if same {'),
+    ("revoke: an entry's signature is not checked", 'src/revoke.cho',
+     '            if ed25519.verify(root, msg, text[ra + 40..ra + 104]) != 1 {',
+     '            if false {'),
+    ('revoke: a list that does not check is an empty one', 'src/serve.cho',
+     '    if n < 0 {\n        n = 0 - 1;\n    }\n    gs[g_revoked()] = n;',
+     '    if n < 0 {\n        n = 0;\n    }\n    gs[g_revoked()] = n;'),
+    ('revoke: the list is read once and not again', 'src/serve.cho',
+     '    if size == gs[g_revoked_size()] && size >= 0 {\n        return 0;',
+     '    if gs[g_revoked_size()] > 0 && size >= 0 {\n        return 0;'),
 ]
 
 
@@ -3368,7 +3389,7 @@ def run_wire(cancho):
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in WIRE if not only or only in m[0]]
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
-            "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "ir.cho")
+            "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
 
     def one(mutant):
         label, rel, old, new = mutant

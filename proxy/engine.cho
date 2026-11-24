@@ -10,8 +10,10 @@ import cdb.serve;
 
 // The engine's server (docs/m3-engine.md 6al): PostgreSQL's protocol in front of the engine, with no PostgreSQL behind it.
 //
-//     engine PAGEFILE PORT [KEYFILE [ROOTFILE [IDLE_MS WRITE_MS]]]
+//     engine PAGEFILE PORT [KEYFILE [ROOTFILE [IDLE_MS WRITE_MS [REVOKEDFILE]]]]
 //
+// REVOKEDFILE: the root's list of revoked tokens (docs/spec/token.md section 3), read again whenever it has grown (docs/m3-engine.md 6bd); a token on it, or made from one
+// on it, is not let in and runs nothing more.
 // Up to 16 connections, from this machine only. ROOTFILE: 64 hexadecimal digits, the public key of the root that signs capability tokens; with it a client logs in with a
 // token as its password (docs/m3-engine.md 6at); `-` or nothing: no login. KEYFILE: 64 hexadecimal digits, the seed of the key that signs the log; with it every commit that changed rows is
 // recorded in the page file with what it wrote (docs/m3-engine.md 6as), without it nothing is recorded. IDLE_MS: how long a transaction may idle while another connection waits for it (default 30000); WRITE_MS:
@@ -81,7 +83,7 @@ fn number_of[&t](text: &t [byte]) -> [] int {
     return v;
 }
 
-fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j](heap: &!h Heap, io: &!o Io, net: &n Net(""), clk: &k Clock, port: int, idle_ms: int, write_ms: int, key: &y [byte], rootkey: &j [byte], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub) -> [heap, err_write, net_in(""), conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
+fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f](heap: &!h Heap, io: &!o Io, net: &n Net(""), clk: &k Clock, port: int, idle_ms: int, write_ms: int, key: &y [byte], rootkey: &j [byte], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, revoked: &!f File) -> [heap, err_write, net_in(""), conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
     var roots = box_slice(heap, 16, 0);
     var globals = box_slice(heap, serve.globals(), 0);
     var states = box_slice(heap, serve.stride() * serve.max_clients(), 0);
@@ -142,7 +144,7 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j](heap: &!h Heap, io: &!o Io, net
                                     borrow mut outb as &!ob in {
                                         borrow mut arena as &!ab in {
                                             borrow mut index as &!xb in {
-                                                status = serve.run(heap, lh, clk, pg, w, sub, contents(ib), contents(ob), rs, gs, contents(sw), contents(ab), contents(xb));
+                                                status = serve.run(heap, lh, clk, revoked, pg, w, sub, contents(ib), contents(ob), rs, gs, contents(sw), contents(ab), contents(xb));
                                             }
                                         }
                                     }
@@ -168,6 +170,14 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j](heap: &!h Heap, io: &!o Io, net
     return status;
 }
 
+// The file of revoked tokens the command line names (its eighth word), or one that is always empty.
+fn revoked_file[&f, &a](fs: &f Fs(""), args: &a Args) -> [fs_read(""), args] Opened {
+    if arg_count(args) == 8 {
+        return open_read(fs, arg(args, 7));
+    }
+    return open_read(fs, "/dev/null");
+}
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
     release(tty);
@@ -179,7 +189,7 @@ fn main(world: World) -> [] int {
         borrow args as &g in {
             var idle_ms = 30000;
             var write_ms = 10000;
-            if arg_count(g) == 7 {
+            if arg_count(g) == 7 || arg_count(g) == 8 {
                 idle_ms = number_of(arg(g, 5));
                 write_ms = number_of(arg(g, 6));
             }
@@ -202,7 +212,7 @@ fn main(world: World) -> [] int {
                         rooted = 1;
                     }
                 }
-                if (arg_count(g) == 3 || arg_count(g) == 4 || arg_count(g) == 5 || arg_count(g) == 7) && number_of(arg(g, 2)) > 0 && number_of(arg(g, 2)) < 65536 && idle_ms > 0 && write_ms > 0 && keyed >= 0 && rooted >= 0 {
+                if (arg_count(g) == 3 || arg_count(g) == 4 || arg_count(g) == 5 || arg_count(g) == 7 || arg_count(g) == 8 && rooted == 1) && number_of(arg(g, 2)) > 0 && number_of(arg(g, 2)) < 65536 && idle_ms > 0 && write_ms > 0 && keyed >= 0 && rooted >= 0 {
                     status = 3;
                     match open_new(fsr, arg(g, 1)) {
                         Opened::Ok(nf) => {
@@ -261,7 +271,19 @@ fn main(world: World) -> [] int {
                                                 borrow mut subs as &!sb in {
                                                     borrow net as &nn in {
                                                         borrow clock as &kk in {
-                                                            status = listen_on(hh, oo, nn, kk, number_of(arg(g, 2)), idle_ms, write_ms, keyseed[0..32 * keyed], rootkey[0..32 * rooted], pp, ww, sb);
+                                                            // the list of revoked tokens (6bd): the file named, or one that is always empty
+                                                            match revoked_file(fsr, g) {
+                                                                Opened::Ok(rf) => {
+                                                                    var rv = rf;
+                                                                    borrow mut rv as &!rw in {
+                                                                        status = listen_on(hh, oo, nn, kk, number_of(arg(g, 2)), idle_ms, write_ms, keyseed[0..32 * keyed], rootkey[0..32 * rooted], pp, ww, sb, rw);
+                                                                    }
+                                                                    file_close(rv);
+                                                                }
+                                                                Opened::Failed(e) => {
+                                                                    status = 3;
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }

@@ -15,6 +15,7 @@ import cdb.token;
 import cdb.build;
 import cdb.wire;
 import cdb.tables;
+import cdb.revoke;
 
 // One connection of the engine's server (docs/m3-engine.md 6al): the startup, then a statement at a time, each answered after what it committed is on the disk.
 
@@ -78,8 +79,92 @@ pub fn g_raised() -> [] int {
     return 74;
 }
 
-pub fn globals() -> [] int {
+// The tokens the root has revoked (docs/m3-engine.md 6bd): how many (-1: there is a list and it cannot be taken, so nobody is let in), the size the file had when it
+// was last read, and the entries (`revoke.stride()` ints each) from `g_revoked_at()`.
+pub fn g_revoked() -> [] int {
+    return 75;
+}
+
+pub fn g_revoked_size() -> [] int {
+    return 76;
+}
+
+pub fn g_revoked_at() -> [] int {
     return 80;
+}
+
+pub fn globals() -> [] int {
+    return 80 + revoke.stride() * revoke.max();
+}
+
+// Read the list of revoked tokens again if its file is not the size it was (it is added to, never rewritten: docs/spec/token.md section 3). A list that cannot be
+// read or does not check is no list to go by: until it does, nobody is let in and no statement runs under a login.
+pub fn revocations[&h, &g, &f](heap: &!h Heap, gs: &!g [int], file: &!f File) -> [heap, file_read] int {
+    var size = 0 - 1;
+    match file_size(file) {
+        Done::Ok(n) => {
+            size = n;
+        }
+        Done::Failed(e) => {
+        }
+    }
+    if size == gs[g_revoked_size()] && size >= 0 {
+        return 0;
+    }
+    gs[g_revoked_size()] = size;
+    if size < 0 || size > 8 + 104 * revoke.max() {
+        gs[g_revoked()] = 0 - 1;
+        return 0;
+    }
+    var text = box_slice(heap, size, byte_of(0));
+    var got = 0;
+    var whole = true;
+    borrow mut text as &!t in {
+        while got < size && whole {
+            match file_pread(file, got, contents(t)[got..size]) {
+                Read::Got(n) => {
+                    if n <= 0 {
+                        whole = false;
+                    }
+                    got = got + n;
+                }
+                Read::End => {
+                    whole = false;
+                }
+                Read::Failed(e) => {
+                    whole = false;
+                }
+            }
+        }
+    }
+    var n = 0 - 1;
+    if whole {
+        region r {
+            let root = alloc_slice[r](32, byte_of(0));
+            var k = 0;
+            while k < 32 {
+                root[k] = byte_of(gs[g_root() + k]);
+                k = k + 1;
+            }
+            borrow text as &t in {
+                n = revoke.load(contents(t), root, gs, g_revoked_at());
+            }
+        }
+    }
+    if n < 0 {
+        n = 0 - 1;
+    }
+    gs[g_revoked()] = n;
+    unbox_slice(heap, text);
+    return 0;
+}
+
+// Whether a connection that logged in with the token `tk` may go on now: its token is not revoked, and the list is one to go by.
+fn standing[&g, &t](gs: &g [int], tk: &t [byte]) -> [] bool {
+    if gs[g_login()] != 1 || gs[g_revoked()] == 0 {
+        return true;
+    }
+    return gs[g_revoked()] > 0 && !revoke.hit(gs, g_revoked_at(), gs[g_revoked()], tk, gs[g_now()]);
 }
 
 // How many pages the file may grow by beyond twice what is in use after a sweep (8 MiB).
@@ -327,6 +412,17 @@ fn password_step[&t, &g, &b, &o, &s, &a, &x](tab: &!t conns.Table, slot: int, gs
         }
     }
     st[1] = shift(buf, n, st[1]);
+    if rule == login.login_ok() && !standing(gs, ar[token_at()..token_at() + tl]) {
+        // the root has revoked the token, or one it was made from (6bd)
+        xi[token_len()] = 0;
+        if gs[g_revoked()] < 0 {
+            push(tab, slot, gs, out[0..wire.error(out, 0, true, "28P01", "cancho-db: refused ", "login-revocations-unreadable")]);
+        } else {
+            push(tab, slot, gs, out[0..wire.error(out, 0, true, "28P01", "cancho-db: refused ", "login-revoked")]);
+        }
+        st[3] = 1;
+        return 1;
+    }
     if rule != login.login_ok() {
         xi[token_len()] = 0;
         push(tab, slot, gs, out[0..wire.error(out, 0, true, login.sqlstate(rule), "cancho-db: refused ", login.rule_name(rule))]);
@@ -809,6 +905,14 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x](heap: &!h Heap, tab: &!c
                 did = 1;
             } else if st[1] < n {
                 more = false;
+            } else if t != 'X' && !standing(gs, ar[token_at()..token_at() + xi[token_len()]]) {
+                // the token was revoked since the login (6bd): nothing more is run for it, and the connection ends (a transaction it had open is rolled back)
+                if gs[g_revoked()] < 0 {
+                    op = wire.error(out, op, true, "28P01", "cancho-db: refused ", "revocations-unreadable");
+                } else {
+                    op = wire.error(out, op, true, "28P01", "cancho-db: refused ", "token-revoked");
+                }
+                st[3] = 1;
             } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free {
                 // another connection is in a transaction: this statement waits for it to end (6aq)
                 st[7] = 1;
@@ -993,7 +1097,7 @@ fn receive[&c, &b, &t](tab: &!c conns.Table, slot: int, buf: &!b [byte], st: &!t
 // Serve every connection until the server must stop (docs/m3-engine.md 6aq): the status to stop with. `gs` is the server's (`globals()` ints, the limits set); `sts`, `ins`,
 // `ars` and `xis` hold, for each of `max_clients()` connections, its `stride()` ints, its buffer (`in_size()` bytes), and what the extended protocol keeps (`arena_size()`
 // bytes and `index_size()` ints). `out` is where an answer is built before it is written. `roots` are the page file's trees (the first is the branch's).
-pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x](heap: &!h Heap, listener: &!l Listener, clk: &k Clock, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, ins: &!i [byte], out: &!o [byte], roots: &!r [int], gs: &!g [int], sts: &!s [int], ars: &!a [byte], xis: &!x [int]) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
+pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f](heap: &!h Heap, listener: &!l Listener, clk: &k Clock, revoked: &!f File, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, ins: &!i [byte], out: &!o [byte], roots: &!r [int], gs: &!g [int], sts: &!s [int], ars: &!a [byte], xis: &!x [int]) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
     match poller_new() {
         Polling::Ok(p) => {
             var poller = p;
@@ -1007,6 +1111,8 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x](heap: &!h Heap, l
                         let ready = poller_wait(pw, ev, wait);
                         wait = 1000;
                         gs[g_now()] = clock_unix_ms(clk);
+                        // the list of revoked tokens, if its file has grown (6bd): at every turn, which is at least once a second
+                        revocations(heap, gs, revoked);
                         var j = 0;
                         while j < ready {
                             let token = ev[2 * j];
