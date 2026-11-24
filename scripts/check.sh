@@ -132,8 +132,9 @@ for seed in 1 2 3; do quiet 2 python3 tests/engine_log.py build/enginecheck 2000
 echo "== the engine's server (docs/m3-engine.md 6al): PostgreSQL's protocol over a socket, held against the test program; kill, dropped connections, garbage, psql"
 "$CANCHO" build --std proxy/engine.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/exec.cho src/execs.cho src/execw.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/wire.cho src/serve.cho src/login.cho src/token.cho src/revoke.cho src/ir.cho -o build/engine
 for seed in 1 2 3; do quiet 2 python3 tests/engine_wire.py build/engine build/enginecheck 1500 $seed "python3 tools/l3a.py" build/l3averify "python3 tests/third/l3a_third.py"; done
-echo "== the engine's server under load for a minute (docs/m3-engine.md 6az): money never made or lost, the journal, a copy of the log kept up beside it, kills"
-quiet 9 python3 tests/engine_soak.py build/engine build/enginecheck 60 1 archive
+echo "== the engine's server under load for a minute (docs/m3-engine.md 6az): money never made or lost, the journal, a copy of the log kept up beside it, kills;"
+echo "   and beside those (6bg) definitions, erases and reads as of a commit, with the log archived and the history trimmed"
+quiet 12 python3 tests/engine_soak.py build/engine build/enginecheck 60 1 archive,mixed
 echo "== cancho-hooks, the program, on the engine's server (docs/m3-engine.md 6an): skipped unless HOOKS_BIN names a hooks binary"
 quiet 2 python3 tests/hooks_server.py build/engine
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"

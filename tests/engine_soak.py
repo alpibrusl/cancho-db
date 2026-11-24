@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The engine's server under load for a while (docs/m3-engine.md 6az).
 
-    python3 tests/engine_soak.py SERVER_BINARY ENGINECHECK_BINARY SECONDS [SEED [archive]]
+    python3 tests/engine_soak.py SERVER_BINARY ENGINECHECK_BINARY SECONDS [SEED [archive|mixed|archive,mixed]]
 
 Not a differential: several clients at once have no single order to compare with. What is held is what must be true whatever the order:
 
@@ -13,6 +13,14 @@ Not a differential: several clients at once have no single order to compare with
   * every so often the server is killed (SIGKILL) and started again;
   * the page file's size is noted through the run (6aw): what it does over time is the measurement, and it must stay under a bound per commit;
   * at the end, everything the tool exports at one anchor verifies: the chain, every commit's changes, and the replay ends at the rows the file holds.
+
+With `mixed` (6bg) three more clients run beside those, so that what was built one at a time is held together:
+
+  * one makes a table, fills it, adds a column and an index, reads by the index and drops the table, over and over (definitions are commits, 6bc);
+  * one adds people with a secret each, changes the secret, and erases one in three (6bf): at the end the file has no byte of an erased person's secrets, and
+    every person not erased is there with the secret last acknowledged; after every fifth erase the file is searched at once, with the server running;
+  * one writes a mark, takes the head of the log and reads as of it (6be): the mark is the one just written, and as of an earlier head still the one written
+    then; the accounts' sum is the first sum at every commit, and the journal as of a commit, read twice, is the same both times. With `archive` the answer may instead be that this past was trimmed or the commit is no longer in the file's log.
 
 It prints a line every 30 seconds and a summary. Seconds is the length of the load; the gate runs a short one, the long ones are run by hand and reported in the design.
 """
@@ -27,7 +35,11 @@ import time
 
 SERVER, HARNESS, SECONDS = sys.argv[1], sys.argv[2], int(sys.argv[3])
 SEED = int(sys.argv[4]) if len(sys.argv) > 4 else 1
-ARCHIVE = len(sys.argv) > 5 and sys.argv[5] == "archive"       # the exporter has the server take out of the page file what the copy has (6ba)
+MODES = sys.argv[5].split(",") if len(sys.argv) > 5 else []
+if [m for m in MODES if m not in ("archive", "mixed")]:
+    sys.exit("usage: engine_soak.py SERVER_BINARY ENGINECHECK_BINARY SECONDS [SEED [archive|mixed|archive,mixed]]")
+MIXED = "mixed" in MODES                                       # definitions, erases and reads as of a commit beside the load (6bg)
+ARCHIVE = "archive" in MODES      # the exporter has the server take out of the page file what the copy has (6ba)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.argv = ["engine_wire.py", SERVER, HARNESS, "0", str(SEED)]
 sys.path.insert(0, os.path.join(ROOT, "tests"))
@@ -55,6 +67,16 @@ class Shared:
         self.wrong = []            # what must not happen
         self.refused = 0           # transfers that would overdraw: rolled back by the client
         self.reconnects = 0
+        self.defined = 0           # tables made, changed and dropped whole
+        self.people = {}           # id -> the secret last acknowledged, of those not erased
+        self.unsure = set()        # people a statement about whom was sent and never answered
+        self.erased = {}           # id -> every secret the person had, of those whose erase was answered
+        self.path = ""
+        self.mixed = []            # what must not happen, of the three clients of 6bg
+        self.looked = 0            # erases after whose answer the file was searched at once, the server running
+        self.marks = 0             # readings of the mark as of a head that were the mark written before that head
+        self.asof = 0              # readings as of a commit that were answered with rows
+        self.gone = 0              # readings as of a commit refused because that past is no longer in the file
 
 
 def connect(sh):
@@ -154,6 +176,176 @@ def reader(sh):
             pass
 
 
+def definer(sh):
+    """A table made, filled, changed, read by an index and dropped. Each statement is answered as it must be, or the server was killed under it."""
+    c, n = connect(sh), 0
+    while not sh.stop and c is not None:
+        t = "side%d" % n
+        n += 1
+        try:
+            # (a table of this name may be left from before a kill: its drop was not reached)
+            want = [("create table %s (k integer primary key, v text not null)" % t, "CREATE TABLE"),
+                    ("insert into %s values " % t + ", ".join("(%d, 'v%d')" % (k, k % 5) for k in range(40)), "INSERT 0 40"),
+                    ("alter table %s add column w integer" % t, "ALTER TABLE"),
+                    ("create index %s_v on %s (v)" % (t, t), "CREATE INDEX"),
+                    ("update %s set w = k where v = 'v3'" % t, "UPDATE 8"),
+                    ("select count(*), sum(w) from %s where v = 'v3'" % t, "SELECT 1"),
+                    ("drop table %s" % t, "DROP TABLE")]
+            for sql, tag in want:
+                got = ask(c, sql)
+                if got[5] != tag or (tag == "SELECT 1" and got[4] != [[b"8", b"164"]]):
+                    with sh.lock:
+                        sh.mixed.append(("a definition", sql[:60], got[:2], got[4][:2], got[5]))
+                    break
+            else:
+                with sh.lock:
+                    sh.defined += 1
+            time.sleep(0.05)
+        except Exception:
+            try:
+                c.s.close()
+            except Exception:
+                pass
+            c = connect(sh)
+    if c is not None:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+def secret(rng, i, v):
+    return "p%d.%d-%020x" % (i, v, rng.getrandbits(80))
+
+
+def people(sh):
+    """People with a secret each, changed once; one in three erased. What was acknowledged is what the end is held to."""
+    rng = random.Random(SEED * 7919)
+    c, i = connect(sh), 0
+    while not sh.stop and c is not None:
+        i += 1
+        s1, s2 = secret(rng, i, 1), secret(rng, i, 2)
+        step = 0
+        try:
+            if ask(c, "insert into person values (%d, '%s')" % (i, s1))[5] != "INSERT 0 1":
+                with sh.lock:
+                    sh.mixed.append(("a person", i))
+                continue
+            with sh.lock:
+                sh.people[i] = s1
+            step = 1
+            if ask(c, "update person set secret = '%s' where id = %d" % (s2, i))[5] != "UPDATE 1":
+                with sh.lock:
+                    sh.mixed.append(("a person's secret", i))
+                continue
+            with sh.lock:
+                sh.people[i] = s2
+            step = 2
+            if i % 3 == 0:
+                got = ask(c, "select cancho_erase('person', '[%d]')" % i)
+                if got[4] != [[b"1", got[4][0][1] if got[4] else b""]] or int(got[4][0][1]) < 1:
+                    with sh.lock:
+                        sh.mixed.append(("an erase", i, got[:2], got[4]))
+                    continue
+                with sh.lock:
+                    del sh.people[i]
+                    sh.erased[i] = (s1, s2)
+                if i % 15 == 0:
+                    # gone when the answer comes (6bf), not at the next sweep: the file as it is now, the server running
+                    with open(sh.path, "rb") as f:
+                        data = f.read()
+                    left = [s[:8] for s in (s1, s2) if s.encode() in data or s[:14].encode() in data]
+                    with sh.lock:
+                        sh.looked += 1
+                        if left:
+                            sh.mixed.append(("erased and answered, and in the file", i, left))
+            time.sleep(0.1)
+        except Exception:
+            # the server was killed under a statement: what became of this person is not known (and nothing is claimed of them)
+            with sh.lock:
+                sh.unsure.add(i)
+                sh.people.pop(i, None)
+            try:
+                c.s.close()
+            except Exception:
+                pass
+            c = connect(sh)
+    if c is not None:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+def past(sh):
+    """The accounts and the journal as of a commit a client took the id of."""
+    gone = ("cancho-db: refused history-trimmed", "cancho-db: refused asof-unknown-commit")
+    rng = random.Random(SEED * 31)
+    c, n, marks = connect(sh), 0, []
+    while not sh.stop and c is not None:
+        try:
+            # a mark only this client writes, and the head taken right after: as of that head the mark is this one, whatever was committed between; and as of
+            # an earlier head it is still what it was then (a past that reads as the present is seen here and not by the sums). Not seen: a past one commit
+            # too early. Under this load the head is never the mark's own commit (0 of 135 tries, the statements sent together), and one client alone sees it
+            # (tests/engine_wire.py, `history`).
+            n += 1
+            if ask(c, "update mark set v = %d where k = 0" % n)[5] != "UPDATE 1":
+                with sh.lock:
+                    sh.mixed.append(("the mark", n))
+                continue
+            head = ask(c, "select cancho_last_commit()")[4]
+            if not head or not head[0][1]:
+                time.sleep(0.2)
+                continue
+            at = head[0][1].decode()
+            marks = (marks + [(at, n)])[-40:]
+            for h, was in (marks[-1], marks[rng.randrange(len(marks))]):
+                m = ask(c, "select v from mark as of '%s'" % h)
+                if m[0]:
+                    if not ARCHIVE or m[1] not in gone:
+                        with sh.lock:
+                            sh.mixed.append(("the mark as of, refused", h[:12], m[:2]))
+                elif m[4] != [[str(was).encode()]]:
+                    with sh.lock:
+                        sh.mixed.append(("the mark as of", h[:12], was, m[4]))
+                else:
+                    with sh.lock:
+                        sh.marks += 1
+            a = ask(c, "select sum(cents), count(*) from acct as of '%s'" % at)
+            j1 = ask(c, "select count(*), sum(amount) from journal as of '%s'" % at)
+            time.sleep(0.3)
+            j2 = ask(c, "select count(*), sum(amount) from journal as of '%s'" % at)
+            now = ask(c, "select count(*) from journal")
+            refused = [x for x in (a, j1, j2) if x[0]]
+            if refused:
+                # only with the archive beside, and only for that reason
+                if not ARCHIVE or [x for x in refused if x[1] not in gone]:
+                    with sh.lock:
+                        sh.mixed.append(("as of, refused", at[:12], [x[:2] for x in refused]))
+                with sh.lock:
+                    sh.gone += 1
+            if not a[0] and a[4] != [[str(ACCOUNTS * START).encode(), str(ACCOUNTS).encode()]]:
+                with sh.lock:
+                    sh.mixed.append(("the sum as of", at[:12], a[4]))
+            if not j1[0] and not j2[0] and (j1[4] != j2[4] or int(j1[4][0][0]) > int(now[4][0][0])):
+                with sh.lock:
+                    sh.mixed.append(("the journal as of", at[:12], j1[4], j2[4], now[4]))
+            if not refused:
+                with sh.lock:
+                    sh.asof += 1
+        except Exception:
+            try:
+                c.s.close()
+            except Exception:
+                pass
+            c = connect(sh)
+    if c is not None:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
 def export(path, *what):
     r = subprocess.run([TOOL, path] + [str(x) for x in what], capture_output=True)
     return r.returncode, r.stdout, r.stderr.decode().strip()
@@ -173,13 +365,20 @@ def main():
         srv = ew.Server(path)
         sh = Shared()
         sh.port = srv.port
+        sh.path = path
         c = ew.Client(srv.port)
         c.query("create table acct (id integer primary key, cents integer not null)")
         c.query("create table journal (tid bigint primary key, src integer not null, dst integer not null, amount integer not null)")
         for i in range(0, ACCOUNTS, 50):
             c.query("insert into acct values " + ", ".join("(%d, %d)" % (k, START) for k in range(i, i + 50)))
+        if MIXED:
+            c.query("create table person (id integer primary key, secret text not null)")
+            c.query("create table mark (k integer primary key, v integer not null)")
+            c.query("insert into mark values (0, 0)")
         c.close()
         threads = [threading.Thread(target=writer, args=(sh, w)) for w in range(WRITERS)] + [threading.Thread(target=reader, args=(sh,)) for _ in range(2)]
+        if MIXED:
+            threads += [threading.Thread(target=f, args=(sh,)) for f in (definer, people, past)]
         for t in threads:
             t.start()
         t0 = time.time()
@@ -292,8 +491,30 @@ def main():
             for row in c.query("select tid from journal where tid >= %d and tid < %d" % (lo, lo + 100000000))[4]:
                 tids.add(int(row[0]))
         moved = c.query("select sum(amount) from journal")[4]
+        there, top = {}, max(list(sh.people) + list(sh.erased) + list(sh.unsure) + [0])
+        if MIXED:
+            for lo in range(0, top + 1, 1000):
+                for row in c.query("select id, secret from person where id >= %d and id < %d" % (lo, lo + 1000))[4]:
+                    there[int(row[0])] = row[1].decode()
         c.close()
         srv.stop()
+        if MIXED:
+            with open(path, "rb") as f:
+                data = f.read()
+            found = [(i, s[:8]) for i, ss in sh.erased.items() for s in ss if s.encode() in data or s[:14].encode() in data]
+            back = [i for i in sh.erased if i in there]
+            kept = {i: s for i, s in there.items() if i not in sh.unsure}
+            check("erased beside the load: %d people erased, and the file has no byte of either secret of any of them (whole, or the first 14 bytes); after %d of the erases the file "
+                  "was searched as soon as the answer came, the server running; the %d not erased are there with the secret last acknowledged (%d more were under a statement when "
+                  "the server was killed: nothing is claimed of them)" % (len(sh.erased), sh.looked, len(sh.people), len(sh.unsure)),
+                  not found and not back and kept == sh.people and len(sh.erased) > 0 and sh.looked > 0 and not [m for m in sh.mixed if "eras" in m[0] or "person" in m[0]], (found[:3], back[:3], len(kept), len(sh.people), [m for m in sh.mixed if "eras" in m[0] or "person" in m[0]][:3]))
+            check("definitions beside the load: %d tables made, filled, given a column and an index, read by it and dropped, every statement answered as it must be" % sh.defined,
+                  sh.defined > 0 and not [m for m in sh.mixed if m[0] == "a definition"], (sh.defined, [m for m in sh.mixed if m[0] == "a definition"][:3]))
+            check("the past beside the load: %d times the accounts as of a commit summed to the first sum and the journal as of it was the same read twice; %d times a mark as of "
+                  "a head was the mark written just before that head, at once and later%s"
+                  % (sh.asof, sh.marks, "; %d times that past was no longer in the file (trimmed, or its commit archived)" % sh.gone if ARCHIVE else ""),
+                  sh.asof > 0 and sh.marks > 0 and (ARCHIVE or sh.gone == 0) and not [m for m in sh.mixed if "as of" in m[0] or "mark" in m[0]],
+                  (sh.asof, sh.marks, sh.gone, [m for m in sh.mixed if "as of" in m[0] or "mark" in m[0]][:3]))
         check("money is never made or lost: %d readings of the sum during the load, all the first sum; at the end %d cents in %d accounts, none below zero"
               % (sh.sums, ACCOUNTS * START, ACCOUNTS), not sh.wrong and sh.sums > 10 and total == [[str(ACCOUNTS * START).encode(), str(ACCOUNTS).encode()]] and low == [[b"0"]],
               (sh.wrong[:3], total, low))
