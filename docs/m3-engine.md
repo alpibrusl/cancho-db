@@ -2146,6 +2146,32 @@ a person, not for a batch. One column of key. The log does not say which key was
 commit, its time and its token, and the absence of the row. What is erased is erased in this file: a copy of the page file made before, a backup, the disk
 under the file system, are not this program's. The log's copy elsewhere (6ba) holds the row's facts as hashes, with salts that are gone.
 
+## 6bg. What was built one at a time, held together under load
+
+Since the soak of 6az the server has learnt to take the oldest of its log out of the file (6ba), to trim the rows' past (6bb), to make definitions commits
+(6bc), to read a table as of a commit (6be) and to erase a row (6bf). Each has a test of its own, with one client and nothing beside it. What this month's
+faults had in common is that they were between two things: a sweep and the export tool, a read of the past and the file's size, an erase and the page a
+sweep had not reached. So the soak gets the new things as clients of their own, beside the transfers, the readers, the export tool and the kills it had.
+
+**Design.** `tests/engine_soak.py ... SECONDS SEED mixed` (and `archive,mixed`). Nothing in the engine changes for it: it is a test. Three clients more:
+
+- *A definer.* Over and over: a table made, 40 rows, a column added, an index made, 8 rows updated by the indexed column, read back by it (count and sum),
+  the table dropped. Every statement's answer is what it must be, or the connection was lost to a kill. Seven commits a round, six of them definitions, so
+  the transfers' transactions begin under a schema hash that keeps moving.
+- *People.* A person inserted with a secret (their number and 80 random bits), the secret changed, and one person in three erased. The client keeps what
+  was acknowledged. At the end, with the server stopped: **the file has no byte of either secret of any person whose erase was answered** (whole, or the
+  first 14 bytes, which hold the person's number and so are no one else's), and every person not erased is there with the secret last acknowledged. A
+  person under a statement when the server was killed is set aside: nothing is claimed of them.
+- *The past.* The head of the log taken (`cancho_last_commit()`), then `sum(cents), count(*)` of the accounts as of it: **the first sum, at every commit**,
+  since no commit makes or loses money. The journal as of it read twice, 0.3 s apart: the same both times, and no more rows than the journal has now. Without
+  `archive` no reading may be refused. With it a reading may be refused `history-trimmed` or `asof-unknown-commit`, and for no other reason.
+
+What stays held from 6az: the sum at every reading of the present, the journal against the acknowledgements, the copy kept up by the export tool and
+verified, and at the end the replay of the whole log ending at the rows the file holds, now through definitions, deletes and erases.
+
+*What it does not hold.* That an erased person is out of the *copy*: the copy is the export tool's, outside the file, and has the facts of the insert (6bf's
+limit, unchanged). That two definers at once agree: there is one. How long a client waits while an erase sweeps: not measured here.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
