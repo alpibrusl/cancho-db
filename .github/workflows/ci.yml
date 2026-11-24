@@ -10,7 +10,7 @@ env:
   CANCHO_REV: 1d3ec24d1b96b39f0b1b474d46ebff7ae94a10e3
 
 jobs:
-  # The gate in six parts, run at once (scripts/check.sh says what each is and checks that this list is its own): the checks, and five shards of the mutants.
+  # The gate in seven parts, run at once (scripts/check.sh says what each is and checks that this list is its own): the checks, and six shards of the mutants.
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -23,6 +23,7 @@ jobs:
           - mutants-c
           - mutants-d
           - mutants-e
+          - mutants-f
     steps:
       - uses: actions/checkout@v4
         with:

@@ -102,8 +102,8 @@ the authority report, the attenuation property over thousands of random tokens, 
 verifiers agree and none crashes), the parser, lowering and row-capture differentials against PostgreSQL, the proxy and fork end to end, and about 700 mutants (every one must make a check fail; the proxy
 ones take about an hour). Needs `python3` with `cryptography`, the cancho compiler at the revision in [`cancho.toml`](cancho.toml), `go`, `strace`, `psql` and a PostgreSQL 16 server (the script starts a throwaway one).
 
-The script takes a part to run alone: `checks` (everything but the mutants) or `mutants-a` to `mutants-e` (a shard of the mutants, after building what they are
-held against). CI runs the six as six jobs at once; with no argument it runs everything, as CI's jobs do together.
+The script takes a part to run alone: `checks` (everything but the mutants) or `mutants-a` to `mutants-f` (a shard of the mutants, after building what they are
+held against). CI runs the seven as seven jobs at once; with no argument it runs everything, as CI's jobs do together.
 
 ## Landing page
 

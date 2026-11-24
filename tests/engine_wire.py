@@ -1419,6 +1419,83 @@ def history(d):
     verified(d, os.path.join(d, "asof.db"), ["create table h ", "create table other ", "create table wide "], "a server whose clients read the past", login=True)
 
 
+def erasing(d):
+    """A client erases a row (6bf): `select cancho_erase('<table>', '<key>')`. The row and its past are gone from the page file when the answer comes, the log says who erased and
+    still verifies, and the rows not erased are whole."""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import verify as l1  # noqa: E402
+    path = os.path.join(d, "erase.db")
+    srv = Server(path, login=True)
+    a = Client(srv.port, password=mint("password", "--effects", ALL), database="main")
+    a.query("create table person (name text primary key, note text)")
+    a.query("create table contact (id integer primary key, mail text, who text)")
+    a.query("create index contact_mail on contact (mail)")
+    people = [("zq-ada-%02d-lovelace" % i, "zq-note-%02d-first" % i, "zq-note-%02d-later" % i, "zq-mail-%02d@example.test" % i) for i in range(40)]
+    people[7] = ("zq-o'brien-07", "zq-it's-07-first", "zq-it's-07-later", "zq-mail-07@example.test")
+    esc = lambda t: t.replace("'", "''")
+    for i, (name, note, later, mail) in enumerate(people):
+        a.query("insert into person values ('%s', '%s')" % (esc(name), esc(note)))
+        a.query("insert into contact values (%d, '%s', '%s')" % (i, mail, esc(name)))
+        a.query("update person set note = '%s' where name = '%s'" % (esc(later), esc(name)))
+    before = a.query("select cancho_last_commit()")[4][0]
+    a.query("delete from person where name = '%s'" % people[3][0])       # deleted by an ordinary statement first: only its past is left to erase
+
+    def key(text):
+        return "[\"%s\"]" % text.replace("\\", "\\\\").replace('"', '\\"')
+    gone = [3, 7, 11, 12, 30]
+    got = []
+    for i in gone:
+        got.append(a.query("select cancho_erase('person', '%s')" % esc(key(people[i][0]))))
+        got.append(a.extended("select cancho_erase('contact', '[%d]')" % i, []))
+    again = a.query("select cancho_erase('person', '%s')" % esc(key(people[11][0])))
+    head = a.query("select cancho_last_commit()")[4][0]
+    data = open(path, "rb").read()                                # the file as it is while the server runs: the erase was answered, so it is done
+    found = [(i, t) for i in gone for t in people[i] if t.encode() in data or t.encode()[:10] in data]
+    kept = [i for i in range(40) if i not in gone]
+    rows = a.query("select name, note from person order by name")[4]
+    mails = a.query("select who from contact where mail = '%s'" % people[20][3])[4]
+    past = a.query("select count(*) from person as of '%s'" % before[1].decode())[4]
+    check("5 rows of each of two tables erased by key (a text key with a quote in it, a number, one row deleted before): each answers whether the row was there and how much of its "
+          "past went; a second erase finds nothing; when the last is answered no byte of any erased key, value, earlier value or indexed value is in the page file",
+          [g[2] for g in got] == [[b"row", b"past"]] * 10 and [g[4][0][0] for g in got] == [b"0"] + [b"1"] * 9 and all(int(g[4][0][1]) >= 1 for g in got)
+          and again[4] == [[b"0", b"0"]] and not found, ([g[4] for g in got][:4], again[4], found[:3]))
+    check("the rows not erased are whole (35 of each), found by key and by the index; the table as it was before the erases no longer has the erased rows, and has the others",
+          rows == sorted([[people[i][0].encode(), people[i][2].encode()] for i in kept]) and mails == [[people[20][0].encode()]] and past == [[b"35"]], (len(rows), mails, past))
+    # what is refused: in a transaction, not a table and a key, a token without the call, a token with the call and no right to the table
+    a.query("create table pair (a integer, b text, v text, primary key (a, b))")
+    a.query("insert into pair values (1, 'x', 'kept')")
+    a.query("begin")
+    intx = a.query("select cancho_erase('person', '%s')" % key(people[0][0]))
+    a.query("rollback")
+    shapes = [a.query(q) for q in ("select cancho_erase('person', '[1]')", "select cancho_erase('contact', '[\"1\"]')", "select cancho_erase('person', '%s')" % people[0][0],
+                                    "select cancho_erase('nosuch', '[1]')", "select cancho_erase('person')", "select cancho_erase('contact', '[1, 2]')",
+                                    "select cancho_erase('contact', '[1.5]')", "select cancho_erase('person', '[\"a\\nb\"]')", "select cancho_erase('pair', '[\"x\"]')")]
+    pair = a.query("select v from pair")[4]
+    nocall = Client(srv.port, password=mint("password", "--effects", "r:*,w:*"), database="main")
+    notable = Client(srv.port, password=mint("password", "--effects", "r:contact,r:contact.*,w:contact,c:cancho_erase"), database="main")
+    denied = [nocall.query("select cancho_erase('contact', '[1]')"), notable.query("select cancho_erase('person', '%s')" % key(people[1][0])), notable.query("select cancho_erase('contact', '[39]')")]
+    still = a.query("select count(*) from person")[4]
+    check("refused: in a transaction (25001 erase-in-transaction); nine shapes that are not a table and its key, a table keyed by two columns among them (erase-malformed); a token without the call, and one with the call "
+          "and no right to the table (42501); a token with both erases; nothing else was erased",
+          (intx[0], intx[1]) == ("25001", "cancho-db: refused erase-in-transaction") and all((x[0], x[1]) == ("0A000", "cancho-db: refused erase-malformed") for x in shapes)
+          and [x[0] for x in denied[:2]] == ["42501", "42501"] and denied[2][4] and denied[2][4][0][0] == b"1" and int(denied[2][4][0][1]) >= 1 and still == [[b"35"]] and pair == [[b"kept"]],
+          ((intx[0], intx[1]), [(x[0], x[1]) for x in shapes], [(x[0], x[4]) for x in denied], still))
+    # the log: every erase that removed something is a commit that names the call, and no other statement
+    for cl in (nocall, notable):
+        cl.close()
+    srv.stop(signal.SIGKILL)                                      # (killed after the answers: what was erased stays erased)
+    a.close(False)
+    r = subprocess.run([HARNESS, path], input="!records\n", capture_output=True, text=True).stdout.split("\n")
+    recs = [bytes.fromhex(l.split()[1]) for l in r if l.startswith("L ")][1:]
+    effects = [sorted(l1.decode(x[4:4 + int.from_bytes(x[:4], "big")])[3][3]) for x in recs]
+    erases = [e for e in effects if (3, b"cancho_erase") in e]
+    data = open(path, "rb").read()
+    found = [(i, t) for i in gone for t in people[i] if t.encode() in data or t.encode()[:10] in data]
+    check("each of the 11 erases that removed something is a commit whose only effect is the call cancho_erase (the one that found nothing is none); after a kill the file still holds nothing of the erased rows",
+          len(erases) == 11 and all(e == [(3, b"cancho_erase")] for e in erases) and int(head[0]) == int(before[0]) + 1 + 10 and not found, (len(erases), erases[:2], head[0], before[0], found[:2]))
+    verified(d, path, ["create table person ", "create table contact ", "create table pair "], "a server whose clients erased rows", login=True)
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1434,6 +1511,7 @@ def main():
         logins(d)
         revocations(d)
         history(d)
+        erasing(d)
         with_psql(d)
         with_cancho_pg(d)
     if FAILED:

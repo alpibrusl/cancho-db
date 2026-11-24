@@ -3244,8 +3244,8 @@ WIRE = [
      '    conns.close(tab, slot);\n    st[0] = 0;',
      '    conns.close(tab, slot);'),
     ('reclaim: the pages left behind are never looked for', 'src/serve.cho',
-     '                let due = sweep_due(gs, pg);',
-     '                let due = false;'),
+     '                let due = sweep_due(gs, pg) || erasing;',
+     '                let due = erasing;'),
     ('reclaim: after one sweep there is no other until the server starts again', 'src/serve.cho',
      '    gs[g_sweep_at()] = next;',
      '    gs[g_sweep_at()] = next + 100000000;'),
@@ -3282,6 +3282,36 @@ WIRE = [
     ('asof: the pages a read of the past was built of are kept', 'src/drive.cho',
      '    pager.recycle(pg);\n    return rc;',
      '    return rc;'),
+    ('erasing: the row is deleted and its past kept', 'src/drive.cho',
+     '                rc = execw.erase(pg, w, exec.root_of(w), e, contents(m.sc));',
+     '                rc = 0;'),
+    ('erasing: the file is not swept when a row is erased', 'src/serve.cho',
+     '                let due = sweep_due(gs, pg) || erasing;',
+     '                let due = sweep_due(gs, pg);'),
+    ('erasing: the commit of an erase is made once, and the state before it kept', 'src/serve.cho',
+     '                if seq >= 0 && erasing {',
+     '                if seq >= 0 && erasing && false {'),
+    ('erasing: an erase runs inside a transaction', 'src/serve.cho',
+     '        } else if el >= 0 && session.state(st[8..16]) != session.idle() {',
+     '        } else if el >= 0 && false {'),
+    ('erasing: any token may erase', 'src/serve.cho',
+     '        } else if el >= 0 && !drive.may_erase(tk) {',
+     '        } else if el >= 0 && false {'),
+    ('erasing: the erase is not told to the log', 'src/serve.cho',
+     '            if drive.outcome(m) == drive.o_ok() && !drive.keep_erase(w, sub) {',
+     '            if false {'),
+    ('erasing: a quote in a key is written once', 'src/drive.cho',
+     '                            if ch == 39 {\n                                out[at] = byte_of(39);',
+     '                            if ch == 0 {\n                                out[at] = byte_of(39);'),
+    ('erasing: a key of the wrong kind for the table is erased by', 'src/drive.cho',
+     '                if !(text && ty == row.t_text()) && !(!text && whole) {',
+     '                if false {'),
+    ('erasing: an erase of a past alone is no commit', 'src/exec.cho',
+     '        if int_of(said[at + 4]) == 5 && commit.be(said, at, 4) > 15',
+     '        if false && commit.be(said, at, 4) > 15'),
+    ('erasing: a table of two key columns is erased by its first', 'src/drive.cho',
+     '            if row.key_columns(def) == 1 {\n                var c = 0;',
+     '            if row.key_columns(def) >= 1 {\n                var c = 0;'),
 ]
 
 
@@ -3415,6 +3445,15 @@ def run_wire(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in WIRE if not only or only in m[0]]
+    # the group is the gate's longest (each mutant is a server held to the whole of tests/engine_wire.py), so CI runs it in slices: MUTANT_SLICE=K/N keeps every
+    # N-th mutant from the K-th. Every mutant is in exactly one slice; scripts/check.sh runs each slice in a shard of its own, and all of them when it runs all.
+    part = os.environ.get("MUTANT_SLICE")
+    if part:
+        k, n = (int(x) for x in part.split("/"))
+        if not 0 <= k < n:
+            print("MUTANT_SLICE: %s is not K/N with 0 <= K < N" % part)
+            return 1
+        table = table[k::n]
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
             "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
 

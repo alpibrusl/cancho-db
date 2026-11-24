@@ -822,6 +822,17 @@ pub fn archive[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, upto: in
     return two(w, nw, at, n);
 }
 
+// The answer of an erase (6bf), made in `w` as a SELECT's: whether the row was there (1 or 0) and how many entries of its past were removed. What the statement
+// changed (the row deleted) and its tree stay as they are: they are the commit's.
+pub fn erased[&q](w: &!q exec.Work, row_there: int, past: int) -> [] int {
+    let nchg = w.nchg;
+    let cfill = w.cfill;
+    two(w, w.root, row_there, past);
+    w.nchg = nchg;
+    w.cfill = cfill;
+    return 0;
+}
+
 // The answer of a call that changes no row, made in `w` as a SELECT's: one row of two whole numbers; and the tree the call left. 0.
 fn two[&q](w: &!q exec.Work, root: int, a: int, b: int) -> [] int {
     let rows = contents(w.rows);
