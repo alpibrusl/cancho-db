@@ -6,11 +6,11 @@ CANCHO=${CANCHO:-cancho}
 export CANCHO
 mkdir -p build
 
-# What to run: `all` (the default: everything, as before), `checks` (everything but the mutants), or one shard of the mutants, `mutants-a` to `mutants-e`
-# (CI runs the six parts as six jobs at once, .github/workflows/ci.yml). A shard builds what the mutants are held against and runs the short checks, and
+# What to run: `all` (the default: everything, as before), `checks` (everything but the mutants), or one shard of the mutants, `mutants-a` to `mutants-f`
+# (CI runs the seven parts as seven jobs at once, .github/workflows/ci.yml). A shard builds what the mutants are held against and runs the short checks, and
 # leaves out the long ones, which the `checks` part runs.
 PART=${1:-all}
-case "$PART" in all|checks|mutants-a|mutants-b|mutants-c|mutants-d|mutants-e) ;; *) echo "usage: check.sh [all|checks|mutants-a|mutants-b|mutants-c|mutants-d|mutants-e]" >&2; exit 2 ;; esac
+case "$PART" in all|checks|mutants-a|mutants-b|mutants-c|mutants-d|mutants-e|mutants-f) ;; *) echo "usage: check.sh [all|checks|mutants-a|mutants-b|mutants-c|mutants-d|mutants-e|mutants-f]" >&2; exit 2 ;; esac
 long() { case "$PART" in mutants-*) return 1 ;; *) return 0 ;; esac; }
 
 # run a command, keep ITS exit status (a pipe into tail would hide it in sh), and show its last N lines; on failure show all.
@@ -41,7 +41,7 @@ mutants() {
     fi
 }
 
-echo "== the parts of this script are the jobs CI runs"; for p in checks mutants-a mutants-b mutants-c mutants-d mutants-e; do grep -q "^ *- $p\$" .github/workflows/ci.yml || { echo "ci.yml has no job for $p" >&2; exit 1; }; done; [ "$(grep -c '^ *- \(checks\|mutants-[a-z]\)$' .github/workflows/ci.yml)" = 6 ] || { echo "ci.yml names a part this script does not have" >&2; exit 1; }
+echo "== the parts of this script are the jobs CI runs"; for p in checks mutants-a mutants-b mutants-c mutants-d mutants-e mutants-f; do grep -q "^ *- $p\$" .github/workflows/ci.yml || { echo "ci.yml has no job for $p" >&2; exit 1; }; done; [ "$(grep -c '^ *- \(checks\|mutants-[a-z]\)$' .github/workflows/ci.yml)" = 7 ] || { echo "ci.yml names a part this script does not have" >&2; exit 1; }
 echo "== formatting";                "$CANCHO" fmt --check src
 echo "== vectors are reproducible";  rm -rf build/vectors && python3 tools/gen_vectors.py build/vectors >/dev/null && diff -r vectors build/vectors
 echo "== the landing page (docs/index.html, served by Pages from branch main, folder /docs): its counts are current"; python3 scripts/site.py --check
@@ -197,8 +197,10 @@ echo "== mutants, B+tree, pages and superblocks";  mutants e btree "$CANCHO"
 echo "== mutants, the engine's rows";  mutants e row "$CANCHO"
 echo "== mutants, the engine's expression evaluator";  mutants e eval "$CANCHO"
 echo "== mutants, the engine's statements";  mutants b engine "$CANCHO"
-echo "== mutants, the engine's server";  mutants c wire "$CANCHO"
-echo "== mutants, the export tool";  mutants c export "$CANCHO"
+# (the server's mutants are the longest group: each is a server held to the whole of tests/engine_wire.py. Two slices, a shard each; every mutant is in one)
+echo "== mutants, the engine's server, the first half";  MUTANT_SLICE=0/2 mutants c wire "$CANCHO"
+echo "== mutants, the engine's server, the second half"; MUTANT_SLICE=1/2 mutants f wire "$CANCHO"
+echo "== mutants, the export tool";  mutants f export "$CANCHO"
 echo "== mutants, capture SQL and cdb.fork";  mutants e sql "$CANCHO"
 echo "== mutants, L3a verifier";  mutants e l3a "$CANCHO"
 echo "== mutants, L3a verifier in cancho";  mutants e l3a-cho "$CANCHO"

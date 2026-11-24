@@ -3445,6 +3445,15 @@ def run_wire(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in WIRE if not only or only in m[0]]
+    # the group is the gate's longest (each mutant is a server held to the whole of tests/engine_wire.py), so CI runs it in slices: MUTANT_SLICE=K/N keeps every
+    # N-th mutant from the K-th. Every mutant is in exactly one slice; scripts/check.sh runs each slice in a shard of its own, and all of them when it runs all.
+    part = os.environ.get("MUTANT_SLICE")
+    if part:
+        k, n = (int(x) for x in part.split("/"))
+        if not 0 <= k < n:
+            print("MUTANT_SLICE: %s is not K/N with 0 <= K < N" % part)
+            return 1
+        table = table[k::n]
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
             "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
 
