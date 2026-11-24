@@ -2627,8 +2627,8 @@ ENGINE = [
      'root = exec.mark_txn(p, w, ss[1], last + 1);',
      'root = ss[1];'),
     ('session: a transaction that wrote has no facts', 'src/session.cho',
-     '            ss[3] = 1;\n',
-     ''),
+     '            ss[2] = facts.take(p, w, ss[2]);\n            ss[3] = 1;\n',
+     '            ss[2] = facts.take(p, w, ss[2]);\n'),
     ('session: what a rolled back transaction drew is given back', 'src/session.cho',
      '            ss[5] = 3;\n            root = exec.seq_replay(p, w, branch);',
      '            ss[5] = 3;\n            root = branch;'),
@@ -2648,8 +2648,8 @@ ENGINE = [
      '        ss[0] = idle();\n',
      ''),
     ("log: a transaction's commit is sealed on the branch's tree", 'src/session.cho',
-     'root = seal_on(p, w, ss, root, ss[2], key, who, rec);',
-     'root = seal_on(p, w, ss, branch, ss[2], key, who, rec);'),
+     'root = seal_on(heap, p, w, ss, root, ss[2], key, who, rec, branch);',
+     'root = seal_on(heap, p, w, ss, branch, ss[2], key, who, rec, branch);'),
     ("session: a transaction's facts stay for the next", 'src/session.cho',
      '            ss[2] = 0;\n            ss[3] = 0;\n            ss[5] = 1;',
      '            ss[3] = 0;\n            ss[5] = 1;'),
@@ -2906,6 +2906,33 @@ ENGINE = [
     ('log: the trim is a commit of what the statement before changed', 'src/facts.cho',
      "    w.rfill = 18;\n    // it changed no row: what the statement before reported is not this one's (a commit of the log is made of a statement's changes)\n    w.nchg = 0;\n    w.cfill = 0;",
      '    w.rfill = 18;'),
+    ('log: a commit says no schema', 'src/facts.cho',
+     '        if len(schema) == 32 {\n            exec.copy(schema, 0, 32, sch, 0);',
+     '        if false {\n            exec.copy(schema, 0, 32, sch, 0);'),
+    ('log: a commit says the schema it ended with, not the one it began with', 'src/session.cho',
+     '        nw = schema_hash(heap, p, w, before, sh);',
+     '        nw = schema_hash(heap, p, w, root, sh);'),
+    ('log: a statement that defines and changes no row is no commit', 'src/session.cho',
+     '            let wrote = exec.changes_of(w) > 0 || len(key) > 0 && exec.stmts_define(w);',
+     '            let wrote = exec.changes_of(w) > 0;'),
+    ('log: a transaction of definitions alone is no commit', 'src/session.cho',
+     '        if len(key) > 0 && exec.stmts_define(w) {\n            // a definition makes the transaction one that commits to the log, rows changed or not (6bc)\n            ss[3] = 1;',
+     '        if false {\n            // a definition makes the transaction one that commits to the log, rows changed or not (6bc)\n            ss[3] = 1;'),
+    ('log: every statement kept is taken for a definition', 'src/exec.cho',
+     '        if int_of(said[at + 4]) == 4 {\n            return true;',
+     '        if int_of(said[at + 4]) >= 0 {\n            return true;'),
+    ('scrub: the key of an erased row stays in the internal pages', 'src/execw.cho',
+     '    let sr = btree.scrub(p, contents(w.sc), nroot, contents(w.tmp)[65536..65540 + kn]);',
+     '    let sr = nroot;'),
+    ("scrub: the keys of an erased row's history stay in the internal pages", 'src/execw.cho',
+     '                let sw = btree.scrub(p, contents(w.sc), nw, contents(w.key2)[0..nk]);',
+     '                let sw = nw;'),
+    ('scrub: a key found in an internal page is left there', 'src/btree.cho',
+     '                if nl == kl && cmp(key, sc[ra..ra + nl]) == 0 {',
+     '                if nl <= kl {'),
+    ('scrub: only the first internal page of the path is looked at', 'src/btree.cho',
+     '        while level < d && done {\n            let po = level * 4096;\n            let lr = pager.read_page(p, was(sc, level), sc[po..po + 4096]);',
+     '        while level < 1 && done {\n            let po = level * 4096;\n            let lr = pager.read_page(p, was(sc, level), sc[po..po + 4096]);'),
 ]
 
 # The engine's server (docs/m3-engine.md 6al): the messages and one connection. Judged by tests/engine_wire.py, which holds the server against the test program.
@@ -3401,6 +3428,14 @@ def run_engine(cancho):
             b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/enginecheck.cho")] + [str(work / "src" / x) for x in srcs] + ["-o", str(exe)], capture_output=True, text=True)
             if b.returncode != 0:
                 return label, "BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]), True
+            if label.startswith("scrub: "):
+                # what an erase leaves in the file is judged by the search of the whole file (tests/engine_erase.py), on two seeds
+                for seed in ("1", "2"):
+                    r = subprocess.run([sys.executable, str(ROOT / "tests/engine_erase.py"), str(exe), seed], capture_output=True, text=True, timeout=900)
+                    if r.returncode != 0:
+                        first = [l for l in (r.stdout + r.stderr).splitlines() if l.startswith("FAIL")]
+                        return label, "killed   %-46s %s" % (label, (first[0] if first else "a crash")[:90]), False
+                return label, "SURVIVED %-46s nothing of an erased row is found" % label, True
             if label.startswith(("log: ", "stmts: ")):
                 # the log's mutants are judged by the verifiers (tests/engine_log.py), which need no database
                 r = subprocess.run([sys.executable, str(ROOT / "tests/engine_log.py"), str(exe), "300", "1"], capture_output=True, text=True, timeout=900)
@@ -3414,6 +3449,9 @@ def run_engine(cancho):
                     rc, out = r.returncode, r.stdout + r.stderr
                 except subprocess.TimeoutExpired:
                     rc, out = 1, "FAIL timed out"
+                if rc != 0 and "connection to server" in out:
+                    # the test could not reach its PostgreSQL: that judges nothing, and is not a mutant killed
+                    return label, "NO-DB  %-48s the test's PostgreSQL is not there: %s" % (label, [l for l in out.splitlines() if "connection to server" in l][0][:80]), True
                 if rc != 0:
                     first = [l for l in out.splitlines() if l.startswith("FAIL")] or [l for l in out.splitlines() if l.startswith("engine_check:")][-1:]
                     return label, "killed   %-46s seed %s: %s" % (label, seed, (first[0] if first else "a crash")[:80]), False

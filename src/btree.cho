@@ -810,6 +810,110 @@ pub fn del[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [b
     return cid;
 }
 
+// The least key under page `id`, read into `sc` at w4(): where it starts there and its length, or an error in the first.
+fn least[&q, &s](p: &!q pager.Pager, sc: &!s [byte], id0: int) -> [file_read] (int, int) {
+    var id = id0;
+    var d = 0;
+    while d < 15 {
+        let rc = pager.read_page(p, id, sc[w4()..w4() + 4096]);
+        if rc < 0 {
+            return (fail(rc), 0);
+        }
+        let t = int_of(sc[w4()]);
+        if t == 1 {
+            if commit.be(sc, w4() + 1, 2) < 1 {
+                return (err_bad(), 0);
+            }
+            return (w4() + 10, int_of(sc[w4() + 7]));
+        }
+        if t != 2 {
+            return (err_bad(), 0);
+        }
+        id = commit.be(sc, w4() + 7, 4);
+        d = d + 1;
+    }
+    return (err_deep(), 0);
+}
+
+// After `key` was deleted from the tree `root` for good (an erase, docs/m3-engine.md 6bc): no internal page keeps it. An internal page's key is "the least key
+// that can be in" a child, copied from a leaf when a page was split, and it stays when the entry it was copied from is deleted: the key of an erased row was still
+// in the file. Each such key on the path to where `key` was is replaced by the first bytes (as many as `key` had, or fewer) of the least key the child now holds,
+// which is a bound as good, and no longer than the one it replaces, so the page needs no more room. If that least key begins with `key` itself, `key` stays: the
+// file has those bytes anyway, in a row that is there. The new root, or an error.
+pub fn scrub[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root0: int, key: &k [byte]) -> [file_read, file_write] int {
+    var root = root0;
+    var from = 0;
+    var pass = 0;
+    while pass < 16 && root != 0 {
+        let d = descend(p, sc, root, key);
+        if d < 0 {
+            return d;
+        }
+        var level = from;
+        var done = true;
+        while level < d && done {
+            let po = level * 4096;
+            let lr = pager.read_page(p, was(sc, level), sc[po..po + 4096]);
+            if lr < 0 {
+                return fail(lr);
+            }
+            let count = commit.be(sc, po + 1, 2);
+            var at = po + 11;
+            var hit = 0 - 1;
+            var i = 0;
+            while i < count {
+                let kl = int_of(sc[at]);
+                if hit < 0 && kl == len(key) && cmp(key, sc[at + 1..at + 1 + kl]) == 0 {
+                    hit = at;
+                }
+                at = at + 5 + kl;
+                i = i + 1;
+            }
+            if hit >= 0 {
+                let kl = len(key);
+                let (ra, rl) = least(p, sc, commit.be(sc, hit + 1 + kl, 4));
+                if ra < 0 {
+                    return ra;
+                }
+                var nl = rl;
+                if nl > kl {
+                    nl = kl;
+                }
+                if nl == kl && cmp(key, sc[ra..ra + nl]) == 0 {
+                    // the least key there begins with it: it stays, and the levels below are looked at
+                    from = level + 1;
+                } else {
+                    // the entry with the shorter key, and what follows it moved up to it
+                    sc[hit] = byte_of(nl);
+                    mv(sc, hit + 1, ra, nl);
+                    mv(sc, hit + 1 + nl, hit + 1 + kl, at - (hit + 1 + kl));
+                    var z = at - (kl - nl);
+                    while z < at {
+                        sc[z] = byte_of(0);
+                        z = z + 1;
+                    }
+                    let cid = new_page(p, sc, po, was(sc, level));
+                    if cid < 0 {
+                        return cid;
+                    }
+                    root = climb(p, sc, level, cid, false, 0, 0);
+                    if root < 0 {
+                        return root;
+                    }
+                    from = level;
+                    done = false;
+                }
+            }
+            level = level + 1;
+        }
+        if done {
+            return root;
+        }
+        pass = pass + 1;
+    }
+    return root;
+}
+
 // The first entry after `key` (or at it, if `inclusive`) in the tree `root`, in key order: its key and value are copied into `kout` and `vout` and the answer is `key length * 1024 + value length`;
 // `not_found()` if there is none. Calling it with the key it answered walks the tree in order.
 pub fn next_after[&q, &s, &k, &a, &b](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte], inclusive: bool, kout: &!a [byte], vout: &!b [byte]) -> [file_read] int {

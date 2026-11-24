@@ -142,6 +142,24 @@ def random_history(rng, n):
     return out
 
 
+sys.path.insert(0, str(ROOT / "tools"))
+import verify as l1v  # noqa: E402  (its reader of a record's fields)
+
+
+def with_schema(history):
+    """The history with the schema asked for before every statement that is not inside a transaction: what the commit that follows must say it began with (6bc)."""
+    out, intxn = [], False
+    for st in history:
+        if not intxn:
+            out.append("!schema")
+        out.append(st)
+        if st == "begin":
+            intxn = True
+        elif st in ("commit", "rollback"):
+            intxn = False
+    return out
+
+
 def run(path, lines):
     r = subprocess.run([EXE, path], input="\n".join(lines) + "\n", capture_output=True, text=True)
     if r.returncode != 0:
@@ -155,6 +173,7 @@ class Files:
     def __init__(self):
         self.header, self.records, self.deltas, self.pending, self.seq, self.fline, self.agree = None, [], [], [], 0, None, True
         self.wrote, self.asked, self.heads = False, False, 0
+        self.schema, self.schemas, self.unlike = None, set(), 0
         self.ran, self.named = 0, []       # how many statements ran in the transaction that is open (or the statement that is one); for each record, that number
 
     def unhex(self, f):
@@ -172,6 +191,9 @@ class Files:
                 # a write that returns what it wrote is two statements: the write, and the select of what it returns (6au)
                 self.ran += 1
                 self.wrote = False
+            if f[0] == "M" and len(f) == 2:
+                # the schema before the statement, or the transaction, that follows (6bc)
+                self.schema = hashlib.sha256(b"" if f[1] == "." else bytes.fromhex(f[1])).digest()
             if f[0] == "N" and f[1:] == [b"commits".hex(), b"id".hex()]:
                 self.asked = True
             elif f[0] == "R" and self.asked:
@@ -200,6 +222,15 @@ class Files:
                 cid = commit_id(rec[4:4 + n])
                 self.records.append(rec)
                 self.named.append(self.ran)
+                rd = l1v.Reader(rec[4:4 + n])
+                rd.u16()
+                [rd.take(32) for _ in range(rd.count())]
+                rd.b16()
+                rd.u64()
+                said = rd.take(32)
+                self.schemas.add(said)
+                if said != self.schema:
+                    self.unlike += 1
                 # the `changes` the engine printed for the test (6af) is the one in the record
                 if self.fline is None or len(self.fline) != 3 or bytes.fromhex(self.fline[2]) not in rec:
                     self.agree = False
@@ -341,6 +372,8 @@ def exported(work, path, files, live, nrows):
     run(path, WHO + ["delete from note where k = 'needle'", "!erase delete from note where k = 'needle'", "!commit", "!sweep", "!commit", "!sweep"])
     log6, recs6, lines6, live6, n6, _ = read_back(path)
     data = open(path, "rb").read()
+    if b"needle" in data and os.environ.get("DBG"):
+        i = data.index(b"needle"); print("DBG page", i // 4096, "of", len(data) // 4096, data[i - 60:i + 40], data[(i // 4096) * 4096:(i // 4096) * 4096 + 8].hex(), data.count(b"needle"))
     check("a value that came in three statements is in no byte of the page file once its row is erased; the statements are still in the log, as shapes",
           NEEDLE.encode() not in data and b"needle" not in data and len(KEPT[1]) > 10 and len(recs6) == len(recs4) + 1, (NEEDLE.encode() in data, b"needle" in data, len(KEPT[1])))
     authority(work, log6, KEPT[0], KEPT[1], "after the value was erased")
@@ -456,6 +489,24 @@ def tool(work, path, early):
           and export(path, "live", len(recs))[1] == got["live"][1], export(nolog, "live"))
 
 
+def definitions(work):
+    """A statement that defines is a commit of the log though it changes no row (6bc); one that only reads is not."""
+    path = str(work / "defs")
+    out = run(path, WHO + ["create table d1 (k integer primary key, v text)", "begin", "create table d2 (k integer primary key)", "create index d1v on d1 (v)", "commit",
+                           "begin", "select k from d1", "commit", "select k from d2", "create sequence d3", "alter table d1 rename to d4", "drop table d2",
+                           "begin", "create table d5 (k integer primary key)", "rollback", "select cancho_last_commit()", "!commit"])
+    recs = [bytes.fromhex(l.split()[1]) for l in out if l.startswith("L ")][1:]
+    effects = [sorted(l1v.decode(r[4:4 + int.from_bytes(r[:4], "big")])[3][3]) for r in recs]
+    head = [l for l in out if l.startswith("R ")][-1].split()[1]
+    check("a table made, a transaction of two definitions, a sequence, a renaming and a table dropped are 5 commits, each with its definitions for effects and no fact; "
+          "a transaction that only reads, a select, and a definition rolled back are none",
+          effects == [[(2, b"d1")], [(2, b"d1"), (2, b"d2")], [(2, b"d3")], [(2, b"d1"), (2, b"d4")], [(2, b"d2")]] and head == b"5".hex()
+          and not [l for l in out if l.startswith(("C ", "refused", "err"))], (effects, head))
+    (work / "d.log").write_bytes(b"".join(bytes.fromhex(l.split()[1]) for l in out if l.startswith("L ")))
+    r = subprocess.run([sys.executable, str(ROOT / "tools/verify.py"), str(work / "d.log")], capture_output=True, text=True)
+    check("a log of definitions alone verifies", r.stdout.startswith("ok commits=5 "), r.stdout + r.stderr)
+
+
 def archiving(work, path):
     """The log's oldest part taken out of the page file by whoever has a copy (6ba): the copy and what the file still has are the whole log, and it goes on."""
     import verify as l1  # noqa: E402  (tools/ is on the path since `exported`)
@@ -568,14 +619,16 @@ def main():
         work = Path(tmp)
         path = str(work / "pages")
         files = Files()
-        files.take(run(path, WHO + history[:cut] + ["!commit"]))
+        files.take(run(path, WHO + with_schema(history[:cut]) + ["!commit"]))
         first = len(files.records)
         st, said, _ = export(path, "anchor")
         early = (int(said.split()[1]), said.split()[2].decode()) if st == 0 and len(said.split()) == 3 else (0, "")
-        out = run(path, WHO + history[cut:] + ["!commit", "!mark"] + ["!rows " + t for t in TABLES])
+        out = run(path, WHO + with_schema(history[cut:]) + ["!commit", "!mark"] + ["!rows " + t for t in TABLES])
         files.take(out[:out.index("mark")])
         live, nrows = dump(out[out.index("mark"):], TABLES)
         check("cancho_last_commit() was asked 3 times in the history and answered with the log's head each time", files.heads == 3, files.heads)
+        check("every commit says the schema its transaction began with: the hash of the snapshot the lowering read before it (%d different schemas in %d commits)"
+              % (len(files.schemas), len(files.records)), files.unlike == 0 and len(files.schemas) >= 8, (files.unlike, len(files.schemas)))
         check("commits in both processes", first >= 3 and len(files.records) > first + 3, (first, len(files.records)))
         check("the changes printed for the test are the records'", files.agree)
         (work / "log").write_bytes(files.log())
@@ -603,6 +656,7 @@ def main():
         exported(work, path, files, live, nrows)
         tool(work, path, early)
         trimming(work, path, *archiving(work, path))
+        definitions(work)
         print("commits %d, changes %d, rows at the end %d" % (len(files.records), len(files.deltas), nrows))
     if FAILED:
         print("FAIL engine log: %d failed" % len(FAILED))
