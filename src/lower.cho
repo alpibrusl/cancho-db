@@ -192,7 +192,8 @@ fn wname_scope[&s, &t, &m, &o, &c](sql: &s [byte], toks: &t [int], schema: &m [b
     let line = sc[16 + 3 * e + 2];
     let length = table_name_len(schema, line);
     let tok = sc[120 + e];
-    if tok < 0 {
+    if tok < 0 || sc[7] == 1 {
+        // (`sc[7]`: `lower_plain`, for a caller that reads the tree as of the commit itself and wants the statement over the tables' own names, 6be)
         return wname_sch(schema, line, length, out, sc);
     }
     var r = wn(out, sc, length + 65, 2);
@@ -1788,6 +1789,23 @@ fn lower_ddl[&s, &t, &n, &m, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [
 // Lowers the statement at `root` into `out`: answers the number of bytes written, or `0 - code` (sc[1] the token). `rs` is the
 // expression walk's stack (two ints a level), `sc` the scratch of this file's header (at least 128 ints).
 pub fn lower[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
+    return lower_as(sql, toks, nodes, kids, root, schema, rs, out, sc, false);
+}
+
+// The same statement with every table under its own name, also one read `AS OF` a commit: for a caller that reads the tree as it was at that commit itself and
+// runs the statement there (docs/m3-engine.md 6be). The IR that is kept, shown to a token and recorded, is `lower`'s.
+pub fn lower_plain[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
+    return lower_as(sql, toks, nodes, kids, root, schema, rs, out, sc, true);
+}
+
+fn lower_as[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int], plain: bool) -> [] int {
+    // (`sc[7]`: whether tables are named without their commit; set here and nowhere else, so that what a caller's scratch held is nothing to it)
+    if len(sc) > 7 {
+        sc[7] = 0;
+    }
+    if plain {
+        sc[7] = 1;
+    }
     sc[0] = 0;
     sc[1] = 0;
     sc[2] = 0;

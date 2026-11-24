@@ -609,6 +609,63 @@ def trimming(work, path, full, toks, n):
         check("%s: after the trim, the copy, its facts and the rows the file holds: ok, final" % cmd, all(m[0] == 0 for m in more) and v.startswith("ok commits=%d " % (n + 1)) and v.endswith(" final"), v)
 
 
+def as_of(work):
+    """`from t as of '<commit id>'` reads the tables as they were at that commit (6be): the id a client was given by cancho_last_commit(), the proxy's syntax."""
+    path = str(work / "asof")
+
+    def heads(out):
+        return [bytes.fromhex(l.split()[2]).decode() for l in out if l.startswith("R ") and len(l.split()) == 3 and len(l.split()[2]) == 128]
+
+    def rows(out):
+        got, cur = [], None
+        for l in out:
+            if l.startswith(("ok ", "refused ", "err ")):
+                cur = [l] if not l.startswith("ok SELECT") else []
+                got.append(cur)
+            elif l.startswith("R ") and cur is not None:
+                cur.append(tuple(None if x == "-" else bytes.fromhex(x).decode() if x != "." else "" for x in l.split()[1:]))
+        return got
+    out = run(path, WHO + ["create table t (a integer primary key, b text)", "create table u (k integer primary key, t_a integer, note text)", "create table live (k integer primary key)",
+                           "insert into live values (1)",
+                           "insert into t values (1, 'one'), (2, 'two')", "insert into u values (10, 1, 'first')", "select cancho_last_commit()",
+                           "update t set b = 'ONE' where a = 1", "insert into u values (11, 2, 'second')", "select cancho_last_commit()",
+                           "delete from t where a = 2", "alter table t add column c integer default 7", "select cancho_last_commit()",
+                           "drop table u", "select cancho_last_commit()", "!commit"])
+    c = heads(out)
+    check("four commits' ids are taken as the history goes", len(c) == 4 and len(set(c)) == 4, c)
+    q = ["select a, b from t as of '%s' order by a" % c[0], "select a, b from t as of '%s' order by a" % c[1], "select a, b, c from t as of '%s' order by a" % c[2], "select a, b, c from t order by a",
+         "select t.b, u.note from t as of '%s' join u as of '%s' on u.t_a = t.a order by t.a" % (c[1], c[1]),
+         "select note from u as of '%s' order by k" % c[2],
+         "select count(*) from t as of '%s' where b = 'two'" % c[0],
+         # what is refused: a table that is no longer there read as it is, one table as it was and another as it is, two commits, a commit nobody made, a write
+         "select note from u", "select t.b from t as of '%s' join u as of '%s' on u.t_a = t.a" % (c[0], c[1]), "select t.b from t as of '%s' join live on live.k = t.a" % c[0],
+         "select b from t as of '%s' where a in (1)" % ("ab" * 32), "update t as of '%s' set b = 'x'" % c[0],
+         # in a transaction: the past is the past, whatever the transaction has done
+         "begin", "update t set b = 'changed in a transaction' where a = 1", "select b from t as of '%s' order by a" % c[3], "select b from t", "commit", "!commit"]
+    got = rows(run(path, WHO + q))
+    want = [[("1", "one"), ("2", "two")], [("1", "ONE"), ("2", "two")], [("1", "ONE", "7")], [("1", "ONE", "7")],
+            [("ONE", "first"), ("two", "second")], [("first",), ("second",)], [("1",)],
+            ["refused unknown-table"], ["refused engine-unsupported"], ["refused engine-unsupported"], ["refused asof-unknown-commit"], ["refused as-of-write"],
+            ["ok BEGIN 0"], ["ok UPDATE 1"], [("ONE",)], [("changed in a transaction",)], ["ok COMMIT 0"]]
+    check("a table read as of each of four commits is the table as it was then: rows since changed or deleted, a column not yet added, a table since dropped, two tables joined as of one "
+          "commit; refused: two commits in a statement, one table as it was beside one as it is, a commit nobody made, a write; in a transaction the past is not what the transaction has done",
+          got == want, [(i, g, w2) for i, (g, w2) in enumerate(zip(got, want)) if g != w2][:3] or (len(got), len(want)))
+    # the transaction that read the past committed: its commit names that statement, a read of the table as of a commit, and the log verifies with it
+    (work / "o.log").write_bytes(export(path, "log")[1])
+    (work / "o.tok").write_bytes(export(path, "tokens")[1])
+    (work / "o.st").write_bytes(export(path, "stmts")[1])
+    for cmd in L2:
+        r = subprocess.run(cmd.split() + [str(work / "o.log"), "--root", ROOT_KEY, "--tokens", str(work / "o.tok"), "--stmts", str(work / "o.st")], capture_output=True, text=True, cwd=ROOT)
+        v = (r.stdout + r.stderr).strip()
+        check("%s: a commit whose transaction read a table as of a commit: level=2+ir" % cmd, v.startswith("ok commits=") and v.endswith("level=2+ir"), v)
+    # the past trimmed away, and a commit whose record was archived: said, not answered with the present
+    n = int(export(path, "anchor")[1].split()[1])
+    out = run(path, WHO + ["select cancho_history_trim()"] * 3 + ["select a from t as of '%s'" % c[3], "select cancho_log_archive(%d)" % (n - 1), "select a from t as of '%s'" % c[3], "!commit"])
+    said = [l for l in out if l.startswith(("refused", "err"))]
+    check("after the history is trimmed a commit before it is history-trimmed; after its record is archived it is a commit the tree does not know",
+          said == ["refused history-trimmed", "refused asof-unknown-commit"], said)
+
+
 def main():
     rng = random.Random(SEED)
     history = FIXED + random_history(rng, COUNT)
@@ -657,6 +714,7 @@ def main():
         tool(work, path, early)
         trimming(work, path, *archiving(work, path))
         definitions(work)
+        as_of(work)
         print("commits %d, changes %d, rows at the end %d" % (len(files.records), len(files.deltas), nrows))
     if FAILED:
         print("FAIL engine log: %d failed" % len(FAILED))

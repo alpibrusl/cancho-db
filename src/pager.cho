@@ -129,6 +129,24 @@ pub fn begin[&q](p: &!q Pager) -> [file_write] int {
     return fr;
 }
 
+// The pages handed out in the window that is open are given back (docs/m3-engine.md 6be): for a statement that built a tree only to read it and forget it, so
+// that reading does not make the file grow. The caller says by this that no root names them. They are free to be handed out again at once; what they hold is
+// zeroed at the next sweep like any page nothing names. How many.
+pub fn recycle[&q](p: &!q Pager) -> [] int {
+    var i = 0;
+    var given = 0;
+    while i < p.nfl {
+        let id = contents(p.flist)[i];
+        contents(p.fresh)[id] = byte_of(0);
+        if push_free(p, id) {
+            given = given + 1;
+        }
+        i = i + 1;
+    }
+    p.nfl = 0;
+    return given;
+}
+
 // Whether page `id` was handed out in the window that is open.
 pub fn is_fresh[&q](p: &!q Pager, id: int) -> [] bool {
     return p.window && id >= 3 && id < fresh_max() && int_of(contents(p.fresh)[id]) == 1;

@@ -273,6 +273,17 @@ pub fn seal[&q, &z, &s, &y, &m, &o](p: &!z pager.Pager, w: &!q exec.Work, root: 
         if nw < 0 {
             return exec.tree_err(nw);
         }
+        // which of the tree's transactions this commit is, under its id: what `AS OF` the commit reads the tree as of (6be)
+        let txn = exec.last_txn(p, w, nw);
+        if txn < 0 {
+            return txn;
+        }
+        build.put_be(sig, 0, txn, 8);
+        let ak = tables.asof_key(head[8..40], contents(w.key));
+        nw = btree.put(p, contents(w.sc), nw, contents(w.key)[0..ak], sig[0..8]);
+        if nw < 0 {
+            return exec.tree_err(nw);
+        }
         // the log is in the tree (6as). One key signs it: the first commit's, kept, and a commit signed with another is not made
         build.public_key(seed, sig[0..32]);
         let lk = tables.log_key(contents(w.key));
@@ -730,6 +741,18 @@ fn forget[&q, &z, &r, &f](p: &!z pager.Pager, w: &!q exec.Work, root: int, seq: 
             }
         }
     }
+    // which transaction it was, kept under its id (6be): the tree is not read as of a commit it no longer has the record of
+    region g {
+        let ident = alloc_slice[g](32, byte_of(0));
+        build.id(rec[4..rn - 64], ident);
+        let ak = tables.asof_key(ident, contents(w.key));
+        let d = btree.del(p, contents(w.sc), nw, contents(w.key)[0..ak]);
+        if d >= 0 {
+            nw = d;
+        } else if d != btree.not_found() {
+            return exec.tree_err(d);
+        }
+    }
     // its record, in parts
     var part = 0;
     more = true;
@@ -869,4 +892,21 @@ pub fn trim[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_re
         }
     }
     return two(w, nw, gone, last);
+}
+
+// The number of the tree's transaction that the commit `id` was (`tables.asof_key`), or `exec.as_of_unknown()`: no commit of the log the tree `root` still has
+// the record of; or an error.
+pub fn txn_of[&q, &z, &i](p: &!z pager.Pager, w: &!q exec.Work, root: int, id: &i [byte]) -> [file_read] int {
+    let ak = tables.asof_key(id, contents(w.key));
+    let r = btree.get(p, contents(w.sc), root, contents(w.key)[0..ak], contents(w.cur));
+    if r == btree.not_found() {
+        return exec.as_of_unknown();
+    }
+    if r < 0 {
+        return exec.tree_err(r);
+    }
+    if r != 8 {
+        return exec.damaged();
+    }
+    return commit.be(contents(w.cur), 0, 8);
 }

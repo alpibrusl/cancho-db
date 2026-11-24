@@ -1377,6 +1377,48 @@ def revocations(d):
     srv.stop()
 
 
+def history(d):
+    """A client reads a table as it was at a commit it holds the id of (6be), by both protocols, and a token that may read the table may read its past."""
+    srv = Server(os.path.join(d, "asof.db"), login=True)
+    a = Client(srv.port, password=mint("password", "--effects", ALL), database="main")
+    a.query("create table h (k integer primary key, v text)")
+    a.query("insert into h values (1, 'as it was'), (2, 'gone later')")
+    c1 = a.query("select cancho_last_commit()")[4][0][1].decode()
+    a.query("update h set v = 'as it is' where k = 1")
+    a.query("delete from h where k = 2")
+    a.query("create table other (k integer primary key)")
+    # (docs/spec/ir.md section 6.1: a token's pattern matches the name as written, `h@<commit>`; one for the rows as they are does not reach the past)
+    reader = Client(srv.port, password=mint("password", "--effects", "r:h@*"), database="main")
+    stranger = Client(srv.port, password=mint("password", "--effects", "r:h,r:h.*"), database="main")
+    got = [a.query("select k, v from h as of '%s' order by k" % c1), a.extended("select v from h as of '%s' where k = $1" % c1, ["2"]), a.query("select k, v from h order by k"),
+           reader.query("select v from h as of '%s' order by k" % c1), stranger.query("select v from h as of '%s'" % c1), a.query("select v from h as of '%s'" % ("cd" * 32)),
+           reader.query("select v from h"), stranger.query("select v from h"),
+           a.query("insert into h values (3, 'the server goes on')")]
+    check("a table read as of a commit a client held the id of: the rows as they were, by both protocols, beside the rows as they are; a token for the table's past reads it and not its present, "
+          "and one for its present not its past (42501 each: the specification's rule); a commit nobody made is refused asof-unknown-commit; the branch is as it was after",
+          got[0][4] == [[b"1", b"as it was"], [b"2", b"gone later"]] and got[1][4] == [[b"gone later"]] and got[2][4] == [[b"1", b"as it is"]]
+          and got[3][4] == [[b"as it was"], [b"gone later"]] and got[4][0] == "42501" and (got[5][0], got[5][1]) == ("0A000", "cancho-db: refused asof-unknown-commit")
+          and got[6][0] == "42501" and got[7][4] == [[b"as it is"]] and got[8][5] == "INSERT 0 1", [(x[0], x[1], x[4], x[5]) for x in got])
+    # reading the past builds a tree to read and forget: its pages are given back, so that reading alone does not make the file grow
+    # (enough rows changed since, and enough reads, that the pages the reads build are more than the whole file: no pages left free by a sweep can hide them)
+    a.query("create table wide (k integer primary key, v text)")
+    a.query("insert into wide values " + ", ".join("(%d, 'row %d as it was')" % (k, k) for k in range(200)))
+    c2 = a.query("select cancho_last_commit()")[4][0][1].decode()
+    for i in range(1000):
+        a.query("update wide set v = 'again %d' where k = %d" % (i, i % 200))
+    size0 = os.path.getsize(os.path.join(d, "asof.db"))
+    seen = set()
+    for i in range(800):
+        seen.add(a.query("select count(*) from wide as of '%s' where v like '%%as it was'" % c2)[4][0][0])
+    size1 = os.path.getsize(os.path.join(d, "asof.db"))
+    check("800 reads of a table of 200 rows as it was 1,000 commits ago: each finds the 200 as they were, and the page file is not a page larger for them (%.1f MiB)" % (size1 / 1048576),
+          seen == {b"200"} and size1 == size0, (seen, size0, size1))
+    for cl in (a, reader, stranger):
+        cl.close()
+    srv.stop()
+    verified(d, os.path.join(d, "asof.db"), ["create table h ", "create table other ", "create table wide "], "a server whose clients read the past", login=True)
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1391,6 +1433,7 @@ def main():
         disk_full(d)
         logins(d)
         revocations(d)
+        history(d)
         with_psql(d)
         with_cancho_pg(d)
     if FAILED:
