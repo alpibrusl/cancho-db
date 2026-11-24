@@ -26,6 +26,7 @@ It prints a line every 30 seconds and a summary. Seconds is the length of the lo
 """
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -501,10 +502,12 @@ def main():
         if MIXED:
             with open(path, "rb") as f:
                 data = f.read()
-            found = [(i, s[:8]) for i, ss in sh.erased.items() for s in ss if s.encode() in data or s[:14].encode() in data]
+            # one pass over the file, not one for each secret: every secret begins with its person's number, so anything in the file that begins as a secret
+            # does is someone's, and none may be an erased person's (a search for each took longer than the hour's load once thousands had been erased)
+            found = sorted(set((int(m.group(1)), m.group(0)[:8].decode()) for m in re.finditer(rb"p(\d+)\.[12]-[0-9a-f]", data) if int(m.group(1)) in sh.erased))
             back = [i for i in sh.erased if i in there]
             kept = {i: s for i, s in there.items() if i not in sh.unsure}
-            check("erased beside the load: %d people erased, and the file has no byte of either secret of any of them (whole, or the first 14 bytes); after %d of the erases the file "
+            check("erased beside the load: %d people erased, and the file has no byte of either secret of any of them (nothing in it begins as a secret of theirs does); after %d of the erases the file "
                   "was searched as soon as the answer came, the server running; the %d not erased are there with the secret last acknowledged (%d more were under a statement when "
                   "the server was killed: nothing is claimed of them)" % (len(sh.erased), sh.looked, len(sh.people), len(sh.unsure)),
                   not found and not back and kept == sh.people and len(sh.erased) > 0 and sh.looked > 0 and not [m for m in sh.mixed if "eras" in m[0] or "person" in m[0]], (found[:3], back[:3], len(kept), len(sh.people), [m for m in sh.mixed if "eras" in m[0] or "person" in m[0]][:3]))
