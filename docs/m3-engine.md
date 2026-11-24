@@ -1819,7 +1819,8 @@ run read the whole log again (9 ms for 1,000 commits, 6av) and so took longer th
   it be unique in the file and order a commit's lines).
 - *What disturbs a reader is a sweep, not a commit.* **A read (`src/pager.cho`, `src/pstore.cho`):** a page is written again only if it is on the pager's free
   list, and only `pstore.sweep` puts pages there. A commit writes new pages and leaves the old; so a reader that loaded one state reads that state's pages whole
-  however many commits follow, until a sweep frees some of them. So the server now **says in the tree that a sweep is coming**: a number under the log's space
+  however many commits follow, until a sweep frees some of them. *(Amended in 6be: a statement that reads the past also gives back the pages it built its view of. Those were made in its own window and no root
+  named them, so a reader of a committed state never had them to read.)* So the server now **says in the tree that a sweep is coming**: a number under the log's space
   (`tables.sweeps_key`) that the commit before a sweep raises, and the first commit of every run (for the sweep made at the start, 6ay, which has no commit of its
   own). The tool reads the number when it begins and, from the state the file is in when it ends, again: if it is not the same, `export-raced`. `logexport
   PAGEFILE sweeps` prints it.
@@ -2048,6 +2049,55 @@ told; the test dates its revocations at the moment they are written.
 *Limits.* The token is still sent in clear. Between a revocation being written and the server's next turn (a second at most) a statement can still run. A
 damaged list stops everyone, by design: whoever can write the file can stop the server's clients, as they could by deleting the page file. 256 entries. The
 clock is the server's.
+
+## 6be. A table read as it was at a commit, through the server
+
+The engine has kept what every row was before each transaction since 6n, and could put a tree back to any of them (`exec.as_of`, by the tree's own count of its
+transactions). Only the test program could ask. The server had no statement for it, so the history it wrote was read by nobody (6bb said so). The statement has
+existed since M2: `select ... from t as of '<commit id>'`, the proxy's (`docs/m2-branches.md` D8), which the lexer, the parser and the lowering accept and the
+engine refused when it came to run it.
+
+**Design.**
+
+- *The commit is the client's handle.* A client has a commit's id from `cancho_last_commit()` (6ax). The tree counts transactions, not commits (a statement
+  that fails, a trim, an archive are transactions and no commits), so each commit now writes, under its id, which transaction it was (`tables.asof_key`), and
+  `AS OF` a commit is `exec.as_of` that transaction.
+- *One tree a statement.* The engine runs a statement over one tree. So every table of the statement is read as of the same commit: one table as it was beside
+  one as it is, or two commits, is refused `engine-unsupported`. The proxy can do those, table by table; the engine cannot yet.
+- *The names are found in the tree as it was.* The schema the statement is lowered against is the one of that commit: a table since dropped is there, a column
+  since added is not.
+- *Two lowerings.* The IR that is kept (for the token, for the log if the statement is in a transaction that commits) names each table `t@<commit>`, as the
+  specification asks (`docs/spec/ir.md` section 6.1); the one that is run names it `t`, over the tree as it was. The lowering writes either, by a flag.
+- *What a token needs is the specification's:* a pattern matches the name as written, so `r:t` does not reach the past and `r:t@*` does not reach the present.
+- *Nothing of it is the branch's.* The tree read is forgotten when the statement ends and the branch is as it was; in a transaction the past is the past,
+  whatever the transaction has done.
+- *What is refused and how:* a commit the tree has no record of, `asof-unknown-commit` (nobody made it, or its record was archived, 6ba: the archive takes the
+  handle with it); a past that was trimmed, `history-trimmed` (6bb); a write `AS OF`, by the lowering as before.
+
+**Found while building: reading the past made the file grow.** Putting a tree back writes pages (the tree is copied on write), and they were given back only by
+a sweep, which runs after a commit. Measured: 300 reads of a table as it was 2,000 transactions ago, with no write, grew the page file from 13.4 MB to 24.4 MB.
+Now the pages a statement built its view of are given back when it ends (`pager.recycle`): after, the same 300 reads leave the file at 13.4 MB. This is a second
+way for a page to be written again besides a sweep (6az's argument for the export tool said there was one): the pages given back were made in the statement's own
+window and no root ever named them, so no reader of a committed state had them to read. 6az's argument stands for that reason and is amended there.
+
+*Not in this part:* one statement over two times; a self-join (refused by the engine with or without `AS OF`); `AS OF` a time rather than a commit; branches.
+
+**Test.** `tests/engine_log.py` (`as_of`): four commits' ids taken as a history goes; a table read as of each is the table as it was (rows since changed or
+deleted, a column not yet added, a table since dropped, two tables joined as of one commit); refused: two commits, one table as it was beside one as it is, a
+commit nobody made, a write; in a transaction the past is not what the transaction did, and its commit, which names the read, verifies at `level=2+ir` with the
+three L2 verifiers; after a trim `history-trimmed`, after the archive `asof-unknown-commit`. `tests/engine_wire.py` (`history`): through the server by both
+protocols; a token for the past and one for the present, each refused the other; 300 reads and the file not a page larger.
+
+**Built.** `drive.as_of_view`, `select_as_of`; `facts.txn_of` and the key written by `facts.seal`; `lower`'s flag for plain names; `pager.recycle`. Measured:
+all of the test, on 3 seeds of the log's test; a read of 200 rows as they were 2,000 transactions ago takes 10.6 ms through the server (the cost is the
+transactions since: each one's entries are applied to get back); 800 such reads leave the page file exactly the size it was. 9 mutants (8 of the engine, 1 of the
+server), all killed. Two written and taken out as the same program: an archive that throws away the tree its deletion answered (the tree deletes in place within
+a statement), and a page given back that keeps its mark.
+
+*Limits.* **A read of the past costs the whole of what happened since**, and holds the server while it runs: far back in a long history is slow, and nothing
+bounds it. One commit a statement, every table of it. No self-join. The handle is the commit's id, which a client must have kept: there is no way to ask for
+"an hour ago". A commit's handle goes with its record when the log is archived, though the rows' past may still be there. The past of a row that was erased is
+not there, which is what an erase is for.
 
 ## 7. Taking over, safely
 

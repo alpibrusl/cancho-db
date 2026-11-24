@@ -542,6 +542,96 @@ fn archive_upto[&e](e: &e [byte]) -> [] int {
     return v;
 }
 
+fn hex_digit(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    return 0 - 1;
+}
+
+// The tree a SELECT whose tables are read `AS OF` a commit is run on (docs/m3-engine.md 6be; the syntax and the IR are the proxy's, docs/m2-branches.md D8): 0 if
+// the statement just parsed reads no table that way; else the tree `root` as it was at that commit. The engine reads the whole statement over one tree, so every
+// table of the statement must be read as of the same commit (one table as it was and another as it is, or two commits: `engine-unsupported`). The commit is
+// looked up in the log the tree has (`asof-unknown-commit`) and the tree put back to the transaction it was (`exec.as_of`; `history-trimmed` if that past is
+// gone). The tree answered is one to read and forget: nothing of it is the branch's.
+fn as_of_view[&z, &q, &b, &s](pg: &!z pager.Pager, w: &!q exec.Work, m: &!b Run, sql: &s [byte], root: int) -> [file_read, file_write] int {
+    var first = 0 - 1;
+    var tables = 0;
+    var with = 0;
+    var same = true;
+    var id = 0;
+    while id < contents(m.st)[0] {
+        if contents(m.nb)[6 * id] == parse.n_table() {
+            tables = tables + 1;
+            let tok = contents(m.nb)[6 * id + 5];
+            if tok >= 0 {
+                with = with + 1;
+                if first < 0 {
+                    first = tok;
+                }
+                same = same && parse.tlen(contents(m.tb), tok) == 64;
+                var i = 0;
+                while i < 64 && same {
+                    same = int_of(sql[parse.tstart(contents(m.tb), tok) + i]) == int_of(sql[parse.tstart(contents(m.tb), first) + i]);
+                    i = i + 1;
+                }
+            }
+        }
+        id = id + 1;
+    }
+    if with == 0 {
+        return 0;
+    }
+    if !same || with != tables {
+        return exec.unsupported();
+    }
+    var view = 0;
+    region r {
+        let ident = alloc_slice[r](32, byte_of(0));
+        var i = 0;
+        var hex = true;
+        while i < 32 && hex {
+            let hi = hex_digit(int_of(sql[parse.tstart(contents(m.tb), first) + 2 * i]));
+            let lo = hex_digit(int_of(sql[parse.tstart(contents(m.tb), first) + 2 * i + 1]));
+            hex = hi >= 0 && lo >= 0;
+            ident[i] = byte_of((hi * 16 + lo) % 256);
+            i = i + 1;
+        }
+        if !hex {
+            view = exec.unsupported();
+        } else {
+            view = facts.txn_of(pg, w, root, ident);
+            if view >= 0 {
+                view = exec.as_of(pg, w, root, view);
+            }
+        }
+    }
+    return view;
+}
+
+// The SELECT, lowered again over the tables' own names (the IR that is kept says `AS OF`; the one that is run does not), on the tree `view` as it was.
+fn select_as_of[&z, &q, &b, &s](pg: &!z pager.Pager, w: &!q exec.Work, m: &!b Run, sql: &s [byte], top: int, sl: int, view: int, root: int) -> [file_read] int {
+    var rc = 0;
+    region r {
+        let ir2 = alloc_slice[r](32768, byte_of(0));
+        let sc2 = alloc_slice[r](1024, 0);
+        let l2 = lower.lower_plain(sql, contents(m.tb), contents(m.nb), contents(m.kb), top, contents(m.schema)[0..sl], contents(m.rb), ir2, sc2);
+        if l2 < 0 {
+            rc = exec.unsupported();
+        } else {
+            rc = execs.select(pg, w, view, ir2[0..l2], sc2);
+        }
+        // the tree read is not the branch's: the statement leaves the branch as it found it
+        w.root = root;
+    }
+    // and the pages that tree was built of are given back: reading the past does not make the file grow
+    pager.recycle(pg);
+    return rc;
+}
+
 fn keep_named[&q, &s, &t](w: &!q exec.Work, sql: &s [byte], toks: &t [int], tok: int, tag: int, kind: int) -> [] bool {
     var ok = false;
     region r {
@@ -591,7 +681,7 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
     hw[3] = 0;
     hw[4] = 0;
     exec.set_guard(w, 0);
-    let sl = exec.schema(pg, w, root, contents(m.schema));
+    var sl = exec.schema(pg, w, root, contents(m.schema));
     if sl < 0 {
         done(hw, o_refused(), sl);
         return root;
@@ -668,6 +758,23 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
         }
         kind = answer.k_alter_table();
     } else {
+        // a SELECT of tables as they were at a commit (6be) is read, and its names found, in the tree as it was then: a table since dropped is there, a column
+        // since added is not
+        var view = 0;
+        if head == parse.n_select() && mode == 0 {
+            view = as_of_view(pg, w, m, sql, root);
+            if view < 0 {
+                done(hw, o_refused(), view);
+                return root;
+            }
+            if view > 0 {
+                sl = exec.schema(pg, w, view, contents(m.schema));
+                if sl < 0 {
+                    done(hw, o_refused(), sl);
+                    return root;
+                }
+            }
+        }
         let ln = lower.lower(sql, contents(m.tb), contents(m.nb), contents(m.kb), top, contents(m.schema)[0..sl], contents(m.rb), contents(m.ir), contents(m.sc));
         if ln < 0 {
             done(hw, o_lower(), 0 - ln);
@@ -687,6 +794,9 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
         } else if mode == 2 {
             rc = execw.erase(pg, w, root, e, contents(m.sc));
             kind = 9;
+        } else if kind == 6 && view > 0 {
+            // tables read as of a commit (6be)
+            rc = select_as_of(pg, w, m, sql, top, sl, view, root);
         } else if kind == 6 {
             rc = execs.select(pg, w, root, e, contents(m.sc));
         } else if kind == 1 && contents(m.nb)[6 * top + 1] > 0 && execw.guard_lower(w, sql, contents(m.tb), contents(m.nb), contents(m.kb), contents(m.nb)[6 * top + 1] - 1, contents(m.schema)[0..sl]) < 0 {

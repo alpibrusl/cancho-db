@@ -55,6 +55,11 @@ pub fn archive_ahead() -> [] int {
     return 0 - 20;
 }
 
+// `AS OF` a commit the tree does not know (6be).
+pub fn as_of_unknown() -> [] int {
+    return 0 - 22;
+}
+
 // The tree as it was at a transaction whose history has been trimmed away (6bb).
 pub fn trimmed() -> [] int {
     return 0 - 21;
@@ -87,6 +92,9 @@ pub fn refusal_name(code: int) -> [] &static [byte] {
     }
     if code == trimmed() {
         return "history-trimmed";
+    }
+    if code == as_of_unknown() {
+        return "asof-unknown-commit";
     }
     return "engine-unsupported";
 }

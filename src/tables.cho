@@ -204,6 +204,18 @@ pub fn trim_key[&o](out: &!o [byte]) -> [] int {
     return 5;
 }
 
+// The number of the tree's transaction that a commit of the log was (docs/m3-engine.md 6be), under the commit's id: what `AS OF` a commit reads the tree as of.
+pub fn asof_key[&i, &o](id: &i [byte], out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, log_space(), 4);
+    out[4] = byte_of(12);
+    var k = 0;
+    while k < 32 {
+        out[5 + k] = id[k];
+        k = k + 1;
+    }
+    return 37;
+}
+
 pub fn fact_key[&o](seq: int, out: &!o [byte]) -> [] int {
     build.put_be(out, 0, log_space(), 4);
     out[4] = byte_of(6);
