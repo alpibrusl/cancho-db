@@ -2161,13 +2161,28 @@ sweep had not reached. So the soak gets the new things as clients of their own, 
 - *People.* A person inserted with a secret (their number and 80 random bits), the secret changed, and one person in three erased. The client keeps what
   was acknowledged. At the end, with the server stopped: **the file has no byte of either secret of any person whose erase was answered** (whole, or the
   first 14 bytes, which hold the person's number and so are no one else's), and every person not erased is there with the secret last acknowledged. A
-  person under a statement when the server was killed is set aside: nothing is claimed of them.
-- *The past.* The head of the log taken (`cancho_last_commit()`), then `sum(cents), count(*)` of the accounts as of it: **the first sum, at every commit**,
-  since no commit makes or loses money. The journal as of it read twice, 0.3 s apart: the same both times, and no more rows than the journal has now. Without
+  person under a statement when the server was killed is set aside: nothing is claimed of them. After every fifth erase the file is searched at once, the
+  server running: 6bf says gone when the answer comes, and the end of the run cannot tell (see below).
+- *The past.* A mark only this client writes is set to the next number and the head of the log taken (`cancho_last_commit()`): as of that head the mark is
+  that number, whatever was committed between, and as of a head taken earlier (one of the last 40, at random) it is still the number written then. Then
+  `sum(cents), count(*)` of the accounts as of the head: **the first sum, at every commit**, since no commit makes or loses money. The journal as of it read twice, 0.3 s apart: the same both times, and no more rows than the journal has now. Without
   `archive` no reading may be refused. With it a reading may be refused `history-trimmed` or `asof-unknown-commit`, and for no other reason.
 
 What stays held from 6az: the sum at every reading of the present, the journal against the acknowledgements, the copy kept up by the export tool and
 verified, and at the end the replay of the whole log ending at the rows the file holds, now through definitions, deletes and erases.
+
+**The checks were made to fail, and two of the first could not.** Each was run against an engine built with one of the mutants of `tests/mutants.py`
+(40 s, `mixed`):
+
+- *An erase that does not sweep the file* (`erasing: the file is not swept when a row is erased`) **passed the soak as first written.** The file was
+  searched only at the end, after the server had been started once more, and a server sweeps when it starts. The search after an answer is what was added;
+  with it this engine and the one that commits an erase once fail on the first erase looked at. An erase that keeps the row's past fails by its answer.
+- *A past that is the present* (`history: a known old value is recorded as nothing`) **passed too**: every commit has the same sum, and the journal read
+  twice as of a commit is the same wrong thing twice. The mark is what was added; with it this engine fails. Two engines whose past is damaged were refused
+  by the first checks already (`engine-damaged` is not an answer the soak allows).
+- *A past one commit too early* (`history: AS OF t undoes t as well`) **still passes, and that is a limit of this test**: it shows only as of the mark's
+  own commit, and under this load the head a client takes is never its own commit (0 of 135 tries with the statements sent together: the server takes its
+  clients in turn). One client alone sees it at the first read, and `tests/engine_wire.py` fails on that engine.
 
 *What it does not hold.* That an erased person is out of the *copy*: the copy is the export tool's, outside the file, and has the facts of the insert (6bf's
 limit, unchanged). That two definers at once agree: there is one. How long a client waits while an erase sweeps: not measured here.
