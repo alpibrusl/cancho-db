@@ -2187,6 +2187,28 @@ verified, and at the end the replay of the whole log ending at the rows the file
 *What it does not hold.* That an erased person is out of the *copy*: the copy is the export tool's, outside the file, and has the facts of the insert (6bf's
 limit, unchanged). That two definers at once agree: there is one. How long a client waits while an erase sweeps: not measured here.
 
+**Measured** (by hand; the gate runs `60 1 archive,mixed`).
+
+| run | commits | kills | people erased (searched at once) | tables made and dropped | the past read (mark) | page file at the end | commits a second, first and last minute |
+|---|---|---|---|---|---|---|---|
+| 30 min, `mixed`, the first checks | 53,647 | 54 | 803 (none) | 1,273 | 985 (none) | 193.0 MiB | 110, 20 |
+| 60 min, `archive,mixed`, the checks as they are | 291,097 | 81 | 4,364 (873) | 6,918 | 2,161 (3,577) | 71.5 MiB | 100, 55 |
+
+In both every check passed: the sum at every reading (20,071 and 108,781), the journal against the acknowledgements (40,032 and 214,527 transfers), the
+copy verifying beside the load, and at the end the whole log replayed to the rows the file holds, through the definitions, the deletes and the erases (7 s
+and 28 s). In the hour 1,965 readings of the past were refused, all as trimmed or archived; 1,590,919 history entries were trimmed and 288,152 commits
+archived as the load went. No fault of the engine was found by either run.
+
+*What the runs did show.*
+
+- **An erase costs the whole file, and under load that is the server's throughput.** Without the archive the file grew to 193 MiB and commits fell from
+  110 a second to 20: an erase about every second, each sweeping every page while every client waits (6bf's limit, with its number under load). With the
+  archive the file stayed under 72 MiB and the fall was to 55.
+- **The test's own search was slower than its load.** One search of the file for each secret took 12 minutes after the hour, with 4,364 people erased. It is
+  one pass now: every secret begins with its person's number, so whatever in the file begins as a secret does is looked up once.
+- The 30 minutes were run before the search at once and the mark were added; the hour has both.
+
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
