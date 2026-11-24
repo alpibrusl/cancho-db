@@ -1921,6 +1921,45 @@ Measured:
 history of the rows still grows without bound and nothing reads it in the server. The file does not shrink (6aw): the space is used again, not given back. A
 copy is now the only place the old log is: how it is kept, and that it is, is not this repository's.
 
+## 6bb. What the rows were before, taken out of the page file
+
+After 6ba what still grew without bound was the history of the rows (6n): for every key a transaction writes, what it held before, 176 bytes a commit of 6az's
+load and two thirds of what was left in the file. **A read (`src/serve.cho`, `src/drive.cho`):** nothing the server runs reads it. `AS OF` is a command of the test
+program; the server has no statement for it. A commit's facts are made from the entries of the transaction that is committing, and from no older one
+(`facts.take`); an erase deletes a row's entries and needs none to be there.
+
+**Design.**
+
+- `select cancho_history_trim()` takes out of the tree every entry of the history up to the tree's last transaction, at most 256 a call (`facts.trim_step`),
+  and answers `removed` (0: there are no more) and `transaction`. A token must name the call. **Nothing does it unasked.**
+- *The entries of a transaction that is open stay.* They are of the next number, which the call does not reach: the transaction's commit finds them and makes
+  its facts as before.
+- *What is trimmed cannot be read again, and says so.* The tree keeps the number of the last transaction trimmed (`tables.trim_key`); `exec.as_of` for a
+  transaction before it is refused, `history-trimmed`, where it would otherwise have answered with the rows as they are now and called them the past.
+- It makes no commit of the log (6ba), and it is a transaction of the tree: the number goes on by one.
+
+*Not in this part:* a trim up to a chosen transaction (nothing gives a client a transaction's number; when `AS OF` is a statement of the server, this is where it
+gets its bound); a trim per branch.
+
+**Test.** `tests/engine_log.py` (`trimming`): the tree is read as of its first transaction; then, inside a transaction that has written a row, the call until it
+finds nothing; the transaction writes again and commits. Every entry of the transactions ended is gone and the open one's are there; as of the first transaction
+is now `history-trimmed`; the commit continues the copy of 6ba at `level=2+ir` and the replay ends at the rows the file holds. `tests/engine_wire.py`: who may
+call it. `tests/engine_soak.py ... archive`: the exporter trims after it archives.
+
+**Built.** `facts.trim`, `tables.trim_key`, the refusal in `exec.as_of`. Measured:
+
+- 3 seeds of 2,000 statements: 2,489 to 2,962 entries (the tree's count of its transactions among them) out in 11 to 13 calls, 3 left (the open transaction's), all of the test.
+- **Ten minutes of 6az's load, the exporter archiving and trimming** (seed 2, 16 kills): 67,652 commits; the page file **48.1 MiB** (79.4 with the archive alone,
+  283 with neither), 0.7 KiB a commit. 200,175 entries of the history taken out, 2,974 there at the end. Money, the journal and the replay to `final` as before.
+- What that file holds: the rows 5.4 MB (67,848 of them: the journal, which is the data), the log not yet copied 2.5 MB, the history 0.2 MB. **What grows now is
+  what was put in.**
+- 6 mutants, all killed. One survived the first run: the bound of a call was 1,024 entries and the test's small history had 551, so a call with no bound did the
+  same. The bound is 256 and the test asks that some call meets it.
+
+*Limits.* What a row was before is gone for good, for anyone: an operator who wants `AS OF` later must not call this. The server still has no `AS OF`, so today
+the history it keeps until trimmed is of use to nobody; whether to write it at all when nothing will read it is a question this does not answer. The call leaves
+no record in the log. The file does not shrink.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

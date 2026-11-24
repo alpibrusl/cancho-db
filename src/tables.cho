@@ -197,6 +197,13 @@ pub fn floor_key[&o](out: &!o [byte]) -> [] int {
     return 5;
 }
 
+// The number of the last transaction whose history was trimmed away (docs/m3-engine.md 6bb): the tree as it was before it cannot be read any more. 8 bytes.
+pub fn trim_key[&o](out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, log_space(), 4);
+    out[4] = byte_of(11);
+    return 5;
+}
+
 pub fn fact_key[&o](seq: int, out: &!o [byte]) -> [] int {
     build.put_be(out, 0, log_space(), 4);
     out[4] = byte_of(6);

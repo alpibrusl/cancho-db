@@ -992,6 +992,14 @@ def logins(d):
     n = int(head[0][0]) if head else 0
     arch = [ro.query("select cancho_log_archive(1)"), caller.query("select cancho_log_archive(1)"), keeper.query("select cancho_log_archive(%d)" % (n + 1)), keeper.query("select cancho_log_archive(1)"),
             keeper.extended("select cancho_log_archive(2)", []), caller.query("select cancho_last_commit()")]
+    trimmer = Client(srv.port, password=mint("password", "--effects", "c:cancho_history_trim"), database="main")
+    trim = [ro.query("select cancho_history_trim()"), keeper.query("select cancho_history_trim()"), trimmer.query("select cancho_history_trim()"), trimmer.extended("select cancho_history_trim()", []),
+            trimmer.query("select cancho_history_trim(1)"), trimmer.query("select cancho_log_archive(1)")]
+    check("cancho_history_trim(): refused to a token that reads and to one that may archive (42501); a token that names it takes the history out (some entries, then none, by both protocols) "
+          "and may do nothing else; with an argument it is no such call; a call that took something out is itself a transaction, and the next names the one after",
+          [x[0] for x in trim[:2]] == ["42501", "42501"] and trim[2][2] == [b"removed", b"transaction"] and int(trim[2][4][0][0]) > 0 and trim[3][4][0][0] == b"0" and int(trim[3][4][0][1]) == int(trim[2][4][0][1]) + 1
+          and (trim[4][0], trim[4][1]) == ("0A000", "cancho-db: refused engine-unsupported") and trim[5][0] == "42501", [(x[0], x[1], x[4]) for x in trim])
+    trimmer.close()
     srv.stop(signal.SIGKILL)                                      # the answer was given: what was taken out stays out
     for cl in (ro, caller, keeper):
         cl.close(False)

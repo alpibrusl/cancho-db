@@ -185,7 +185,7 @@ def main():
         t0 = time.time()
         whole = raced = sets = kills = held = 0
         odd, sizes, anchor, last_n = [], [], None, 0
-        have, copy_log, copy_facts, copy_stmts, archived = 0, b"", b"", b"", 0
+        have, copy_log, copy_facts, copy_stmts, archived, trimmed = 0, b"", b"", b"", 0, 0
         next_line, next_kill = t0 + 30, t0 + rng.uniform(20, 40)
         while time.time() - t0 < SECONDS:
             time.sleep(rng.uniform(0.2, 0.6))
@@ -232,6 +232,12 @@ def main():
                                 floor = int(got[4][0][0])
                                 if floor >= have:
                                     break
+                            # and what the rows were before the transactions that have ended (6bb), which nothing here reads
+                            for _ in range(200):
+                                got = cc.query("select cancho_history_trim()")
+                                if cc.status == "closed" or not got[4] or int(got[4][0][0]) == 0:
+                                    break
+                                trimmed += int(got[4][0][0])
                             cc.close()
                             if floor >= 0:
                                 archived = max(archived, floor)
@@ -317,11 +323,14 @@ def main():
                            capture_output=True, text=True).stdout.strip()
         check("at the end, %d commits through %d kills: the copy's log and facts and the rows the file holds verify, the replay ending at those rows (%.0f s to verify)"
               % (n, kills, time.time() - t1), all(files[w][0] == 0 for w in files) and v.startswith("ok commits=%d " % n) and v.endswith(" final"), v)
+        if ARCHIVE:
+            hist = int([l for l in export(path, "usage")[1].decode().split("\n") if l.startswith("usage history ")][0].split()[2])
+            check("the history of the rows was trimmed as the load went: %d entries taken out, %d left for %d commits" % (trimmed, hist, n), trimmed > 0 and hist < 3 * (n - have) + 5000, (trimmed, hist, n, have))
         use = export(path, "usage")[1].decode().strip().replace("usage ", "").replace("\n", "; ")
         print("     what the file holds (entries, bytes): " + use)
         size = os.path.getsize(path)
         check("the page file: %.1f MiB after %d commits, %.1f KiB a commit (%s)" % (size / 1048576, n, size / 1024 / max(n, 1),
-              "the log taken out as it is copied: the rows and their history are what grows" if ARCHIVE else "the history of every row and the whole log are in it"),
+              "the log taken out as it is copied and the history trimmed: the rows are what grows" if ARCHIVE else "the history of every row and the whole log are in it"),
               n > 0 and size / max(n, 1) < 64 * 1024, sizes[-3:])
         print("sizes (s, commits, bytes): " + " ".join("%d:%d:%d" % s for s in sizes))
     if FAILED:
