@@ -3,6 +3,9 @@
 
     mint.py root                          print the root public key (hex)
     mint.py password [options]            print a password psql can send: base64url(token + seed of the last key)
+    mint.py revoke PASSWORD SINCE_MS [--prefix K] [--foreign]
+                                          print, in hex, an entry of the list of revoked tokens (docs/spec/token.md section 3) for the token of that
+                                          password, or for the token of its first K blocks (which revokes every token made from it), from that time on
 
 options: --effects SPEC (default r:*; comma separated KIND:PATTERN, KIND one of r w d c n, e.g. r:orders,r:orders.id,w:orders),
          --branch PATTERN (default *), --expiry MS (default none), --blocks N (attenuate N-1 times, default 1),
@@ -19,6 +22,18 @@ import gen_login as g  # noqa: E402
 def main(argv):
     if len(argv) >= 2 and argv[1] == "root":
         print(g.ROOT_PK.hex())
+        return 0
+    if len(argv) >= 4 and argv[1] == "revoke":
+        import base64
+        import struct
+        import verify as v
+        raw = base64.urlsafe_b64decode(argv[2] + "=" * (-len(argv[2]) % 4))[:-32]
+        blocks = v.decode_token(raw)
+        k = int(argv[argv.index("--prefix") + 1]) if "--prefix" in argv else len(blocks)
+        ident = v.prefix_id(blocks, k)
+        body = ident + struct.pack(">Q", int(argv[3]))
+        signer = g.FOREIGN if "--foreign" in argv else g.ROOT
+        print((body + signer.sign(b"cancho-db/revoke/v1\x00" + body)).hex())
         return 0
     if len(argv) < 2 or argv[1] != "password":
         print(__doc__, file=sys.stderr)

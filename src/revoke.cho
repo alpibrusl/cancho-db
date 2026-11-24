@@ -1,0 +1,127 @@
+edition 9;
+module cdb.revoke;
+
+import std.ed25519;
+import cdb.commit;
+import cdb.token;
+
+// The list of revoked tokens as the server keeps it (docs/m3-engine.md 6bd; the file is docs/spec/token.md section 3: `CHODBRV1`, then entries of a token's id, a
+// time `since` and the root's signature over both, 104 bytes each). The server keeps each entry as ten ints, the id as eight of four bytes and `since` as two,
+// among its own (`serve.globals()`), so that every place that has those has the list.
+
+pub fn max() -> [] int {
+    return 256;
+}
+
+pub fn stride() -> [] int {
+    return 10;
+}
+
+// Why a list is not taken: each is the whole list refused, not an entry passed over.
+pub fn truncated() -> [] int {
+    return 0 - 1;
+}
+
+pub fn bad_magic() -> [] int {
+    return 0 - 2;
+}
+
+pub fn bad_signature() -> [] int {
+    return 0 - 3;
+}
+
+pub fn too_many() -> [] int {
+    return 0 - 4;
+}
+
+// The entries of the file `text`, each checked under the root's key `root`, into `gs` from `at`: how many (an empty file is none), or why not.
+pub fn load[&t, &k, &g](text: &t [byte], root: &k [byte], gs: &!g [int], at: int) -> [] int {
+    if len(text) == 0 {
+        return 0;
+    }
+    if len(text) < 8 {
+        return truncated();
+    }
+    let magic = "CHODBRV1";
+    var i = 0;
+    while i < 8 {
+        if int_of(text[i]) != int_of(magic[i]) {
+            return bad_magic();
+        }
+        i = i + 1;
+    }
+    if (len(text) - 8) % 104 != 0 {
+        return truncated();
+    }
+    let n = (len(text) - 8) / 104;
+    if n > max() {
+        return too_many();
+    }
+    var bad = false;
+    region r {
+        // "cancho-db/revoke/v1", a zero byte, the id, `since`
+        let msg = alloc_slice[r](60, byte_of(0));
+        let tag = "cancho-db/revoke/v1";
+        i = 0;
+        while i < 19 {
+            msg[i] = tag[i];
+            i = i + 1;
+        }
+        var e = 0;
+        while e < n && !bad {
+            let ra = 8 + 104 * e;
+            i = 0;
+            while i < 40 {
+                msg[20 + i] = text[ra + i];
+                i = i + 1;
+            }
+            if ed25519.verify(root, msg, text[ra + 40..ra + 104]) != 1 {
+                bad = true;
+            } else {
+                i = 0;
+                while i < 10 {
+                    gs[at + stride() * e + i] = commit.be(text, ra + 4 * i, 4);
+                    i = i + 1;
+                }
+            }
+            e = e + 1;
+        }
+    }
+    if bad {
+        return bad_signature();
+    }
+    return n;
+}
+
+// Whether the token `tk` is revoked at the time `now` (ms): the id of the token, or of any token it was attenuated from (each prefix of its blocks), is among the
+// `n` entries of `gs` at `at` with a `since` that is not after `now`.
+pub fn hit[&g, &t](gs: &g [int], at: int, n: int, tk: &t [byte], now: int) -> [] bool {
+    if n <= 0 {
+        return false;
+    }
+    var found = false;
+    region r {
+        let ident = alloc_slice[r](32, byte_of(0));
+        let blocks = token.blocks(tk);
+        var k = 1;
+        while k <= blocks && !found {
+            token.prefix_id(tk, k, ident);
+            var e = 0;
+            while e < n && !found {
+                let ea = at + stride() * e;
+                var same = true;
+                var i = 0;
+                while i < 8 && same {
+                    same = gs[ea + i] == commit.be(ident, 4 * i, 4);
+                    i = i + 1;
+                }
+                if same && token.cmp64(gs[ea + 8], gs[ea + 9], now / 4294967296, now % 4294967296) <= 0 {
+                    found = true;
+                }
+                e = e + 1;
+            }
+            k = k + 1;
+        }
+    }
+    return found;
+}
