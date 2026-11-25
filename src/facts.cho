@@ -890,6 +890,29 @@ pub fn trim[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_re
                 }
                 nw = d;
                 gone = gone + 1;
+                // and the entry that found it by its key (6bi; an entry from before there were such has none)
+                let nk = r / 1024;
+                let xl = tables.past_key(contents(w.key2)[12..nk], nk - 12, 9223372036854775807 - commit.be(contents(w.key2), 4, 8), contents(w.key));
+                let xd = btree.del(p, contents(w.sc), nw, contents(w.key)[0..xl]);
+                if xd >= 0 {
+                    nw = xd;
+                } else if xd != btree.not_found() {
+                    return exec.tree_err(xd);
+                }
+            }
+        }
+        if gone == 0 && root != 0 {
+            // no history is left up to the last transaction: whatever is written from here on is findable by its key, and the tree says so (6bi)
+            let one = alloc_slice[g](1, byte_of(1));
+            let ik = tables.indexed_key(contents(w.key));
+            let ig = btree.get(p, contents(w.sc), nw, contents(w.key)[0..ik], contents(w.cur));
+            if ig == btree.not_found() {
+                nw = btree.put(p, contents(w.sc), nw, contents(w.key)[0..ik], one);
+                if nw < 0 {
+                    return exec.tree_err(nw);
+                }
+            } else if ig < 0 {
+                return exec.tree_err(ig);
             }
         }
         if gone > 0 {

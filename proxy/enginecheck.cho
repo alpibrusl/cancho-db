@@ -27,6 +27,8 @@ import cdb.row;
 //
 //     !commit        make the statements so far durable (src/pstore.cho)      -> `committed SEQ` or `err CODE`
 //     !sweep         zero and reuse the pages nothing names                   -> `swept N` or `err CODE`
+//     !indexed       whether the tree says all of its history is findable by key (6bi)   -> `indexed` or `unindexed`
+//     !unindex       make the tree one from before that: the mark and every by-key entry are removed    -> `unindexed`
 //     !purge         the same from what was written since the last sweep or purge (6bh), checked against the sweep's walk
 //                                                                             -> `purged N`, `purge-fallback`, `purge-unsafe`, `purge-incomplete` or `err CODE`
 //     !steps         how many writes and syncs the page file has seen         -> `steps N`
@@ -548,6 +550,51 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                         put_int(io, r);
                     }
                     putchar(io, '\n');
+                } else if starts(all, ls, le, "!indexed") || starts(all, ls, le, "!unindex") {
+                    // whether the tree says its history is findable by key (6bi); `!unindex` makes the tree one from before that: the mark and every such entry go
+                    var said = 0;
+                    region ix {
+                        let k = alloc_slice[ix](256, byte_of(0));
+                        let nx = alloc_slice[ix](256, byte_of(0));
+                        let v = alloc_slice[ix](1024, byte_of(0));
+                        let ik = tables.indexed_key(k);
+                        if starts(all, ls, le, "!unindex") {
+                            let d = btree.del(pg, exec.scratch(w), rs[cur], k[0..ik]);
+                            if d >= 0 {
+                                rs[cur] = d;
+                            }
+                            build.put_be(k, 0, tables.log_space(), 4);
+                            k[4] = byte_of(13);
+                            var going = true;
+                            while going {
+                                let r = btree.next_after(pg, exec.scratch(w), rs[cur], k[0..5], true, nx, v);
+                                if r < 0 || r / 1024 < 5 || commit.be(nx, 0, 4) != tables.log_space() || int_of(nx[4]) != 13 {
+                                    going = false;
+                                } else {
+                                    let d2 = btree.del(pg, exec.scratch(w), rs[cur], nx[0..r / 1024]);
+                                    if d2 < 0 {
+                                        going = false;
+                                        said = d2;
+                                    } else {
+                                        rs[cur] = d2;
+                                    }
+                                }
+                            }
+                            tables.indexed_key(k);
+                        }
+                        if said == 0 && btree.get(pg, exec.scratch(w), rs[cur], k[0..ik], v) >= 0 {
+                            said = 1;
+                        }
+                    }
+                    if said < 0 {
+                        put_str(io, "err ");
+                        put_int(io, said);
+                        putchar(io, '\n');
+                    } else if said == 1 {
+                        put_str(io, "indexed\n");
+                    } else {
+                        put_str(io, "unindexed\n");
+                    }
                 } else if starts(all, ls, le, "!purge") {
                     // what an erase does in place of a sweep (6bh), held to the sweep's walk before it writes; a tree built to read the past is garbage to it
                     view = 0 - 1;

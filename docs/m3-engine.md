@@ -2294,6 +2294,64 @@ C200, C201). What this section built removes the sweep's part. The scan's part i
 *What it will not do.* A sweep for size still walks the file and holds the server (6aw): this is for erases. The first erase after a start or after a
 sweep for size still sweeps. Nothing a client sees says which way an erase went; the measure is the time.
 
+## 6bi. The history of one row, found without reading everyone's
+
+6bh's finding: an erase reads every history entry in the file to find one row's (1.05 s for 400,000). The history is kept under the transaction's number
+and then the key, newest first, because that is the order a read of the past undoes it in (6n). Nothing finds an entry by its key.
+
+**Design.**
+
+- *A second entry, by key.* Wherever a history entry is written (`exec.remember`, `exec.remember_known`) one more key is: the log space, kind 13, the tree
+  key, and the transaction's number as the history has it (so newest first). One byte for a value. The entries of one key are next to each other.
+- *An erase* reads the entries that begin as the row's key does and are exactly that much longer, and for each removes the history entry of that transaction and key, and the entry itself; the keys are scrubbed from the internal pages as before (6bc), the
+  new entries' too, since they hold the row's key.
+- *A trim* (6bb) removes the by-key entry with each history entry it removes.
+- *A read of the past* does not use them and does not see them: it undoes the history, which is where it was.
+
+*Files written before this.* Their history has no such entries, and an erase that trusted the new ones would leave a row's past in the file. So the
+tree says whether its history is all findable by key: a mark (kind 14) written with the first transaction of a new tree, or by a trim that finds no
+history left to take (from then every entry is one written since). **Without the mark an erase reads all of the history, as it did.** An old file is
+brought over by trimming its history.
+
+*The cost*, measured on a prototype before this was designed (the soak of 6az, 60 s, twice each): 4,920 and 4,716 commits without, 4,860 and 4,535
+with; 7.1 and 7.2 KiB a commit without, 7.3 and 7.5 with. A few percent at most of either, inside what two runs of the same binary differ by.
+
+**Test** (first). `tests/engine_erase.py`: the search of the whole file after the erases already holds an erase to every value a row ever had, so an
+entry the new way misses is found there; it gains (a) the count each erase answers, held to the number of times the row was written, (b) a file with no
+mark (the test program removes the mark and the by-key entries: `!unindex`), where erases must do as much, and after a trim to the end must have the mark
+again (`!indexed`), (c) a row whose key begins another's. `tests/engine_log.py` (`trimming`): after a trim to the end no by-key entry is left (the tool's
+`usage` counts them). The time: the 110 MiB file of 6bh with its history not trimmed.
+
+**Built.** `tables.past_key`, `past_prefix`, `indexed_key`; `exec.by_key` (called where `remember` and `remember_known` write an entry) and the mark in
+`exec.mark_txn` at a tree's first transaction; `execw.erase` goes by the entries when the tree has its mark and reads all of the history when it has
+not (and there removes an entry by key that it meets, since a file being brought over has some); `facts.trim` removes each with the entry it found, and
+gives the mark when it finds no history left. The test program: `!indexed`, `!unindex`. The export tool's `usage` counts them (`by-key`).
+
+**Measured.**
+
+- *The time of an erase*, the 104 MiB file of 6bh with the history of its 400,000 rows not trimmed, 40 erases, one client, the server without the check:
+
+  | | before 6bh | with 6bh | with this |
+  |---|---|---|---|
+  | the first erase after a start (it sweeps) | 1,332 ms | 1,332 ms | 343 ms |
+  | the next 39, median | 1,373 ms | 1,104 ms | **9.5 ms** |
+  | the next 39, the slowest | 1,838 ms | 1,526 ms | 15 ms |
+
+- *What an erase answers* (`tests/engine_erase.py`, three seeds): each of about 100 erases among transactions, rollbacks and statements that fail answers
+  the row and one entry for every transaction that wrote it, no more and no fewer; and the search of the file finds nothing of them.
+- *A file from before* (the same test, `by_key`): with the mark and the entries taken out, 30 rows written by 4 transactions each answer 5, all of their
+  history; `!indexed` says no; one trim that takes 256 entries and leaves others does not give the mark; a trim to the end does, and 30 rows updated and
+  erased after it answer 2.
+- *A trim* (`tests/engine_log.py`): before and after it there is one entry by key for each history entry.
+- *Mutants*: 9 (`scrub: by key:`, and one of the trim under `log:`), all killed. Two were wrong first and are worth the note. One was a mutant of
+  nothing: "an erase takes the entries of a key that only begins as the row's" cannot be killed because no key begins another (a text ends with a
+  terminator, a number is 8 bytes, `row.cho`); the check of the length stays, and the test's rows with a key one letter longer are there for a
+  format that might change. The other, "a trim leaves the entries", survived by ignoring what `btree.del` answered: a page the statement itself wrote is
+  changed in place, so the entry went anyway. The mutant now does not call it.
+
+*What it will not do.* A file written by this engine and then by an older one has history the mark does not know of: an older engine is not to be run on
+it (nothing in the file stops it). An erase is still by one key column (6bf).
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
