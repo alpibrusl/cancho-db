@@ -2477,6 +2477,30 @@ commit by `session.close`, with the effects of its statements.
 *What changed for a reader of the log.* The head is no longer what it was after an archive or a trim: a client that took the head before one and
 holds a later log to it still can (the head it took is in that log), but "the head stays" is not so, and one test said it.
 
+## 6bl. The schema a commit began with: the types and the keys too
+
+A commit says the hash of the schema its transaction began with (6bc). The schema hashed was the snapshot the lowering reads: the names of the tables,
+of their columns and of the indexes. So a table dropped and made again with the same names and other types, or another key, was the same schema to
+the log: two commits that wrote to tables a reader would not call the same said the same `schema`.
+
+**Design.** What is hashed is the snapshot with, after each column's name, its type and its place in the key (`/T/K`: the type's number in the tree's
+definition, 0 for a column that is not of the key, else which column of the key it is). `tables.schema_text` writes either form; the lowering still
+reads the one of names, which is all it needs and is what the proxy's lowering reads. The specification puts no rule on the field (`docs/spec/commit.md`),
+so no verifier changes; the engine's hash and the proxy's for the same tables were not the same bytes before either, and are not meant to be.
+
+*What it still does not say.* Whether a column may be null, and its default: the tree's definition of a table keeps them as the statement that made it,
+not as fields. A sequence is in no snapshot (6bc). These are the same limits as before, less the two that are gone.
+
+**Test** (first). `tests/engine_log.py`: the schema the test program prints before each statement (`!schema`) is the text hashed, and the test of 6bc
+holds every commit's field to the hash of it, so the record and the text cannot differ without that test failing. Added (`definitions`): a table dropped
+and made again with a column of another type, and again with another key, is a different schema each time, and the names alone are the same.
+
+**Built.** `tables.schema_text` takes `typed`; `session.schema_hash` and the test program's `!schema` ask for it, `exec.schema` (the lowering's) does not.
+
+**Measured.** `tests/engine_log.py`: every commit of the history says the hash of the typed text printed before its statement (the check of 6bc, now of
+this text); a table made with `v text`, then `v integer`, then keyed by `v`: three schemas, and the third made again is the third. Three mutants (the
+commit hashes the names alone; the type left out; the key left out), all killed. `t: k/5/1 v/3/0` is a line of it.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

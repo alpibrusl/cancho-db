@@ -387,6 +387,21 @@ fn lit[&o](out: &!o [byte], at: int, text: &static [byte]) -> [] int {
     return at + len(text);
 }
 
+// A number under 1000 in decimal, at `at`: where it ends.
+fn small[&o](out: &!o [byte], at: int, v: int) -> [] int {
+    var n = at;
+    if v >= 100 {
+        out[n] = byte_of('0' + v / 100 % 10);
+        n = n + 1;
+    }
+    if v >= 10 {
+        out[n] = byte_of('0' + v / 10 % 10);
+        n = n + 1;
+    }
+    out[n] = byte_of('0' + v % 10);
+    return n + 1;
+}
+
 // The key of the index `name` in the catalog, into `out`: its length, or -1. An index is a name and the table it is on (the key's value): 0x00000000, 0x01, the name. A table's name does not begin
 // with the byte 1, so the two kinds of key are apart.
 pub fn index_key[&n, &o](name: &n [byte], out: &!o [byte]) -> [] int {
@@ -405,7 +420,9 @@ pub fn index_key[&n, &o](name: &n [byte], out: &!o [byte]) -> [] int {
 
 // The snapshot the lowering reads (src/lower.cho): a line `name: column column ...` for each table of the tree `root` and a line `index name on table` for each index, into `out`: its length, or an error (`btree.err_big()` if `out` is too small).
 // `key`, `key2` (at least 256 bytes each) and `ent` (at least 1024) are scratch.
-pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &!k [byte], key2: &!j [byte], ent: &!e [byte], out: &!o [byte]) -> [file_read] int {
+// With `typed`, each column's name is followed by `/T/K`: its type's number and its place in the key (0: not of the key). That is the schema a commit's hash is of
+// (docs/m3-engine.md 6bl); the lowering reads the form without.
+pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &!k [byte], key2: &!j [byte], ent: &!e [byte], out: &!o [byte], typed: bool) -> [file_read] int {
     build.put_be(key, 0, 0, 4);
     var kl = 4;
     var at = 0;
@@ -465,7 +482,7 @@ pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], r
                 var need = nk - 4 + 2;
                 var c = 0;
                 while c < n {
-                    need = need + 1 + len(row.col_name(def, c));
+                    need = need + 1 + len(row.col_name(def, c)) + 10;
                     c = c + 1;
                 }
                 if at + need > len(out) {
@@ -489,6 +506,12 @@ pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], r
                         out[at] = nm[i];
                         at = at + 1;
                         i = i + 1;
+                    }
+                    if typed {
+                        out[at] = byte_of('/');
+                        at = small(out, at + 1, row.col_type(def, c));
+                        out[at] = byte_of('/');
+                        at = small(out, at + 1, row.col_pk(def, c));
                     }
                     c = c + 1;
                 }
