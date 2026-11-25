@@ -884,17 +884,26 @@ pub fn trim[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_re
             } else if r / 1024 < 12 || commit.be(contents(w.key2), 0, 4) != 4294967295 {
                 more = false;
             } else {
-                let d = btree.del(p, contents(w.sc), nw, contents(w.key2)[0..r / 1024]);
+                let nk = r / 1024;
+                var d = btree.del(p, contents(w.sc), nw, contents(w.key2)[0..nk]);
+                if d >= 0 {
+                    // the entry's key holds a row's, and an internal page may keep it as the bound of a child: it goes from there too. An erase of that row
+                    // later has no entry left to know this key by (6bi: found by an erase after a trim that took some of the history and left the rest)
+                    d = btree.scrub(p, contents(w.sc), d, contents(w.key2)[0..nk]);
+                }
                 if d < 0 {
                     return exec.tree_err(d);
                 }
                 nw = d;
                 gone = gone + 1;
-                // and the entry that found it by its key (6bi; an entry from before there were such has none)
-                let nk = r / 1024;
+                // and the entry that found it by its key (6bi; an entry from before there were such has none), scrubbed likewise
                 let xl = tables.past_key(contents(w.key2)[12..nk], nk - 12, 9223372036854775807 - commit.be(contents(w.key2), 4, 8), contents(w.key));
-                let xd = btree.del(p, contents(w.sc), nw, contents(w.key)[0..xl]);
+                var xd = btree.del(p, contents(w.sc), nw, contents(w.key)[0..xl]);
                 if xd >= 0 {
+                    xd = btree.scrub(p, contents(w.sc), xd, contents(w.key)[0..xl]);
+                    if xd < 0 {
+                        return exec.tree_err(xd);
+                    }
                     nw = xd;
                 } else if xd != btree.not_found() {
                     return exec.tree_err(xd);

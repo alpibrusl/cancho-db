@@ -2354,6 +2354,17 @@ gives the mark when it finds no history left. The test program: `!indexed`, `!un
   format that might change. The other, "a trim leaves the entries", survived by ignoring what `btree.del` answered: a page the statement itself wrote is
   changed in place, so the entry went anyway. The mutant now does not call it.
 
+**Found by CI, and then by the test it asked for.** Three older mutants survived the first push: they change the reading of all the history, which
+the tests now reached only for a file from before. So the erase test of 6bc runs that way on its even seeds (`!unindex` first), and the mutants of that
+way are judged by it. Making `!unindex` right (it left the keys it removed as bounds in internal pages, which a file from before never had) raised the
+question of what else removes such keys without looking there. **A trim does** (6bb, since it was built): it removes history entries, whose keys hold
+rows' keys, and an internal page may keep one as the bound of a child. A row erased afterwards has no entry left for the erase to know that key by.
+Measured before the fix (600 rows with text keys, a trim of 256 or 768 entries that leaves the rest, 300 rows erased, three seeds): **1 to 9 of the 300
+erased keys still in the file** with this section's entries, and 1 of 300 on one seed of three with the engine as it was before them. A trim to the
+end left none, which is why the soak and 6bb's test did not see it: with no history left there are no internal pages of it. `facts.trim` now takes
+each key it removes out of the internal pages (`btree.scrub`), the history's and the by-key entry's. `tests/engine_erase.py` (`after_a_trim`) is that
+measurement, held to none; two mutants, one for each scrub. C195 and C197 said more than was so and are corrected.
+
 *What it will not do.* A file written by this engine and then by an older one has history the mark does not know of: an older engine is not to be run on
 it (nothing in the file stops it). An erase is still by one key column (6bf).
 

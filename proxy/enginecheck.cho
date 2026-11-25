@@ -571,7 +571,11 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                                 if r < 0 || r / 1024 < 5 || commit.be(nx, 0, 4) != tables.log_space() || int_of(nx[4]) != 13 {
                                     going = false;
                                 } else {
-                                    let d2 = btree.del(pg, exec.scratch(w), rs[cur], nx[0..r / 1024]);
+                                    // (and no internal page keeps it as a bound: a file from before never had it)
+                                    var d2 = btree.del(pg, exec.scratch(w), rs[cur], nx[0..r / 1024]);
+                                    if d2 >= 0 {
+                                        d2 = btree.scrub(pg, exec.scratch(w), d2, nx[0..r / 1024]);
+                                    }
                                     if d2 < 0 {
                                         going = false;
                                         said = d2;

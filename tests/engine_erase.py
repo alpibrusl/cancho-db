@@ -7,7 +7,7 @@ The older check of this (tests/engine_log.py, tests/engine_check.py) erased one 
 split: the key of a row is copied into an internal page of the tree when a leaf is split there, and stayed when the row was deleted and erased. This test does not
 leave it to chance. Rows with keys and values that occur nowhere else, enough of them and long enough that the tree splits at many of them (text keys, so that
 the key itself is in the internal pages; a second table with an index on a text column, so that a value is a key too); they are written, updated (a history),
-some deleted first, and then half are erased, in an order of the seed. After two commits and a sweep the whole file is searched for every erased row's key and
+some deleted first, and then half are erased, in an order of the seed (on an even seed in a file made one from before 6bi, so that both ways an erase finds a row's history are held to this). After two commits and a sweep the whole file is searched for every erased row's key and
 values, and every row that was not erased must still be read whole.
 """
 import os
@@ -148,6 +148,36 @@ def purging(rng):
         said = [[l for l in run(path, c[1]) if l.startswith(("purge", "err"))] for c in cases]
         check("it falls back, and writes nothing, when: " + "; ".join(c[0] for c in cases), said == [["purge-fallback"]] * len(cases), said)
 
+def after_a_trim(rng):
+    """A row erased after a trim took some of the history and left the rest (docs/m3-engine.md 6bi). The trim removed entries whose keys hold the row's key, and an
+    internal page of the tree may keep such a key as the bound of a child. The erase that comes later has no entry left to know that key by, so the trim has to take it
+    from the internal pages itself. It did not, before this test: one or two of 300 erased keys were left in the file, and up to nine once every entry had a second
+    by its key."""
+    n = 600
+    def word(tag, i):
+        return "%s%04d%s" % (tag, i, "".join(rng.choice("bcdfghjklmnpqrstvwxz") for _ in range(40)))
+    rows = [(word("kt", i), word("vt", i), word("wt", i)) for i in range(n)]
+    order = list(range(n))
+    rng.shuffle(order)
+    left, bad = [], []
+    for calls in (1, 3):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "pages")
+            lines = ["!log " + KEY, "create table person (name text primary key, note text)"]
+            lines += ["insert into person values ('%s', '%s')" % (rows[i][0], rows[i][1]) for i in order]
+            lines += ["update person set note = '%s' where name = '%s'" % (rows[i][2], rows[i][0]) for i in order[::2]]
+            run(path, lines + ["!commit"])
+            out = run(path, ["!log " + KEY] + ["select cancho_history_trim()"] * calls + ["!commit", "!commit", "!sweep"])
+            took = [l for l in out if l.startswith("R ")]
+            gone = sorted(rng.sample(range(n), n // 2))
+            out = run(path, ["!log " + KEY] + ["!erase delete from person where name = '%s'" % rows[i][0] for i in gone] + ["!commit", "!sweep", "!commit", "!sweep", "select count(*) from person"])
+            bad += [l for l in out if l.startswith(("refused", "err"))] + [l for l in out if l.startswith("R ")][-1:] + took[-1:]
+            data = open(path, "rb").read()
+            left += [(calls, i, w, data[data.index(t.encode()) // 4096 * 4096]) for i in gone for w, t in zip(("key", "value", "later value"), rows[i]) if t.encode() in data]
+    check("600 rows, half of them updated; a trim of 256 entries of the history (and, in a second file, of 768) that leaves the rest; then 300 rows erased: no key or "
+          "value of an erased row is in either file", not left and bad[0::2] == ["R " + b"300".hex()] * 2 and all(l.startswith("R " + b"256".hex()) for l in bad[1::2]), (len(left), left[:4], bad))
+
+
 def by_key(rng):
     """A row's history found by its key (docs/m3-engine.md 6bi): not another row's whose key begins the same; and in a file from before there were such entries (the test
     program takes them and the tree's mark out: `!unindex`) an erase reads all of the history as it did, until a trim has left none and the tree has its mark again."""
@@ -236,6 +266,9 @@ def main():
         check("the tree has internal pages (%d of them), so keys have been copied up" % inner, inner >= 3, inner)
         gone = sorted(rng.sample(range(n), n // 2))
         lines = ["!log " + KEY]
+        if SEED % 2 == 0:
+            # on the even seeds the file is one from before the history was findable by key (6bi): the erases read all of it, the way that is still there for such files
+            lines.append("!unindex")
         for j, i in enumerate(gone):
             k, v, w2, e = rows[i]
             if j % 3 == 0:
@@ -276,6 +309,7 @@ def main():
         check("the rows not erased are read whole, by key and by the index (40 of %d tried)" % len(kept), out == want, [(a, b) for a, b in zip(out, want) if a != b][:2])
     purging(random.Random(SEED * 101))
     by_key(random.Random(SEED * 211))
+    after_a_trim(random.Random(SEED * 307))
     if FAILED:
         print("FAIL engine erase: %d failed" % len(FAILED))
         return 1
