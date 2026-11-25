@@ -2204,7 +2204,7 @@ archived as the load went. No fault of the engine was found by either run.
 - **An erase costs the whole file, and under load that is the server's throughput.** Without the archive the file grew to 193 MiB and commits fell from
   110 a second to 20: an erase about every second, each sweeping every page while every client waits (6bf's limit, with its number under load). With the
   archive the file stayed under 72 MiB and the fall was to 55. *(Corrected by 6bh: the sweep was a third of it. An erase also reads every history entry
-  the file has to find the row's own, and in this run, with nothing trimmed, that was the larger part.)*
+  the file has to find the row's own, and in this run, with nothing trimmed, that was the larger part Corrected again by 6bj: commits a second in the soak measure the soak's load, whose own questions grow with what it has written; they are not the engine's throughput.)*
 - **The test's own search was slower than its load.** One search of the file for each secret took 12 minutes after the hour, with 4,364 people erased. It is
   one pass now: every secret begins with its person's number, so whatever in the file begins as a secret does is looked up once.
 - The 30 minutes were run before the search at once and the mark were added; the hour has both.
@@ -2341,7 +2341,8 @@ gives the mark when it finds no history left. The test program: `!indexed`, `!un
   kills where there were 53,647, 1,527 people erased where there were 803, every check passing. The file ended at 332 MiB (193 then: more was
   written). Commits a second in the last minute: 35, at 332 MiB, where there were 20 at 193. *It still falls as the file grows*, and an erase is no
   longer why: what is left that costs the whole file is the sweep when the server starts (51 kills in this run), the sweeps for size, and a read of the
-  past that undoes more the more there is. Not taken apart here.
+  past that undoes more the more there is. Not taken apart here. *(Taken apart in 6bj: most of the fall is the soak's own questions, which grow with what
+  it has written.)*
 - *What an erase answers* (`tests/engine_erase.py`, three seeds): each of about 100 erases among transactions, rollbacks and statements that fail answers
   the row and one entry for every transaction that wrote it, no more and no fewer; and the search of the file finds nothing of them.
 - *A file from before* (the same test, `by_key`): with the mark and the entries taken out, 30 rows written by 4 transactions each answer 5, all of their
@@ -2395,6 +2396,47 @@ same test: it can see what it looks for). What the look found about each way:
 
 *What it will not do.* A file written by this engine and then by an older one has history the mark does not know of: an older engine is not to be run on
 it (nothing in the file stops it). An erase is still by one key column (6bf).
+
+## 6bj. Why the soak slows as it runs, each thing measured by itself
+
+6bi left the soak at 35 commits a second after 30 minutes where it began near 100, and said what might be left without measuring it. This is the
+measurement: one client, nothing beside it (`tests/engine_grow.py`, run by hand; nothing in the engine changes).
+
+| the file | transfers a second | 200 rows as of about 250 commits back | the start after a kill |
+|---|---|---|---|
+| 48 MiB | 87 | 12.5 ms | 142 ms |
+| 137 MiB | 77 | 8.0 ms | 416 ms |
+| 286 MiB | 80 | 8.7 ms | 927 ms |
+| 469 MiB | 68 | 11.8 ms | 1,413 ms |
+
+| one row as of | 0 commits back | 100 | 500 | 2,000 | 7,900 |
+|---|---|---|---|---|---|
+| | 0.2 ms | 1.7 ms | 6.8 ms | 13.4 ms | 51.6 ms |
+
+| a count and a sum over | 5,000 rows | 20,000 | 60,000 |
+|---|---|---|---|
+| now | 3.3 ms | 12.6 ms | 45.0 ms |
+| as of the head | 3.3 ms | 12.6 ms | 47.2 ms |
+
+**What it says.**
+
+- *Commits by themselves fall little*: 87 to 68 transfers a second over a file ten times the size. The tree is deeper and less of it is in the server's
+  memory (32 MiB of pages).
+- *A read of the past costs what it undoes*, about 7 microseconds an entry, whatever the size of the file: 52 ms for 7,900 commits back.
+- *A scan costs its rows*: 45 ms for 60,000.
+- *The start after a kill costs the file*: 3 ms a MiB, the sweep before the server serves (6ay). At 10 GiB that would be about half a minute. This is
+  the one cost here that is the engine's and grows with the file whatever the clients ask.
+
+**The soak, then.** Its client of the past (6bg) asks, each round: the journal counted and summed as of the head, twice, and once now; and a mark as of
+one of its last 40 heads. After 30 minutes the journal has 60,000 rows and 40 rounds are some thousands of commits: about 130 ms of scans and up to
+50 ms of undoing in a round of about a second, on a server that answers one statement at a time. With a second of sweep at each of its kills (one in
+30 s) and the fall of the commits themselves, that is the soak's fall. **Most of it is the test's own questions growing with what the test has
+written**, not a cost the engine puts on every client. 6bg and 6bi read the soak's commits a second as the engine's throughput; they are a measure of
+that load, and are corrected to say so where they said more.
+
+*Not done.* The soak is not changed: its questions are the checks, and a soak that asked less would hold less. A bound on them (the journal of the last
+minute, say) would make its numbers comparable from run to run; it is left for when a number of it is next needed. The start after a kill is not
+changed either: whether a server may serve before it has swept is a question of what a full disk then does (6ay), and wants its own design.
 
 ## 7. Taking over, safely
 
