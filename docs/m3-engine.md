@@ -2601,6 +2601,59 @@ sweep, so under erases a copy of a large file may seldom get through, and that i
 - What the copy is *of* is the commit the superblocks named when the tool began; later commits are not in it, and the tool does not say which commit
   that was (`logexport COPY anchor` does, from the copy).
 
+## 6bo. Indexes that are built: the plan, and its first slice
+
+`create index` records a name and builds nothing (6q): "honest only because the engine claims no speed". Every read that is not by the key reads the
+whole table, 45 ms for 60,000 rows (6bj), and a `unique` index is refused because there is nothing to hold it with. This is the plan for building
+them, in slices that each leave the gate green, and the design of the first.
+
+**What an index is, in the tree.**
+
+- *Its entry in the catalog* has been the index's name and the table's name. It gains: a number of its own (from the counter tables take theirs
+  from, so no table has it), the columns it is on, in order, and the boolean column of its condition if it is a partial one (6x). An entry without
+  those is an index from before: a name, as now, and it stays one (it is not built behind anyone's back; it can be dropped and made again).
+- *Its entries* are keys under its number: for each of its columns one byte (0: null; 1: a value) and the value as a key stores it (the encoding of
+  `row.cho`: it sorts as the values do), then the row's own key. One byte for a value. An entry leads to its row by the key at its end.
+- *They are written with the row*, in the same statement and the same tree: an insert writes them, a delete removes them, an update that changes an
+  indexed column or the condition's removes the old and writes the new. `truncate` and `drop table` remove them with the rows, `drop index` removes
+  them alone, and `create index` on a table that has rows writes one for each.
+
+**Two decisions, with their reasons.**
+
+- *An index entry has no history.* A row's past is kept so that the table can be read as it was (6n). An index is not read as it was: **a statement
+  that reads the past reads no index**, it reads the table, as every statement does today. So the entries are written and removed plainly, a rollback
+  drops the tree they were in as it drops the rows, and nothing of them is in the history or its by-key entries. A read of the past builds its tree
+  by undoing the rows' history, which leaves the index entries of the present in that tree; nothing reads them there.
+- *An erase has to know them.* An entry holds the indexed values of a row. The erase removes the entries the row has now and takes their keys out of
+  the internal pages (6bc), and for each earlier form of the row that its history holds, works out the entries that form had and takes those keys out
+  too: an update removed those entries plainly, and a key removed plainly may still bound a child. That is the one place the two decisions meet, and
+  the test of it is the erase test with an index on a column of many lengths, searched for every value the row ever had (which holds today only because
+  an index holds nothing).
+
+**The slices.**
+
+1. *Built and kept, and read by nothing* (this one). Answers cannot change: no statement reads an index. What it has to show is that the entries are
+   exactly what the rows say, through every statement, a crash, a rollback and an erase.
+2. *A read by an indexed column's value* (`where c = constant`) goes by the index. The differential against PostgreSQL holds the answers; the time is
+   the claim.
+3. *`unique`*: the constraint held by looking the value up before a row is written.
+4. *Ranges and order* (`where c > x`, `order by c`), if the first three say they are worth it.
+
+**Slice 1: the test, written first.** The test program gets `!indexes`: for every built index of the tree, the entries it has and the entries its
+table's rows say it should have, and whether they are the same set (`indexes N ok`, or the first difference). It is asked:
+
+- at the end of every seed of the random history against PostgreSQL (`tests/engine_check.py`), whose statements gain `create index` on tables with
+  rows, partial ones, and `drop index` (they have them already, building nothing);
+- after every crash point of the crash test (6m), on the state the file comes back to;
+- after rollbacks and failed statements (the erase test's workload of 6bh, with an index);
+- and in the erase test with an indexed column of 14 to 65 bytes: after the erases no value an erased row ever had is in the file.
+
+*What slice 1 will cost* is a number it owes: every write to an indexed table writes more pages. It is measured before slice 2 is begun, with the
+soak's transfers on a table with one index and with three.
+
+*Not in the plan.* An index on an expression; `include`; any index but the tree's own order; a planner that chooses between two indexes by anything
+but "the first that fits"; statistics.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
