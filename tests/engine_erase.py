@@ -178,6 +178,32 @@ def after_a_trim(rng):
           "value of an erased row is in either file", not left and bad[0::2] == ["R " + b"300".hex()] * 2 and all(l.startswith("R " + b"256".hex()) for l in bad[1::2]), (len(left), left[:4], bad))
 
 
+def lengths(rng):
+    """Keys of many lengths, and rows erased whose neighbours are erased after them (docs/m3-engine.md 6bi). When a key goes from an internal page of the tree its place is
+    taken by the beginning of the least key the child now holds, cut to the length of the key that went: a piece of a NEIGHBOUR's key, shorter than it when the neighbour's key is
+    longer. The erase of that neighbour looked only for all of its key and left the piece. Every key in the older test of this is of one length, so it never had such a piece."""
+    n = 500
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "pages")
+        keys = ["kv%04d%s" % (i, "".join(rng.choice("bcdfghjklmnpqrstvwxz") for _ in range(rng.randrange(8, 60)))) for i in range(n)]
+        order = list(range(n))
+        rng.shuffle(order)
+        lines = ["!log " + KEY, "create table person (name text primary key, note text)"]
+        lines += ["insert into person values ('%s', 'n%d')" % (keys[i], i) for i in order]
+        lines += ["update person set note = 'm%d' where name = '%s'" % (i, keys[i]) for i in order[::2]]
+        run(path, lines + ["!commit"])
+        # nine in ten erased, in an order of the seed: most rows that are erased have a neighbour in key order that is erased before or after them
+        gone = [i for i in order if i % 10 != 0]
+        out = run(path, ["!log " + KEY] + ["!erase delete from person where name = '%s'" % keys[i] for i in gone] + ["!commit", "!commit", "!sweep", "select count(*) from person"])
+        bad = [l for l in out if l.startswith(("refused", "err"))]
+        left = [l for l in out if l.startswith("R ")][-1:]
+        data = open(path, "rb").read()
+        # (the first 14 bytes: the number in the key and 8 letters, which no other key has)
+        found = [(i, len(keys[i]), data[data.index(keys[i].encode()[:14]) // 4096 * 4096]) for i in gone if keys[i].encode()[:14] in data]
+        check("%d rows with keys of 14 to 65 bytes, %d of them erased in an order of the seed: no erased key is in the file, nor the first 14 bytes of one" % (n, len(gone)),
+              not bad and not found and left == ["R " + str(n - len(gone)).encode().hex()], (len(found), found[:5], bad[:2], left))
+
+
 def by_key(rng):
     """A row's history found by its key (docs/m3-engine.md 6bi): not another row's whose key begins the same; and in a file from before there were such entries (the test
     program takes them and the tree's mark out: `!unindex`) an erase reads all of the history as it did, until a trim has left none and the tree has its mark again."""
@@ -310,6 +336,7 @@ def main():
     purging(random.Random(SEED * 101))
     by_key(random.Random(SEED * 211))
     after_a_trim(random.Random(SEED * 307))
+    lengths(random.Random(SEED * 401))
     if FAILED:
         print("FAIL engine erase: %d failed" % len(FAILED))
         return 1

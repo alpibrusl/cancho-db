@@ -2365,6 +2365,20 @@ end left none, which is why the soak and 6bb's test did not see it: with no hist
 each key it removes out of the internal pages (`btree.scrub`), the history's and the by-key entry's. `tests/engine_erase.py` (`after_a_trim`) is that
 measurement, held to none; two mutants, one for each scrub. C195 and C197 said more than was so and are corrected.
 
+**And a second one, which is 6bc's own.** The second push failed in CI on a check that passed here: a key one letter longer than an erased one, erased
+after it, was in the file. It failed here too once in nine runs of the same seed (what differs between runs was not found; the facts' salts are the
+suspect). The bytes were in an internal page, and were **the beginning of the key and not all of it**. When `btree.scrub` takes a key out of an internal
+page it puts in its place the beginning of the least key the child now holds, cut to the length of the key that went. That is a piece of a
+*neighbour's* key, and shorter than it when the neighbour's key is longer. The erase of the neighbour looked for a bound that was all of its key, and
+left the piece. The test of 6bc could not see it: every key in it is of one length, so a piece was never shorter than its key.
+
+- *Measured, with the engine as it was before this section* (`tests/engine_erase.py`, `lengths`: 500 rows with keys of 14 to 65 bytes, 450 erased in an
+  order of the seed, the file searched for the first 14 bytes of each): **12, 14 and 15 of the 450 erased keys in the file**, on each of three seeds.
+- *The fix*: `btree.scrub` takes out every bound on the path that the key *begins with*, not only one that is all of it (it stays if the child's least
+  key begins with it too: those bytes are in a row that is there). The page that holds such a piece is on the path of the key it was cut from, because
+  a bound and the child it bounds stay side by side whatever is split above them. With it: none, on the three seeds.
+- Two mutants of it (a bound that is all of the key only; after the first bound of a page the others not looked at). C197 is corrected a second time.
+
 *What it will not do.* A file written by this engine and then by an older one has history the mark does not know of: an older engine is not to be run on
 it (nothing in the file stops it). An erase is still by one key column (6bf).
 
