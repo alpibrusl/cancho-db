@@ -2366,8 +2366,10 @@ each key it removes out of the internal pages (`btree.scrub`), the history's and
 measurement, held to none; two mutants, one for each scrub. C195 and C197 said more than was so and are corrected.
 
 **And a second one, which is 6bc's own.** The second push failed in CI on a check that passed here: a key one letter longer than an erased one, erased
-after it, was in the file. It failed here too once in nine runs of the same seed (what differs between runs was not found; the facts' salts are the
-suspect). The bytes were in an internal page, and were **the beginning of the key and not all of it**. When `btree.scrub` takes a key out of an internal
+after it, was in the file. It failed here too once in nine runs of the same seed. *(What differed between the runs, found since: the salts of the facts are the
+system's unless a test seeds them; a commit's id is made of them; and since 6be the tree keeps a key under each commit's id. So two runs of one input
+wrote different trees, 25.3 and 25.1 MiB for the same 600 statements. With `!seed` three runs are the same file byte for byte, and
+`tests/engine_erase.py` now seeds every run it makes: a failure of it comes again.)* The bytes were in an internal page, and were **the beginning of the key and not all of it**. When `btree.scrub` takes a key out of an internal
 page it puts in its place the beginning of the least key the child now holds, cut to the length of the key that went. That is a piece of a
 *neighbour's* key, and shorter than it when the neighbour's key is longer. The erase of the neighbour looked for a bound that was all of its key, and
 left the piece. The test of 6bc could not see it: every key in it is of one length, so a piece was never shorter than its key.
@@ -2378,6 +2380,18 @@ left the piece. The test of 6bc could not see it: every key in it is of one leng
   key begins with it too: those bytes are in a row that is there). The page that holds such a piece is on the path of the key it was cut from, because
   a bound and the child it bounds stay side by side whatever is split above them. With it: none, on the three seeds.
 - Two mutants of it (a bound that is all of the key only; after the first bound of a page the others not looked at). C197 is corrected a second time.
+
+**What else removes keys, looked at after the two.** `tests/engine_erase.py` (`beside_an_index`): 500 rows with an index on a column, names and
+values of 14 to 65 bytes, half updated in the indexed column, a third deleted by an ordinary statement before the erase, 450 erased; the file searched
+for the first 14 bytes of every name, value and earlier value. None, on three seeds (the engine as it was before this section leaves 14 names in the
+same test: it can see what it looks for). What the look found about each way:
+
+- *An index* holds nothing: `CREATE INDEX` records a name and builds no entries (6q), so there is no indexed value in the tree to be left. That is also
+  why the indexed values of 6bc's test were never found, by an engine with the fault or without.
+- *An ordinary DELETE, and an UPDATE*, leave the key as a bound; the erase that follows takes it out, as 6bc says, and now the pieces of it too.
+- *The archive of the log* (6ba) removes records, facts and statements: their keys are numbers and commit ids, and hold nothing of a row.
+- *DROP TABLE and TRUNCATE* remove a table's rows and take nothing out of the internal pages, and no erase can follow: the rows are not there to name.
+  **A dropped table's keys may be in the file until those pages are written again.** Nothing has claimed otherwise; it is said here so that it is.
 
 *What it will not do.* A file written by this engine and then by an older one has history the mark does not know of: an older engine is not to be run on
 it (nothing in the file stops it). An erase is still by one key column (6bf).
