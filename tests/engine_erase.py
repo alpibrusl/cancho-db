@@ -10,6 +10,7 @@ the key itself is in the internal pages; a second table with an index on a text 
 some deleted first, and then half are erased, in an order of the seed (on an even seed in a file made one from before 6bi, so that both ways an erase finds a row's history are held to this). After two commits and a sweep the whole file is searched for every erased row's key and
 values, and every row that was not erased must still be read whole.
 """
+import hashlib
 import os
 import random
 import subprocess
@@ -28,7 +29,15 @@ def check(name, ok, detail=""):
         FAILED.append(name)
 
 
+RUNS = [0]
+
+
 def run(path, lines):
+    # The salts of the facts are seeded, a different seed for each run of the program and the same ones for a seed of this test. Without it they are the system's, a
+    # commit's id is made of them, and the tree keeps a key under each commit's id (6be): two runs of one seed wrote different trees, and a check that failed in CI
+    # failed here once in nine runs (6bi). A failure of this test is now one that comes again.
+    RUNS[0] += 1
+    lines = ["!seed " + hashlib.sha256(b"%d:%d" % (SEED, RUNS[0])).hexdigest()] + lines
     r = subprocess.run([EXE, path], input="\n".join(lines) + "\n", capture_output=True, text=True)
     if r.returncode != 0:
         check("the engine ran", False, "status %d: %s" % (r.returncode, r.stderr[:200]))
@@ -204,6 +213,37 @@ def lengths(rng):
               not bad and not found and left == ["R " + str(n - len(gone)).encode().hex()], (len(found), found[:5], bad[:2], left))
 
 
+def beside_an_index(rng):
+    """What else removes keys (docs/m3-engine.md 6bi): rows with names and indexed values of many lengths, half of them updated in the indexed column, a third deleted by an
+    ordinary statement before they are erased. Nothing of an erased row is in the file: not its name, not the value it had, not the one before."""
+    n = 500
+    def word(tag, i):
+        return "%s%04d%s" % (tag, i, "".join(rng.choice("bcdfghjklmnpqrstvwxz") for _ in range(rng.randrange(8, 60))))
+    names, first, later = [word("kn", i) for i in range(n)], [word("ma", i) for i in range(n)], [word("mb", i) for i in range(n)]
+    order = list(range(n))
+    rng.shuffle(order)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "pages")
+        lines = ["!log " + KEY, "create table person (name text primary key, mail text)", "create index person_mail on person (mail)"]
+        lines += ["insert into person values ('%s', '%s')" % (names[i], first[i]) for i in order]
+        lines += ["update person set mail = '%s' where name = '%s'" % (later[i], names[i]) for i in order[::2]]
+        run(path, lines + ["!commit"])
+        gone = [i for i in order if i % 10 != 0]
+        lines = ["!log " + KEY]
+        for j, i in enumerate(gone):
+            if j % 3 == 0:
+                lines.append("delete from person where name = '%s'" % names[i])
+            lines.append("!erase delete from person where name = '%s'" % names[i])
+        out = run(path, lines + ["!commit", "!commit", "!sweep", "select count(*) from person"])
+        bad = [l for l in out if l.startswith(("refused", "err"))]
+        left = [l for l in out if l.startswith("R ")][-1:]
+        data = open(path, "rb").read()
+        found = [(w, i) for w, arr in (("name", names), ("value", first), ("later value", later)) for i in gone if arr[i].encode()[:14] in data]
+        check("%d rows with an index on a column, names and values of 14 to 65 bytes; half updated in that column, a third deleted first; %d erased: no name, value or "
+              "earlier value of an erased row is in the file, nor the first 14 bytes of one" % (n, len(gone)),
+              not bad and not found and left == ["R " + str(n - len(gone)).encode().hex()], (len(found), found[:5], bad[:2], left))
+
+
 def by_key(rng):
     """A row's history found by its key (docs/m3-engine.md 6bi): not another row's whose key begins the same; and in a file from before there were such entries (the test
     program takes them and the tree's mark out: `!unindex`) an erase reads all of the history as it did, until a trim has left none and the tree has its mark again."""
@@ -337,6 +377,7 @@ def main():
     by_key(random.Random(SEED * 211))
     after_a_trim(random.Random(SEED * 307))
     lengths(random.Random(SEED * 401))
+    beside_an_index(random.Random(SEED * 503))
     if FAILED:
         print("FAIL engine erase: %d failed" % len(FAILED))
         return 1
