@@ -2333,7 +2333,7 @@ gives the mark when it finds no history left. The test program: `!indexed`, `!un
 
   | | before 6bh | with 6bh | with this |
   |---|---|---|---|
-  | the first erase after a start (it sweeps) | 1,332 ms | 1,332 ms | 343 ms |
+  | the first erase after a start (it sweeps) | 1.3 s | 1.3 s | 343 ms |
   | the next 39, median | 1,373 ms | 1,104 ms | **9.5 ms** |
   | the next 39, the slowest | 1,838 ms | 1,526 ms | 15 ms |
 
