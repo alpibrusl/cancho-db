@@ -89,6 +89,11 @@ pub fn g_revoked_size() -> [] int {
     return 76;
 }
 
+// Whether an erase's garbage is held to the sweep's walk before it is zeroed (6bh; the tests ask for it).
+pub fn g_check() -> [] int {
+    return 77;
+}
+
 pub fn g_revoked_at() -> [] int {
     return 80;
 }
@@ -732,7 +737,15 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
                     nr = seq;
                 } else {
                     gs[g_seq()] = seq;
-                    let fr = reclaim(heap, gs, pg, w, roots, due);
+                    // an erase finds what to zero from what was written since the last one (6bh); when that cannot be done, or the file has grown enough for a
+                    // sweep anyway, the file is swept
+                    var fr = pstore.no_base();
+                    if erasing && !sweep_due(gs, pg) {
+                        fr = pstore.purge(heap, pg, exec.scratch(w), roots, gs[g_check()] == 1);
+                    }
+                    if fr == pstore.no_base() {
+                        fr = reclaim(heap, gs, pg, w, roots, due);
+                    }
                     if fr < 0 {
                         nr = fr;
                     }

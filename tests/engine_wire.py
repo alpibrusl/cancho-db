@@ -107,6 +107,9 @@ class Server:
             if revoked is not None:
                 # the root's list of revoked tokens (6bd)
                 args += [revoked]
+        if key and os.environ.get("PURGE_CHECK", "1") != "0":
+            # every erase's garbage is held to the sweep's walk before it is zeroed, and the server stops if they differ (6bh). (PURGE_CHECK=0: as a server is run, to measure it)
+            args += ["check-purge"]
         def before():
             die_with_parent()
             if fsize is not None:
@@ -1496,6 +1499,59 @@ def erasing(d):
     verified(d, path, ["create table person ", "create table contact ", "create table pair "], "a server whose clients erased rows", login=True)
 
 
+def erasing_after_the_past(d):
+    """An erase finds its garbage from what was written since the last one (6bh), and a read of the past writes pages too: a tree is built to be read and its pages given
+    back, free and not zeroed. They hold what the tree held. The next erase zeroes them, once; and a page of them is free once, not twice. The read here rebuilds most
+    leaves of the table, many more pages than the erases after it take from the free list, so that pages it gave back are still free when they come."""
+    path = os.path.join(d, "erase2.db")
+    srv = Server(path)
+    a = Client(srv.port)
+    n = 1500
+    a.query("create table person (id integer primary key, secret text not null)")
+    first = ["zw-first-%04d-%s" % (i, "bcdfghjklm"[i % 10] * 24) for i in range(n)]
+    later = ["zw-later-%04d-%s" % (i, "npqrstvwxz"[i % 10] * 24) for i in range(n)]
+    for lo in range(0, n, 100):
+        a.query("insert into person values " + ", ".join("(%d, '%s')" % (i, first[i]) for i in range(lo, lo + 100)))
+    a.query("select cancho_erase('person', '[0]')")              # the first erase after a start sweeps: from here there is a base
+    want = {i: first[i] for i in range(1, n)}
+    found, bad, gone = [], [], []
+    for turn in range(3):
+        at = a.query("select cancho_last_commit()")[4][0][1].decode()
+        for i in range(10 + turn, n, 10):
+            if i in want:
+                want[i] = later[i] + str(turn)
+                a.query("update person set secret = '%s' where id = %d" % (want[i], i))
+        # the table as it was before those updates: every leaf that holds one of the rows is written again, with the secret the row had, into pages that are then given back
+        was = a.query("select count(*) from person as of '%s'" % at)
+        for i in (10 + turn, 400 + turn, 800 + turn, 1200 + turn, 1490 + turn):
+            got = a.query("select cancho_erase('person', '[%d]')" % i)
+            gone.append(i)
+            del want[i]
+            if not got[4] or got[4][0][0] != b"1":
+                bad.append((i, got[:2], got[4]))
+            data = open(path, "rb").read()                       # the server running: the erase was answered
+            found += [(g, t[:13]) for g in gone for t in (first[g], later[g]) if t.encode() in data or t.encode()[:13] in data]
+        if was[4] != [[str(len(want) + 5).encode()]]:
+            bad.append((turn, was[:2], was[4]))
+    check("three times: 150 rows updated, the table read as it was before, and 5 of the rows erased. When each erase is answered the file has neither secret of any erased row, "
+          "in the pages the read of the past gave back either", not bad and not found and srv.alive(), (bad[:2], found[:3], srv.alive()))
+    # pages enough are written after it that every page made free is handed out again: one that was made free twice would be two pages of the tree
+    ids = sorted(want)
+    for k in range(1200):
+        i = ids[(k * 37) % len(ids)]
+        want[i] = "zw-round-%04d-%04d-%s" % (k, i, "y" * 20)
+        a.query("update person set secret = '%s' where id = %d" % (want[i], i))
+    rows = []
+    for lo in range(0, n, 500):
+        rows += a.query("select id, secret from person where id >= %d and id < %d order by id" % (lo, lo + 500))[4]
+    one = [a.query("select secret from person where id = %d" % i)[4] for i in (ids[0], ids[700], ids[-1])]
+    check("1,200 updates after them, and the %d rows not erased are read whole, all of them and by key: no page was handed out twice" % len(want),
+          rows == [[str(i).encode(), want[i].encode()] for i in ids] and one == [[[want[i].encode()]] for i in (ids[0], ids[700], ids[-1])] and srv.alive(), (len(rows), one, srv.alive()))
+    a.close()
+    srv.stop(signal.SIGKILL)
+    verified(d, path, ["create table person "], "a server whose clients read the past and erased")
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1512,6 +1568,7 @@ def main():
         revocations(d)
         history(d)
         erasing(d)
+        erasing_after_the_past(d)
         with_psql(d)
         with_cancho_pg(d)
     if FAILED:

@@ -27,6 +27,8 @@ import cdb.row;
 //
 //     !commit        make the statements so far durable (src/pstore.cho)      -> `committed SEQ` or `err CODE`
 //     !sweep         zero and reuse the pages nothing names                   -> `swept N` or `err CODE`
+//     !purge         the same from what was written since the last sweep or purge (6bh), checked against the sweep's walk
+//                                                                             -> `purged N`, `purge-fallback`, `purge-unsafe`, `purge-incomplete` or `err CODE`
 //     !steps         how many writes and syncs the page file has seen         -> `steps N`
 //     !txn           the number of the branch's last transaction (6n)                 -> `txn N`
 //     !asof N        statements read the branch as it was after transaction N (`-`: as it is)  -> `asof N`
@@ -543,6 +545,24 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                     } else {
                         seq = r;
                         put_str(io, "committed ");
+                        put_int(io, r);
+                    }
+                    putchar(io, '\n');
+                } else if starts(all, ls, le, "!purge") {
+                    // what an erase does in place of a sweep (6bh), held to the sweep's walk before it writes; a tree built to read the past is garbage to it
+                    view = 0 - 1;
+                    let r = pstore.purge(heap, pg, exec.scratch(w), rs, true);
+                    if r == pstore.no_base() {
+                        put_str(io, "purge-fallback");
+                    } else if r == pstore.unsafe_purge() {
+                        put_str(io, "purge-unsafe");
+                    } else if r == pstore.incomplete_purge() {
+                        put_str(io, "purge-incomplete");
+                    } else if r < 0 {
+                        put_str(io, "err ");
+                        put_int(io, r);
+                    } else {
+                        put_str(io, "purged ");
                         put_int(io, r);
                     }
                     putchar(io, '\n');
