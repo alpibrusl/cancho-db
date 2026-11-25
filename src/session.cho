@@ -3,6 +3,7 @@ module cdb.session;
 
 import cdb.pager;
 import cdb.exec;
+import cdb.tables;
 import cdb.facts;
 import std.crypto;
 
@@ -93,9 +94,10 @@ fn schema_hash[&h, &q, &z, &o](heap: &!h Heap, p: &!z pager.Pager, w: &!q exec.W
     var text = box_slice(heap, 65536, byte_of(0));
     var r = 0;
     borrow mut text as &!t in {
-        let n = exec.schema(p, w, root, contents(t));
+        // (with each column's type and place in the key, 6bl)
+        let n = tables.schema_text(p, contents(w.sc), root, contents(w.key), contents(w.key2), contents(w.ent), contents(t), true);
         if n < 0 {
-            r = n;
+            r = exec.tree_err(n);
         } else {
             crypto.sha256(contents(t)[0..n], out);
         }

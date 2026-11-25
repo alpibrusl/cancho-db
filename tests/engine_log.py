@@ -505,6 +505,16 @@ def definitions(work):
     (work / "d.log").write_bytes(b"".join(bytes.fromhex(l.split()[1]) for l in out if l.startswith("L ")))
     r = subprocess.run([sys.executable, str(ROOT / "tools/verify.py"), str(work / "d.log")], capture_output=True, text=True)
     check("a log of definitions alone verifies", r.stdout.startswith("ok commits=5 "), r.stdout + r.stderr)
+    # the schema a commit's hash is of has the types and the keys (6bl): a table made again with the same names is another schema when a type or the key is another
+    texts = []
+    for made in ("create table d6 (k integer primary key, v text)", "create table d6 (k integer primary key, v integer)", "create table d6 (k integer, v integer, primary key (v))",
+                 "create table d6 (k integer, v integer, primary key (v))"):
+        out = run(path, WHO + [made, "!schema", "drop table d6"])
+        texts += [bytes.fromhex(l.split()[1]).decode() for l in out if l.startswith("M ")]
+    lines6 = [[l for l in t.split("\n") if l.startswith("d6:")][0] for t in texts]
+    names = [" ".join(c.split("/")[0] for c in l.split()) for l in lines6]
+    check("a table dropped and made again with the same names: with a column of another type it is another schema, with another key another again, and made the same way the same",
+          len(texts) == 4 and len(set(lines6[:3])) == 3 and lines6[3] == lines6[2] and names == ["d6: k v"] * 4, lines6)
 
 
 def archiving(work, path):

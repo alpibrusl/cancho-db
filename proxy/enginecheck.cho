@@ -826,10 +826,10 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                 } else if begins(all, ls, le, "!rows ") {
                     put_table(io, pg, w, rs[cur], all[ls + 6..le]);
                 } else if starts(all, ls, le, "!schema") {
-                    // the schema as the lowering reads it, whose hash a commit records (docs/m3-engine.md 6bc): `M` and the text in hex (`.`: none)
+                    // the schema whose hash a commit records (docs/m3-engine.md 6bc, with the types and keys of 6bl): `M` and the text in hex (`.`: none)
                     region xr {
                         let text = alloc_slice[xr](32768, byte_of(0));
-                        let n = exec.schema(pg, w, rs[cur], text);
+                        let n = tables.schema_text(pg, exec.scratch(w), rs[cur], contents(w.key), contents(w.key2), contents(w.ent), text, true);
                         if n < 0 {
                             put_str(io, "M -\n");
                         } else {

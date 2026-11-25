@@ -1972,7 +1972,7 @@ pub fn as_of[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, t: int) -> [fil
 
 // The snapshot of the tree `root` that the lowering reads (`tables.schema_text`), into `out`: its length, or a refusal.
 pub fn schema[&q, &z, &o](p: &!z pager.Pager, w: &!q Work, root: int, out: &!o [byte]) -> [file_read] int {
-    let n = tables.schema_text(p, contents(w.sc), root, contents(w.key), contents(w.key2), contents(w.ent), out);
+    let n = tables.schema_text(p, contents(w.sc), root, contents(w.key), contents(w.key2), contents(w.ent), out, false);
     if n < 0 {
         return tree_err(n);
     }
