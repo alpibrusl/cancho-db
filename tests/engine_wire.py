@@ -1016,11 +1016,15 @@ def logins(d):
     again = keeper.query("select cancho_log_archive(1)")
     keeper.close()
     srv.stop()
-    check("cancho_log_archive(): refused to a token that reads and to one that may only take the head (42501); a token that names it takes commits out, by both protocols (the floor 1, then 2, of %d); "
-          "more than there are is archive-ahead; the head stays; killed after the answer and started again, the floor is where it was" % n,
+    # (each call that took a commit out is a commit of the log itself, 6bk: the second answers one commit more, and the head after them is the second call's)
+    check("cancho_log_archive(): refused to a token that reads and to one that may only take the head (42501); a token that names it takes commits out, by both protocols (the floor 1, then 2, of %d, "
+          "each call a commit: the head after them is 2 commits on and another id); more than there are is archive-ahead; killed after the answer and started again, the floor is where it was "
+          "and a call that takes nothing adds none" % n,
           n > 3 and [x[0] for x in arch[:2]] == ["42501", "42501"] and (arch[2][0], arch[2][1]) == ("0A000", "cancho-db: refused archive-ahead") and arch[3][4] == [[b"1", str(n).encode()]]
-          and arch[3][2] == [b"floor", b"commits"] and arch[4][4] == [[b"2", str(n).encode()]] and arch[5][4] == head and again[4] == [[b"2", str(n).encode()]],
-          [(x[0], x[1], x[4]) for x in arch] + [again[4]])
+          and arch[3][2] == [b"floor", b"commits"] and arch[4][4] == [[b"2", str(n + 1).encode()]] and int(arch[5][4][0][0]) == n + 2 and arch[5][4][0][1] != head[0][1]
+          # (after them the trim that took something was a commit too, and the one that found nothing was not: 3 commits on in all)
+          and again[4] == [[b"2", str(n + 3).encode()]],
+          [(x[0], x[1], x[4]) for x in arch] + [again[4], head])
 
 
 def with_psql(d):

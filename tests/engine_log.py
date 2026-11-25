@@ -539,25 +539,35 @@ def archiving(work, path):
     n = n + 1
     said = [l for l in out if l[:2] in ("R ", "re", "er")]
     steps = [(int(bytes.fromhex(l.split()[1])), int(bytes.fromhex(l.split()[2]))) for l in said if l.startswith("R ")]
-    want = [(min(cut, 128 * (i + 1)), n) for i in range(cut // 128 + 2)] + [(cut, n)]
-    check("cancho_log_archive: more commits than there are is refused archive-ahead, a number that is none is no such call; %d commits are taken out 128 a call (%d calls), and a call for less than is gone changes nothing"
-          % (cut, cut // 128 + 1), said[:3] == ["refused archive-ahead", "refused engine-unsupported", "refused engine-unsupported"] and steps == want, (said[:3], steps[:4], want[:4]))
+    # each call that took something out is a commit of the log itself (6bk): the next call answers one commit more; a call that finds nothing to take is none
+    eff = (cut + 127) // 128
+    want = [(min(cut, 128 * (i + 1)), n + min(i, eff)) for i in range(cut // 128 + 2)] + [(cut, n + eff)]
+    check("cancho_log_archive: more commits than there are is refused archive-ahead, a number that is none is no such call; %d commits are taken out 128 a call (%d calls, each a "
+          "commit of the log), and a call for less than is gone changes nothing and is none" % (cut, eff),
+          said[:3] == ["refused archive-ahead", "refused engine-unsupported", "refused engine-unsupported"] and steps == want, (said[:3], steps[:4], want[:4]))
+    n = n + eff
+    # (the records as the test program printed them when they were made: the first is the log's head, the insert's follows, then one for each call)
+    tail = [bytes.fromhex(l.split()[1]) for l in out if l.startswith("L ")][1:][-eff - 1:]
+    effects = [sorted(l1.decode(x[4:4 + int.from_bytes(x[:4], "big")])[3][3]) for x in tail]
+    check("the log says who archived and when: its last %d records are commits whose only effect is the call cancho_log_archive, after the commit of the insert" % eff,
+          effects[1:] == [[(3, b"cancho_log_archive")]] * eff and (3, b"cancho_log_archive") not in effects[0], effects)
     after = usage()
     gone = sum(len(l1.decode(r[4:4 + int.from_bytes(r[:4], "big")])[3][5]) for r in recs[:cut])
     before["facts"] += 1                                          # (the insert before the archive: a fact and a statement more)
     before["statements"] += 1
     check("what the file holds after: the facts and the statements of the %d commits left and of no other (facts %d of %d, statements %d of %d), fewer parts of records, every row and all the history"
           % (n - cut, after["facts"], before["facts"], after["statements"], before["statements"]),
-          after["facts"] == 1 + len([l for l in lines if int(l.split("\t")[0]) // 10000000 >= cut]) and after["statements"] == before["statements"] - gone and after["records"] < before["records"]
+          after["facts"] == 1 + len([l for l in lines if int(l.split("\t")[0]) // 10000000 >= cut]) and after["statements"] == before["statements"] - gone + eff and after["records"] < before["records"]
           and (after["rows"], after["tokens"], after["catalog"]) == (before["rows"] + 1, before["tokens"], before["catalog"]) and after["history"] > before["history"], (before, after))
     rest = [export(path, w, n, cut) for w in ("log", "facts", "stmts")]
     refused = [export(path, w, n, a)[::2] for w in ("log", "facts", "stmts") for a in (0, cut - 1)] + [export(path, "log")[::2], export(path, "facts")[::2]]
     check("the tool after: the floor is %d; from the floor it writes the rest; from before it, export-archived; the anchor is what it was" % cut,
           export(path, "floor")[1] == b"floor %d\n" % cut and all(r[0] == 0 for r in rest) and all(r == (1, "export-archived") for r in refused)
           and export(path, "anchor")[1].startswith(b"anchor %d " % n), (export(path, "floor"), [r[0] for r in rest], refused))
-    check("the copy and the rest are the log and the store of facts as they were and one commit more, byte for byte, and its statements; the commit before the archive is one commit",
+    check("the copy and the rest are the log and the store of facts as they were and the commits since, byte for byte, and their statements: the insert before the archive and the "
+          "archive's own calls",
           (copy[0][1] + rest[0][1]).startswith(log) and (copy[1][1] + rest[1][1]).startswith(facts) and set(kept) <= set(packed(copy[2][1] + rest[2][1]))
-          and len(packed(copy[2][1] + rest[2][1])) == len(kept) + 1 and len(copy[0][1] + rest[0][1]) > len(log))
+          and len(packed(copy[2][1] + rest[2][1])) == len(kept) + 1 + eff and len(copy[0][1] + rest[0][1]) > len(log), (len(packed(copy[2][1] + rest[2][1])), len(kept), eff))
     # the log goes on from its head, and what is exported from the floor continues the copy
     out = run(path, WHO + ["insert into acct values (424242, 'after the archive', 1)", "select cancho_last_commit()", "!commit"])
     more = [export(path, w, n + 1, n) for w in ("log", "facts", "stmts")]
@@ -597,6 +607,11 @@ def trimming(work, path, full, toks, n):
           and 1 <= after["history"] - 1 <= 4 and said[-1] == "err -21" and (after["rows"], after["catalog"]) == (before["rows"], before["catalog"])
           # (each history entry has the entry that finds it by its key, 6bi, before and after: the trim took those with the entries they found)
           and before["by-key"] == before["history"] - 1 and after["by-key"] == after["history"] - 1, (said[:3], removed, txns, before, after, said[-2:]))
+    # the trim was made in that transaction, so its commit is what the log has of it (6bk): the call is among its effects, beside the tables it wrote
+    last = [bytes.fromhex(l.split()[1]) for l in out if l.startswith("L ")][-1]
+    effects = sorted(l1v.decode(last[4:4 + int.from_bytes(last[:4], "big")])[3][3])
+    check("the log says who trimmed and when: the commit of the transaction the trim was made in has the call cancho_history_trim among its effects",
+          (3, b"cancho_history_trim") in effects and len(effects) > 1, effects)
     # the transaction that was open while its history was trimmed around it commits as any other: its facts are in the log
     more = [export(path, w, n + 1, n) for w in ("log", "facts", "stmts")]
     (work / "y.log").write_bytes(full[0] + more[0][1])
@@ -609,6 +624,13 @@ def trimming(work, path, full, toks, n):
     for cmd in VERIFIERS:
         v = verdict(cmd, work, full[0] + more[0][1], full[1] + more[1][1], export(path, "live")[1])
         check("%s: after the trim, the copy, its facts and the rows the file holds: ok, final" % cmd, all(m[0] == 0 for m in more) and v.startswith("ok commits=%d " % (n + 1)) and v.endswith(" final"), v)
+    # and a trim by itself (6bk): the one that takes something is a commit, the one after it that finds nothing is none
+    out = run(path, WHO + ["update acct set cents = 3 where id = 616161", "select cancho_history_trim()", "select cancho_history_trim()", "!commit"])
+    made = [bytes.fromhex(l.split()[1]) for l in out if l.startswith("L ")][1:]
+    effects = [sorted(l1v.decode(x[4:4 + int.from_bytes(x[:4], "big")])[3][3]) for x in made]
+    took = [int(bytes.fromhex(l.split()[1])) for l in out if l.startswith("R ") and len(l.split()) == 3]
+    check("a trim by itself that takes something is a commit of the log whose only effect is the call cancho_history_trim; the next, which finds nothing to take, is none",
+          len(made) == 2 and effects[1] == [(3, b"cancho_history_trim")] and (3, b"cancho_history_trim") not in effects[0] and len(took) == 2 and took[0] > 0 and took[1] == 0, (effects, took))
 
 
 def as_of(work):
