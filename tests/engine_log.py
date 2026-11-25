@@ -594,7 +594,9 @@ def trimming(work, path, full, toks, n):
     check("cancho_history_trim: before it the tree is read as of its first transaction; %d entries of the history go out 256 a call (%d calls, the last finding none), every one of the transactions ended "
           "and none of the one open (%d left, its own); after it the tree as of what was trimmed is refused history-trimmed" % (before["history"], calls, after["history"]),
           "asof 1" in said and sum(removed) == before["history"] - 1 and removed[-1] == 0 and max(removed) == 256 and len(txns) == 2 and txns[1] == txns[0] + 1
-          and 1 <= after["history"] - 1 <= 4 and said[-1] == "err -21" and (after["rows"], after["catalog"]) == (before["rows"], before["catalog"]), (said[:3], removed, txns, before, after, said[-2:]))
+          and 1 <= after["history"] - 1 <= 4 and said[-1] == "err -21" and (after["rows"], after["catalog"]) == (before["rows"], before["catalog"])
+          # (each history entry has the entry that finds it by its key, 6bi, before and after: the trim took those with the entries they found)
+          and before["by-key"] == before["history"] - 1 and after["by-key"] == after["history"] - 1, (said[:3], removed, txns, before, after, said[-2:]))
     # the transaction that was open while its history was trimmed around it commits as any other: its facts are in the log
     more = [export(path, w, n + 1, n) for w in ("log", "facts", "stmts")]
     (work / "y.log").write_bytes(full[0] + more[0][1])

@@ -468,7 +468,7 @@ fn put_usage[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root
         let at = alloc_slice[g](1024, byte_of(0));
         let next = alloc_slice[g](1024, byte_of(0));
         let ent = alloc_slice[g](1024, byte_of(0));
-        let sums = alloc_slice[g](16, 0);
+        let sums = alloc_slice[g](18, 0);
         var al = 0;
         var more = root != 0;
         var first = true;
@@ -490,7 +490,8 @@ fn put_usage[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root
                 let nk = r / 1024;
                 al = exec.copy(next, 0, nk, at, 0);
                 let space = commit.be(at, 0, 4);
-                // 0 the catalog, 1 the rows, 2 the history of the rows, 3 the log's records, 4 its facts, 5 its tokens, 6 its statements, 7 the rest
+                // 0 the catalog, 1 the rows, 2 the history of the rows, 3 the log's records, 4 its facts, 5 its tokens, 6 its statements, 7 the rest, 8 the history's
+                // entries by key (6bi)
                 var kind = 1;
                 if space == 0 {
                     kind = 0;
@@ -500,6 +501,8 @@ fn put_usage[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root
                     kind = 7;
                     if nk > 4 && int_of(at[4]) >= 5 && int_of(at[4]) <= 8 {
                         kind = int_of(at[4]) - 2;
+                    } else if nk > 4 && int_of(at[4]) == 13 {
+                        kind = 8;
                     }
                 }
                 sums[2 * kind] = sums[2 * kind] + 1;
@@ -507,7 +510,7 @@ fn put_usage[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root
             }
         }
         var k = 0;
-        while k < 8 && status == 0 {
+        while k < 9 && status == 0 {
             put_str(io, "usage ");
             if k == 0 {
                 put_str(io, "catalog");
@@ -523,6 +526,8 @@ fn put_usage[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root
                 put_str(io, "tokens");
             } else if k == 6 {
                 put_str(io, "statements");
+            } else if k == 8 {
+                put_str(io, "by-key");
             } else {
                 put_str(io, "other");
             }

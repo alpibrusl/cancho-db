@@ -865,9 +865,66 @@ pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
         return exec.tree_err(sr);
     }
     nroot = sr;
+    // the row's history. Where the tree says all of its history is findable by key (6bi), the entries that begin as the row's key does and are a transaction's
+    // number longer name the row's history entries: each is removed with the entry it names. Otherwise (a file from before) all of the history is read.
+    let ik = tables.indexed_key(contents(w.key));
+    let ig = btree.get(p, contents(w.sc), root, contents(w.key)[0..ik], contents(w.cur));
+    if ig < 0 && ig != btree.not_found() {
+        return exec.tree_err(ig);
+    }
+    var kl = tables.past_prefix(contents(w.tmp)[65536..65540 + kn], 4 + kn, contents(w.key));
+    let pl = kl;
+    exec.copy(contents(w.key), 0, pl, contents(w.tmp), 66000);
+    var more = ig >= 0;
+    while more {
+        let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return exec.tree_err(r);
+        } else {
+            let nk = r / 1024;
+            if nk < pl || !exec.same(contents(w.key2), 0, pl, contents(w.tmp), 66000, pl) {
+                more = false;
+            } else {
+                if nk == pl + 8 {
+                    // the history entry: the history's space, the number, the key
+                    build.put_be(contents(w.ukey), 0, 4294967295, 4);
+                    exec.copy(contents(w.key2), pl, 8, contents(w.ukey), 4);
+                    let hl = exec.copy(contents(w.tmp), 65536, 4 + kn, contents(w.ukey), 12);
+                    let hd = btree.del(p, contents(w.sc), nroot, contents(w.ukey)[0..hl]);
+                    if hd >= 0 {
+                        let hs = btree.scrub(p, contents(w.sc), hd, contents(w.ukey)[0..hl]);
+                        if hs < 0 {
+                            return exec.tree_err(hs);
+                        }
+                        nroot = hs;
+                        w.count = w.count + 1;
+                    } else if hd != btree.not_found() {
+                        return exec.tree_err(hd);
+                    }
+                    let xd = btree.del(p, contents(w.sc), nroot, contents(w.key2)[0..nk]);
+                    if xd < 0 {
+                        return exec.tree_err(xd);
+                    }
+                    let xs = btree.scrub(p, contents(w.sc), xd, contents(w.key2)[0..nk]);
+                    if xs < 0 {
+                        return exec.tree_err(xs);
+                    }
+                    nroot = xs;
+                }
+                exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
+                kl = nk;
+            }
+        }
+    }
+    if ig >= 0 {
+        w.root = nroot;
+        return 0;
+    }
     build.put_be(contents(w.key), 0, 4294967295, 4);
-    var kl = 4;
-    var more = true;
+    kl = 4;
+    more = true;
     while more {
         let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
         if r == btree.not_found() {
@@ -891,6 +948,18 @@ pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
                 }
                 nroot = sw;
                 w.count = w.count + 1;
+                // and the entry by key, if this one was written since there are such (6bi): it holds the row's key
+                let xl = tables.past_key(contents(w.tmp)[65536..65540 + kn], 4 + kn, 9223372036854775807 - commit.be(contents(w.key2), 4, 8), contents(w.ukey));
+                let xd = btree.del(p, contents(w.sc), nroot, contents(w.ukey)[0..xl]);
+                if xd >= 0 {
+                    let xs = btree.scrub(p, contents(w.sc), xd, contents(w.ukey)[0..xl]);
+                    if xs < 0 {
+                        return exec.tree_err(xs);
+                    }
+                    nroot = xs;
+                } else if xd != btree.not_found() {
+                    return exec.tree_err(xd);
+                }
             }
             exec.copy(contents(w.key2), 0, nk, contents(w.key), 0);
             kl = nk;

@@ -1742,6 +1742,17 @@ fn undo_key[&k, &o](txn: int, k: &k [byte], kn: int, out: &!o [byte]) -> [] int 
     return copy(k, 0, kn, out, 12);
 }
 
+// With a history entry, the entry that finds it by its key (6bi). The tree with it, or a refusal.
+fn by_key[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int) -> [file_read, file_write] int {
+    let il = tables.past_key(k, kn, w.txn, contents(w.ukey));
+    contents(w.uval)[0] = byte_of(1);
+    let nw = btree.put(p, contents(w.sc), root, contents(w.ukey)[0..il], contents(w.uval)[0..1]);
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    return nw;
+}
+
 // Before the key `k[0..kn]` of the tree `root` is written by the current transaction: record what it holds now (`0`: nothing; `1` and the value), unless this transaction has recorded it already (what a
 // key held BEFORE the transaction is its first record). The tree with the entry, or a refusal.
 pub fn remember[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int) -> [file_read, file_write] int {
@@ -1776,7 +1787,7 @@ pub fn remember[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [b
     if nw < 0 {
         return tree_err(nw);
     }
-    return nw;
+    return by_key(p, w, nw, k, kn);
 }
 
 // Whether the transaction is one statement (the default): then no key is written twice in it, and a writer that knows what a key held need not look (`put_known`, `del_known`).
@@ -1808,7 +1819,7 @@ pub fn remember_known[&q, &z, &k, &o](p: &!z pager.Pager, w: &!q Work, root: int
     if nw < 0 {
         return tree_err(nw);
     }
-    return nw;
+    return by_key(p, w, nw, k, kn);
 }
 
 // `put_key` for a caller that knows what the key held (`remember_known`).
@@ -1887,7 +1898,13 @@ pub fn last_txn[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_rea
 pub fn mark_txn[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, t: int) -> [file_read, file_write] int {
     build.put_be(contents(w.key), 0, 4294967295, 4);
     build.put_be(contents(w.uval), 0, t, 8);
-    let nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..4], contents(w.uval)[0..8]);
+    var nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..4], contents(w.uval)[0..8]);
+    if nw >= 0 && t == 1 {
+        // a new tree's first transaction: every history entry it has or will have is findable by its key (6bi)
+        let ik = tables.indexed_key(contents(w.key));
+        contents(w.uval)[0] = byte_of(1);
+        nw = btree.put(p, contents(w.sc), nw, contents(w.key)[0..ik], contents(w.uval)[0..1]);
+    }
     if nw < 0 {
         return tree_err(nw);
     }

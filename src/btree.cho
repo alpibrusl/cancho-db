@@ -837,14 +837,18 @@ fn least[&q, &s](p: &!q pager.Pager, sc: &!s [byte], id0: int) -> [file_read] (i
 
 // After `key` was deleted from the tree `root` for good (an erase, docs/m3-engine.md 6bc): no internal page keeps it. An internal page's key is "the least key
 // that can be in" a child, copied from a leaf when a page was split, and it stays when the entry it was copied from is deleted: the key of an erased row was still
-// in the file. Each such key on the path to where `key` was is replaced by the first bytes (as many as `key` had, or fewer) of the least key the child now holds,
-// which is a bound as good, and no longer than the one it replaces, so the page needs no more room. If that least key begins with `key` itself, `key` stays: the
-// file has those bytes anyway, in a row that is there. The new root, or an error.
+// in the file. Each such key on the path to where `key` was is replaced by the first bytes (as many as it had, or fewer) of the least key the child now holds,
+// which is a bound as good, and no longer than the one it replaces, so the page needs no more room. If that least key begins with it, it stays: the file has
+// those bytes anyway, in a row that is there.
+// "Such a key" is one that `key` begins with, and not only one that is all of `key` (docs/m3-engine.md 6bi): the replacement just described is the beginning
+// of a neighbour's key, cut to the length of the key that went. When that neighbour is erased in its turn, what an internal page has of it is shorter than
+// it. A bound and the child it bounds stay side by side whatever is split above them, so the page that holds it is on the path to the key it was cut from.
+// The new root, or an error.
 pub fn scrub[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root0: int, key: &k [byte]) -> [file_read, file_write] int {
     var root = root0;
     var from = 0;
     var pass = 0;
-    while pass < 16 && root != 0 {
+    while pass < 64 && root != 0 {
         let d = descend(p, sc, root, key);
         if d < 0 {
             return d;
@@ -858,51 +862,49 @@ pub fn scrub[&q, &s, &k](p: &!q pager.Pager, sc: &!s [byte], root0: int, key: &k
                 return fail(lr);
             }
             let count = commit.be(sc, po + 1, 2);
-            var at = po + 11;
-            var hit = 0 - 1;
+            var end = po + 11;
             var i = 0;
             while i < count {
+                end = end + 5 + int_of(sc[end]);
+                i = i + 1;
+            }
+            var at = po + 11;
+            i = 0;
+            while i < count && done {
                 let kl = int_of(sc[at]);
-                if hit < 0 && kl == len(key) && cmp(key, sc[at + 1..at + 1 + kl]) == 0 {
-                    hit = at;
+                if kl <= len(key) && cmp(key[0..kl], sc[at + 1..at + 1 + kl]) == 0 {
+                    let (ra, rl) = least(p, sc, commit.be(sc, at + 1 + kl, 4));
+                    if ra < 0 {
+                        return ra;
+                    }
+                    var nl = rl;
+                    if nl > kl {
+                        nl = kl;
+                    }
+                    if nl != kl || cmp(key[0..kl], sc[ra..ra + nl]) != 0 {
+                        // the least key there does not begin with it: the entry with the bytes of that key, and what follows it moved up to it
+                        sc[at] = byte_of(nl);
+                        mv(sc, at + 1, ra, nl);
+                        mv(sc, at + 1 + nl, at + 1 + kl, end - (at + 1 + kl));
+                        var z = end - (kl - nl);
+                        while z < end {
+                            sc[z] = byte_of(0);
+                            z = z + 1;
+                        }
+                        let cid = new_page(p, sc, po, was(sc, level));
+                        if cid < 0 {
+                            return cid;
+                        }
+                        root = climb(p, sc, level, cid, false, 0, 0);
+                        if root < 0 {
+                            return root;
+                        }
+                        from = level;
+                        done = false;
+                    }
                 }
                 at = at + 5 + kl;
                 i = i + 1;
-            }
-            if hit >= 0 {
-                let kl = len(key);
-                let (ra, rl) = least(p, sc, commit.be(sc, hit + 1 + kl, 4));
-                if ra < 0 {
-                    return ra;
-                }
-                var nl = rl;
-                if nl > kl {
-                    nl = kl;
-                }
-                if nl == kl && cmp(key, sc[ra..ra + nl]) == 0 {
-                    // the least key there begins with it: it stays, and the levels below are looked at
-                    from = level + 1;
-                } else {
-                    // the entry with the shorter key, and what follows it moved up to it
-                    sc[hit] = byte_of(nl);
-                    mv(sc, hit + 1, ra, nl);
-                    mv(sc, hit + 1 + nl, hit + 1 + kl, at - (hit + 1 + kl));
-                    var z = at - (kl - nl);
-                    while z < at {
-                        sc[z] = byte_of(0);
-                        z = z + 1;
-                    }
-                    let cid = new_page(p, sc, po, was(sc, level));
-                    if cid < 0 {
-                        return cid;
-                    }
-                    root = climb(p, sc, level, cid, false, 0, 0);
-                    if root < 0 {
-                        return root;
-                    }
-                    from = level;
-                    done = false;
-                }
             }
             level = level + 1;
         }

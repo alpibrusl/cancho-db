@@ -204,6 +204,32 @@ pub fn trim_key[&o](out: &!o [byte]) -> [] int {
     return 5;
 }
 
+// A history entry by its key (docs/m3-engine.md 6bi): the tree key `k[0..kn]` and then the transaction's number as the history has it (newest first), so that the
+// entries of one key are found without reading everyone's. Into `out`: its length. `past_prefix` is what the entries of a key begin with.
+pub fn past_prefix[&k, &o](k: &k [byte], kn: int, out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, log_space(), 4);
+    out[4] = byte_of(13);
+    var i = 0;
+    while i < kn {
+        out[5 + i] = k[i];
+        i = i + 1;
+    }
+    return 5 + kn;
+}
+
+pub fn past_key[&k, &o](k: &k [byte], kn: int, txn: int, out: &!o [byte]) -> [] int {
+    let at = past_prefix(k, kn, out);
+    build.put_be(out, at, 9223372036854775807 - txn, 8);
+    return at + 8;
+}
+
+// Whether every history entry the tree has is findable by its key (6bi): there from a new tree's first transaction, or from a trim that found no history left.
+pub fn indexed_key[&o](out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, log_space(), 4);
+    out[4] = byte_of(14);
+    return 5;
+}
+
 // The number of the tree's transaction that a commit of the log was (docs/m3-engine.md 6be), under the commit's id: what `AS OF` a commit reads the tree as of.
 pub fn asof_key[&i, &o](id: &i [byte], out: &!o [byte]) -> [] int {
     build.put_be(out, 0, log_space(), 4);
