@@ -2537,6 +2537,67 @@ killed, the server going on to sync again.
 *Not done.* The shim fails a call; it does not lose the pages, so "the data is gone and a retry would not know" is the kernel's behaviour as documented,
 not something this test shows. A failing `pwrite` is 6ay's. A new file left unusable by its first sync is not repaired here.
 
+## 6bn. A copy of the page file that can be started from, taken while the server runs
+
+Nothing so far says how this database is backed up. Two things were assumed and neither holds.
+
+- *The log is not a backup.* What `logexport` writes proves what was committed and by whom; its facts are salted hashes of the rows (6ag), so that what
+  was erased cannot be guessed back. Nothing can be rebuilt from it, by design. **A backup is a copy of the page file.**
+- *A copy made with `cp` while the server runs is not one either.* Measured first (three writers and an erase every 50 ms, a copy every half second,
+  each copy opened and its tables counted): of 116 copies of an 18 MiB file, 115 were whole and **1 was refused as damaged** when opened. A commit writes
+  pages and then the superblock that names them; a copy that read the superblock late and the pages early has a superblock naming pages the copy does
+  not have, and after a sweep or an erase a page the copy's superblock names may have been zeroed or written again.
+
+**Design.** `logexport PAGEFILE pages` writes the whole page file to its output, in an order that makes the copy one state of the database, and says if
+it could not:
+
+- *The two superblocks are read first*, before anything else, and are what the copy has for its pages 1 and 2. Every page a superblock names was
+  written and synced before the superblock was (6b), so every page those two name is in the file from that moment on.
+- *Then the program loads the database as it does for any export, and reads the two superblocks again.* If they are not byte for byte what it read
+  first, a commit came between: it stops, `export-raced`, and the caller runs it again. Otherwise the state it loaded is the state it will write.
+- *Then every other page, to the end of the file as it is by then.* Pages the two superblocks do not name may be in it, whole or half written: the
+  server that starts on the copy sweeps them before it serves (6ay).
+- *At the end, the count of sweeps the tree says were announced* (6az) is read again from the file as it is then, as for every export. If it is not
+  what the loaded state said, a page the copy has may have been zeroed or written again since: `export-raced`, and the output is not to be kept.
+
+It writes to its output and nowhere else, and opens the page file to read: its authority is what it was (C189).
+
+*To restore* is to put the copy where a page file is wanted and start the server on it. There is no other step, and so nothing else to get wrong.
+
+**Test** (first). `tests/engine_wire.py` (`copying`): under writers, a client that erases and one that reads the past, the tool is run over and over.
+Every copy it says is whole is started as a server of its own: every table is counted and summed against what must hold whatever the moment (the sum of
+the accounts; each writer's journal without a gap), every transfer acknowledged before the copy was begun is in it, the log exports and verifies and
+its replay ends at the rows. No copy it says is whole may fail any of that. How many it refuses as raced is counted and reported: an erase announces a
+sweep, so under erases a copy of a large file may seldom get through, and that is a number this section owes.
+
+**Built.** `pager.raw` (a page as the file has it, unchecked); `pages` in `proxy/logexport.cho`, with the two superblocks read in `main` before the load.
+
+**Measured.**
+
+- *`cp`, to know what is being replaced* (a 202 MiB file, three writers that also rewrite rows all over it, an erase every 50 ms, a copy every half
+  second, each opened and counted): **32 of 82 copies were not a database** (39%). The engine refused 28 of them as damaged when it opened or read
+  them; the other 4 answered the first question and failed a later one.
+- *The tool, the same load*: 55 of 55 runs refused `export-raced`; a run took 1.1 s, and a sweep was announced twenty times a second. **Nothing wrong
+  was handed out, and nothing was handed out.**
+- *The tool, an erase every 3 s* (274 MiB by the end): 37 of 49 runs gave a copy, 12 were raced; **every one of the 37 was whole** by every count.
+- *In the gate* (`copying`, a 24 MiB file): under an erase every 20 ms, 7 of 8 runs raced and the one copy was whole; under an erase a second, 4 of 6
+  gave a copy. Each copy was started as a server and had the accounts' sum, the untouched table's rows, each writer's journal without a gap and every
+  transfer acknowledged before the copy began; the log of one verified and its replay ended at its rows.
+- Three mutants (the superblocks are not those of the moment it began; the copy stops before the end of the file; a copy is given though a sweep was
+  announced), all killed.
+
+*What this does not do, and it matters.*
+
+- **Under steady erases no copy gets through.** A copy is refused whenever a sweep was announced while it was read, and every erase announces one. The
+  caller runs it again; how long that takes depends on the load, and under an erase every 50 ms it is never. A way for a copy to hold the sweeps off, or
+  to survive one, is not designed.
+- A copy takes 1.1 s for 200 MiB: the tool writes its output a byte at a time.
+- Two refusals are designed and not shown to refuse: a commit landing between the first read of the superblocks and the load (no test makes one land
+  there), and a superblock torn while it is read.
+- A restore is a start: the copy's server sweeps before it serves (6ay), which costs the file (6bj).
+- What the copy is *of* is the commit the superblocks named when the tool began; later commits are not in it, and the tool does not say which commit
+  that was (`logexport COPY anchor` does, from the copy).
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

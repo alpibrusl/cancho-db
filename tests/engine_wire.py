@@ -1651,6 +1651,98 @@ def sync_failing(d):
           unusable == [1], unusable)
 
 
+def copying(d):
+    """A copy of the page file that a server can be started on, taken while the server runs (6bn): `logexport PAGEFILE pages`. Every copy it says is whole is started as a
+    server of its own and held to what must be so whatever the moment it was taken; a copy it could not make whole it refuses (`export-raced`), and how often is counted."""
+    import threading
+    tool = os.environ.get("LOGEXPORT", os.path.join(ROOT, "build", "logexport"))
+    path = os.path.join(d, "copy.db")
+    srv = Server(path)
+    c = Client(srv.port)
+    c.query("create table acct (id integer primary key, cents integer not null)")
+    c.query("create table journal (tid bigint primary key, src integer not null)")
+    c.query("create table person (id integer primary key, secret text not null)")
+    c.query("create table bulk (id integer primary key, v text not null)")
+    c.query("insert into acct values " + ", ".join("(%d, 1000)" % k for k in range(200)))
+    nb = 0
+    while os.path.getsize(path) < 24 * 1048576:
+        c.query("insert into bulk values " + ", ".join("(%d, '%s')" % (k, "x" * 200) for k in range(nb, nb + 200)))
+        nb += 200
+    c.close()
+    st = {"stop": False, "pause": 0.02, "acked": [0, 0, 0], "odd": []}
+
+    def writer(w):
+        rng, cl, n = random.Random(SEED * 100 + w), Client(srv.port), 0
+        while not st["stop"]:
+            a, b = rng.randrange(200), rng.randrange(200)
+            got = [cl.query(q) for q in ("begin", "update acct set cents = cents - 1 where id = %d" % a, "update acct set cents = cents + 1 where id = %d" % b,
+                                         "insert into journal values (%d, %d)" % (w * 10 ** 8 + n, a), "update bulk set v = 'w%d' where id = %d" % (n, rng.randrange(nb)), "commit")]
+            if got[-1][5] != "COMMIT":
+                st["odd"].append((w, n, got[-1][:2], got[-1][5]))
+                break
+            n += 1
+            st["acked"][w] = n
+        cl.close()
+
+    def eraser():
+        cl, i = Client(srv.port), 0
+        while not st["stop"]:
+            i += 1
+            cl.query("insert into person values (%d, 'secret-%d')" % (i, i))
+            cl.query("select cancho_erase('person', '[%d]')" % i)
+            time.sleep(st["pause"])
+        cl.close()
+    threads = [threading.Thread(target=writer, args=(w,)) for w in range(3)] + [threading.Thread(target=eraser)]
+    for t in threads:
+        t.start()
+    bad, counts, checked_log = [], [], [False]
+
+    def attempt(k):
+        """One run of the tool: "raced", or the copy started as a server and looked at ("whole"), or what was wrong with it."""
+        before = list(st["acked"])
+        cp = os.path.join(d, "copy%d.db" % k)
+        with open(cp, "wb") as out:
+            r = subprocess.run([tool, path, "pages"], stdout=out, stderr=subprocess.PIPE)
+        if r.returncode != 0:
+            os.remove(cp)
+            return "raced" if (r.returncode, r.stderr.decode().strip()) == (1, "refused export-raced") else ("the tool", r.returncode, r.stderr.decode().strip())
+        try:
+            s2 = Server(cp)
+        except SystemExit as e:
+            return ("said whole, and no server starts on it", str(e)[-40:])
+        c2 = Client(s2.port)
+        got = [c2.query("select sum(cents), count(*) from acct"), c2.query("select count(*) from bulk")]
+        got += [c2.query("select count(*), max(tid) - min(tid) + 1 from journal where tid >= %d and tid < %d" % (w * 10 ** 8, (w + 1) * 10 ** 8)) for w in range(3)]
+        c2.close()
+        s2.stop()
+        js = [g[4][0] if g[4] else [b"0", b"0"] for g in got[2:]]
+        ok = (not [g for g in got if g[0]] and got[0][4] == [[b"200000", b"200"]] and got[1][4] == [[str(nb).encode()]]
+              and all((j[0] == j[1] or j == [b"0", None]) and int(j[0]) >= before[w] for w, j in enumerate(js)))
+        if ok and not checked_log[0] and sum(before) > 10:
+            checked_log[0] = True
+            verified(d, cp, ["create table acct ", "create table journal ", "create table person ", "create table bulk "], "a copy taken while the server ran")
+        os.remove(cp)
+        return "whole" if ok else ("said whole, and is not", [(g[0], g[1], g[4]) for g in got], before)
+
+    # an erase every 20 ms: a sweep is announced about as often as a copy can be made
+    hard = [attempt(k) for k in range(8)]
+    # an erase a second: copies get through
+    st["pause"] = 1.0
+    easy = []
+    while len(easy) < 40 and easy.count("whole") < 4:
+        easy.append(attempt(100 + len(easy)))
+    st["stop"] = True
+    for t in threads:
+        t.join()
+    srv.stop()
+    bad = [x for x in hard + easy if x not in ("whole", "raced")]
+    check("a copy of the page file by the export tool while three clients write and one erases: under an erase every 20 ms, %d of 8 runs say they were raced and %d give a copy; "
+          "under an erase a second, %d of %d give a copy. No run gives a copy that is not one: each copy is started as a server, the accounts sum to what they began with, "
+          "the table nobody inserts into has its rows, each writer's journal has no gap and has every transfer acknowledged before the copy was begun"
+          % (hard.count("raced"), hard.count("whole"), easy.count("whole"), len(easy)),
+          not bad and not st["odd"] and easy.count("whole") >= 4 and checked_log[0], (bad[:2], st["odd"][:2], hard, easy))
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1669,6 +1761,7 @@ def main():
         erasing(d)
         erasing_after_the_past(d)
         sync_failing(d)
+        copying(d)
         with_psql(d)
         with_cancho_pg(d)
     if FAILED:
