@@ -2438,6 +2438,45 @@ that load, and are corrected to say so where they said more.
 minute, say) would make its numbers comparable from run to run; it is left for when a number of it is next needed. The start after a kill is not
 changed either: whether a server may serve before it has swept is a question of what a full disk then does (6ay), and wants its own design.
 
+## 6bk. Who took the log's oldest part out, and who trimmed the history: commits of the log
+
+An erase is a commit of the log: who asked and when (6bf). The two other calls that take something out of the page file are not. `cancho_log_archive(n)`
+removes records, facts and statements (6ba) and `cancho_history_trim()` removes what the rows were before (6bb); each changes the tree, the page file's
+commit makes that durable, and the log has no record that it was done. A reader of the log sees that it starts at a floor and cannot see who put it
+there.
+
+**Design.** A call of either that changed the tree is a commit of the log, as an erase is and by the same rule (`exec.stmts_define`: the statement is one
+that makes a commit though it changes no row). Its record has no changes; its one statement is the call, with its constant left out as every statement's
+is; its effect is the call's name, which is what a token needs to make it (6at). A call that changed nothing (an archive that is already there, a trim
+with nothing to take and the tree's mark already set) is no commit, as a statement that wrote nothing is none.
+
+*What follows from it, and is meant.*
+
+- The log grows by a record for each call that did something: an archive of 128 commits a call adds one record for 128 taken, a trim one for 256 entries.
+- An archive's own record is after what it took, so it is not taken by that call; a later archive takes it like any record.
+- *How much* a call took is not in its record (the constant is left out, and a trim has none): the floor is in the tree, and a copy of the log that was
+  kept up has the records before it. What the record adds is who and when.
+
+**Test** (first). `tests/engine_log.py`: after the archive and after the trim the log has, for each call that removed something, a record whose only
+effect is that call, by the token that made it, and the verifiers accept the log with them; the call that found nothing left none. `tests/engine_wire.py`
+and the soak count commits around these calls and are brought to the new count where they did.
+
+**Built.** `exec.stmts_define` names the two calls beside the erase. Nothing else: a statement that changed the tree and is one of these was already a
+commit by `session.close`, with the effects of its statements.
+
+**Measured.**
+
+- `tests/engine_log.py`: 187 commits archived by two calls that took something: the log's next two records have the call `cancho_log_archive` for
+  their only effect, the second call answers one commit more than the first, and a third call with nothing to take adds none. A trim by itself that
+  takes something: a record whose only effect is `cancho_history_trim`; the one after it, which finds nothing, none. A trim made in a transaction: the
+  call is among that commit's effects. The verifiers accept the log with these records (`level=2+ir`, and the replay ends at the rows).
+- `tests/engine_wire.py`: through the server, two archive calls by a token that names the call move the head two commits on.
+- The soak (`60 1 archive,mixed`): 5,761 commits, 4,321 of them archived and 27,175 history entries trimmed as the load went, every check passing.
+- Two mutants (the archive is no commit; the trim is none), both killed.
+
+*What changed for a reader of the log.* The head is no longer what it was after an archive or a trim: a client that took the head before one and
+holds a later log to it still can (the head it took is in that log), but "the head stays" is not so, and one test said it.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

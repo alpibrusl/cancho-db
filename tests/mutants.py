@@ -2952,6 +2952,8 @@ ENGINE = [
     ('scrub: by key: the keys of the entries by key stay in the internal pages', 'src/execw.cho', '                    let xs = btree.scrub(p, contents(w.sc), xd, contents(w.key2)[0..nk]);', '                    let xs = xd;'),
     ('scrub: a trim leaves the keys of the history it took in the internal pages', 'src/facts.cho', '                    d = btree.scrub(p, contents(w.sc), d, contents(w.key2)[0..nk]);', '                    d = d + 0;'),
     ('scrub: a trim leaves the keys of the entries by key it took in the internal pages', 'src/facts.cho', '                    xd = btree.scrub(p, contents(w.sc), xd, contents(w.key)[0..xl]);', '                    xd = xd + 0;'),
+    ('log: an archive that took commits out is not a commit of the log', 'src/exec.cho', 'nl == 18 && same(said, at + 7, 18, "cancho_log_archive", 0, 18)', 'nl == 99 && same(said, at + 7, 18, "cancho_log_archive", 0, 18)'),
+    ('log: a trim that took history out is not a commit of the log', 'src/exec.cho', 'nl == 19 && same(said, at + 7, 19, "cancho_history_trim", 0, 19)', 'nl == 99 && same(said, at + 7, 19, "cancho_history_trim", 0, 19)'),
     ('log: a table as of a commit is read as it is now', 'src/drive.cho',
      '        } else if kind == 6 && view > 0 {',
      '        } else if kind == 6 && view < 0 {'),
