@@ -2337,6 +2337,11 @@ gives the mark when it finds no history left. The test program: `!indexed`, `!un
   | the next 39, median | 1,373 ms | 1,104 ms | **9.5 ms** |
   | the next 39, the slowest | 1,838 ms | 1,526 ms | 15 ms |
 
+- *Under load* (the soak of 6bg, `1800 3 mixed`, the same seed and length as its first run; the server without the check): 86,571 commits through 51
+  kills where there were 53,647, 1,527 people erased where there were 803, every check passing. The file ended at 332 MiB (193 then: more was
+  written). Commits a second in the last minute: 35, at 332 MiB, where there were 20 at 193. *It still falls as the file grows*, and an erase is no
+  longer why: what is left that costs the whole file is the sweep when the server starts (51 kills in this run), the sweeps for size, and a read of the
+  past that undoes more the more there is. Not taken apart here.
 - *What an erase answers* (`tests/engine_erase.py`, three seeds): each of about 100 erases among transactions, rollbacks and statements that fail answers
   the row and one entry for every transaction that wrote it, no more and no fewer; and the search of the file finds nothing of them.
 - *A file from before* (the same test, `by_key`): with the mark and the entries taken out, 30 rows written by 4 transactions each answer 5, all of their
