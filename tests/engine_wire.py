@@ -1574,8 +1574,9 @@ def sync_failing(d):
         try:
             try:
                 srv = Server(path)
-            except SystemExit as e:
-                started, said = False, str(e)
+            except SystemExit:
+                # (the status when the process has ended, not when its error stream closed: the two are not the same moment)
+                started, said = False, STARTED[-1].wait(timeout=10)
             if started:
                 c = Client(srv.port)
                 for q in plan:
@@ -1608,15 +1609,16 @@ def sync_failing(d):
             odd.append((n, "calls after the one that failed", calls))
         if started and (said != ("58030", "cancho-db: the page file cannot be written", "closed") or status != 7):
             odd.append((n, "the statement under it", said, status))
-        if not started and "(status 5)" not in said:
+        if not started and said != 5:
             odd.append((n, "the start under it", said))
         # a start without the fault
         try:
             srv = Server(path)
-        except SystemExit as e:
+        except SystemExit:
             unusable.append(n)
-            if started or n != 1 or "(status 5)" not in str(e):
-                odd.append((n, "does not start again", str(e)[-40:]))
+            again = STARTED[-1].wait(timeout=10)
+            if started or n != 1 or again != 5:
+                odd.append((n, "does not start again", again))
             continue
         c = Client(srv.port)
         rows = c.query("select k, v from t order by k")
