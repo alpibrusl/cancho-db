@@ -2488,8 +2488,11 @@ definition, 0 for a column that is not of the key, else which column of the key 
 reads the one of names, which is all it needs and is what the proxy's lowering reads. The specification puts no rule on the field (`docs/spec/commit.md`),
 so no verifier changes; the engine's hash and the proxy's for the same tables were not the same bytes before either, and are not meant to be.
 
-*What it still does not say.* Whether a column may be null, and its default: the tree's definition of a table keeps them as the statement that made it,
-not as fields. A sequence is in no snapshot (6bc). These are the same limits as before, less the two that are gone.
+*What it still does not say.* ~~Whether a column may be null, and its default: the tree's definition of a table keeps them as the statement that made it,
+not as fields.~~ **That was false, and was written without looking**: the table's entry marks each column (it may not be null; it has a default, kept
+as a stored value; a range; an identity: `tables.not_null`, `tables.default_at`). Found while reading the catalog for the indexes. The text hashed now
+has the marks and the default too, `/T/K/M` and `=` with the default's bytes: `v/3/0/3=03000178` is a text column, not of the key, not null, with the
+default `x`. A sequence is in no snapshot (6bc).
 
 **Test** (first). `tests/engine_log.py`: the schema the test program prints before each statement (`!schema`) is the text hashed, and the test of 6bc
 holds every commit's field to the hash of it, so the record and the text cannot differ without that test failing. Added (`definitions`): a table dropped

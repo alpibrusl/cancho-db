@@ -508,13 +508,15 @@ def definitions(work):
     # the schema a commit's hash is of has the types and the keys (6bl): a table made again with the same names is another schema when a type or the key is another
     texts = []
     for made in ("create table d6 (k integer primary key, v text)", "create table d6 (k integer primary key, v integer)", "create table d6 (k integer, v integer, primary key (v))",
-                 "create table d6 (k integer, v integer, primary key (v))"):
+                 "create table d6 (k integer, v integer, primary key (v))", "create table d6 (k integer not null, v integer, primary key (v))",
+                 "create table d6 (k integer default 1, v integer, primary key (v))", "create table d6 (k integer default 2, v integer, primary key (v))"):
         out = run(path, WHO + [made, "!schema", "drop table d6"])
         texts += [bytes.fromhex(l.split()[1]).decode() for l in out if l.startswith("M ")]
     lines6 = [[l for l in t.split("\n") if l.startswith("d6:")][0] for t in texts]
     names = [" ".join(c.split("/")[0] for c in l.split()) for l in lines6]
-    check("a table dropped and made again with the same names: with a column of another type it is another schema, with another key another again, and made the same way the same",
-          len(texts) == 4 and len(set(lines6[:3])) == 3 and lines6[3] == lines6[2] and names == ["d6: k v"] * 4, lines6)
+    check("a table dropped and made again with the same names: with a column of another type it is another schema, with another key another again, and made the same way the same; "
+          "a column that may not be null, one with a default and one with another default are three more",
+          len(texts) == 7 and len(set(lines6[:3])) == 3 and lines6[3] == lines6[2] and len(set(lines6[2:])) == 4 and names == ["d6: k v"] * 7, lines6)
 
 
 def archiving(work, path):

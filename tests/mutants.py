@@ -2957,6 +2957,8 @@ ENGINE = [
     ('log: the schema a commit says it began with is the one of names alone', 'src/session.cho', 'contents(t), true);', 'contents(t), false);'),
     ("log: the schema has a column's place in the key and not its type", 'src/tables.cho', 'at = small(out, at + 1, row.col_type(def, c));', 'at = small(out, at + 1, 0);'),
     ("log: the schema has a column's type and not its place in the key", 'src/tables.cho', 'at = small(out, at + 1, row.col_pk(def, c));', 'at = small(out, at + 1, 0);'),
+    ("log: the schema has a column's type and key and not what the entry marks it with", 'src/tables.cho', 'at = small(out, at + 1, int_of(ent[marks_at(ent[0..nv], c)]));', 'at = small(out, at + 1, 0);'),
+    ('log: the schema says a column has a default and not which', 'src/tables.cho', "                        if da >= 0 {\n                            out[at] = byte_of('=');", "                        if da >= 9999 {\n                            out[at] = byte_of('=');"),
     ('log: a table as of a commit is read as it is now', 'src/drive.cho',
      '        } else if kind == 6 && view > 0 {',
      '        } else if kind == 6 && view < 0 {'),

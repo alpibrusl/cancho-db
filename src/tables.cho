@@ -387,6 +387,13 @@ fn lit[&o](out: &!o [byte], at: int, text: &static [byte]) -> [] int {
     return at + len(text);
 }
 
+fn hexd(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
 // A number under 1000 in decimal, at `at`: where it ends.
 fn small[&o](out: &!o [byte], at: int, v: int) -> [] int {
     var n = at;
@@ -420,7 +427,8 @@ pub fn index_key[&n, &o](name: &n [byte], out: &!o [byte]) -> [] int {
 
 // The snapshot the lowering reads (src/lower.cho): a line `name: column column ...` for each table of the tree `root` and a line `index name on table` for each index, into `out`: its length, or an error (`btree.err_big()` if `out` is too small).
 // `key`, `key2` (at least 256 bytes each) and `ent` (at least 1024) are scratch.
-// With `typed`, each column's name is followed by `/T/K`: its type's number and its place in the key (0: not of the key). That is the schema a commit's hash is of
+// With `typed`, each column's name is followed by `/T/K/M`: its type's number, its place in the key (0: not of the key) and the entry's marks for it (1: it may not be
+// null; 2: it has a default, which follows as `=` and its stored bytes in hex; more for a range and an identity). That is the schema a commit's hash is of
 // (docs/m3-engine.md 6bl); the lowering reads the form without.
 pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &!k [byte], key2: &!j [byte], ent: &!e [byte], out: &!o [byte], typed: bool) -> [file_read] int {
     build.put_be(key, 0, 0, 4);
@@ -482,7 +490,10 @@ pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], r
                 var need = nk - 4 + 2;
                 var c = 0;
                 while c < n {
-                    need = need + 1 + len(row.col_name(def, c)) + 10;
+                    need = need + 1 + len(row.col_name(def, c)) + 16;
+                    if default_at(ent[0..nv], c) >= 0 {
+                        need = need + 2 * stored_len(ent, default_at(ent[0..nv], c));
+                    }
                     c = c + 1;
                 }
                 if at + need > len(out) {
@@ -512,6 +523,22 @@ pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], r
                         at = small(out, at + 1, row.col_type(def, c));
                         out[at] = byte_of('/');
                         at = small(out, at + 1, row.col_pk(def, c));
+                        // and what the table's entry marks the column with (whether it may be null, whether it has a default, a range, an identity), and the default
+                        out[at] = byte_of('/');
+                        at = small(out, at + 1, int_of(ent[marks_at(ent[0..nv], c)]));
+                        let da = default_at(ent[0..nv], c);
+                        if da >= 0 {
+                            out[at] = byte_of('=');
+                            at = at + 1;
+                            var h = 0;
+                            while h < stored_len(ent, da) {
+                                let b = int_of(ent[da + h]);
+                                out[at] = byte_of(hexd(b / 16));
+                                out[at + 1] = byte_of(hexd(b % 16));
+                                at = at + 2;
+                                h = h + 1;
+                            }
+                        }
                     }
                     c = c + 1;
                 }
