@@ -2203,11 +2203,96 @@ archived as the load went. No fault of the engine was found by either run.
 
 - **An erase costs the whole file, and under load that is the server's throughput.** Without the archive the file grew to 193 MiB and commits fell from
   110 a second to 20: an erase about every second, each sweeping every page while every client waits (6bf's limit, with its number under load). With the
-  archive the file stayed under 72 MiB and the fall was to 55.
+  archive the file stayed under 72 MiB and the fall was to 55. *(Corrected by 6bh: the sweep was a third of it. An erase also reads every history entry
+  the file has to find the row's own, and in this run, with nothing trimmed, that was the larger part.)*
 - **The test's own search was slower than its load.** One search of the file for each secret took 12 minutes after the hour, with 4,364 people erased. It is
   one pass now: every secret begins with its person's number, so whatever in the file begins as a secret does is looked up once.
 - The 30 minutes were run before the search at once and the mark were added; the hour has both.
 
+
+## 6bh. An erase that costs what was written since the last one, not the file
+
+6bf's limit, with 6bg's number: an erase sweeps the whole file while every client waits, and under load that was the server's throughput (110 commits a
+second to 20 at 193 MiB). The sweep is the engine's only way to find the pages nothing names: it walks every tree from its root and zeroes the rest.
+
+**What does not work** (and was first proposed): to zero only the pages the erase itself replaced. A page is copied when it is changed, and the copy before
+stays in the file until a sweep. A row erased today is in the copies that last week's commits left behind, and nothing says where those are.
+
+**Design.** The pager remembers which pages it has handed out since a point where the file was known clean (the *base*: a tree, and nothing else in the file
+but zeroed pages). At an erase the garbage is then worked out from two trees and that list, with no walk of what did not change:
+
+- *Born.* Every page handed out since the base, a mark for each and a list of them (`pager.alloc`). A page that was not born since the base and is in the
+  tree now was in the tree at the base: pages are never changed in place once a root names them, so the whole of what is under such a page is as it was.
+- *Live and new.* From the root as it is now, down through born pages only. A page reached that was not born is *kept*: it and all under it are the base's
+  and still in use, and it is not read.
+- *Dead and old.* From the base's root down, stopping at kept pages. Whatever else is reached was in the base's tree and is in no kept part of it: no
+  root names it now. A tree has one way to each page, so a page under a kept page is never reached another way.
+- *Garbage* is the dead and old, and the born that are not live and new: pages of statements that failed or were rolled back, pages one statement of a
+  transaction wrote and the next replaced, the catalog pages of commits since. Except the two catalog pages the two superblocks name now.
+- The garbage is zeroed and made free, the file synced, and the tree as it is now is the new base. A crash in the middle leaves pages zeroed that nothing
+  names, as for a sweep.
+
+*Why not a list of pages as they are replaced* (the second proposal): what a statement replaced is still in use if the statement fails, if the transaction
+is rolled back, or if the tree was built only to be read (6be). Each such path would have to take its entries back, and one path missed zeroes a page in
+use. This design asks nothing of those paths: it reads what the trees are, not how they came to be.
+
+*When it may be used* (otherwise the erase sweeps as it does today, and that sweep makes a base):
+
+- There is a base. A sweep makes one if, when it ran, both superblocks named the tree it was given: otherwise the state before the last commit is in the
+  file and in neither tree. An erase's own sweep qualifies (the commit is made twice, 6bf); the sweep at start and the sweeps for size usually do not, so
+  the first erase after one of those sweeps the file.
+- Both superblocks name the tree as it is now, and it is the only tree (the test program's branches share pages between trees; the server has one).
+- The list of born pages did not overflow (262,144 pages, 1 GiB written since the base).
+
+*Pages given back by a read of the past* (`pager.recycle`, 6be) were free and not zeroed: nothing needed them zeroed before the next sweep. Now an erase
+may come before it. They are marked, stay free, and are zeroed by the next erase. A page of them that was handed out again in between is an ordinary
+born page.
+
+*The test program checks every use.* `!purge` in the test program runs the same code and then the old one beside it: every tree walked from its root as
+the sweep does, and (a) **no page the erase would zero is one the walk reaches** (else `purge-unsafe`: it would have destroyed a page in use), (b) **every
+page the walk does not reach, and the erase would not zero, is zeros already** (else `purge-incomplete`: something erased could be left). Both are refusals
+before a byte is written. The server does not run the walk: that is the cost this section removes.
+
+**Test** (written first; `tests/engine_erase.py`, a second part). A workload of the seed: rows inserted, updated and deleted in two tables, alone and in
+transactions, some rolled back, some statements that fail half-way (a duplicate key in the last row of an insert of many), reads as of an earlier
+transaction, erases; and after every few statements two commits and `!purge`. Every `!purge` after the first sweep must use the list (not fall back),
+and pass both checks; at the end no erased key or value is in the file and every other row is read whole. Then the cases that must fall back, each
+shown to: no sweep yet, one commit only, a second branch, a sweep that did not leave a base. Through the server: `tests/engine_wire.py` (`erasing`) and
+the soak (6bg) as they are, which hold an erase to "gone when answered" and the file to "every row readable", whichever way the garbage was found.
+
+**Built.** `pager.alloc` marks and lists what it hands out; `pager.rebase` starts a base; `pager.recycle` marks what it gives back. `pstore.purge` is the
+design above; `pstore.sweep` leaves a base when both superblocks named the one tree it was given (the walk it shares with the check is `mark_all`). The
+server (`serve.answer`) tries `purge` after an erase's two commits and sweeps if it answers `no_base()` or a sweep for size is due anyway. The test program
+has `!purge`, always checked; the server checks when its command line ends with `check-purge`, which every test's server does.
+
+**Measured.**
+
+- *The check* (`tests/engine_erase.py`, three seeds): 126 purges each, after 92 to 109 erases, 34 to 36 transactions, 29 to 51 rollbacks, 53 to 62 statements
+  that failed half-way and 40 to 52 reads of the past; about 6,200 pages zeroed a run; never unsafe, never incomplete, never a fall back after the first
+  sweep. No erased key or value in the file, every other row read whole. The five cases that must fall back do.
+- *Through the server*: `tests/engine_wire.py` passes with every erase checked. A part of it is new (`erasing_after_the_past`): 1,500 rows; three times 150 of
+  them are updated, the table is read as it was before (most of its leaves are written again into pages that are then given back) and 5 of the rows are
+  erased, the file searched after each; then 1,200 updates and every row read back. The first form of it, with 60 rows, **could not fail**: the erase took
+  the few pages the read had given back off the free list and wrote over them. With 1,500 an engine that does not zero those pages leaves the secret in
+  the file, and one that makes them free twice hands a page out twice and the log's replay no longer ends at the rows.
+- *Mutants*: 10 of the purge (`scrub: purge:`, judged by `tests/engine_erase.py`), 2 of the pages a read of the past gives back (`erasing:`, by
+  `tests/engine_wire.py`), all killed; the 6 older mutants of the sweep's walk moved with the code and are killed as before (the page store's 40 of 40).
+- *The time of an erase* (one client, a file of 110 MiB, 40 erases, each after an update; the server without the check):
+
+  | | before | after |
+  |---|---|---|
+  | the first erase after a start | 368 ms | 424 ms (it sweeps: the base) |
+  | the next 39, median | 323 ms | **15 ms** |
+  | the next 39, the slowest | 400 ms | 17 ms |
+
+**Found by measuring, and not what this section set out to fix.** Those numbers are with the history trimmed (6bb). With the history of the 400,000
+rows that filled the file still in it, an erase took 1,373 ms before and 1,104 ms after: **an erase reads every history entry in the file.** The history
+is kept by transaction and then by key, so the entries of one row are found by reading all of them (`execw.erase`, since 6n). In the test program, on
+that file: the erase itself 1.05 s, a sweep 0.43 s. 6bg put the whole fall in throughput down to the sweep; it was a third of it (corrected there and in
+C200, C201). What this section built removes the sweep's part. The scan's part is as it was, and is the next thing: it needs the history findable by key.
+
+*What it will not do.* A sweep for size still walks the file and holds the server (6aw): this is for erases. The first erase after a start or after a
+sweep for size still sweeps. Nothing a client sees says which way an erase went; the measure is the time.
 
 ## 7. Taking over, safely
 

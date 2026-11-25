@@ -48,6 +48,17 @@ pub res struct Pager {
     cdirty: Box[[byte]],
     dlist: Box[[int]],
     ndl: int,
+    // the pages handed out since the base (docs/m3-engine.md 6bh): a mark for each page of the first `fresh_max()` (1: handed out; 2: handed out, given back by `recycle` and free, not
+    // zeroed) and the list of those marked (`born_max()`; `over` if it did not hold them all, or a page was beyond the marks). `based`: there is a base, the tree `base`, and when
+    // it was made the file held nothing else but zeroed pages and the two catalog pages `bcat0` and `bcat1`.
+    born: Box[[byte]],
+    blist: Box[[int]],
+    nb: int,
+    over: bool,
+    based: bool,
+    base: int,
+    bcat0: int,
+    bcat1: int,
 }
 
 pub fn free_max() -> [] int {
@@ -56,6 +67,10 @@ pub fn free_max() -> [] int {
 
 pub fn fresh_max() -> [] int {
     return 4194304;
+}
+
+pub fn born_max() -> [] int {
+    return 262144;
 }
 
 pub fn cache_slots() -> [] int {
@@ -67,11 +82,13 @@ pub fn new_pager[&h](heap: &!h Heap, file: File, length: int) -> [heap] Pager {
     if next < 3 {
         next = 3;
     }
-    return Pager { file: file, next: next, crash: 0, torn: 0, steps: 0, dead: false, free: box_slice(heap, free_max(), 0), nfree: 0, fresh: box_slice(heap, fresh_max(), byte_of(0)), flist: box_slice(heap, free_max(), 0), nfl: 0, window: false, cache: box_slice(heap, 4096 * cache_slots(), byte_of(0)), ctag: box_slice(heap, cache_slots(), 0), cdirty: box_slice(heap, cache_slots(), byte_of(0)), dlist: box_slice(heap, 2 * cache_slots(), 0), ndl: 0 };
+    return Pager { file: file, next: next, crash: 0, torn: 0, steps: 0, dead: false, free: box_slice(heap, free_max(), 0), nfree: 0, fresh: box_slice(heap, fresh_max(), byte_of(0)), flist: box_slice(heap, free_max(), 0), nfl: 0, window: false, cache: box_slice(heap, 4096 * cache_slots(), byte_of(0)), ctag: box_slice(heap, cache_slots(), 0), cdirty: box_slice(heap, cache_slots(), byte_of(0)), dlist: box_slice(heap, 2 * cache_slots(), 0), ndl: 0, born: box_slice(heap, fresh_max(), byte_of(0)), blist: box_slice(heap, born_max(), 0), nb: 0, over: false, based: false, base: 0, bcat0: 0, bcat1: 0 };
 }
 
 pub fn drop_pager[&h](heap: &!h Heap, p: Pager) -> [heap] int {
-    let Pager { file, next, crash, torn, steps, dead, free, nfree, fresh, flist, nfl, window, cache, ctag, cdirty, dlist, ndl } = p;
+    let Pager { file, next, crash, torn, steps, dead, free, nfree, fresh, flist, nfl, window, cache, ctag, cdirty, dlist, ndl, born, blist, nb, over, based, base, bcat0, bcat1 } = p;
+    unbox_slice(heap, born);
+    unbox_slice(heap, blist);
     unbox_slice(heap, free);
     unbox_slice(heap, fresh);
     unbox_slice(heap, flist);
@@ -111,7 +128,79 @@ pub fn alloc[&q](p: &!q Pager) -> [] int {
         contents(p.flist)[p.nfl] = id;
         p.nfl = p.nfl + 1;
     }
+    // born since the base (6bh)
+    if id >= fresh_max() {
+        p.over = true;
+    } else if int_of(contents(p.born)[id]) == 2 {
+        // given back by a read of the past and handed out again: it is in the list
+        contents(p.born)[id] = byte_of(1);
+    } else if int_of(contents(p.born)[id]) == 0 {
+        if p.nb < born_max() {
+            contents(p.born)[id] = byte_of(1);
+            contents(p.blist)[p.nb] = id;
+            p.nb = p.nb + 1;
+        } else {
+            p.over = true;
+        }
+    }
     return id;
+}
+
+// The base (6bh): the tree it is, or -1 if there is none to work from (no sweep left one, or more pages were handed out since than the list holds).
+pub fn base[&q](p: &q Pager) -> [] int {
+    if !p.based || p.over {
+        return 0 - 1;
+    }
+    return p.base;
+}
+
+// One of the two catalog pages the superblocks named when the base was made (`i` 0 or 1).
+pub fn base_catalog[&q](p: &q Pager, i: int) -> [] int {
+    if i == 0 {
+        return p.bcat0;
+    }
+    return p.bcat1;
+}
+
+pub fn born_count[&q](p: &q Pager) -> [] int {
+    return p.nb;
+}
+
+pub fn born_at[&q](p: &q Pager, i: int) -> [] int {
+    return contents(p.blist)[i];
+}
+
+// What is known of page `id` since the base: 0 it was not handed out, 1 it was, 2 it was and a read of the past gave it back (it is free and may not be zeros).
+pub fn born[&q](p: &q Pager, id: int) -> [] int {
+    if id < 0 || id >= fresh_max() {
+        return 0;
+    }
+    return int_of(contents(p.born)[id]);
+}
+
+// From here on the base is the tree `root` (`ok`), or there is none (a sweep that could not leave one): nothing is born yet. `c0` and `c1` are the catalog pages the
+// two superblocks name.
+pub fn rebase[&q](p: &!q Pager, root: int, ok: bool, c0: int, c1: int) -> [] int {
+    var i = 0;
+    if p.over {
+        // the list does not say which marks are set
+        while i < fresh_max() {
+            contents(p.born)[i] = byte_of(0);
+            i = i + 1;
+        }
+    } else {
+        while i < p.nb {
+            contents(p.born)[contents(p.blist)[i]] = byte_of(0);
+            i = i + 1;
+        }
+    }
+    p.nb = 0;
+    p.over = false;
+    p.based = ok;
+    p.base = root;
+    p.bcat0 = c0;
+    p.bcat1 = c1;
+    return 0;
 }
 
 // A window begins (a statement, docs/m3-engine.md 6p): from here until the next `begin`, a page handed out by `alloc` is one that no root names yet, and `is_fresh` says so. The caller's side of the
@@ -131,7 +220,7 @@ pub fn begin[&q](p: &!q Pager) -> [file_write] int {
 
 // The pages handed out in the window that is open are given back (docs/m3-engine.md 6be): for a statement that built a tree only to read it and forget it, so
 // that reading does not make the file grow. The caller says by this that no root names them. They are free to be handed out again at once; what they hold is
-// zeroed at the next sweep like any page nothing names. How many.
+// zeroed at the next sweep like any page nothing names, or by the next erase (6bh). How many.
 pub fn recycle[&q](p: &!q Pager) -> [] int {
     var i = 0;
     var given = 0;
@@ -140,6 +229,10 @@ pub fn recycle[&q](p: &!q Pager) -> [] int {
         contents(p.fresh)[id] = byte_of(0);
         if push_free(p, id) {
             given = given + 1;
+            // free, and it may hold what the tree read held: the next erase zeroes it (6bh)
+            if id < fresh_max() && int_of(contents(p.born)[id]) == 1 {
+                contents(p.born)[id] = byte_of(2);
+            }
         }
         i = i + 1;
     }
@@ -411,6 +504,44 @@ pub fn flip[&q](p: &!q Pager, id: int, off: int) -> [file_read, file_write] int 
             Read::Failed(e) => {
                 rc = 0 - 1;
             }
+        }
+    }
+    return rc;
+}
+
+// Whether page `id` is zeros in the file (1), is not (0), or the file could not be read (-1). What the cache holds and the file does not yet is written first.
+pub fn blank[&q](p: &!q Pager, id: int) -> [file_read, file_write] int {
+    if flush(p) < 0 {
+        return 0 - 1;
+    }
+    var rc = 1;
+    region r {
+        let buf = alloc_slice[r](4096, byte_of(0));
+        var got = 0;
+        var going = true;
+        while going && got < 4096 {
+            match file_pread(p.file, id * 4096 + got, buf[got..4096]) {
+                Read::Got(n) => {
+                    if n <= 0 {
+                        going = false;
+                    }
+                    got = got + n;
+                }
+                Read::End => {
+                    going = false;
+                }
+                Read::Failed(e) => {
+                    going = false;
+                    rc = 0 - 1;
+                }
+            }
+        }
+        var i = 0;
+        while i < got && rc == 1 {
+            if int_of(buf[i]) != 0 {
+                rc = 0;
+            }
+            i = i + 1;
         }
     }
     return rc;
