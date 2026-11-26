@@ -2501,6 +2501,42 @@ and made again with a column of another type, and again with another key, is a d
 this text); a table made with `v text`, then `v integer`, then keyed by `v`: three schemas, and the third made again is the third. Three mutants (the
 commit hashes the names alone; the type left out; the key left out), all killed. `t: k/5/1 v/3/0` is a line of it.
 
+## 6bm. A sync that fails, provoked
+
+Section 1 says a failed `fsync` is the end of the process and is never tried again: after `EIO` the kernel may have dropped the pages and cleared the
+error, and a second `fsync` can say all is well for data that is gone. The test program's crash hook makes the pager stop at a step (6b); nothing made
+the kernel's own call fail under the server. This does.
+
+**Design** (a test; nothing in the engine changes unless it finds something). `tests/shim/fsync_fail.c`, loaded into the server with `LD_PRELOAD`:
+the n-th `fsync` of the process answers -1 with `EIO`, and **every call after it succeeds**, so a server that tried again would be told all is well. It
+writes how many calls were made to a file the test reads. `tests/engine_wire.py` (`sync_failing`) runs a server for each n from 1 until a run is not
+reached by the failure, with a client that makes a table, inserts five rows, erases one and inserts another, and holds:
+
+- *No sync after the one that failed*: the count of calls is n, exactly.
+- *The statement under which it failed is refused* (`58030`), the connection ended, the server gone with status 7; if it failed before the server
+  served, the server did not start (status 5).
+- *After a start without the fault*: every row acknowledged is there, and no row but those and the one in flight; the log verifies and its replay ends
+  at the rows.
+
+**Measured** (first, by hand, before the test was written; n from 1 to 13):
+
+- The server made no call after the failing one, at every n, and stopped as designed.
+- A commit syncs twice (the pages and the catalog, then the superblock). **When the second failed, the client was told the commit failed and the row
+  was there after the start**: the superblock was written, and whether it reached the disk is what the failed call did not say. This is the rule of
+  a kill (a commit not acknowledged may be there or not), but here the client has an error in hand and not silence: `58030` does not mean "not done".
+- **A new file whose first sync failed is not a database afterwards**: the catalog page is in it and no superblock, and the server refuses it at every
+  start (status 5) rather than take it for an empty one (the rule of `pstore.load`: a file that is not empty and has no valid superblock is refused). It
+  never held a commit; it has to be removed by hand. A failure at the second or third sync of a new file leaves one that starts.
+
+**The test, as it runs in the gate.** 22 places: the syncs of a new file, of the start, of each of the commits, of the erase (its two commits and
+what it zeroes) and of the insert after it. At each: no call after the failing one; `58030` and status 7 (or no start, status 5); the rows after a
+start are those acknowledged, or those and the one in flight (10 of the 22: the second sync of a commit, which the client was told had failed); the
+verifiers accept the log and its replay ends at the rows wherever there are commits enough for them. One mutant (a failed sync is taken for done):
+killed, the server going on to sync again.
+
+*Not done.* The shim fails a call; it does not lose the pages, so "the data is gone and a retry would not know" is the kernel's behaviour as documented,
+not something this test shows. A failing `pwrite` is 6ay's. A new file left unusable by its first sync is not repaired here.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

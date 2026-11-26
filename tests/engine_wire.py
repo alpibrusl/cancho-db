@@ -1556,6 +1556,101 @@ def erasing_after_the_past(d):
     verified(d, path, ["create table person "], "a server whose clients read the past and erased")
 
 
+def sync_failing(d):
+    """A sync that fails under the server (6bm): the n-th `fsync` of the process answers EIO and every later one succeeds (tests/shim/fsync_fail.c, loaded with LD_PRELOAD).
+    The server makes no call after it: the statement is refused, the connection ended, the server gone; and what was acknowledged is there after a start without the fault."""
+    lib = os.path.join(d, "fsync_fail.so")
+    built = subprocess.run(["cc", "-shared", "-fPIC", "-O1", "-o", lib, os.path.join(ROOT, "tests", "shim", "fsync_fail.c"), "-ldl"], capture_output=True, text=True)
+    if built.returncode != 0:
+        check("the shim that makes a sync fail is built", False, built.stderr[:300])
+        return
+    plan = ["create table t (k integer primary key, v text)"] + ["insert into t values (%d, 'v%d')" % (k, k) for k in range(1, 6)] + ["select cancho_erase('t', '[2]')", "insert into t values (9, 'v9')"]
+    odd, reached, later, unusable, n = [], 0, 0, [], 0
+    while n < 60:
+        n += 1
+        path, note = os.path.join(d, "sync%d.db" % n), os.path.join(d, "sync%d.calls" % n)
+        os.environ.update(LD_PRELOAD=lib, FSYNC_FAIL_AT=str(n), FSYNC_COUNT_FILE=note)
+        acked, flight, started, status, said = 0, None, True, None, None
+        try:
+            try:
+                srv = Server(path)
+            except SystemExit:
+                # (the status when the process has ended, not when its error stream closed: the two are not the same moment)
+                started, said = False, STARTED[-1].wait(timeout=10)
+            if started:
+                c = Client(srv.port)
+                for q in plan:
+                    got = c.query(q)
+                    if got[0] or c.status == "closed":
+                        flight, said = q, (got[0], got[1], c.status)
+                        break
+                    acked += 1
+                if flight is None:
+                    c.close()
+                    srv.stop()
+                else:
+                    c.close(False)
+                    try:
+                        status = srv.p.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        srv.stop(signal.SIGKILL)
+                        status = "still running"
+        finally:
+            for k in ("LD_PRELOAD", "FSYNC_FAIL_AT", "FSYNC_COUNT_FILE"):
+                os.environ.pop(k, None)
+        calls = int(open(note).read()) if os.path.exists(note) else 0
+        if started and flight is None:
+            # the failure was never reached: the server made fewer calls than n in all, and every statement was done
+            if calls >= n:
+                odd.append((n, "all done, and yet", calls, "calls"))
+            break
+        reached += 1
+        if calls != n:
+            odd.append((n, "calls after the one that failed", calls))
+        if started and (said != ("58030", "cancho-db: the page file cannot be written", "closed") or status != 7):
+            odd.append((n, "the statement under it", said, status))
+        if not started and said != 5:
+            odd.append((n, "the start under it", said))
+        # a start without the fault
+        try:
+            srv = Server(path)
+        except SystemExit:
+            unusable.append(n)
+            again = STARTED[-1].wait(timeout=10)
+            if started or n != 1 or again != 5:
+                odd.append((n, "does not start again", again))
+            continue
+        c = Client(srv.port)
+        rows = c.query("select k, v from t order by k")
+        c.close()
+        srv.stop()
+        # what the statements acknowledged leave, and what they leave with the one in flight done too
+        def state(k):
+            keys = [i for i in range(1, 6)][:max(0, min(k, 6) - 1)]
+            if k >= 7:
+                keys.remove(2)
+            if k >= 8:
+                keys.append(9)
+            return [[str(i).encode(), b"v%d" % i] for i in keys]
+        have = rows[4] if not rows[0] else None
+        if started and acked >= 1:
+            if have not in (state(acked), state(acked + 1)):
+                odd.append((n, "rows after", acked, have))
+            if have == state(acked + 1):
+                later += 1
+            if acked >= 4:
+                # (the verifiers are held to a log of more than 3 commits)
+                verified(d, path, ["create table t "], "after the sync %d failed" % n)
+        elif rows[0] is None and rows[4] not in ([], state(1)) or rows[0] not in (None, "0A000", "42P01"):
+            odd.append((n, "rows after", acked, rows[:2], rows[4]))
+    check("a sync made to fail, the 1st to the %dth of a server that makes a table, inserts 5 rows, erases one and inserts another: the server makes no call after the one that "
+          "failed, the statement under it is refused 58030 and the server ends (status 7; 5 if it had not begun to serve); after a start without the fault every row acknowledged "
+          "is there and none but those and the one in flight (%d times the commit the client was told had failed was there: its second sync is the one that failed)" % (reached, later),
+          not odd and reached >= 12 and later >= 1, odd[:4])
+    check("a new file whose first sync failed is refused at every start after, not taken for an empty database (it has a catalog page and no superblock); no other is",
+          unusable == [1], unusable)
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1573,6 +1668,7 @@ def main():
         history(d)
         erasing(d)
         erasing_after_the_past(d)
+        sync_failing(d)
         with_psql(d)
         with_cancho_pg(d)
     if FAILED:

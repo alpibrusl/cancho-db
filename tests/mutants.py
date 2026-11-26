@@ -3336,6 +3336,7 @@ WIRE = [
     ('erasing: a table of two key columns is erased by its first', 'src/drive.cho',
      '            if row.key_columns(def) == 1 {\n                var c = 0;',
      '            if row.key_columns(def) >= 1 {\n                var c = 0;'),
+    ('disk: a sync that failed is taken for done', 'src/pager.cho', '    match file_sync(p.file) {\n        Done::Ok(n) => {\n            return 0;\n        }\n        Done::Failed(e) => {\n            return 0 - 1;', '    match file_sync(p.file) {\n        Done::Ok(n) => {\n            return 0;\n        }\n        Done::Failed(e) => {\n            return 0;'),
     ('erasing: a page a read of the past gave back is not zeroed by the next erase', 'src/pager.cho', '            if id < fresh_max() && int_of(contents(p.born)[id]) == 1 {\n                contents(p.born)[id] = byte_of(2);', '            if id < fresh_max() && int_of(contents(p.born)[id]) == 1 {\n                contents(p.born)[id] = byte_of(0);'),
     ('erasing: a page a read of the past gave back is made free a second time', 'src/pstore.cho', '                            if int_of(mk[gl[i]]) == 2 {\n                                pager.push_free(p, gl[i]);', '                            if int_of(mk[gl[i]]) >= 2 {\n                                pager.push_free(p, gl[i]);'),
 ]
