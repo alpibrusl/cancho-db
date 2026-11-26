@@ -547,6 +547,35 @@ pub fn blank[&q](p: &!q Pager, id: int) -> [file_read, file_write] int {
     return rc;
 }
 
+// Page `id` as the file has it now, unchecked and not from the pages kept in memory, into `out` (4096 bytes): how many bytes of it the file has (0: the file ends
+// before it; fewer than 4096: it ends inside it, and the rest of `out` is zeros), or -1 if the file could not be read. For a copy of the file (docs/m3-engine.md 6bn).
+pub fn raw[&q, &o](p: &!q Pager, id: int, out: &!o [byte]) -> [file_read] int {
+    var got = 0;
+    var going = true;
+    while going && got < 4096 {
+        match file_pread(p.file, id * 4096 + got, out[got..4096]) {
+            Read::Got(n) => {
+                if n <= 0 {
+                    going = false;
+                }
+                got = got + n;
+            }
+            Read::End => {
+                going = false;
+            }
+            Read::Failed(e) => {
+                return 0 - 1;
+            }
+        }
+    }
+    var i = got;
+    while i < 4096 {
+        out[i] = byte_of(0);
+        i = i + 1;
+    }
+    return got;
+}
+
 // Forget the free pages (before a sweep fills the list again).
 pub fn clear_free[&q](p: &!q Pager) -> [] int {
     p.nfree = 0;

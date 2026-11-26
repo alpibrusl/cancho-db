@@ -29,6 +29,8 @@ import cdb.row;
 //              refused `export-archived`
 //     usage    what the tree holds, by what it is for: `usage KIND entries bytes` for each
 //     sweeps   `sweeps N`: how many times the server has said a sweep was coming (docs/m3-engine.md 6az); a reader that sees it change was raced
+//     pages    the whole page file, as one state of the database: a copy a server can be started on (docs/m3-engine.md 6bn). Refused `export-raced` if a
+//              commit came while it began or a sweep was announced while it read: the output is then not to be kept
 //     live     a version-2 dump of every row of every table (with UPTO: only if the log has exactly that many commits)
 //
 // It opens PAGEFILE to read and never writes to it. A server may be writing the file meanwhile: commits do not disturb a reader, a sweep may (it frees pages for
@@ -627,6 +629,50 @@ fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, roo
     return status;
 }
 
+// The whole page file to the output, as one state of the database (docs/m3-engine.md 6bn). `first` is the two superblocks as they were read before the database was
+// loaded: if the file's are no longer those, a commit came between and the state loaded may not be theirs (`raced()`). They are written for pages 1 and 2, and
+// every other page as the file has it now, to the end of the file as it is now: every page the two name was in the file before they were. 0, or a refusal's code.
+fn pages[&i, &z, &f](io: &!i Io, pg: &!z pager.Pager, first: &f [byte]) -> [io_write, file_read] int {
+    var status = 0;
+    region g {
+        let buf = alloc_slice[g](4096, byte_of(0));
+        var k = 1;
+        while k <= 2 && status == 0 {
+            if pager.raw(pg, k, buf) < 0 {
+                status = damaged();
+            } else {
+                var i = 0;
+                while i < 4096 && status == 0 {
+                    if int_of(buf[i]) != int_of(first[4096 * (k - 1) + i]) {
+                        status = raced();
+                    }
+                    i = i + 1;
+                }
+            }
+            k = k + 1;
+        }
+        var id = 0;
+        var going = status == 0;
+        while going {
+            if id == 1 || id == 2 {
+                put_raw(io, first, 4096 * (id - 1), 4096 * id);
+            } else {
+                let n = pager.raw(pg, id, buf);
+                if n < 0 {
+                    status = damaged();
+                    going = false;
+                } else if n == 0 && id > 2 {
+                    going = false;
+                } else {
+                    put_raw(io, buf, 0, 4096);
+                }
+            }
+            id = id + 1;
+        }
+    }
+    return status;
+}
+
 // How many sweeps the tree `root` says were announced (`tables.sweeps`), or a negative number.
 fn sweeps_of[&z, &q](pg: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_read] int {
     var n = 0 - 1;
@@ -695,7 +741,7 @@ fn main(world: World) -> [] int {
                 good = from >= 0 && (same(arg(g, 2), "log") || same(arg(g, 2), "facts") || same(arg(g, 2), "stmts"));
             }
             if good {
-                good = (same(arg(g, 2), "anchor") || same(arg(g, 2), "sweeps") || same(arg(g, 2), "usage") || same(arg(g, 2), "floor")) && arg_count(g) == 3 || same(arg(g, 2), "log") || same(arg(g, 2), "facts") || same(arg(g, 2), "live") || same(arg(g, 2), "stmts") || same(arg(g, 2), "tokens") && arg_count(g) == 3;
+                good = (same(arg(g, 2), "anchor") || same(arg(g, 2), "sweeps") || same(arg(g, 2), "usage") || same(arg(g, 2), "floor")) && arg_count(g) == 3 || same(arg(g, 2), "log") || same(arg(g, 2), "facts") || same(arg(g, 2), "live") || same(arg(g, 2), "stmts") || same(arg(g, 2), "tokens") && arg_count(g) == 3 || same(arg(g, 2), "pages") && arg_count(g) == 3;
             }
             if good {
                 status = no_file();
@@ -720,9 +766,20 @@ fn main(world: World) -> [] int {
                             var roots = box_slice(hh, 16, 0);
                             var seq = 0 - 1;
                             var swept = 0 - 1;
+                            // for a copy of the file (`pages`, docs/m3-engine.md 6bn): the two superblocks as they are before anything else is read
+                            let paging = same(arg(g, 2), "pages");
+                            var first = box_slice(hh, 8192, byte_of(0));
                             borrow mut roots as &!rw in {
                                 borrow mut pg as &!pp in {
                                     borrow mut wk as &!ww in {
+                                        var early = 0;
+                                        if paging {
+                                            borrow mut first as &!fw in {
+                                                if pager.raw(pp, 1, contents(fw)[0..4096]) < 0 || pager.raw(pp, 2, contents(fw)[4096..8192]) < 0 {
+                                                    early = 0 - 1;
+                                                }
+                                            }
+                                        }
                                         seq = pstore.load(pp, exec.scratch(ww), contents(rw));
                                         if seq == pstore.no_database() {
                                             status = no_database();
@@ -730,8 +787,14 @@ fn main(world: World) -> [] int {
                                             status = damaged();
                                         } else {
                                             swept = sweeps_of(pp, ww, contents(rw)[0]);
-                                            if swept < 0 {
+                                            if swept < 0 || early < 0 {
                                                 status = damaged();
+                                            } else if paging {
+                                                borrow mut io as &!oo in {
+                                                    borrow first as &fr in {
+                                                        status = pages(oo, pp, contents(fr));
+                                                    }
+                                                }
                                             } else {
                                                 borrow mut io as &!oo in {
                                                     status = export(oo, pp, ww, contents(rw)[0], arg(g, 2), upto, from, swept);
@@ -749,6 +812,7 @@ fn main(world: World) -> [] int {
                                 }
                             }
                             unbox_slice(hh, roots);
+                            unbox_slice(hh, first);
                             exec.drop_work(hh, wk);
                             pager.drop_pager(hh, pg);
                         }
