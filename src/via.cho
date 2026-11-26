@@ -34,10 +34,10 @@ pub fn choose[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int]) -> []
             let (c2, end) = eval.scan(e, mid, contents(w.ws));
             var cat = 0 - 1;
             var vat = 0 - 1;
-            if c1 == 1 && c2 == 1 && int_of(e[a + 2]) == 0 && (int_of(e[mid]) == 1 || int_of(e[mid]) == 2) {
+            if c1 == 1 && int_of(e[a + 2]) == 0 && eval.constant(e, mid, c2) {
                 cat = a + 2;
                 vat = mid;
-            } else if c1 == 1 && c2 == 1 && int_of(e[mid]) == 0 && (int_of(e[a + 2]) == 1 || int_of(e[a + 2]) == 2) {
+            } else if c2 == 1 && int_of(e[mid]) == 0 && eval.constant(e, a + 2, c1) {
                 cat = mid;
                 vat = a + 2;
             }

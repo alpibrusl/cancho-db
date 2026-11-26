@@ -1851,9 +1851,14 @@ VIAFIXED = [
     (P("select k from fvi where a = $1", None), "set", False),
     ("select k from fvi where b = null", "set", False),
     (P("select k from fvi where b = $1", None), "set", False),
-    # a minus sign is not read as a constant (it can overflow, and an error of the WHERE has to be found on every row: 6g)
-    ("select k from fvi where a = -5", "set", False),
-    ("select k from fvi where s = -32768", "set", False),
+    # a negative number as it is written is a constant; a minus over anything else is not (it can overflow, and an error of the WHERE has to be found on every row: 6g)
+    ("select k from fvi where a = -5", "set", True),
+    ("select k from fvi where s = -32768", "set", True),
+    ("select k from fvi where -7 = c", "set", True),
+    ("select k from fvi where a = -2147483649", "set", True),
+    ("select k from fvi where a = - -5", "set", False),
+    ("select k from fvi where a = -s", "set", False),
+    ("select k from fvi where a = -5 and c = -(-7)", "set", False),
     # after writes: a value changed, a row removed, a key moved, a transaction rolled back and one kept
     ("update fvi set a = 6 where k = 1", "write", False),
     ("select k from fvi where a = 5", "set", True),

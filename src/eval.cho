@@ -1660,3 +1660,15 @@ pub fn eval[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], at: int, kinds: &k [int], 
     }
     return wrong;
 }
+
+// Whether the expression at `p` of `e` is a minus sign directly over an integer literal that is not negative: a negative number as it is written. It cannot
+// raise (the negation of such an integer is a bigint), which a minus over anything else can (docs/m3-engine.md 6bo).
+pub fn neg_const[&x](e: &x [byte], p: int) -> [] bool {
+    return p + 12 <= len(e) && int_of(e[p]) == 7 && int_of(e[p + 1]) == 1 && int_of(e[p + 2]) == 1 && int_of(e[p + 3]) == 1 && row.int_at(e, p + 4) >= 0;
+}
+
+// Whether the expression at `at` of `e`, of `c` nodes (`scan`), is a constant a key or an indexed column may be compared with: a literal, a parameter, or a
+// negative number as it is written.
+pub fn constant[&x](e: &x [byte], at: int, c: int) -> [] bool {
+    return c == 1 && (int_of(e[at]) == 1 || int_of(e[at]) == 2) || c == 2 && neg_const(e, at);
+}

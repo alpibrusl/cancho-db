@@ -2705,7 +2705,8 @@ before the rows, `start`, `next`).
   is not found); when a condition already bounds the scan by the key; under a join (there the engine does not ask whether the `where` can raise); for a read of the past (**the entries in the tree a past read is
   given are the present's**: an index has no history); for a partial index (it has not every row); when the constant is a null (`= null` is true of
   nothing, and the table says so); when the column is a boolean or a bytea; and when the constant has a minus sign, which is not counted as a
-  constant because it can overflow. That last one is a limit worth removing: `where a = -5` reads the table.
+  constant because it can overflow. That last one is a limit worth removing: `where a = -5` reads the table. (*Removed since*, for a minus sign
+  over an integer written in the statement: see below.)
 - *The constant.* A number for an integer column; a string for a text column; a parameter or a string for an integer column is read as the integer
   the column's type makes of it (one that is no integer was refused before any row).
 - *An entry says where its row's key begins* (its one byte of value), so that the reader need not know the columns' lengths. This changed the entries
@@ -2726,6 +2727,14 @@ held to what the table had then, with a count of 0 (`past_by_value`), and throug
 | 100,000 | 68 ms | 0.16 ms |
 
 The same 3,341 rows answered either way on the larger table. The two indexes made the file 14 % larger (60.0 MiB for 52.4) and the load 40 % longer.
+
+**A number with a minus sign is a constant (after slice 2).** `where a = -5` read the table: a minus is not counted among what cannot raise (it
+overflows on the least bigint), and so neither the key's bounds (6b) nor an index was used for the commonest way of writing a negative number. A minus
+over an integer written in the statement cannot overflow: the integer is not negative, and its negation is a bigint. So that one form, a minus sign
+directly over an integer literal, is now a condition that cannot raise and a constant a key or an indexed column may be compared with. A minus over
+anything else (a column, a parameter, a string, another minus) is as before: the table is read.
+*Tested* in the list of slice 2, which is now 69 selects of which 49 have to be read by an index: four with a negative number, and three with a minus
+over something else that may not be. 3 mutants. That the key's bounds take a negative number too is, like the parameter there, not counted by a test.
 
 **Slice 3: `create unique index`, the design.** A unique index is an index (slices 1 and 2: built, kept, read) whose catalog entry says so, and a
 row may not be written while another row has the same values in its columns. As in PostgreSQL a null is equal to nothing, so a row with a null in one
