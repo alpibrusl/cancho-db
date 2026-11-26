@@ -1655,7 +1655,8 @@ FIXED += [
 DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into fz values (3, 30)", "insert into fz values (2, 20)", "insert into fz values (1, 10)",
              "create table fw (wk integer primary key, m integer)", "insert into fw values (1, 5), (9, 0)",
              "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
-             "create table ft (k integer primary key, s text)", "insert into ft values (1, '3000000000 7abc')", "create sequence fzs"]
+             "create table ft (k integer primary key, s text)", "insert into ft values (1, '3000000000 7abc')", "create sequence fzs",
+             "create table fu (k integer primary key, u integer)", "insert into fu values (1, 1), (2, 2), (3, 3), (4, 40)", "create unique index fuu on fu (u)"]
 DEP = [
     # the cheaper condition is computed first, wherever it is written: the row with k = 2 never reaches the division
     ("select k from fz where k > 2 and 10 / (k - 2) > 0", None),
@@ -1668,6 +1669,12 @@ DEP = [
     ("update fz set k = k + 1", None),
     # the same rows the other way: 3 becomes 2, which is there
     ("update fz set k = k - 1", "23505"),
+    # a unique index (6bo): each row takes the value the next one has, and PostgreSQL meets the next one still holding it
+    ("update fu set u = u + 1 where k < 4", "23505"),
+    # the other way no row takes a value that is still held when PostgreSQL gets to it
+    ("update fu set u = u - 1 where k < 4", None),
+    # two rows change places: an error in either order, and the engine does not reason that far
+    ("update fu set u = 3 - u where k < 3", "23505"),
     # every row of a DISTINCT over a constant is the same row, so one is enough: PostgreSQL stops there
     ("select distinct 'x' from fz where 10 / (k - 2) > 0", None),
     # and under an aggregation too: the group whose HAVING divides by zero is not reached
@@ -1699,7 +1706,8 @@ UNSUP = [
     # and this one only for rows that join, so it answers
     ("select fz.k from fz join fw on fz.k = fw.wk and 10 / fw.m > fz.k", None),
     ("select a1.k from fz a1 join fz a2 on a1.k = a2.k", None),          # a table joined to itself
-    ("create unique index fzu on fz (n)", None),                         # a constraint that needs an index to hold
+    ("update fu set k = k + 10", None),                                   # a key that changes on a table with a unique index (6bo)
+    ("create table fzq (k integer primary key, u integer unique)", None), # a constraint, which is more than its index
     ("select fw.m, count(*) from fz join fw on fz.k = fw.wk group by fw.wk", None),   # m depends on fw's key
     # digits that are out of range, then something that is no digit: PostgreSQL says out of range, having not read on
     ("select cast(s as integer) from ft", "22003"),
@@ -1897,6 +1905,93 @@ VIAFIXED = [
     ("select k from fvi where a = 5", "set", True),
     ("insert into fvi values (1, 5, 'x', 7, 3, true)", "write", False),
     ("select k from fvi where a = 5", "set", True),
+]
+
+
+# Unique indexes (docs/m3-engine.md 6bo, slice 3): every statement is answered, and as PostgreSQL answers it.
+UNIQFIXED = [
+    ("create table fua (k integer primary key, u integer, s text, f boolean, a integer, b integer, c integer)", "ddl"),
+    ("insert into fua values (1, 1, 'a', true, 1, 1, 1), (2, 2, 'b', true, 1, 2, 2), (3, null, 'c', false, 2, 1, 2), (4, null, '%s-1', true, null, 1, 3), (5, 5, '%s-2', false, null, 1, 3)" % (LONG, LONG), "write"),
+    # an index over rows that are not unique is not made, and its name stays free
+    ("create unique index fuax on fua (a)", "ddl"),
+    ("create index fuax on fua (a)", "ddl"),
+    ("create unique index fuau on fua (u)", "ddl"),
+    ("create unique index fuas on fua (s)", "ddl"),
+    ("create unique index fuaab on fua (a, b)", "ddl"),
+    ("create unique index fuac on fua (c) where f", "ddl"),
+    # insert: a value that is held, in each index; a null is equal to nothing; a text that differs after what an entry keeps of it
+    ("insert into fua values (10, 2, 'n1', false, 9, 9, 9)", "write"),
+    ("insert into fua values (10, 9, 'b', false, 9, 9, 9)", "write"),
+    ("insert into fua values (10, 9, '%s-1', false, 9, 9, 9)" % LONG, "write"),
+    ("insert into fua values (10, 9, '%s-3', false, 9, 9, 9)" % LONG, "write"),
+    ("insert into fua values (11, null, null, null, 9, null, null)", "write"),
+    ("insert into fua values (12, null, null, null, 9, null, null)", "write"),
+    ("insert into fua values (13, 13, 'n13', false, 1, 2, 9)", "write"),
+    ("insert into fua values (13, 13, 'n13', false, null, 2, 9)", "write"),
+    # a partial one holds only the rows its condition is true for
+    ("insert into fua values (14, 14, 'n14', false, 14, 14, 1)", "write"),
+    ("insert into fua values (15, 15, 'n15', true, 15, 15, 1)", "write"),
+    ("insert into fua values (15, 15, 'n15', null, 15, 15, 1)", "write"),
+    # two rows of one statement
+    ("insert into fua values (16, 16, 'n16', false, 16, 16, 16), (17, 16, 'n17', false, 17, 17, 17)", "write"),
+    ("insert into fua values (16, 16, 'n16', false, 16, 16, 16), (17, 17, 'n16', false, 17, 17, 17)", "write"),
+    ("insert into fua values (16, 16, 'n16', false, 16, 16, 16), (17, 17, 'n17', false, 17, 17, 17)", "write"),
+    # ON CONFLICT DO NOTHING leaves the row out, whichever index it is
+    ("insert into fua values (18, 16, 'n18', false, 18, 18, 18) on conflict do nothing", "write"),
+    ("insert into fua values (18, 18, 'n18', false, 18, 18, 18), (19, 18, 'n19', false, 19, 19, 19), (20, 20, 'n18', false, 20, 20, 20), (21, 21, 'n21', false, 21, 21, 21) on conflict do nothing returning k", "write"),
+    ("select * from fua order by k", "order"),
+    # a read by a unique index
+    ("select k from fua where u = 16", "set"),
+    ("select k from fua where s = '%s-3'" % LONG, "set"),
+    # update: a value a row that stays holds; one two rows take; one a row keeps; and what conflicts with nothing
+    ("update fua set u = 2 where k = 1", "write"),
+    ("update fua set u = 5 where k = 1", "write"),
+    # (texts that begin alike: their entries are the same bytes, and they are not the same value)
+    ("update fua set s = '%s-2' where k = 4" % LONG, "write"),
+    ("update fua set s = '%s-1' where k = 10" % LONG, "write"),
+    ("update fua set s = '%s-5' where k = 10" % LONG, "write"),
+    ("update fua set s = '%s-3' where k = 10" % LONG, "write"),
+    ("update fua set u = 5 where k < 3", "write"),
+    ("update fua set u = 100 where k < 3", "write"),
+    ("update fua set u = 2 where k < 3", "write"),
+    ("update fua set u = 100 where k = 1", "write"),
+    ("update fua set u = 101 where k = 1 or k = 3", "write"),
+    ("update fua set u = u + 1000", "write"),
+    ("update fua set u = u - 1000, s = s || '!' where u > 1001", "write"),
+    ("update fua set s = 'c' where k = 1", "write"),
+    ("update fua set s = '%s-2' where k = 4" % LONG, "write"),
+    ("update fua set s = '%s-4' where k = 4" % LONG, "write"),
+    ("update fua set a = 1, b = 2 where k = 3", "write"),
+    ("update fua set a = 2, b = 2 where k = 3", "write"),
+    ("update fua set b = null where a = 1", "write"),
+    ("update fua set f = true where k = 5", "write"),
+    ("update fua set f = true where k = 3", "write"),
+    ("update fua set c = 1 where k = 14", "write"),
+    ("update fua set u = null", "write"),
+    ("update fua set u = k", "write"),
+    ("update fua set u = 1 where k = 1", "write"),
+    ("select * from fua order by k", "order"),
+    # a delete frees the value; a rollback frees what the transaction took
+    ("delete from fua where k = 2", "write"),
+    ("insert into fua values (30, 2, 'n30', false, 30, 30, 30)", "write"),
+    ("begin", "ddl"),
+    ("insert into fua values (31, 31, 'n31', false, 31, 31, 31)", "write"),
+    ("insert into fua values (32, 31, 'n32', false, 32, 32, 32)", "write"),
+    ("rollback", "ddl"),
+    ("insert into fua values (32, 31, 'n31', false, 32, 32, 32)", "write"),
+    ("begin", "ddl"),
+    ("delete from fua where k = 32", "write"),
+    ("insert into fua values (33, 31, 'n31', false, 33, 33, 33)", "write"),
+    ("commit", "ddl"),
+    # the index dropped, the value may be taken twice; and then no unique index can be made
+    ("drop index fuau", "ddl"),
+    ("insert into fua values (34, 31, 'n34', false, 34, 34, 34)", "write"),
+    ("create unique index fuau on fua (u)", "ddl"),
+    ("truncate fua", "ddl"),
+    ("insert into fua values (1, 1, 'a', true, 1, 1, 1)", "write"),
+    ("insert into fua values (2, 1, 'b', true, 1, 2, 2)", "write"),
+    ("insert into fua values (2, 2, 'a', true, 1, 2, 2)", "write"),
+    ("select * from fua order by k", "order"),
 ]
 
 
@@ -2286,6 +2381,11 @@ def main():
     wanted = sum(1 for v in VIAFIXED if v[2])
     if VIA[0] != wanted:
         raise SystemExit("engine_check: %d statements read by an index, and %d should have" % (VIA[0], wanted))
+    with tempfile.TemporaryDirectory() as d:
+        ueng = run_engine(os.path.join(d, "uniq.db"), lines(u[0] for u in UNIQFIXED))
+    ucounts, ufails, _, _ = compare(pg, [(sql, how, "fua") for sql, how in UNIQFIXED], ueng, True)
+    fails += ufails
+    print("engine_check: %d statements on a table with four unique indexes, none refused: %s" % (len(UNIQFIXED), ", ".join("%s=%d" % kv for kv in sorted(ucounts.items()))))
     _, vfails, _, _ = compare(pg, [(sql, how, "fvj" if " fvj" in str(sql) else "fvl" if " fvl" in str(sql) else "fvi") for sql, how, _ in VIAFIXED], veng, True)
     fails += vfails
     print("engine_check: %d statements read by an index and %d beside them that may not be, each with PostgreSQL's answer" % (wanted, sum(1 for v in VIAFIXED if v[1] in ("set", "order") and not v[2])))

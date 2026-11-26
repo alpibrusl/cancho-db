@@ -1839,21 +1839,18 @@ ENGINE = [
     ("alter: the new column's name is not compared with the old ones", 'src/execw.cho',
      '        while k < c {\n            let ol = commit.be(contents(w.ent), oa + 2, 2);',
      '        while k < c - c0 {\n            let ol = commit.be(contents(w.ent), oa + 2, 2);'),
-    ('index: a name that is taken is taken again', 'src/execw.cho',
+    ('index: a name that is taken is taken again', 'src/execd.cho',
      '    let g = btree.get(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.cur));\n    if g >= 0 {\n        there = true;',
      '    let g = btree.get(p, contents(w.sc), root, contents(w.key2)[0..kl], contents(w.cur));\n    if false {\n        there = true;'),
-    ("index: a table's name is free for an index", 'src/execw.cho',
+    ("index: a table's name is free for an index", 'src/execd.cho',
      '    if gt >= 0 {\n        there = true;',
      '    if false {\n        there = true;'),
     ("index: an index's name is free for a table", 'src/execw.cho',
      '    if gi >= 0 {\n        exec.note(w, exec.e_table_exists());',
      '    if false {\n        exec.note(w, exec.e_table_exists());'),
-    ('index: a column that is not there is indexed', 'src/execw.cho',
+    ('index: a column that is not there is indexed', 'src/execd.cho',
      '        if !found {\n            exec.note(w, exec.e_no_column());',
      '        if false {\n            exec.note(w, exec.e_no_column());'),
-    ('index: a unique one is taken as any other', 'src/execw.cho',
-     '    if iflags % 2 == 1 {\n        return exec.unsupported();\n    }\n',
-     ''),
     ("index: a dropped table's indexes stay", 'src/execw.cho',
      '                if exec.same(contents(w.cur), 0, tl, e, 4, nl) {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);',
      '                if false {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);'),
@@ -2359,13 +2356,13 @@ ENGINE = [
     ("schema: a row gets the new column's range after its default", 'src/execw.cho',
      '                ra = exec.copy(contents(w.tmp), xl + 1, dlen2, contents(w.nrow), ra);',
      '                ra = exec.copy(contents(w.tmp), xl + 1, xa - xl - 1, contents(w.nrow), ra);'),
-    ('schema: the condition of an index is one of its columns', 'src/execw.cho',
+    ('schema: the condition of an index is one of its columns', 'src/execd.cho',
      '        ncols = ncols - 1;',
      '        ncols = ncols - 0;'),
-    ('schema: any column is a condition of an index', 'src/execw.cho',
+    ('schema: any column is a condition of an index', 'src/execd.cho',
      '        if !isbool {',
      '        if !isbool && cl < 0 {'),
-    ('schema: CREATE INDEX IF NOT EXISTS says a name is taken', 'src/execw.cho',
+    ('schema: CREATE INDEX IF NOT EXISTS says a name is taken', 'src/execd.cho',
      '    if there && !ine {',
      '    if there {'),
     ('identity: no column is an identity column', 'src/tables.cho',
@@ -2476,7 +2473,7 @@ ENGINE = [
     ("sequence: a table takes a sequence's name", 'src/execw.cho',
      '    if gq >= 0 {\n        exec.note(w, exec.e_table_exists());',
      '    if gq > 9999 {\n        exec.note(w, exec.e_table_exists());'),
-    ("sequence: an index takes a sequence's name", 'src/execw.cho',
+    ("sequence: an index takes a sequence's name", 'src/execd.cho',
      '    if gq >= 0 {\n        there = true;',
      '    if gq > 9999 {\n        there = true;'),
     ('sequence: IF NOT EXISTS says the name is taken', 'src/execw.cho',
@@ -2962,8 +2959,8 @@ ENGINE = [
     ("index: a row written has no entry in its table's indexes", 'src/exec.cho', '    return indexed(p, w, nw, k, kn, v, true, old, how != 0);', '    return nw;'),
     ('index: a row removed keeps its entries', 'src/exec.cho', '    return indexed(p, w, nw, k, kn, old, false, old, true);', '    return nw;'),
     ('index: a row changed keeps the entry it had', 'src/index.cho', '            if ol > 0 {\n                let d = btree.del(p, sc, nroot, a[0..ol]);', '            if ol > 9999 {\n                let d = btree.del(p, sc, nroot, a[0..ol]);'),
-    ('index: an index made on a table with rows has no entries', 'src/execw.cho', '            if xl > 0 {\n                contents(w.ixb)[0] = byte_of(xl', '            if xl > 9999 {\n                contents(w.ixb)[0] = byte_of(xl'),
-    ('index: a dropped index leaves its entries', 'src/execw.cho', '    if z >= 0 && z + 5 <= g {\n        let id = commit.be(contents(w.cur), z + 1, 4);', '    if z >= 9999 && z + 5 <= g {\n        let id = commit.be(contents(w.cur), z + 1, 4);'),
+    ('index: an index made on a table with rows has no entries', 'src/execd.cho', '            if xl > 0 {\n                contents(w.ixb)[0] = byte_of(xl', '            if xl > 9999 {\n                contents(w.ixb)[0] = byte_of(xl'),
+    ('index: a dropped index leaves its entries', 'src/execd.cho', '    if z >= 0 && z + 5 <= g {\n        let id = commit.be(contents(w.cur), z + 1, 4);', '    if z >= 9999 && z + 5 <= g {\n        let id = commit.be(contents(w.cur), z + 1, 4);'),
     ('index: a row moved to another key leaves its entry under the old one', 'src/execw.cho', '                    if nw >= 0 && og > 32 {', '                    if nw >= 0 && og > 99999 {'),
     ('index: a row moved to another key has no entry under the new one', 'src/execw.cho', '                    if nw >= 0 && nv > 32 {', '                    if nw >= 0 && nv > 99999 {'),
     ("index: a renamed table's indexes are names again, their entries nobody's", 'src/execd.cho', '                    vl = exec.copy(contents(w.cur), tl, nv - tl, contents(w.ent), vl);', '                    vl = vl + 0;'),
@@ -2975,8 +2972,8 @@ ENGINE = [
     ('via: an index is read though a condition of the WHERE can raise', 'src/via.cho', 'if !w.quiet || w.past || w.ret >= 2', 'if w.past || w.ret >= 2'),
     ('via: an index is read though the key bounds the scan', 'src/via.cho', ' || w.nix == 0 || w.lon >= 0 || w.hin >= 0 {', ' || w.nix == 0 {'),
     ('via: any comparison with a constant is read as an equality', 'src/via.cho', '        if int_of(e[a]) == 5 && int_of(e[a + 1]) == 0 {\n            let (c1, mid)', '        if int_of(e[a]) == 5 && int_of(e[a + 1]) <= 5 {\n            let (c1, mid)'),
-    ('via: a partial index is read as if it had every row', 'src/via.cho', 'if int_of(contents(w.ix)[at + 4]) == 0 && exec.is_col(w, e, cat, col) {', 'if exec.is_col(w, e, cat, col) {'),
-    ("via: any index of the table is read, whatever its first column", 'src/via.cho', 'if int_of(contents(w.ix)[at + 4]) == 0 && exec.is_col(w, e, cat, col) {', 'if int_of(contents(w.ix)[at + 4]) == 0 {'),
+    ('via: a partial index is read as if it had every row', 'src/via.cho', 'if int_of(contents(w.ix)[at + 4]) % 2 == 0 && exec.is_col(w, e, cat, col) {', 'if exec.is_col(w, e, cat, col) {'),
+    ("via: any index of the table is read, whatever its first column", 'src/via.cho', 'if int_of(contents(w.ix)[at + 4]) % 2 == 0 && exec.is_col(w, e, cat, col) {', 'if int_of(contents(w.ix)[at + 4]) % 2 == 0 {'),
     ('via: a null constant is read as a value', 'src/via.cho', 'if exec.ev_open(w, e, vat, kinds, 0) >= 0 && contents(w.ws)[b + 1] == 0 {', 'if exec.ev_open(w, e, vat, kinds, 0) >= 0 {'),
     ('via: a string or a parameter is not read as the integer the column has', 'src/via.cho', '                        if inty && vt == 0 {', '                        if inty && vt == 99 {'),
     ('via: a parameter is not a constant', 'src/via.cho', 'if exec.ev_open(w, e, vat, kinds, 0) >= 0 && contents(w.ws)[b + 1] == 0 {', 'if exec.ev(w, e, vat, kinds, 0) == 0 && contents(w.ws)[b + 1] == 0 {'),
@@ -2986,13 +2983,36 @@ ENGINE = [
     ("via: the row read is the one of the entry's first bytes", 'src/via.cho', '    exec.copy(contents(w.key2), off, nk - off, contents(w.key), 4);\n    let rk = 4 + nk - off;', '    exec.copy(contents(w.key2), pl, nk - pl, contents(w.key), 4);\n    let rk = 4 + nk - pl;'),
     ("via: the row's salts are left in front of it", 'src/via.cho', '        let c = contents(w.cur)[32 + i];', '        let c = contents(w.cur)[i];'),
     ('via: an entry written with a row does not say where its key begins', 'src/index.cho', '                a[0] = byte_of(nl - len(pk));', '                a[0] = byte_of(1);'),
-    ('via: an entry made with the index does not say where its key begins', 'src/execw.cho', 'contents(w.ixb)[0] = byte_of(xl - (w.klen - 4));', 'contents(w.ixb)[0] = byte_of(1);'),
+    ('via: an entry made with the index does not say where its key begins', 'src/execd.cho', 'contents(w.ixb)[0] = byte_of(xl - (w.klen - 4));', 'contents(w.ixb)[0] = byte_of(1);'),
     ('via: a select begins as a read of the table whatever it chose', 'src/execs.cho', '    // the rows\n    var n = 0;\n    via.start(w);', '    // the rows\n    var n = 0;\n    exec.scan_start(w);'),
     ('via: a grouped select begins as a read of the table whatever it chose', 'src/execs.cho', '    var cf = 0;\n    via.start(w);', '    var cf = 0;\n    exec.scan_start(w);'),
     ('via: a select does not look for an index', 'src/execs.cho', '    via.choose(w, e, kinds);\n    exec.no_rows(w);\n    i = 0;\n    while i < no {', '    exec.no_rows(w);\n    i = 0;\n    while i < no {'),
     ('via: a grouped select does not look for an index', 'src/execs.cho', '    via.choose(w, e, kinds);\n    exec.no_rows(w);\n    i = 0;\n    while i < ng {', '    exec.no_rows(w);\n    i = 0;\n    while i < ng {'),
     ('via: a parameter in the WHERE is taken for what can raise', 'src/exec.cho', "tag == 2 && (contents(w.cx)[eval.inner_at()] == 0 || commit.be(e, p + 1, 4) < contents(w.cx)[eval.inner_at()]) ||", 'tag == 99 ||'),
     ("log: via: a table as of a commit is read by the present's index", 'src/drive.cho', '            w.past = true;\n            rc = execs.select(pg, w, view, ir2[0..l2], sc2);', '            rc = execs.select(pg, w, view, ir2[0..l2], sc2);'),
+    ('unique: a null is equal to a null', 'src/index.cho', '        if int_of(r[va]) == 0 {\n            return 0;\n        }\n        i = i + 1;\n    }\n    let el = entry(ix, at, def, r, pk, a);', '        i = i + 1;\n    }\n    let el = entry(ix, at, def, r, pk, a);'),
+    ('unique: two texts that begin alike are taken for one value', 'src/index.cho', '        if same_cols(ix, at, def, v[32..g], r) {\n            found = nk - off;\n        }', '        found = nk - off;'),
+    ('unique: an update between texts that begin alike is not looked at', 'src/index.cho', '    return eo == en && same_cols(ix, at, def, old, new);', '    return eo == en;'),
+    ('unique: a row that leaves a partial index or enters it is not looked at', 'src/index.cho', '    return eo == en && same_cols(ix, at, def, old, new);', '    return same_cols(ix, at, def, old, new);'),
+    ('unique: no index is a unique one', 'src/index.cho', '    return int_of(ix[at + 4]) / 2 % 2 == 1;', '    return int_of(ix[at + 4]) / 2 % 2 == 9;'),
+    ('unique: a partial unique index is read as a whole one', 'src/index.cho', '    if int_of(ix[at + 4]) % 2 == 1 {\n        let ca', '    if int_of(ix[at + 4]) == 1 {\n        let ca'),
+    ("unique: the entries looked at do not end where the value's do", 'src/index.cho', '        i = 0;\n        while i < pl {\n            if int_of(o[i]) != int_of(a[i]) {\n                return 0;\n            }\n            i = i + 1;\n        }\n', ''),
+    ("unique: a unique index's catalog entry is not one", 'src/index.cho', '&& z + 8 + n == len(cv) && int_of(cv[z + 5]) <= 3;', '&& z + 8 + n == len(cv) && int_of(cv[z + 5]) <= 1;'),
+    ('unique: CREATE UNIQUE INDEX makes an index that is not', 'src/execd.cho', 'iflags / 4 % 2 + 2 * (iflags % 2), cond,', 'iflags / 4 % 2, cond,'),
+    ('unique: an index is made over rows that are not unique', 'src/execd.cho', '            if xl > 0 && iflags % 2 == 1 {', '            if xl > 0 && iflags % 2 == 9 {'),
+    ('unique: ON CONFLICT DO NOTHING raises the conflict', 'src/execw.cho', '            if dup == 1 && !skip {', '            if dup == 1 {'),
+    ('unique: a row left out by ON CONFLICT DO NOTHING is stored', 'src/execw.cho', '        if g < 0 && dup == 0 {', '        if g < 0 {'),
+    ("unique: an insert's rows are looked up in the tree before the statement", 'src/execw.cho', 'dup = uniq.taken(p, w, nroot, contents(w.cur)[0..rl], contents(w.key2), kl);', 'dup = uniq.taken(p, w, root, contents(w.cur)[0..rl], contents(w.key2), kl);'),
+    ('unique: an insert does not look', 'src/execw.cho', '        if g < 0 && w.nix > 0 {\n            dup = uniq.taken', '        if g < 0 && w.nix > 99 {\n            dup = uniq.taken'),
+    ('unique: an update does not look', 'src/execw.cho', '                    if uniq.any(w) {\n                        if moved {', '                    if false {\n                        if moved {'),
+    ('unique: an update that moves the key is made', 'src/execw.cho', '                        if moved {\n                            // (a key that changes on a table with a unique index', '                        if false {\n                            // (a key that changes on a table with a unique index'),
+    ('unique: a value still held when the update ends is no error', 'src/execw.cho', '    if seen != 0 && !w.orderdep {', '    if seen != 0 && false {'),
+    ('unique: a holder that gives its value up later is the error all the same', 'src/uniq.cho', '    if moved && out != 0 {', '    if moved && false {'),
+    ('unique: a value a row gave up earlier in the statement is free in any order', 'src/uniq.cho', '                    if h0 > 0 {\n                        w.orderdep = true;\n                    }', '                    if h0 > 99999 {\n                        w.orderdep = true;\n                    }'),
+    ('unique: the holder of a value an update takes is not remembered', 'src/uniq.cho', '                    out = s;\n', '                    out = out + 0;\n'),
+    ('unique: an update looks the new value up in the tree before the statement only', 'src/uniq.cho', 'let h = index.holder(p, contents(w.sc), nroot, w.tid, contents(w.ix), at, contents(w.ctx)[64..64 + dl], new, k[4..kn]', 'let h = index.holder(p, contents(w.sc), root, w.tid, contents(w.ix), at, contents(w.ctx)[64..64 + dl], new, k[4..kn]'),
+    ('unique: only the first index of a table is looked at by an insert', 'src/uniq.cho', '            if h > 0 {\n                return 1;\n            }\n        }\n        i = i + 1;', '            if h > 0 {\n                return 1;\n            }\n        }\n        i = i + 99;'),
+    ('log: unique: a unique index and one that is not are one schema', 'src/tables.cho', 'if typed && i + 5 < nv && int_of(ent[i + 5]) / 2 % 2 == 1 {', 'if typed && i + 5 < nv && int_of(ent[i + 5]) / 2 % 2 == 9 {'),
     ('log: a table as of a commit is read as it is now', 'src/drive.cho',
      '        } else if kind == 6 && view > 0 {',
      '        } else if kind == 6 && view < 0 {'),
@@ -3471,7 +3491,7 @@ def run_export(cancho):
     """Each mutant is an export tool of its own, held against what the test assembles from the test program's output (build/enginecheck, not mutated here)."""
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in EXPORT if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
             "execw.cho", "execd.cho", "facts.cho", "token.cho", "ir.cho")
     survivors = []
     for label, rel, old, new in table:
@@ -3520,7 +3540,7 @@ def run_wire(cancho):
             print("MUTANT_SLICE: %s is not K/N with 0 <= K < N" % part)
             return 1
         table = table[k::n]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
             "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
 
     def one(mutant):
@@ -3564,7 +3584,7 @@ def run_engine(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
 
     def one(mutant):
         label, rel, old, new = mutant

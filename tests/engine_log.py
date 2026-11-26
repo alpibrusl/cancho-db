@@ -517,6 +517,12 @@ def definitions(work):
     check("a table dropped and made again with the same names: with a column of another type it is another schema, with another key another again, and made the same way the same; "
           "a column that may not be null, one with a default and one with another default are three more",
           len(texts) == 7 and len(set(lines6[:3])) == 3 and lines6[3] == lines6[2] and len(set(lines6[2:])) == 4 and names == ["d6: k v"] * 7, lines6)
+    # and whether an index is a unique one (6bo): that is a constraint
+    ix = []
+    for made in ("create index d7v on d7 (v)", "create unique index d7v on d7 (v)"):
+        out = run(path, WHO + ["create table d7 (k integer primary key, v integer)", made, "!schema", "drop table d7"])
+        ix += [[l for l in bytes.fromhex(m.split()[1]).decode().split("\n") if l.startswith("index d7v")] for m in out if m.startswith("M ")]
+    check("an index and a unique index of the same name on the same column are two schemas", ix == [["index d7v on d7"], ["index d7v on d7 unique"]], ix)
 
 
 def archiving(work, path):

@@ -51,7 +51,7 @@ pub fn name_end[&v](cv: &v [byte]) -> [] int {
 }
 
 // The value of a built index's catalog entry, into `out`: its length. `cols` are `n` column numbers, a byte each.
-pub fn value[&t, &c, &o](table: &t [byte], id: int, partial: bool, cond: int, cols: &c [byte], n: int, out: &!o [byte]) -> [] int {
+pub fn value[&t, &c, &o](table: &t [byte], id: int, flags: int, cond: int, cols: &c [byte], n: int, out: &!o [byte]) -> [] int {
     var at = 0;
     while at < len(table) {
         out[at] = table[at];
@@ -59,10 +59,7 @@ pub fn value[&t, &c, &o](table: &t [byte], id: int, partial: bool, cond: int, co
     }
     out[at] = byte_of(0);
     build.put_be(out, at + 1, id, 4);
-    out[at + 5] = byte_of(0);
-    if partial {
-        out[at + 5] = byte_of(1);
-    }
+    out[at + 5] = byte_of(flags);
     out[at + 6] = byte_of(cond);
     out[at + 7] = byte_of(n);
     var i = 0;
@@ -79,7 +76,7 @@ fn tail_ok[&v](cv: &v [byte], z: int) -> [] bool {
         return false;
     }
     let n = int_of(cv[z + 7]);
-    return commit.be(cv, z + 1, 4) > 0 && n >= 1 && n <= max_cols() && z + 8 + n == len(cv) && int_of(cv[z + 5]) <= 1;
+    return commit.be(cv, z + 1, 4) > 0 && n >= 1 && n <= max_cols() && z + 8 + n == len(cv) && int_of(cv[z + 5]) <= 3;
 }
 
 // The built indexes of the table `name` in the tree `root`, a record of `rec()` bytes each into `out`: how many, or an error (`btree.err_big()`: more than
@@ -152,7 +149,7 @@ fn same[&a, &b](x: &a [byte], xa: int, y: &b [byte], n: int) -> [] bool {
 // The entry the row `r` (a row of `def`, whose key in the tree after the table's number is `pk`) has in the index whose record is at `ix[at..]`, into `out`: its
 // length; 0 if the row has none (a partial index whose condition the row does not meet); -1 if it is longer than a key of the tree may be, or the row is not one.
 pub fn entry[&x, &d, &r, &k, &o](ix: &x [byte], at: int, def: &d [byte], r: &r [byte], pk: &k [byte], out: &!o [byte]) -> [] int {
-    if int_of(ix[at + 4]) == 1 {
+    if int_of(ix[at + 4]) % 2 == 1 {
         let ca = row.value_at(def, r, int_of(ix[at + 5]));
         if ca < 0 {
             return 0 - 1;
@@ -283,4 +280,124 @@ pub fn number[&q, &s, &k, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key
     }
     out[0] = id;
     return err;
+}
+
+// Whether the index whose record is at `ix[at..]` is a unique one (docs/m3-engine.md 6bo, slice 3).
+pub fn unique[&x](ix: &x [byte], at: int) -> [] bool {
+    return int_of(ix[at + 4]) / 2 % 2 == 1;
+}
+
+// Whether the rows `x` and `r` of `def` have the same values in the columns of the index at `ix[at..]`.
+fn same_cols[&x, &d, &a, &b](ix: &x [byte], at: int, def: &d [byte], x: &a [byte], r: &b [byte]) -> [] bool {
+    let n = int_of(ix[at + 6]);
+    var i = 0;
+    while i < n {
+        let c = int_of(ix[at + 7 + i]);
+        let xa = row.value_at(def, x, c);
+        let ra = row.value_at(def, r, c);
+        let xl = tables.stored_len(x, xa);
+        let rl = tables.stored_len(r, ra);
+        if xa < 0 || ra < 0 || xl < 0 || xl != rl {
+            return false;
+        }
+        var j = 0;
+        while j < xl {
+            if int_of(x[xa + j]) != int_of(r[ra + j]) {
+                return false;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Whether a row that was `old` and becomes `new` keeps what it has in the index at `ix[at..]`: the same values in its columns, and in the index or out of it as
+// before (`eo`, `en`: the lengths of its two entries). Two entries can be the same bytes and the values not: an entry has only the beginning of a text.
+pub fn stays[&x, &d, &a, &b](ix: &x [byte], at: int, def: &d [byte], old: &a [byte], new: &b [byte], eo: int, en: int) -> [] bool {
+    return eo == en && same_cols(ix, at, def, old, new);
+}
+
+// A row of the table `tid` that has, in the tree `root`, the values the row `r` (whose key after the table's number is `pk`) has in the columns of the
+// index at `ix[at..]`. The caller asks before `r` is in the tree with those values, so a row found is another row. The length of its key, which is left in `rk` from 4 (the table's number before it); 0 if there is none, or if `r` has a null there or is
+// not in the index (a null is equal to nothing; a partial index holds only the rows its condition is true for); or an error. The entries of the value are
+// read, and each one's row compared: an entry has only the beginning of a text. `a`, `k`, `o`, `rk` (256 bytes each) and `v` (a stored row's room) are scratch.
+pub fn holder[&q, &s, &x, &d, &r, &p, &a, &k, &o, &j, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, tid: int, ix: &x [byte], at: int, def: &d [byte], r: &r [byte], pk: &p [byte], a: &!a [byte], k: &!k [byte], o: &!o [byte], rk: &!j [byte], v: &!v [byte]) -> [file_read] int {
+    let n = int_of(ix[at + 6]);
+    var i = 0;
+    while i < n {
+        let va = row.value_at(def, r, int_of(ix[at + 7 + i]));
+        if va < 0 {
+            return btree.err_bad();
+        }
+        if int_of(r[va]) == 0 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    let el = entry(ix, at, def, r, pk, a);
+    if el < 0 {
+        return btree.err_big();
+    }
+    if el == 0 || root == 0 {
+        return 0;
+    }
+    let pl = el - len(pk);
+    i = 0;
+    while i < pl {
+        k[i] = a[i];
+        i = i + 1;
+    }
+    var kl = pl;
+    var found = 0;
+    while found == 0 {
+        let s = btree.next_after(p, sc, root, k[0..kl], false, o, v);
+        if s == btree.not_found() {
+            return 0;
+        }
+        if s < 0 {
+            return s;
+        }
+        let nk = s / 1024;
+        if nk < pl {
+            return 0;
+        }
+        i = 0;
+        while i < pl {
+            if int_of(o[i]) != int_of(a[i]) {
+                return 0;
+            }
+            i = i + 1;
+        }
+        let off = int_of(v[0]);
+        if s % 1024 != 1 || off < pl || off >= nk {
+            return btree.err_bad();
+        }
+        i = 0;
+        while i < nk {
+            k[i] = o[i];
+            i = i + 1;
+        }
+        kl = nk;
+        build.put_be(rk, 0, tid, 4);
+        i = 0;
+        while i < nk - off {
+            rk[4 + i] = o[off + i];
+            i = i + 1;
+        }
+        let g = btree.get(p, sc, root, rk[0..4 + nk - off], v);
+        if g < 0 {
+            if g == btree.not_found() {
+                return btree.err_bad();
+            }
+            return g;
+        }
+        if g < 32 {
+            return btree.err_bad();
+        }
+        if same_cols(ix, at, def, v[32..g], r) {
+            found = nk - off;
+        }
+    }
+    return found;
 }

@@ -1,0 +1,104 @@
+edition 9;
+module cdb.uniq;
+
+// SPDX-License-Identifier: EUPL-1.2
+// Copyright (c) 2026 Alpibru S.L.
+// Unique indexes (docs/m3-engine.md 6bo, slice 3): a row may not be written while another row has the same values in the columns of one. What an INSERT and
+// an UPDATE ask before they write a row; the looking up is `index.holder`.
+import cdb.btree;
+import cdb.pager;
+import cdb.index;
+import cdb.exec;
+
+// Whether the table last bound has a unique index.
+pub fn any[&q](w: &q exec.Work) -> [] bool {
+    var i = 0;
+    while i < w.nix {
+        if index.unique(contents(w.ix), i * index.rec()) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// Before a new row `r` is stored at the key `k[0..kn]`: 1 if a row of the tree `tree` has its values in a unique index, 0 if none has, or a refusal.
+pub fn taken[&q, &z, &r, &k](p: &!z pager.Pager, w: &!q exec.Work, tree: int, r: &r [byte], k: &k [byte], kn: int) -> [file_read] int {
+    let dl = w.dlen;
+    var i = 0;
+    while i < w.nix {
+        let at = i * index.rec();
+        if index.unique(contents(w.ix), at) {
+            let h = index.holder(p, contents(w.sc), tree, w.tid, contents(w.ix), at, contents(w.ctx)[64..64 + dl], r, k[4..kn], contents(w.ixa), contents(w.ixb), contents(w.ua), contents(w.ub), contents(w.uv));
+            if h < 0 {
+                return exec.tree_err(h);
+            }
+            if h > 0 {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Before an UPDATE writes the row at the key `k[0..kn]`, which was `old` and becomes `new`. `root` is the tree before the statement, `nroot` the tree it has
+// made so far, `seen` a tree of the rows remembered as holding a value another row takes (0: none yet). PostgreSQL checks each row as it writes it, in an
+// order the engine does not know, so only what no order changes is answered:
+//   - the new value is held now by another row: that row is remembered. If it is read later and gives the value up, the outcome depends on the order
+//     (`w.orderdep`); if it is still remembered when the statement ends it kept the value, or took it in this statement, and the caller notes the error;
+//   - the new value was held before the statement by a row that has since given it up: order-dependent.
+// The tree of the remembered, or a refusal.
+pub fn changed[&q, &z, &o, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, nroot: int, seen: int, old: &o [byte], new: &n [byte], k: &k [byte], kn: int) -> [file_read, file_write] int {
+    let dl = w.dlen;
+    var out = seen;
+    var moved = false;
+    var i = 0;
+    while i < w.nix {
+        let at = i * index.rec();
+        if index.unique(contents(w.ix), at) {
+            let eo = index.entry(contents(w.ix), at, contents(w.ctx)[64..64 + dl], old, k[4..kn], contents(w.ixa));
+            let en = index.entry(contents(w.ix), at, contents(w.ctx)[64..64 + dl], new, k[4..kn], contents(w.ixb));
+            if eo < 0 || en < 0 {
+                return exec.too_big();
+            }
+            if !index.stays(contents(w.ix), at, contents(w.ctx)[64..64 + dl], old, new, eo, en) {
+                moved = true;
+                let h = index.holder(p, contents(w.sc), nroot, w.tid, contents(w.ix), at, contents(w.ctx)[64..64 + dl], new, k[4..kn], contents(w.ixa), contents(w.ixb), contents(w.ua), contents(w.ub), contents(w.uv));
+                if h < 0 {
+                    return exec.tree_err(h);
+                }
+                if h > 0 {
+                    contents(w.ua)[0] = byte_of('u');
+                    exec.copy(contents(w.ub), 4, h, contents(w.ua), 1);
+                    let s = btree.put(p, contents(w.sc), out, contents(w.ua)[0..1 + h], contents(w.ua)[0..1]);
+                    if s < 0 {
+                        return exec.tree_err(s);
+                    }
+                    out = s;
+                } else {
+                    let h0 = index.holder(p, contents(w.sc), root, w.tid, contents(w.ix), at, contents(w.ctx)[64..64 + dl], new, k[4..kn], contents(w.ixa), contents(w.ixb), contents(w.ua), contents(w.ub), contents(w.uv));
+                    if h0 < 0 {
+                        return exec.tree_err(h0);
+                    }
+                    if h0 > 0 {
+                        w.orderdep = true;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if moved && out != 0 {
+        // this row gives up a value: was it remembered as the holder of one another row takes?
+        contents(w.ua)[0] = byte_of('u');
+        exec.copy(k, 4, kn - 4, contents(w.ua), 1);
+        let g = btree.get(p, contents(w.sc), out, contents(w.ua)[0..1 + kn - 4], contents(w.uv));
+        if g >= 0 {
+            w.orderdep = true;
+        } else if g != btree.not_found() {
+            return exec.tree_err(g);
+        }
+    }
+    return out;
+}

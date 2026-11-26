@@ -1071,10 +1071,10 @@ pub fn run[&h, &z, &q, &m, &s, &k](heap: &!h Heap, pg: &!z pager.Pager, w: &!q e
             rc = execw.alter_add(pg, w, root, e, sql, contents(m.tb), contents(m.nb), contents(m.kb), top);
             kind = answer.k_alter_table();
         } else if kind == 4 && ln > 1 && int_of(e[1]) == 3 {
-            rc = execw.create_index(pg, w, root, e, sql, contents(m.tb), contents(m.nb), contents(m.kb), top);
+            rc = execd.create_index(pg, w, root, e, sql, contents(m.tb), contents(m.nb), contents(m.kb), top);
             kind = answer.k_create_index();
         } else if kind == 4 && ln > 1 && int_of(e[1]) == 4 {
-            rc = execw.drop_index(pg, w, root, e, sql, contents(m.tb), contents(m.nb), top);
+            rc = execd.drop_index(pg, w, root, e, sql, contents(m.tb), contents(m.nb), top);
             kind = answer.k_drop_index();
         } else if kind == 5 && is_call(e, "cancho_history_trim", 0) && len(e) == 7 + 19 {
             // what the rows were before, taken out of the page file (6bb)
