@@ -2702,7 +2702,7 @@ before the rows, `start`, `next`).
 - *Every row read is still judged by the whole `where`.* So the index may give rows the condition is not true for (a text is in an entry by its first
   24 bytes) and what matters is that it gives every row it is true for. The rows come in the order of their keys, as a read of the table gives them.
 - *When it is not done.* When a condition of the `where` can raise an error (the rule of the lookup by key, 6b: a row not read is a row whose error
-  is not found); when a condition already bounds the scan by the key; under a join; for a read of the past (**the entries in the tree a past read is
+  is not found); when a condition already bounds the scan by the key; under a join (there the engine does not ask whether the `where` can raise); for a read of the past (**the entries in the tree a past read is
   given are the present's**: an index has no history); for a partial index (it has not every row); when the constant is a null (`= null` is true of
   nothing, and the table says so); when the column is a boolean or a bytea; and when the constant has a minus sign, which is not counted as a
   constant because it can overflow. That last one is a limit worth removing: `where a = -5` reads the table.
@@ -2712,10 +2712,10 @@ before the rows, `start`, `next`).
   slice 1 wrote, before any file but a test's had one.
 - *`update` and `delete` do not read an index yet.* They read the table, or the key's bounds.
 
-*The test, written with it.* `tests/engine_check.py` runs 61 selects on a table with five indexes (one partial, one of two columns) and a table with a
-key of two columns, each marked with whether it has to be read by an index, between writes, a rollback, a key moved, an index dropped and made again, a
+*The test, written with it.* `tests/engine_check.py` runs 64 selects on a table with five indexes (one partial, one of two columns), a table with a
+key of two columns and one with 400 rows of a value, each marked with whether it has to be read by an index, between writes, a rollback, a key moved, an index dropped and made again, a
 table renamed and a `truncate`. PostgreSQL holds every answer, and the test program counts the statements it read by an index (`!via`): the count has
-to be exactly the 44 marked. So an index read where it may not be fails, and one not read where it is there fails too. A read of the past by value is
+to be exactly the 45 marked. So an index read where it may not be fails, and one not read where it is there fails too. A read of the past by value is
 held to what the table had then, with a count of 0 (`past_by_value`), and through the server's `as of` in `tests/engine_log.py`.
 
 **Measured** (by hand, the test program, 600 selects by value, half on an integer column with 10 rows a value and half on a text column):

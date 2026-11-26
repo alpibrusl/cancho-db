@@ -17,10 +17,11 @@ import cdb.exec;
 
 // Before the rows of a SELECT, after `exec.where_static`: whether it reads by an index, and by which entries (`w.vian`, `w.via`). Not when a condition of the
 // WHERE can raise an error (a row not read is a row whose error is not found, 6g), not when the key already bounds the scan, not when the tree is the past's
-// (an index has no history: the entries in that tree are the present's), not under a join, and not for the rows a RETURNING wrote. 0.
+// (an index has no history: the entries in that tree are the present's), and not for the rows a RETURNING wrote. Under a join `exec.where_static` does not say
+// the WHERE is quiet (a column of that name may be another table's), so there is none here either. 0.
 pub fn choose[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int]) -> [] int {
     w.vian = 0 - 1;
-    if !w.quiet || w.past || w.ret >= 2 || w.ntab != 1 || w.nix == 0 || w.lon >= 0 || w.hin >= 0 {
+    if !w.quiet || w.past || w.ret >= 2 || w.nix == 0 || w.lon >= 0 || w.hin >= 0 {
         return 0;
     }
     let dl = w.dlen;

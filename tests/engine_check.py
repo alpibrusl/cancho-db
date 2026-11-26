@@ -1841,6 +1841,8 @@ VIAFIXED = [
     (P("select k from fvi where s = $1", "3"), "set", True),
     (P("select k from fvi where a = $1 and k > $2", "5", "2"), "set", False),
     (P("select k from fvi where a = $1", None), "set", False),
+    ("select k from fvi where b = null", "set", False),
+    (P("select k from fvi where b = $1", None), "set", False),
     # a minus sign is not read as a constant (it can overflow, and an error of the WHERE has to be found on every row: 6g)
     ("select k from fvi where a = -5", "set", False),
     ("select k from fvi where s = -32768", "set", False),
@@ -1886,6 +1888,11 @@ VIAFIXED = [
     ("select * from fvj where v = 'p'", "set", True),
     ("alter table fvj rename to fvk", "ddl", False),
     ("select * from fvk where v = 'p'", "set", True),
+    # more rows of one value than a leaf of the tree has entries
+    ("create table fvl (k integer primary key, a integer)", "ddl", False),
+    ("create index fvla on fvl (a)", "ddl", False),
+    ("insert into fvl values " + ", ".join("(%d, %d)" % (i, i % 3) for i in range(1200)), "write", False),
+    ("select k from fvl where a = 1", "set", True),
     ("truncate fvi", "ddl", False),
     ("select k from fvi where a = 5", "set", True),
     ("insert into fvi values (1, 5, 'x', 7, 3, true)", "write", False),
@@ -2279,7 +2286,7 @@ def main():
     wanted = sum(1 for v in VIAFIXED if v[2])
     if VIA[0] != wanted:
         raise SystemExit("engine_check: %d statements read by an index, and %d should have" % (VIA[0], wanted))
-    _, vfails, _, _ = compare(pg, [(sql, how, "fvj" if " fvj" in str(sql) else "fvi") for sql, how, _ in VIAFIXED], veng, True)
+    _, vfails, _, _ = compare(pg, [(sql, how, "fvj" if " fvj" in str(sql) else "fvl" if " fvl" in str(sql) else "fvi") for sql, how, _ in VIAFIXED], veng, True)
     fails += vfails
     print("engine_check: %d statements read by an index and %d beside them that may not be, each with PostgreSQL's answer" % (wanted, sum(1 for v in VIAFIXED if v[1] in ("set", "order") and not v[2])))
     print("engine_check: %d fixed statements, none refused: %s" % (len(FIXED), ", ".join("%s=%d" % kv for kv in sorted(fcounts.items()))))

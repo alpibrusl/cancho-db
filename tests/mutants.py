@@ -2973,7 +2973,6 @@ ENGINE = [
     ("scrub: index: what an erased row's indexes had of its earlier forms is not looked for", 'src/execw.cho', '                        nroot = unindexed(p, w, nroot, 33, hg, kn, false);', '                        nroot = nroot + 0;'),
     ("via: the past is read by the present's index", 'src/via.cho', 'if !w.quiet || w.past || w.ret >= 2', 'if !w.quiet || w.ret >= 2'),
     ('via: an index is read though a condition of the WHERE can raise', 'src/via.cho', 'if !w.quiet || w.past || w.ret >= 2', 'if w.past || w.ret >= 2'),
-    ('via: an index is read under a join', 'src/via.cho', ' || w.ntab != 1 || w.nix == 0', ' || w.nix == 0'),
     ('via: an index is read though the key bounds the scan', 'src/via.cho', ' || w.nix == 0 || w.lon >= 0 || w.hin >= 0 {', ' || w.nix == 0 {'),
     ('via: any comparison with a constant is read as an equality', 'src/via.cho', '        if int_of(e[a]) == 5 && int_of(e[a + 1]) == 0 {\n            let (c1, mid)', '        if int_of(e[a]) == 5 && int_of(e[a + 1]) <= 5 {\n            let (c1, mid)'),
     ('via: a partial index is read as if it had every row', 'src/via.cho', 'if int_of(contents(w.ix)[at + 4]) == 0 && exec.is_col(w, e, cat, col) {', 'if exec.is_col(w, e, cat, col) {'),
