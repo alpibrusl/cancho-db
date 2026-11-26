@@ -1707,7 +1707,8 @@ UNSUP = [
     # and this one only for rows that join, so it answers
     ("select fz.k from fz join fw on fz.k = fw.wk and 10 / fw.m > fz.k", None),
     ("select a1.k from fz a1 join fz a2 on a1.k = a2.k", None),          # a table joined to itself
-    ("update fu set k = k + 10", None),                                   # a key that changes on a table with a unique index (6bo)
+    ("update fu set k = k + 10, u = u + 100", None),                      # a key that changes on a table with a unique index, and the indexed value with it (6bo)
+    ("update fu set k = k + 10, u = 1 where k = 2", "23505"),
     ("drop index fuc_u_key", "2BP01"),                                    # the index of a constraint: an error of its own, and another statement to drop it by
     ("alter table fuc add column v integer unique", None),               # a constraint added to a table that has rows
     ("create table fue (k integer primary key, u integer unique)", None), # the constraint's name is a sequence's: PostgreSQL takes another
@@ -1983,6 +1984,15 @@ UNIQFIXED = [
     ("update fua set u = null", "write"),
     ("update fua set u = k", "write"),
     ("update fua set u = 1 where k = 1", "write"),
+    ("select * from fua order by k", "order"),
+    # a row that takes another key keeps its values in the unique indexes: it is moved, and its entries with it
+    ("update fua set k = k + 200 where k = 1", "write"),
+    ("select k from fua where u = 1", "set"),
+    ("insert into fua values (1, 1, 'again', false, 77, 77, 77)", "write"),
+    ("update fua set k = k - 200, c = c where k > 200", "write"),
+    ("update fua set k = k + 1000", "write"),
+    ("update fua set k = k - 1000, s = s where k > 1000", "write"),
+    ("update fua set k = 2 where k = 1", "write"),
     ("select * from fua order by k", "order"),
     # a delete frees the value; a rollback frees what the transaction took
     ("delete from fua where k = 2", "write"),

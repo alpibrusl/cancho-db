@@ -610,9 +610,17 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                     }
                     if uniq.any(w) {
                         if moved {
-                            // (a key that changes on a table with a unique index: not reasoned about in this slice, 6bo)
-                            return exec.unsupported();
+                            // a row that takes another key: moved if it keeps its values in every unique index (its entries follow it); one whose values
+                            // there change too is not reasoned about (6bo)
+                            let kp = uniq.keeps(w, contents(w.cur)[0..rl], contents(w.nrow)[0..ra], contents(w.key), okl);
+                            if kp < 0 {
+                                return kp;
+                            }
+                            if kp != 1 {
+                                return exec.unsupported();
+                            }
                         }
+                        // (for a row that is moved this finds nothing to ask: its values stay)
                         let us = uniq.changed(p, w, root, nroot, seen, contents(w.cur)[0..rl], contents(w.nrow)[0..ra], contents(w.key), okl);
                         if us < 0 {
                             return us;

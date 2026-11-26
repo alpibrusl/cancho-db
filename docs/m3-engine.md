@@ -2762,6 +2762,11 @@ of the columns conflicts with none, and a partial unique index holds only the ro
   way. The mutants of those two tests could not be killed, and the tests are gone.)
 - *An update that changes the key* of a table with a unique index is refused (`engine-unsupported`) in this slice: it goes by another path (the rows
   leave their keys and then take the new ones) and the reasoning above is not made for it.
+  *Since:* **a row that takes another key and keeps its values in every unique index is moved**, and only one whose values there change too is
+  refused. A row's values are not another's because its key is, so nothing has to be looked up: PostgreSQL finds, for the new entry, only the row's
+  own old version. The entries follow the row to its new key (slice 1). `update t set k = k + 10` on a table with a unique column is answered.
+  *Tested*: 8 more statements in the list (120), two among those refused on purpose (the key and the indexed value both changed: one PostgreSQL
+  answers, one it fails), 3 mutants.
 - *A column or table `unique` constraint* in `create table` stays refused: it needs the index's name to be the constraint's, and `drop index` on it
   to be an error. `create unique index` is the whole of this slice.
 - *The schema.* Whether an index is unique is part of what the schema hash is made of (6bl): it is a constraint, not a way of reading.
