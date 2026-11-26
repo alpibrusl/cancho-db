@@ -797,7 +797,7 @@ fn as_of_view[&z, &q, &b, &s](pg: &!z pager.Pager, w: &!q exec.Work, m: &!b Run,
         } else {
             view = facts.txn_of(pg, w, root, ident);
             if view >= 0 {
-                view = exec.as_of(pg, w, root, view);
+                view = facts.as_of(pg, w, root, view);
             }
         }
     }

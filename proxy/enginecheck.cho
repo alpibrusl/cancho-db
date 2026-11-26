@@ -861,7 +861,7 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                         put_str(io, "asof -\n");
                     } else {
                         let t = number(all, ls + 6, le);
-                        view = exec.as_of(pg, w, rs[cur], t);
+                        view = facts.as_of(pg, w, rs[cur], t);
                         if view < 0 {
                             put_str(io, "err ");
                             put_int(io, view);

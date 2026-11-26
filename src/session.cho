@@ -189,7 +189,7 @@ pub fn close[&h, &q, &z, &s, &k, &y, &o](heap: &!h Heap, p: &!z pager.Pager, w: 
                 }
                 note_facts(ss, fr);
             }
-            root = exec.mark_txn(p, w, after, last + 1);
+            root = facts.mark_txn(p, w, after, last + 1);
             if wrote && root >= 0 {
                 root = seal_on(heap, p, w, ss, root, fr, key, who, rec, branch);
             }
@@ -214,7 +214,7 @@ pub fn close[&h, &q, &z, &s, &k, &y, &o](heap: &!h Heap, p: &!z pager.Pager, w: 
         if after == is_commit() && ss[0] == open_txn() {
             ss[5] = 2;
             if ss[1] != branch {
-                root = exec.mark_txn(p, w, ss[1], last + 1);
+                root = facts.mark_txn(p, w, ss[1], last + 1);
             }
             if ss[3] == 1 && root >= 0 {
                 note_facts(ss, ss[2]);
