@@ -28,7 +28,8 @@ import cdb.row;
 //
 //     !commit        make the statements so far durable (src/pstore.cho)      -> `committed SEQ` or `err CODE`
 //     !sweep         zero and reuse the pages nothing names                   -> `swept N` or `err CODE`
-//     !indexes       every built index against its table's rows (6bo)        -> `indexes N ok`, or `indexes bad NAME should S has H found F`
+//     !indexes       every built index against its table's rows (6bo), and every number that has keys against the tables and indexes there are
+//                                                                             -> `indexes N ok`, or `indexes bad NAME should S has H found F`, `indexes bad nobody NUMBER`
 //     !indexed       whether the tree says all of its history is findable by key (6bi)   -> `indexed` or `unindexed`
 //     !unindex       make the tree one from before that: the mark and every by-key entry are removed    -> `unindexed`
 //     !purge         the same from what was written since the last sweep or purge (6bh), checked against the sweep's walk
@@ -1050,10 +1051,79 @@ fn indexes_ok[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, roo
         let ek = alloc_slice[g](256, byte_of(0));
         let one = alloc_slice[g](1024, byte_of(0));
         let rec = alloc_slice[g](16, byte_of(0));
+        // every number a table or a built index has: what is in the tree under any other is nobody's (rows of a table that is gone, entries of an index that is)
+        let known = alloc_slice[g](4096, 0);
+        var nknown = 0;
+        build.put_be(ck, 0, 0, 4);
+        var ckl = 4;
+        var more = root != 0;
+        while more && status == 0 {
+            let r = btree.next_after(pg, exec.scratch(w), root, ck[0..ckl], false, ck2, cv);
+            if r == btree.not_found() {
+                more = false;
+            } else if r < 0 {
+                status = r;
+            } else if r / 1024 < 5 || commit.be(ck2, 0, 4) != 0 {
+                more = false;
+            } else {
+                let nk = r / 1024;
+                let nv = r % 1024;
+                let kind = int_of(ck2[4]);
+                var id = 0;
+                if kind == 1 {
+                    let zb = index.name_end(cv[0..nv]);
+                    if zb >= 0 && zb + 5 <= nv {
+                        id = commit.be(cv, zb + 1, 4);
+                    }
+                } else if kind > 4 && nv >= 4 {
+                    id = commit.be(cv, 0, 4);
+                }
+                if id > 0 && nknown < 4096 {
+                    known[nknown] = id;
+                    nknown = nknown + 1;
+                }
+                ckl = 0;
+                while ckl < nk {
+                    ck[ckl] = ck2[ckl];
+                    ckl = ckl + 1;
+                }
+            }
+        }
+        // from the first number above the catalog's, to the log's and the history's: each number that has keys is one that is known
+        var at = 1;
+        more = root != 0;
+        while more && status == 0 {
+            build.put_be(ck, 0, at, 4);
+            let r = btree.next_after(pg, exec.scratch(w), root, ck[0..4], true, ck2, cv);
+            if r == btree.not_found() {
+                more = false;
+            } else if r < 0 {
+                status = r;
+            } else if r / 1024 < 4 || commit.be(ck2, 0, 4) >= tables.log_space() {
+                more = false;
+            } else {
+                let id = commit.be(ck2, 0, 4);
+                var is = false;
+                var c = 0;
+                while c < nknown {
+                    if known[c] == id {
+                        is = true;
+                    }
+                    c = c + 1;
+                }
+                if !is {
+                    wrong = wrong + 1;
+                    put_str(io, "indexes bad nobody ");
+                    put_int(io, id);
+                    putchar(io, '\n');
+                }
+                at = id + 1;
+            }
+        }
         build.put_be(ck, 0, 0, 4);
         ck[4] = byte_of(1);
-        var ckl = 5;
-        var more = root != 0;
+        ckl = 5;
+        more = root != 0;
         while more && status == 0 {
             let r = btree.next_after(pg, exec.scratch(w), root, ck[0..ckl], false, ck2, cv);
             if r == btree.not_found() {

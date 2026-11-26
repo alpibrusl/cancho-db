@@ -2651,6 +2651,46 @@ table's rows say it should have, and whether they are the same set (`indexes N o
 *What slice 1 will cost* is a number it owes: every write to an indexed table writes more pages. It is measured before slice 2 is begun, with the
 soak's transfers on a table with one index and with three.
 
+**Slice 1, built.** `src/index.cho` (what an index is in the catalog, the entry of a row, `apply`, `clear`, `load`); `row.index_part` (a value as an entry has
+it). `exec.bind_table` loads the bound table's indexes and `exec.row_put` and `exec.row_del`, the two places a row is written or removed, keep their
+entries: that covers insert, update, delete, `truncate`, `drop table` and a table renamed. `execw.create_index` gives the index a number, writes its
+catalog entry with its columns and builds an entry for each row; `drop_index` removes them (`index.clear`). `execw.erase` (`unindexed`). To make room,
+`as_of` and `mark_txn` moved from `exec.cho` to `facts.cho` unchanged (nothing in `exec.cho` called them and the file was at 1,985 lines).
+
+*Two things about the entries that the plan did not say.*
+
+- *A text is in an entry by its first 24 bytes.* A key of the tree is at most 200 bytes, and an entry ends with the row's own key. So two rows whose
+  texts begin the same have entries that differ only in that key, and a reader by value (slice 2) has to look at the row. An entry that would still be
+  too long refuses the statement that writes the row.
+- *An index from before stays a name.* Its catalog value has no number; nothing is built behind it.
+
+**What the test found, the first time it ran.**
+
+- **An update that changes the key did not keep the indexes.** On two of the first three seeds of the random history an index had the right number of
+  entries and some of the wrong ones. `update ta set k = k + 30` moves every row to another key through a path of its own (the rows leave their keys,
+  then take the new ones, so that no row meets another's old key), and that path writes with `exec.put_key`, not `row_put`. It keeps the entries now.
+  Found by `!indexes` asked after every statement (`INDEX_EVERY=1`), which named the statement.
+- **The erase test failed with indexes, as this section said it would**: the indexed values of an erased row were in the file, in the entries the erase
+  had not been told of. It passes with `unindexed`.
+- **The check itself had a hole.** It held each index the catalog names to its table, and so could not see the entries of an index that had been
+  dropped and not cleared: nobody's, and an erase would never find them. `!indexes` now also holds every number that has keys in the tree to the tables
+  and indexes there are (`indexes bad nobody N`).
+
+**Measured.** What keeping them costs a write, by hand with the test program (no server, no sync): a table of four columns, 4,000 inserts, 4,000
+updates of one indexed column by key, 2,000 deletes by key, each its own commit, twice.
+
+| indexes | ms a statement | page file written |
+|---|---|---|
+| 0 | 0.22, 0.23 | 257 MiB |
+| 1 | 0.30, 0.29 | 312 MiB |
+| 3 | 0.40, 0.42 | 396 MiB |
+
+About a third more time for the first index and a quarter of that again for each further one; the pages are those a commit copies and a sweep takes
+back (the test program does not sweep). `!indexes` said `ok` after each run.
+
+*A limit of the check, said plainly.* `!indexes` works out what entry a row should have with the function the engine writes it with (`index.entry`). A
+fault in that function is on both sides and is not seen. It will be seen in slice 2, where a read by an index is held to PostgreSQL's answer.
+
 *Not in the plan.* An index on an expression; `include`; any index but the tree's own order; a planner that chooses between two indexes by anything
 but "the first that fits"; statistics.
 

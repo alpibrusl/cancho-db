@@ -202,7 +202,7 @@ pub fn apply[&q, &s, &x, &d, &k, &o, &w, &a, &b](p: &!q pager.Pager, sc: &!s [by
         if ol < 0 || nl < 0 {
             return btree.err_big();
         }
-        var keep = ol == nl && ol > 0;
+        var keep = ol == nl;
         var c = 0;
         while keep && c < ol {
             if int_of(a[c]) != int_of(b[c]) {
