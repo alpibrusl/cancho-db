@@ -1085,6 +1085,7 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
     var keys = keys0;
     var c = c0;
     contents(w.pos)[exec.p_ddl() + 2] = 0;
+    contents(w.ua)[0] = byte_of(0);
     while c < nc {
         // `skip` is the child of the list that is no column (a table's PRIMARY KEY (...)), or -1
         var ci = c - c0;
@@ -1129,8 +1130,13 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
             return exec.unsupported();
         }
         if flags / 4 % 2 == 1 {
-            // UNIQUE needs an index: not in this slice
-            return exec.unsupported();
+            // UNIQUE: a constraint's index, made with the table (`uniq.constraints`; 6bo). Not on a column added later, and at most eight a table.
+            let nu = int_of(contents(w.ua)[0]);
+            if c0 != 0 || nu >= 8 {
+                return exec.unsupported();
+            }
+            contents(w.ua)[1 + nu] = byte_of(c);
+            contents(w.ua)[0] = byte_of(nu + 1);
         }
         var place = 0;
         if flags / 2 % 2 == 1 {
@@ -1407,9 +1413,14 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     if r2 < 0 {
         return r2;
     }
-    let nw = tables.create(p, contents(w.sc), r2, e[4..4 + nl], contents(w.key), contents(w.ent)[0..total]);
+    var nw = tables.create(p, contents(w.sc), r2, e[4..4 + nl], contents(w.key), contents(w.ent)[0..total]);
     if nw < 0 {
         return exec.tree_err(nw);
+    }
+    // the unique columns: an index each, the constraint's (6bo)
+    nw = uniq.constraints(p, w, nw, e[4..4 + nl], nc);
+    if nw < 0 {
+        return nw;
     }
     w.root = nw;
     if contents(w.pos)[exec.p_ddl() + 2] != 0 {

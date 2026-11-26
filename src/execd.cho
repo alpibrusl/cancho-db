@@ -371,12 +371,16 @@ pub fn drop_index[&q, &z, &x, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, 
     if g < 0 {
         return exec.tree_err(g);
     }
+    let z = index.name_end(contents(w.cur)[0..g]);
+    if z >= 0 && z + 5 < g && int_of(contents(w.cur)[z + 5]) / 4 % 2 == 1 {
+        // a constraint's index (`unique` on a column): PostgreSQL has an error of its own for this, and another statement to drop it by
+        return exec.unsupported();
+    }
     var nw = exec.del_key(p, w, root, contents(w.key2), kl);
     if nw < 0 {
         return nw;
     }
     // a built index's entries go with it (6bo)
-    let z = index.name_end(contents(w.cur)[0..g]);
     if z >= 0 && z + 5 <= g {
         let id = commit.be(contents(w.cur), z + 1, 4);
         region s {

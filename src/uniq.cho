@@ -5,7 +5,9 @@ module cdb.uniq;
 // Copyright (c) 2026 Alpibru S.L.
 // Unique indexes (docs/m3-engine.md 6bo, slice 3): a row may not be written while another row has the same values in the columns of one. What an INSERT and
 // an UPDATE ask before they write a row; the looking up is `index.holder`.
+import cdb.commit;
 import cdb.btree;
+import cdb.tables;
 import cdb.pager;
 import cdb.index;
 import cdb.exec;
@@ -99,6 +101,65 @@ pub fn changed[&q, &z, &o, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: i
         } else if g != btree.not_found() {
             return exec.tree_err(g);
         }
+    }
+    return out;
+}
+
+// After CREATE TABLE has made the table `name`, whose entry (`nc` columns) is in `ent` and whose columns written UNIQUE are listed in `ua` (how many, then their
+// numbers): a unique index `<table>_<column>_key` on each, marked as a constraint's, in the tree `root`. The new root; or a refusal, when a name is taken (PostgreSQL
+// tries another) or longer than a name may be (PostgreSQL cuts it).
+pub fn constraints[&q, &z, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, name: &n [byte], nc: int) -> [file_read, file_write] int {
+    var out = root;
+    let nu = int_of(contents(w.ua)[0]);
+    var u = 0;
+    while u < nu && out >= 0 {
+        let col = int_of(contents(w.ua)[1 + u]);
+        // the column's name in the entry (its columns from 8: a type, a place in the key, a length, the name)
+        var oa = 8;
+        var c = 0;
+        while c < col && c < nc {
+            oa = oa + 4 + commit.be(contents(w.ent), oa + 2, 2);
+            c = c + 1;
+        }
+        let cl = commit.be(contents(w.ent), oa + 2, 2);
+        var nl = exec.copy(name, 0, len(name), contents(w.nrow), 0);
+        contents(w.nrow)[nl] = byte_of('_');
+        nl = exec.copy(contents(w.ent), oa + 4, cl, contents(w.nrow), nl + 1);
+        contents(w.nrow)[nl] = byte_of('_');
+        contents(w.nrow)[nl + 1] = byte_of('k');
+        contents(w.nrow)[nl + 2] = byte_of('e');
+        contents(w.nrow)[nl + 3] = byte_of('y');
+        nl = nl + 4;
+        if nl > 63 {
+            return exec.unsupported();
+        }
+        // the name is free: no index has it, no table, no sequence
+        let kl = tables.index_key(contents(w.nrow)[0..nl], contents(w.key2));
+        let g = btree.get(p, contents(w.sc), out, contents(w.key2)[0..kl], contents(w.uv));
+        let gt = tables.find(p, contents(w.sc), out, contents(w.nrow)[0..nl], contents(w.key), contents(w.uv));
+        let ql = tables.sequence_key(contents(w.nrow)[0..nl], contents(w.key));
+        let gq = btree.get(p, contents(w.sc), out, contents(w.key)[0..ql], contents(w.uv));
+        if g >= 0 || gt >= 0 || gq >= 0 {
+            return exec.unsupported();
+        }
+        if g != btree.not_found() || gt != btree.not_found() || gq != btree.not_found() {
+            return exec.damaged();
+        }
+        var vl = 0;
+        region r {
+            let idn = alloc_slice[r](1, 0);
+            out = index.number(p, contents(w.sc), out, contents(w.key), idn);
+            if out >= 0 {
+                contents(w.ub)[0] = byte_of(col);
+                // (flags: 2 a unique index, 4 a constraint's)
+                vl = index.value(name, idn[0], 6, 0, contents(w.ub), 1, contents(w.uv));
+            }
+        }
+        if out < 0 {
+            return exec.tree_err(out);
+        }
+        out = exec.put_key(p, w, out, contents(w.key2), kl, contents(w.uv)[0..vl]);
+        u = u + 1;
     }
     return out;
 }
