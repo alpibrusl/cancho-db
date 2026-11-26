@@ -1941,11 +1941,14 @@ VIAFIXED = [
     ("select k from fvr where b < 'v001'", "set", True),
     (P("select k from fvr where a >= $1 and a < $2", "50", "60"), "set", True),
     ("select k from fvr where a >= 0 and a < 100", "set", True),
+    # (with no lower bound the read begins after the nulls, and they are counted with the rest of the index)
+    ("select k from fvr where a < 100", "set", True),
     # an equality is taken before a range
     ("select k from fvr where b > 'v000' and a = 5", "set", True),
     ("select k from fvr where a > 1 and b = 'v005'", "set", True),
     # more than a quarter: the table
     ("select k from fvr where a >= 0 and a < 104", "set", False),
+    ("select k from fvr where a < 119", "set", False),
     ("select k from fvr where a > 100", "set", False),
     ("select k from fvr where a >= 0", "set", False),
     ("select k from fvr where a < 300", "set", False),
