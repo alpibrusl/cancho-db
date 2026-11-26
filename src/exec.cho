@@ -1486,7 +1486,7 @@ fn bounds[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int]) -> [] int {
             let p = contents(w.ws)[i];
             let tag = int_of(e[p]);
             // (a parameter the client bound is a constant: what it cannot be read as was refused before any row)
-            let quiet = tag == 0 || tag == 1 || tag == 2 && (contents(w.cx)[eval.inner_at()] == 0 || commit.be(e, p + 1, 4) < contents(w.cx)[eval.inner_at()]) || tag == 8 || tag == 5 && int_of(e[p + 1]) <= 7 || tag == 7 && int_of(e[p + 1]) != 1;
+            let quiet = tag == 0 || tag == 1 || tag == 2 && (contents(w.cx)[eval.inner_at()] == 0 || commit.be(e, p + 1, 4) < contents(w.cx)[eval.inner_at()]) || tag == 8 || tag == 5 && int_of(e[p + 1]) <= 7 || tag == 7 && (int_of(e[p + 1]) != 1 || eval.neg_const(e, p));
             if !quiet {
                 return 0;
             }
@@ -1517,9 +1517,9 @@ fn bounds[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int]) -> [] int {
             let (c1, mid) = eval.scan(e, a + 2, contents(w.ws));
             let (c2, end) = eval.scan(e, mid, contents(w.ws));
             var vat = 0 - 1;
-            if c1 == 1 && c2 == 1 && int_of(e[a + 2]) == 0 && (int_of(e[mid]) == 1 || int_of(e[mid]) == 2) && is_col(w, e, a + 2, kc) {
+            if c1 == 1 && int_of(e[a + 2]) == 0 && eval.constant(e, mid, c2) && is_col(w, e, a + 2, kc) {
                 vat = mid;
-            } else if c1 == 1 && c2 == 1 && int_of(e[mid]) == 0 && (int_of(e[a + 2]) == 1 || int_of(e[a + 2]) == 2) && is_col(w, e, mid, kc) {
+            } else if c2 == 1 && int_of(e[mid]) == 0 && eval.constant(e, a + 2, c1) && is_col(w, e, mid, kc) {
                 vat = a + 2;
                 // constant < key is key > constant
                 if op == 2 || op == 3 {
