@@ -814,7 +814,9 @@ fn select_as_of[&z, &q, &b, &s](pg: &!z pager.Pager, w: &!q exec.Work, m: &!b Ru
         if l2 < 0 {
             rc = exec.unsupported();
         } else {
+            w.past = true;
             rc = execs.select(pg, w, view, ir2[0..l2], sc2);
+            w.past = false;
         }
         // the tree read is not the branch's: the statement leaves the branch as it found it
         w.root = root;

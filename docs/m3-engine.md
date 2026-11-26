@@ -270,6 +270,12 @@ are M3b's page reuse within a transaction and the page cache of gate 3. Neither 
 and `IN`): a row that is not read is a row whose error is not found, and the rule of 6g is that every error is found. So `where k = 77 and a / b > 1` is still a full scan, and says so here rather than
 answering by luck; every row that is read is still judged by the whole `where`.
 
+*Corrected (6bo, slice 2).* "A constant" above did not include a parameter, though PostgreSQL's planner takes one for a constant and the engine had
+already refused, before any row, one that cannot be read as the column's type. So `where k = $1`, which is what a driver sends, read the whole table:
+76 ms a lookup on 100,000 rows where the same lookup with the number written in the statement took under 0.1 ms. A parameter the client bound is now a
+constant here (one the engine binds itself for a subquery's value is not), and a string or a parameter compared with an integer key is read as that
+integer: 0.11 ms. The first measure is the binary before the change and the second after, 200 lookups each, by hand.
+
 **Not built yet, as before:** the engine's delta tree and the `AS OF` reads over it, transactions over several statements (a statement is its own), the output column names a client is sent, and
 everything listed above as refused.
 
@@ -2613,7 +2619,7 @@ them, in slices that each leave the gate green, and the design of the first.
   from, so no table has it), the columns it is on, in order, and the boolean column of its condition if it is a partial one (6x). An entry without
   those is an index from before: a name, as now, and it stays one (it is not built behind anyone's back; it can be dropped and made again).
 - *Its entries* are keys under its number: for each of its columns one byte (0: null; 1: a value) and the value as a key stores it (the encoding of
-  `row.cho`: it sorts as the values do), then the row's own key. One byte for a value. An entry leads to its row by the key at its end.
+  `row.cho`: it sorts as the values do), then the row's own key. One byte for a value (since slice 2 that byte says where in the entry the row's key begins). An entry leads to its row by the key at its end.
 - *They are written with the row*, in the same statement and the same tree: an insert writes them, a delete removes them, an update that changes an
   indexed column or the condition's removes the old and writes the new. `truncate` and `drop table` remove them with the rows, `drop index` removes
   them alone, and `create index` on a table that has rows writes one for each.
@@ -2649,7 +2655,8 @@ table's rows say it should have, and whether they are the same set (`indexes N o
 - and in the erase test with an indexed column of 14 to 65 bytes: after the erases no value an erased row ever had is in the file.
 
 *What slice 1 will cost* is a number it owes: every write to an indexed table writes more pages. It is measured before slice 2 is begun, with the
-soak's transfers on a table with one index and with three.
+soak's transfers on a table with one index and with three. (*What was measured is not that*: single-row statements through the test program, below. The
+soak has no table with three indexes and its time is mostly its syncs.)
 
 **Slice 1, built.** `src/index.cho` (what an index is in the catalog, the entry of a row, `apply`, `clear`, `load`); `row.index_part` (a value as an entry has
 it). `exec.bind_table` loads the bound table's indexes and `exec.row_put` and `exec.row_del`, the two places a row is written or removed, keep their
@@ -2688,7 +2695,42 @@ updates of one indexed column by key, 2,000 deletes by key, each its own commit,
 About a third more time for the first index and a quarter of that again for each further one; the pages are those a commit copies and a sweep takes
 back (the test program does not sweep). `!indexes` said `ok` after each run.
 
-*A limit of the check, said plainly.* `!indexes` works out what entry a row should have with the function the engine writes it with (`index.entry`). A
+**Slice 2: a read by an indexed column's value.** A `select` of one table whose `where` has, among its top-level conditions, `column = constant`
+with the column the first of a built index, reads that index's entries for the value and each entry's row, not the table (`src/via.cho`: `choose`
+before the rows, `start`, `next`).
+
+- *Every row read is still judged by the whole `where`.* So the index may give rows the condition is not true for (a text is in an entry by its first
+  24 bytes) and what matters is that it gives every row it is true for. The rows come in the order of their keys, as a read of the table gives them.
+- *When it is not done.* When a condition of the `where` can raise an error (the rule of the lookup by key, 6b: a row not read is a row whose error
+  is not found); when a condition already bounds the scan by the key; under a join (there the engine does not ask whether the `where` can raise); for a read of the past (**the entries in the tree a past read is
+  given are the present's**: an index has no history); for a partial index (it has not every row); when the constant is a null (`= null` is true of
+  nothing, and the table says so); when the column is a boolean or a bytea; and when the constant has a minus sign, which is not counted as a
+  constant because it can overflow. That last one is a limit worth removing: `where a = -5` reads the table.
+- *The constant.* A number for an integer column; a string for a text column; a parameter or a string for an integer column is read as the integer
+  the column's type makes of it (one that is no integer was refused before any row).
+- *An entry says where its row's key begins* (its one byte of value), so that the reader need not know the columns' lengths. This changed the entries
+  slice 1 wrote, before any file but a test's had one.
+- *`update` and `delete` do not read an index yet.* They read the table, or the key's bounds.
+
+*The test, written with it.* `tests/engine_check.py` runs 64 selects on a table with five indexes (one partial, one of two columns), a table with a
+key of two columns and one with 400 rows of a value, each marked with whether it has to be read by an index, between writes, a rollback, a key moved, an index dropped and made again, a
+table renamed and a `truncate`. PostgreSQL holds every answer, and the test program counts the statements it read by an index (`!via`): the count has
+to be exactly the 45 marked. So an index read where it may not be fails, and one not read where it is there fails too. A read of the past by value is
+held to what the table had then, with a count of 0 (`past_by_value`), and through the server's `as of` in `tests/engine_log.py`.
+
+**Measured** (by hand, the test program, 600 selects by value, half on an integer column with 10 rows a value and half on a text column):
+
+| rows | no index | by the index |
+|---|---|---|
+| 10,000 | 5.8 ms a select | 0.09 ms |
+| 100,000 | 68 ms | 0.16 ms |
+
+The same 3,341 rows answered either way on the larger table. The two indexes made the file 14 % larger (60.0 MiB for 52.4) and the load 40 % longer.
+
+*A limit of the check, said plainly (slice 1's; slice 2 narrows it).* Since slice 2 a fault in `index.entry` that loses a row from a read is seen by
+PostgreSQL's answer. One that only makes entries longer than they need be is still on both sides.
+
+*As it was written with slice 1:* `!indexes` works out what entry a row should have with the function the engine writes it with (`index.entry`). A
 fault in that function is on both sides and is not seen. It will be seen in slice 2, where a read by an index is held to PostgreSQL's answer.
 
 *Not in the plan.* An index on an expression; `include`; any index but the tree's own order; a planner that chooses between two indexes by anything

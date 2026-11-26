@@ -393,6 +393,12 @@ class Gen:
             return "%s %s %s and %s" % (pk[0], self.pick(["=", "<", ">="]), self.key_lit(pk[1]), self.bool_(1))
         if r < 0.6:
             return "%s and %s" % (self.bool_(1), self.bool_(1))
+        if r < 0.72:
+            # a column that is not the key, and a constant: what an index on it is read by (docs/m3-engine.md 6bo, slice 2)
+            c = self.pick(self.t.cols)
+            lit = str(self.pick(SMALL)) if c[1] in INTS else q(self.pick(TEXTS)) if c[1] == "text" else self.pick(["true", "false"])
+            sides = (c[0], lit) if self.r.random() < 0.8 else (lit, c[0])
+            return "%s = %s%s" % (sides + (" and " + self.bool_(1) if self.r.random() < 0.3 else "",))
         return self.bool_(2)
 
     def table(self, name):
@@ -768,6 +774,9 @@ def jselect(g, tables):
     return sql, how, names[0]
 
 
+VIA = [0]
+
+
 def run_engine(path, lines):
     # Every run of the test program ends by holding each built index to its table's rows (docs/m3-engine.md 6bo): an index that has an entry too many or too few after
     # whatever the run did (statements that failed, transactions rolled back, a table dropped, a crash before it) ends the test.
@@ -780,12 +789,15 @@ def run_engine(path, lines):
                 seen += 1
                 if not o.endswith(" ok"):
                     raise SystemExit("engine_check: after line %d %r (before it %r): %s" % (seen, lines[seen - 1][:300], [x[:120] for x in lines[max(0, seen - 4):seen - 1]], o))
-    r = subprocess.run([EXE, path], input="\n".join(list(lines) + ["!indexes"]) + "\n", capture_output=True, text=True)
+    r = subprocess.run([EXE, path], input="\n".join(list(lines) + ["!indexes", "!via"]) + "\n", capture_output=True, text=True)
     if r.returncode != 0:
         raise SystemExit("engine_check: enginecheck ended with %d: %s%s" % (r.returncode, r.stdout[-300:], r.stderr[-300:]))
     out, cur = [], []
     for line in r.stdout.split("\n"):
-        if line.startswith("indexes "):
+        if line.startswith("via "):
+            # how many of the run's statements read by an index (6bo, slice 2)
+            VIA[0] += int(line[4:])
+        elif line.startswith("indexes "):
             if not line.endswith(" ok"):
                 raise SystemExit("engine_check: %s" % line)
         elif line == ".":
@@ -1778,6 +1790,116 @@ UNSUP = [
 PGMAJOR = [0]
 
 
+# Reads by an index (docs/m3-engine.md 6bo, slice 2). Each statement says whether it has to be read by one: the run's count of such reads has to be the number of
+# those, so that an index read where it may not be, and one not read where it is there to be, both fail; PostgreSQL holds the answers.
+LONG = "abcdefghijklmnopqrstuvwx"   # 24 bytes: what an entry keeps of a text
+VIAFIXED = [
+    ("create table fvi (k integer primary key, a integer, b text, c bigint not null, s smallint, f boolean)", "ddl", False),
+    ("insert into fvi values (1, 5, 'x', 7, 3, true), (2, 5, '', 7, null, false), (3, 5, 'x', 8, 3, null), (4, 6, '%s-1', 7, -3, true), (5, null, '%s-2', 9, 3, true), (6, 5, null, 7, 4, false), "
+     "(7, -5, '%s', 7, 3, true), (8, 0, 'xy', 8, 0, null), (9, 5, 'X', 8, 32767, true), (10, 2147483647, 'ñ', -7, -32768, false)" % (LONG, LONG, LONG), "write", False),
+    ("select k from fvi where a = 5", "set", False),
+    ("create index fvia on fvi (a)", "ddl", False),
+    ("create index fvib on fvi (b)", "ddl", False),
+    ("create index fvis on fvi (s)", "ddl", False),
+    ("create index fvica on fvi (c, a)", "ddl", False),
+    # (a partial index, named to be met before the whole one on the same column: it is not read, it has not every row)
+    ("create index fvi0 on fvi (s) where f", "ddl", False),
+    ("select k from fvi where a = 5", "set", True),
+    ("select k, b from fvi where 5 = a", "set", True),
+    ("select * from fvi where b = 'x'", "set", True),
+    ("select * from fvi where b = ''", "set", True),
+    ("select k from fvi where b = '%s-1'" % LONG, "set", True),
+    ("select k from fvi where b = '%s'" % LONG, "set", True),
+    ("select k from fvi where b = '%s-'" % LONG, "set", True),
+    ("select k from fvi where b = 'ñ'", "set", True),
+    ("select count(*), max(k), min(b) from fvi where a = 5", "set", True),
+    ("select a, count(*) from fvi where c = 7 group by a", "set", True),
+    ("select k from fvi where a = 5 and b = 'x'", "set", True),
+    ("select k from fvi where a = 5 and (b = 'x' or c > 7)", "set", True),
+    ("select k from fvi where a = 99", "set", True),
+    ("select k from fvi where a = 2147483647", "set", True),
+    ("select k from fvi where a = 3000000000", "set", True),
+    ("select k from fvi where s = 3", "set", True),
+    ("select k from fvi where s = 100000", "set", True),
+    ("select k from fvi where a = 5 order by k desc limit 2", "order", True),
+    ("select distinct b from fvi where a = 5", "set", True),
+    (P("select k from fvi where a = $1", "5"), "set", True),
+    (P("select k from fvi where b = $1 and a = $2", "x", "5"), "set", True),
+    # not by an index: no constant, a null, the key bounds the scan, an OR, what can raise, a range, a partial index's column, an expression, a type that is not the column's (and, further down, a join)
+    ("select k from fvi where a = c", "set", False),
+    ("select k from fvi where a = null", "set", False),
+    ("select k from fvi where a = 5 and k > 2", "set", False),
+    ("select k from fvi where a = 5 or b = 'x'", "set", False),
+    ("select k from fvi where a = 5 and 10 / (k - 3) > 0", "set", False),
+    ("select k from fvi where a > 5", "set", False),
+    ("select k from fvi where f = true", "set", False),
+    ("select k from fvi where a + 0 = 5", "set", False),
+    ("select k from fvi where not (a = 5)", "set", False),
+    ("select k from fvi where b = 5", "set", False),
+    ("select k from fvi where a = '5'", "set", True),
+    ("select k from fvi where a = ' 5 '", "set", True),
+    (P("select k from fvi where s = $1", "3"), "set", True),
+    (P("select k from fvi where a = $1 and k > $2", "5", "2"), "set", False),
+    (P("select k from fvi where a = $1", None), "set", False),
+    ("select k from fvi where b = null", "set", False),
+    (P("select k from fvi where b = $1", None), "set", False),
+    # a minus sign is not read as a constant (it can overflow, and an error of the WHERE has to be found on every row: 6g)
+    ("select k from fvi where a = -5", "set", False),
+    ("select k from fvi where s = -32768", "set", False),
+    # after writes: a value changed, a row removed, a key moved, a transaction rolled back and one kept
+    ("update fvi set a = 6 where k = 1", "write", False),
+    ("select k from fvi where a = 5", "set", True),
+    ("select k from fvi where a = 6", "set", True),
+    ("update fvi set c = c + 1, b = b || '!' where a = 5", "write", False),
+    ("select k, c from fvi where b = 'x!'", "set", True),
+    ("select k from fvi where b = 'x'", "set", True),
+    ("select k from fvi where c = 8", "set", True),
+    ("delete from fvi where k = 2", "write", False),
+    ("delete from fvi where a = 6", "write", False),
+    ("select k from fvi where a = 5", "set", True),
+    ("select k from fvi where a = 6", "set", True),
+    ("update fvi set k = k + 100 where k = 3", "write", False),
+    ("select k from fvi where a = 5", "set", True),
+    ("begin", "ddl", False),
+    ("insert into fvi values (20, 5, 'new', 1, 1, true), (21, 5, 'x', 1, 1, true)", "write", False),
+    ("select k from fvi where a = 5", "set", True),
+    ("select k from fvi where b = 'new'", "set", True),
+    ("rollback", "ddl", False),
+    ("select k from fvi where a = 5", "set", True),
+    ("select k from fvi where b = 'new'", "set", True),
+    ("begin", "ddl", False),
+    ("insert into fvi values (22, 5, 'kept', 1, 1, true)", "write", False),
+    ("commit", "ddl", False),
+    ("select k from fvi where b = 'kept'", "set", True),
+    ("insert into fvi values (23, 5, 'r', 1, 1, true) returning k, a", "write", False),
+    # an index dropped is not read; made again it is
+    ("drop index fvia", "ddl", False),
+    ("select k from fvi where a = 5", "set", False),
+    ("create index fvia on fvi (a)", "ddl", False),
+    ("select k from fvi where a = 5", "set", True),
+    # a key of two columns, one a text
+    ("create table fvj (g text, h integer, v text, primary key (g, h))", "ddl", False),
+    ("insert into fvj values ('a', 1, 'p'), ('a', 2, 'q'), ('', 1, 'p'), ('b', -1, null), ('ab', 1, 'p')", "write", False),
+    ("create index fvjv on fvj (v)", "ddl", False),
+    ("select * from fvj where v = 'p'", "set", True),
+    ("select * from fvj where v = 'q' and g = 'a'", "set", True),
+    ("select fvi.k, fvj.g from fvi join fvj on fvj.h = fvi.k where fvi.a = 5", "set", False),
+    ("update fvj set h = h + 10 where g = 'a'", "write", False),
+    ("select * from fvj where v = 'p'", "set", True),
+    ("alter table fvj rename to fvk", "ddl", False),
+    ("select * from fvk where v = 'p'", "set", True),
+    # more rows of one value than a leaf of the tree has entries
+    ("create table fvl (k integer primary key, a integer)", "ddl", False),
+    ("create index fvla on fvl (a)", "ddl", False),
+    ("insert into fvl values " + ", ".join("(%d, %d)" % (i, i % 3) for i in range(1200)), "write", False),
+    ("select k from fvl where a = 1", "set", True),
+    ("truncate fvi", "ddl", False),
+    ("select k from fvi where a = 5", "set", True),
+    ("insert into fvi values (1, 5, 'x', 7, 3, true)", "write", False),
+    ("select k from fvi where a = 5", "set", True),
+]
+
+
 def order_dependent(pg):
     notes = []
     with tempfile.TemporaryDirectory() as d:
@@ -1939,6 +2061,34 @@ def history(seed):
         if "refused engine-unsupported" not in r.stdout or "ok " in r.stdout:
             raise SystemExit("engine_check: history: a sequence made AS OF a past transaction: %s" % r.stdout[-200:])
         return len(points), len(forked)
+
+
+def past_by_value():
+    """A read of the past reads no index (docs/m3-engine.md 6bo): an index has no history, and the entries in the tree a past read is given are the present's."""
+    with tempfile.TemporaryDirectory() as d:
+        script = ["create table pv (k integer primary key, a integer, b text)", "create index pva on pv (a)", "create index pvb on pv (b)",
+                  "insert into pv values (1, 5, 'x'), (2, 5, 'y'), (4, 7, 'x')", "!commit", "!txn",
+                  "update pv set a = 6, b = 'z' where k = 1", "delete from pv where k = 2", "insert into pv values (3, 5, 'x')", "update pv set a = 5 where k = 4", "!commit"]
+        r = subprocess.run([EXE, os.path.join(d, "pv.db")], input="\n".join(script) + "\n", capture_output=True, text=True)
+        t = [int(l.split()[1]) for l in r.stdout.split("\n") if l.startswith("txn ")]
+        if r.returncode != 0 or len(t) != 1:
+            raise SystemExit("engine_check: the past by value: %s" % r.stdout[-300:])
+        asks = ["select k from pv where a = 5", "select k from pv where b = 'x'", "select count(*) from pv where a = 6"]
+        script = ["!asof %d" % t[0], "!mark"] + asks + ["!mark", "!via", "!asof -", "!mark"] + asks + ["!mark", "!via"]
+        r = subprocess.run([EXE, os.path.join(d, "pv.db")], input="\n".join(script) + "\n", capture_output=True, text=True)
+        blocks, cur, inside, via = [], [], False, []
+        for l in r.stdout.split("\n"):
+            if l == "mark":
+                if inside:
+                    blocks.append(cur)
+                cur, inside = [], not inside
+            elif inside and l.startswith("R "):
+                cur.append(l[2:])
+            elif l.startswith("via "):
+                via.append(int(l[4:]))
+        want = [["31", "32", "31", "34", "30"], ["33", "34", "33", "34", "31"]]
+        if r.returncode != 0 or blocks != want or via != [0, 3]:
+            raise SystemExit("engine_check: the past by value: the answers then and now %r (should be %r), read by an index %r (should be [0, 3])" % (blocks, want, via))
 
 
 def erasure():
@@ -2130,6 +2280,15 @@ def main():
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")
     fstmts = [(sql, how, ftable(sql, how)) for sql, how in FIXED]
     fcounts, ffails, _, _ = compare(pg, fstmts, feng, True)
+    VIA[0] = 0
+    with tempfile.TemporaryDirectory() as d:
+        veng = run_engine(os.path.join(d, "via.db"), lines(v[0] for v in VIAFIXED))
+    wanted = sum(1 for v in VIAFIXED if v[2])
+    if VIA[0] != wanted:
+        raise SystemExit("engine_check: %d statements read by an index, and %d should have" % (VIA[0], wanted))
+    _, vfails, _, _ = compare(pg, [(sql, how, "fvj" if " fvj" in str(sql) else "fvl" if " fvl" in str(sql) else "fvi") for sql, how, _ in VIAFIXED], veng, True)
+    fails += vfails
+    print("engine_check: %d statements read by an index and %d beside them that may not be, each with PostgreSQL's answer" % (wanted, sum(1 for v in VIAFIXED if v[1] in ("set", "order") and not v[2])))
     print("engine_check: %d fixed statements, none refused: %s" % (len(FIXED), ", ".join("%s=%d" % kv for kv in sorted(fcounts.items()))))
     fails += ffails
     notes = order_dependent(pg)
@@ -2138,6 +2297,8 @@ def main():
         print("engine_check: NOTE (PostgreSQL %s) %s" % (version, note))
     npoints, nforked = history(SEED)
     print("engine_check: AS OF %d points of a history reads what was there, from another process, after a sweep and more writes, and on a fork (%d points); the branch is untouched by its fork" % (npoints, nforked))
+    past_by_value()
+    print("engine_check: a read of the past by an indexed column's value reads the table as it was, and no index")
     erasure()
     print("engine_check: a deleted row and a dropped table stay in the history; an erased key is gone from the page file two commits and a sweep later, with every salt it had, and from every AS OF")
     print("engine_check: %d statements (seed %d): %s" % (len(stmts), SEED, ", ".join("%s=%d" % kv for kv in sorted(counts.items()))))

@@ -480,6 +480,14 @@ pub res struct Work {
     ixa: Box[[byte]],
     ixb: Box[[byte]],
     nix: int,
+    // a read by an index (src/via.cho): the prefix its entries begin with and, from 256, the entry last read; their lengths (`vian` -1: the table is read);
+    // whether no condition of the WHERE can raise an error; whether the tree read is the past's; how many statements read by an index
+    via: Box[[byte]],
+    vian: int,
+    viak: int,
+    quiet: bool,
+    past: bool,
+    viac: int,
 }
 
 pub fn rows_size() -> [] int {
@@ -491,11 +499,12 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0, said: box_slice(heap, 110000, byte_of(0)), nsaid: 0, lsaid: 0, ix: box_slice(heap, 256, byte_of(0)), ixa: box_slice(heap, 256, byte_of(0)), ixb: box_slice(heap, 256, byte_of(0)), nix: 0 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0, said: box_slice(heap, 110000, byte_of(0)), nsaid: 0, lsaid: 0, ix: box_slice(heap, 256, byte_of(0)), ixa: box_slice(heap, 256, byte_of(0)), ixb: box_slice(heap, 256, byte_of(0)), nix: 0, via: box_slice(heap, 512, byte_of(0)), vian: 0 - 1, viak: 0, quiet: false, past: false, viac: 0 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount, said, nsaid, lsaid, ix, ixa, ixb, nix } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount, said, nsaid, lsaid, ix, ixa, ixb, nix, via, vian, viak, quiet, past, viac } = w;
+    unbox_slice(heap, via);
     unbox_slice(heap, ix);
     unbox_slice(heap, ixa);
     unbox_slice(heap, ixb);
@@ -705,6 +714,8 @@ pub fn start[&q](w: &!q Work, root: int) -> [] int {
     w.retcur = 0;
     w.lon = 0 - 1;
     w.hin = 0 - 1;
+    w.vian = 0 - 1;
+    w.quiet = false;
     w.ntab = 1;
     contents(w.cx)[eval.slots_at()] = 0;
     return 0;
@@ -1438,7 +1449,7 @@ fn after_key[&a, &b](k: &a [byte], ka: int, kn: int, h: &b [byte], hn: int) -> [
 }
 
 // Whether the `Col` at `at` of `e` is column `c` of the bound table.
-fn is_col[&q, &x](w: &!q Work, e: &x [byte], at: int, c: int) -> [] bool {
+pub fn is_col[&q, &x](w: &!q Work, e: &x [byte], at: int, c: int) -> [] bool {
     let dl = w.dlen;
     let tn = commit.be(e, at + 1, 2);
     let cn = commit.be(e, at + 3 + tn, 2);
@@ -1457,17 +1468,6 @@ fn bounds[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int]) -> [] int {
         // under a join a column of that name may be another table's
         return 0;
     }
-    if row.key_columns(contents(w.ctx)[64..64 + dl]) != 1 {
-        return 0;
-    }
-    var kc = 0;
-    while row.col_pk(contents(w.ctx)[64..64 + dl], kc) != 1 {
-        kc = kc + 1;
-    }
-    let kt = row.col_type(contents(w.ctx)[64..64 + dl], kc);
-    if kt == row.t_bool() || kt == row.t_bytea() {
-        return 0;
-    }
     var j = 0;
     while j < w.nconj {
         let (cnt, end) = eval.scan(e, contents(w.pos)[p_conj() + j], contents(w.ws));
@@ -1478,13 +1478,26 @@ fn bounds[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int]) -> [] int {
         while i < cnt {
             let p = contents(w.ws)[i];
             let tag = int_of(e[p]);
-            let quiet = tag == 0 || tag == 1 || tag == 8 || tag == 5 && int_of(e[p + 1]) <= 7 || tag == 7 && int_of(e[p + 1]) != 1;
+            // (a parameter the client bound is a constant: what it cannot be read as was refused before any row)
+            let quiet = tag == 0 || tag == 1 || tag == 2 && (contents(w.cx)[eval.inner_at()] == 0 || commit.be(e, p + 1, 4) < contents(w.cx)[eval.inner_at()]) || tag == 8 || tag == 5 && int_of(e[p + 1]) <= 7 || tag == 7 && int_of(e[p + 1]) != 1;
             if !quiet {
                 return 0;
             }
             i = i + 1;
         }
         j = j + 1;
+    }
+    w.quiet = true;
+    if row.key_columns(contents(w.ctx)[64..64 + dl]) != 1 {
+        return 0;
+    }
+    var kc = 0;
+    while row.col_pk(contents(w.ctx)[64..64 + dl], kc) != 1 {
+        kc = kc + 1;
+    }
+    let kt = row.col_type(contents(w.ctx)[64..64 + dl], kc);
+    if kt == row.t_bool() || kt == row.t_bytea() {
+        return 0;
     }
     j = 0;
     while j < w.nconj {
@@ -1509,9 +1522,13 @@ fn bounds[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int]) -> [] int {
                 }
             }
             var n = 0 - 1;
-            if vat >= 0 && ev(w, e, vat, kinds, 0) == 0 && contents(w.ws)[b + 1] == 0 {
+            if vat >= 0 && ev_open(w, e, vat, kinds, 0) >= 0 && contents(w.ws)[b + 1] == 0 {
                 // the constant as a stored key (src/row.cho), in `nrow`
-                let vt = contents(w.ws)[b];
+                var vt = contents(w.ws)[b];
+                if kt != row.t_text() && vt == 0 && eval.assign(contents(w.ws), b, kt, contents(w.ar), contents(w.info)) == 0 && contents(w.ws)[b + 1] == 0 {
+                    // a parameter or a string: the integer the key's type reads it as
+                    vt = contents(w.ws)[b];
+                }
                 if kt != row.t_text() && (vt == 1 || vt == 5 || vt == 6) {
                     put_i64(contents(w.nrow), 0, contents(w.ws)[b + 2]);
                     contents(w.nrow)[0] = byte_of((int_of(contents(w.nrow)[0]) + 128) % 256);
