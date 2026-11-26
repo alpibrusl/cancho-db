@@ -1086,6 +1086,7 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
     var c = c0;
     contents(w.pos)[exec.p_ddl() + 2] = 0;
     contents(w.ua)[0] = byte_of(0);
+    contents(w.ua)[200] = byte_of(1);
     while c < nc {
         // `skip` is the child of the list that is no column (a table's PRIMARY KEY (...)), or -1
         var ci = c - c0;
@@ -1132,10 +1133,14 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
         if flags / 4 % 2 == 1 {
             // UNIQUE: a constraint's index, made with the table (`uniq.constraints`; 6bo). Not on a column added later, and at most eight a table.
             let nu = int_of(contents(w.ua)[0]);
+            let uf = int_of(contents(w.ua)[200]);
             if c0 != 0 || nu >= 8 {
                 return exec.unsupported();
             }
-            contents(w.ua)[1 + nu] = byte_of(c);
+            // (each constraint: how many columns, then their numbers; `ua[200]` is where the next goes)
+            contents(w.ua)[uf] = byte_of(1);
+            contents(w.ua)[uf + 1] = byte_of(c);
+            contents(w.ua)[200] = byte_of(uf + 2);
             contents(w.ua)[0] = byte_of(nu + 1);
         }
         var place = 0;
@@ -1309,17 +1314,24 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
         }
     }
     // a PRIMARY KEY (column, ...) among the children is no column
+    // (nor is a UNIQUE (column, ...), told by its data: those are read after the columns, and have to be written after them)
     var tk = 0 - 1;
+    var nc = 0;
+    var lists = false;
     var i = 0;
     while i < nodes[6 * stmt + 3] {
-        if nodes[6 * kids[nodes[6 * stmt + 2] + i]] == parse.n_cols() {
+        let kid = kids[nodes[6 * stmt + 2] + i];
+        if nodes[6 * kid] != parse.n_cols() {
+            if lists {
+                return exec.unsupported();
+            }
+            nc = nc + 1;
+        } else if nodes[6 * kid + 1] == 0 - 2 {
+            lists = true;
+        } else {
             tk = i;
         }
         i = i + 1;
-    }
-    var nc = nodes[6 * stmt + 3];
-    if tk >= 0 {
-        nc = nc - 1;
     }
     if nc < 1 || nc > row.max_columns() {
         return exec.too_big();
@@ -1374,6 +1386,54 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     if keys == 0 {
         // a table with no primary key has no key to store its rows by
         return exec.unsupported();
+    }
+    // the UNIQUE (column, ...) of the table: each column is one of the table's, once
+    i = 0;
+    while i < nodes[6 * stmt + 3] {
+        let un = kids[nodes[6 * stmt + 2] + i];
+        if nodes[6 * un] == parse.n_cols() && nodes[6 * un + 1] == 0 - 2 {
+            let m = nodes[6 * un + 3];
+            let nu = int_of(contents(w.ua)[0]);
+            let uf = int_of(contents(w.ua)[200]);
+            if m < 1 || m > index.max_cols() || nu >= 8 {
+                return exec.unsupported();
+            }
+            var j = 0;
+            while j < m {
+                let cl = lower.name_text(sql, toks, nodes[6 * kids[nodes[6 * un + 2] + j] + 1], contents(w.nrow)[0..256], 0);
+                if cl < 0 {
+                    return exec.unsupported();
+                }
+                var oa = 8;
+                var at = 0 - 1;
+                var c = 0;
+                while c < nc {
+                    let ol = commit.be(contents(w.ent), oa + 2, 2);
+                    if exec.same(contents(w.ent), oa + 4, ol, contents(w.nrow), 0, cl) {
+                        at = c;
+                    }
+                    oa = oa + 4 + ol;
+                    c = c + 1;
+                }
+                if at < 0 {
+                    exec.note(w, exec.e_no_column());
+                    at = 0;
+                }
+                var q = 0;
+                while q < j {
+                    if int_of(contents(w.ua)[uf + 1 + q]) == at && w.code == 0 {
+                        return exec.unsupported();
+                    }
+                    q = q + 1;
+                }
+                contents(w.ua)[uf + 1 + j] = byte_of(at);
+                j = j + 1;
+            }
+            contents(w.ua)[uf] = byte_of(m);
+            contents(w.ua)[200] = byte_of(uf + 1 + m);
+            contents(w.ua)[0] = byte_of(nu + 1);
+        }
+        i = i + 1;
     }
     build.put_be(contents(w.ent), 4, da - 6, 2);
     build.put_be(contents(w.ent), 6, nc, 2);

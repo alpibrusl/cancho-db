@@ -2793,6 +2793,13 @@ of that name. Here it is that index and a mark on it:
   number after it), or is longer than 63 bytes (PostgreSQL cuts it); `alter table ... add column ... unique`; and a `unique (a, b)` written as a
   constraint of the table, which the parser does not read. More than eight unique columns in one table.
 
+*`unique (a, b)` as a constraint of the table (after that).* Read by the parser as the table's `primary key (...)` is, and made as the column's
+is: a unique index on those columns, named `<table>_<a>_<b>_key`, marked as a constraint's. A column of the list that the table has not is
+PostgreSQL's error (`42703`). Refused: such a constraint written before a column definition (the engine reads the columns first, and they are then
+not where it looks for them), a column named twice in one list, and `constraint <name> unique (...)`, whose name is the user's.
+*Tested*: 17 more statements in the list (112) and three more among those refused on purpose; 7 more mutants. *Corrected*: the paragraph above says
+a `unique (a, b)` of the table is refused because the parser does not read it. It reads it now.
+
 *Built and tested.* `uniq.constraints`, called by `create table` once the table is made; the mark is a bit of the index's flags, which `drop index`
 reads. The list of slice 3 has 23 more statements (95): a table with three unique columns, the conflicts of each, a default that conflicts, the
 constraint's name taken by an index, a table and a sequence, the table dropped and made again, and renamed. Five statements are in the list of those
