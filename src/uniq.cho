@@ -170,3 +170,25 @@ pub fn constraints[&q, &z, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, 
     }
     return out;
 }
+
+// Whether a row that was `old` and becomes `new` keeps, in every unique index of its table, the values it has there (and its place in or out of a partial
+// one): 1, 0, or a refusal. `k[0..kn]` is the key it had.
+pub fn keeps[&q, &o, &n, &k](w: &!q exec.Work, old: &o [byte], new: &n [byte], k: &k [byte], kn: int) -> [] int {
+    let dl = w.dlen;
+    var i = 0;
+    while i < w.nix {
+        let at = i * index.rec();
+        if index.unique(contents(w.ix), at) {
+            let eo = index.entry(contents(w.ix), at, contents(w.ctx)[64..64 + dl], old, k[4..kn], contents(w.ixa));
+            let en = index.entry(contents(w.ix), at, contents(w.ctx)[64..64 + dl], new, k[4..kn], contents(w.ixb));
+            if eo < 0 || en < 0 {
+                return exec.too_big();
+            }
+            if !index.stays(contents(w.ix), at, contents(w.ctx)[64..64 + dl], old, new, eo, en) {
+                return 0;
+            }
+        }
+        i = i + 1;
+    }
+    return 1;
+}
