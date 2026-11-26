@@ -1706,6 +1706,12 @@ def copying(d):
         if r.returncode != 0:
             os.remove(cp)
             return "raced" if (r.returncode, r.stderr.decode().strip()) == (1, "refused export-raced") else ("the tool", r.returncode, r.stderr.decode().strip())
+        with open(cp, "rb") as f:
+            f.seek(4096)
+            supers = [f.read(4096), f.read(4096)]
+        if sorted(x == bytes(4096) for x in supers) != [False, True]:
+            # (the state before the one copied is not in a copy, 6bn: an erase zeroes what only that state named)
+            return ("the copy has not one superblock and one page of zeros where the two are", [x[:16].hex() for x in supers])
         try:
             s2 = Server(cp)
         except SystemExit as e:

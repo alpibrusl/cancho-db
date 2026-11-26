@@ -2607,6 +2607,23 @@ sweep, so under erases a copy of a large file may seldom get through, and that i
 - What the copy is *of* is the commit the superblocks named when the tool began; later commits are not in it, and the tool does not say which commit
   that was (`logexport COPY anchor` does, from the copy).
 
+**Corrected: a copy the tool called whole that no server would start on.** Found by the gate, once, on seed 3 of the server's test, weeks of runs
+after this section was written: of 8 copies under an erase every 20 ms, one was said to be whole and the server stopped on it at start (status 5).
+Kept from a later run (1 in about 150 attempts) and looked at: its tables read, the sums were right, and the start's sweep failed in it.
+
+- *Why.* The copy had both superblocks as they were when it began: the state it copied and the state before. An erase commits twice, one after
+  the other, and then zeroes the pages that only the state before the erase named (6bh). A copy begun *between those two commits* has the erase's
+  first commit as its state and, as its older superblock, the state before the erase, whose pages are zeroed and used again while the copy is read.
+  The number of sweeps was already raised by the first commit, so the tool saw nothing change. The state copied was whole. The superblock beside it
+  named pages that were another state's by then, and a server's start sweeps what *either* superblock names.
+- *What this section said that was not so*: "every page the two name was in the file before they were", taken to mean that both states were
+  kept. Only the one loaded is.
+- *The repair.* A copy has one superblock, the loaded state's, and zeros where the other is: a file as it is after one commit, which a server
+  starts on. The tool run on the copy that was kept gives a copy a server starts on. The test now holds every copy to that shape (one superblock, one
+  page of zeros), since the moment itself is a few milliseconds wide and is not provoked; a mutant that writes both is killed by it.
+- *What it means for a copy taken before this*: it is its state, and a server refuses it at start if it was begun in that moment. Copying it again
+  with this tool repairs it.
+
 ## 6bo. Indexes that are built: the plan, and its first slice
 
 `create index` records a name and builds nothing (6q): "honest only because the engine claims no speed". Every read that is not by the key reads the
