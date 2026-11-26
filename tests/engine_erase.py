@@ -38,9 +38,13 @@ def run(path, lines):
     # failed here once in nine runs (6bi). A failure of this test is now one that comes again.
     RUNS[0] += 1
     lines = ["!seed " + hashlib.sha256(b"%d:%d" % (SEED, RUNS[0])).hexdigest()] + lines
-    r = subprocess.run([EXE, path], input="\n".join(lines) + "\n", capture_output=True, text=True)
+    # (and every run ends by holding each built index to its table's rows, docs/m3-engine.md 6bo)
+    r = subprocess.run([EXE, path], input="\n".join(lines + ["!indexes"]) + "\n", capture_output=True, text=True)
     if r.returncode != 0:
         check("the engine ran", False, "status %d: %s" % (r.returncode, r.stderr[:200]))
+    wrong = [l for l in r.stdout.split("\n") if l.startswith("indexes ") and not l.endswith(" ok")]
+    if wrong:
+        check("every built index has the entries its table's rows say", False, wrong[:3])
     return r.stdout.split("\n")
 
 

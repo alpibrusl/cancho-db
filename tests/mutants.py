@@ -1855,10 +1855,10 @@ ENGINE = [
      '    if iflags % 2 == 1 {\n        return exec.unsupported();\n    }\n',
      ''),
     ("index: a dropped table's indexes stay", 'src/execw.cho',
-     '                if exec.same(contents(w.cur), 0, nv, e, 4, nl) {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);',
+     '                if exec.same(contents(w.cur), 0, tl, e, 4, nl) {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);',
      '                if false {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);'),
     ('index: a dropped table takes every index with it', 'src/execw.cho',
-     '                if exec.same(contents(w.cur), 0, nv, e, 4, nl) {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);',
+     '                if exec.same(contents(w.cur), 0, tl, e, 4, nl) {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);',
      '                if true {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);'),
     ('index: the lowering is not told of it', 'src/tables.cho',
      '            } else if int_of(key2[4]) == 1 {\n                // an index (`index_key`): a line `index NAME on TABLE`\n                if at + 6 + (nk - 5) + 4 + nv + 1 > len(out) {\n                    return btree.err_big();\n                }\n                at = lit(out, at, "index ");',
@@ -2234,8 +2234,8 @@ ENGINE = [
      '                } else if g2 == btree.not_found() {\n                    exec.note(w, exec.e_unique());',
      '                } else if g2 == btree.not_found() {\n                    exec.note(w, 0);'),
     ('update: the old keys are not left', 'src/execw.cho',
-     '                if pass == 0 {\n                    nw = exec.del_key(p, w, out, contents(w.tmp)[65536..65539 + nk], 3 + nk);',
-     '                if pass == 0 {\n                    nw = out;'),
+     '                    nw = exec.del_key(p, w, out, contents(w.tmp)[65536..65539 + nk], 3 + nk);\n                    if nw >= 0 && og > 32 {',
+     '                    nw = out;\n                    if nw >= 0 && og > 32 {'),
     ('delete: the row stays', 'src/execw.cho',
      '                nroot = nw;\n                let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);',
      '                let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);'),
@@ -2733,7 +2733,7 @@ ENGINE = [
      '    nroot = exec.del_key(p, w, nroot, contents(w.key), kl);\n    if nroot < 0 {\n        return nroot;\n    }\n    // its indexes are',
      '    // its indexes are'),
     ('rename: its indexes stay with the old name', 'src/execd.cho',
-     '                if exec.same(contents(w.cur), 0, r % 1024, contents(w.lit), 2, ol) {',
+     '                if exec.same(contents(w.cur), 0, tl, contents(w.lit), 2, ol) {',
      '                if false {'),
     ('rename: what follows the new name is ignored', 'src/stmt.cho',
      '        if pos < end {\n            return parse.fail(st, pos, parse.e_syntax());\n        }\n        let root = parse.mk(nodes, kids, st, parse.n_rename(),',
@@ -3437,7 +3437,7 @@ def run_export(cancho):
     """Each mutant is an export tool of its own, held against what the test assembles from the test program's output (build/enginecheck, not mutated here)."""
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in EXPORT if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "execs.cho",
             "execw.cho", "execd.cho", "facts.cho", "token.cho", "ir.cho")
     survivors = []
     for label, rel, old, new in table:
@@ -3486,7 +3486,7 @@ def run_wire(cancho):
             print("MUTANT_SLICE: %s is not K/N with 0 <= K < N" % part)
             return 1
         table = table[k::n]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "execs.cho",
             "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
 
     def one(mutant):
@@ -3530,7 +3530,7 @@ def run_engine(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
 
     def one(mutant):
         label, rel, old, new = mutant

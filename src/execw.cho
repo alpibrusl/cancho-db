@@ -8,6 +8,7 @@ import cdb.eval;
 import cdb.btree;
 import cdb.pager;
 import cdb.tables;
+import cdb.index;
 import cdb.parse;
 import cdb.lower;
 import cdb.exec;
@@ -732,9 +733,17 @@ fn settle[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nroot: int, s
                 exec.copy(contents(w.key2), 1, nk - 1, contents(w.tmp), 65540);
                 var nw = 0;
                 if pass == 0 {
+                    // (the row as it is under the key it leaves: its index entries leave with it, 6bo)
+                    let og = btree.get(p, contents(w.sc), out, contents(w.tmp)[65536..65539 + nk], contents(w.full));
                     nw = exec.del_key(p, w, out, contents(w.tmp)[65536..65539 + nk], 3 + nk);
+                    if nw >= 0 && og > 32 {
+                        nw = exec.indexed(p, w, nw, contents(w.tmp)[65536..65539 + nk], 3 + nk, contents(w.full)[32..og], false, contents(w.full)[32..og], true);
+                    }
                 } else {
                     nw = exec.put_key(p, w, out, contents(w.tmp)[65536..65539 + nk], 3 + nk, contents(w.cur)[0..nv]);
+                    if nw >= 0 && nv > 32 {
+                        nw = exec.indexed(p, w, nw, contents(w.tmp)[65536..65539 + nk], 3 + nk, contents(w.cur)[32..nv], true, contents(w.cur)[32..nv], false);
+                    }
                 }
                 if nw < 0 {
                     return nw;
@@ -821,6 +830,33 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     return 0;
 }
 
+// What the table's built indexes have, or had, of a form of the row being erased (docs/m3-engine.md 6bo): the form is `full[a..b]`, the row's key `tmp[65540..65540 + kn]`.
+// With `there` the entries are removed (the row as it is); either way their keys are taken out of the internal pages (6bc). The new root, or a refusal.
+fn unindexed[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, a: int, b: int, kn: int, there: bool) -> [file_read, file_write] int {
+    var nroot = root;
+    var i = 0;
+    while i < w.nix {
+        let l = index.entry(contents(w.ix), i * index.rec(), contents(w.ctx)[64..64 + w.dlen], contents(w.full)[a..b], contents(w.tmp)[65540..65540 + kn], contents(w.ixa));
+        if l > 0 {
+            if there {
+                let d = btree.del(p, contents(w.sc), nroot, contents(w.ixa)[0..l]);
+                if d >= 0 {
+                    nroot = d;
+                } else if d != btree.not_found() {
+                    return exec.tree_err(d);
+                }
+            }
+            let s = btree.scrub(p, contents(w.sc), nroot, contents(w.ixa)[0..l]);
+            if s < 0 {
+                return exec.tree_err(s);
+            }
+            nroot = s;
+        }
+        i = i + 1;
+    }
+    return nroot;
+}
+
 // Erase a row and its past (docs/m3-engine.md 6n): `e` is a DELETE whose WHERE is `<the key> = <a constant>` and nothing else. The row is removed with no history entry made for it, and every history
 // entry of its key is removed: AS OF any transaction the row is then not there, and after two commits and a sweep (6c) no page of the file holds it. On 0 `count_of` is the row (0 or 1) plus the entries
 // removed. A row that was moved to another key by an UPDATE has entries under each key it had: each is erased by its own key.
@@ -852,12 +888,20 @@ pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
     build.put_be(contents(w.tmp), 65536, w.tid, 4);
     exec.copy(contents(w.lo), 0, kn, contents(w.tmp), 65540);
     var nroot = root;
+    // (the row as it is, for what its table's indexes have of it: 6bo)
+    let g0 = btree.get(p, contents(w.sc), root, contents(w.tmp)[65536..65540 + kn], contents(w.full));
     let d = btree.del(p, contents(w.sc), nroot, contents(w.tmp)[65536..65540 + kn]);
     if d >= 0 {
         nroot = d;
         w.count = 1;
     } else if d != btree.not_found() {
         return exec.tree_err(d);
+    }
+    if g0 > 32 {
+        nroot = unindexed(p, w, nroot, 32, g0, kn, true);
+        if nroot < 0 {
+            return nroot;
+        }
     }
     // and no internal page of the tree keeps the key as the bound of a child (6bc), whether the row was there or went before
     let sr = btree.scrub(p, contents(w.sc), nroot, contents(w.tmp)[65536..65540 + kn]);
@@ -892,6 +936,14 @@ pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
                     build.put_be(contents(w.ukey), 0, 4294967295, 4);
                     exec.copy(contents(w.key2), pl, 8, contents(w.ukey), 4);
                     let hl = exec.copy(contents(w.tmp), 65536, 4 + kn, contents(w.ukey), 12);
+                    // (what the row was then: an update took its index entries of then away plainly, and their keys may still bound a child, 6bo)
+                    let hg = btree.get(p, contents(w.sc), nroot, contents(w.ukey)[0..hl], contents(w.full));
+                    if hg > 33 && int_of(contents(w.full)[0]) == 1 {
+                        nroot = unindexed(p, w, nroot, 33, hg, kn, false);
+                        if nroot < 0 {
+                            return nroot;
+                        }
+                    }
                     let hd = btree.del(p, contents(w.sc), nroot, contents(w.ukey)[0..hl]);
                     if hd >= 0 {
                         let hs = btree.scrub(p, contents(w.sc), hd, contents(w.ukey)[0..hl]);
@@ -937,6 +989,14 @@ pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
                 return exec.damaged();
             }
             if exec.same(contents(w.key2), 12, nk - 12, contents(w.tmp), 65536, 4 + kn) {
+                let nv = r % 1024;
+                if nv > 33 && int_of(contents(w.cur)[0]) == 1 {
+                    exec.copy(contents(w.cur), 0, nv, contents(w.full), 0);
+                    nroot = unindexed(p, w, nroot, 33, nv, kn, false);
+                    if nroot < 0 {
+                        return nroot;
+                    }
+                }
                 let nw = btree.del(p, contents(w.sc), nroot, contents(w.key2)[0..nk]);
                 if nw < 0 {
                     return exec.tree_err(nw);
@@ -1496,7 +1556,11 @@ pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
             if nk < 6 || commit.be(contents(w.key2), 0, 4) != 0 || int_of(contents(w.key2)[4]) != 1 {
                 more = false;
             } else {
-                if exec.same(contents(w.cur), 0, nv, e, 4, nl) {
+                var tl = index.name_end(contents(w.cur)[0..nv]);
+                if tl < 0 {
+                    tl = nv;
+                }
+                if exec.same(contents(w.cur), 0, tl, e, 4, nl) {
                     let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);
                     if nw < 0 {
                         return nw;
@@ -1686,6 +1750,7 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     let dl = w.dlen;
     let nl = w.nlen;
     var ncols = nodes[6 * stmt + 3];
+    var cond = 0;
     if iflags / 4 % 2 == 1 {
         // the condition of a partial index: a boolean column of the table and nothing else (docs/m3-engine.md 6x)
         ncols = ncols - 1;
@@ -1703,6 +1768,7 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
             let nm = row.col_name(contents(w.ctx)[64..64 + dl], c);
             if exec.same(nm, 0, len(nm), contents(w.nrow), 0, cl) && row.col_type(contents(w.ctx)[64..64 + dl], c) == row.t_bool() {
                 isbool = true;
+                cond = c;
             }
             c = c + 1;
         }
@@ -1724,6 +1790,9 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
             let nm = row.col_name(contents(w.ctx)[64..64 + dl], c);
             if exec.same(nm, 0, len(nm), contents(w.nrow), 0, cl) {
                 found = true;
+                if i < index.max_cols() {
+                    contents(w.ixb)[i] = byte_of(c);
+                }
             }
             c = c + 1;
         }
@@ -1731,6 +1800,10 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
             exec.note(w, exec.e_no_column());
         }
         i = i + 1;
+    }
+    // (an index is built on at most so many columns, and a table has at most so many: docs/m3-engine.md 6bo)
+    if ncols > index.max_cols() || w.nix >= index.max_per_table() {
+        return exec.unsupported();
     }
     let il = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.nrow)[0..256], 0);
     if il < 0 || !name_ok(contents(w.nrow), 0, il) {
@@ -1769,11 +1842,49 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     if there {
         return 0;
     }
-    let nw = exec.put_key(p, w, root, contents(w.key2), kl, contents(w.ctx)[0..nl]);
-    if nw < 0 {
-        return nw;
+    // the index is built (6bo): a number of its own, its entry in the catalog with its columns, and an entry for each row the table has
+    var nroot = root;
+    var vl = 0;
+    region g {
+        let idn = alloc_slice[g](1, 0);
+        nroot = index.number(p, contents(w.sc), root, contents(w.key), idn);
+        if nroot >= 0 {
+            vl = index.value(contents(w.ctx)[0..nl], idn[0], iflags / 4 % 2 == 1, cond, contents(w.ixb), ncols, contents(w.ent));
+        }
     }
-    w.root = nw;
+    if nroot < 0 {
+        return exec.tree_err(nroot);
+    }
+    nroot = exec.put_key(p, w, nroot, contents(w.key2), kl, contents(w.ent)[0..vl]);
+    if nroot < 0 {
+        return nroot;
+    }
+    // (the record of this one index, as `index.load` would give it, at the head of `ix`)
+    exec.copy(contents(w.ent), nl + 1, vl - nl - 1, contents(w.ix), 0);
+    exec.scan_start(w);
+    var more = true;
+    while more {
+        let rl = exec.scan_next(p, w, root);
+        if rl == 0 - 1 {
+            more = false;
+        } else if rl < 0 {
+            return rl;
+        } else {
+            let xl = index.entry(contents(w.ix), 0, contents(w.ctx)[64..64 + dl], contents(w.cur)[0..rl], contents(w.key)[4..w.klen], contents(w.ixa));
+            if xl < 0 {
+                return exec.too_big();
+            }
+            if xl > 0 {
+                contents(w.ixb)[0] = byte_of(1);
+                let u = btree.put(p, contents(w.sc), nroot, contents(w.ixa)[0..xl], contents(w.ixb)[0..1]);
+                if u < 0 {
+                    return exec.tree_err(u);
+                }
+                nroot = u;
+            }
+        }
+    }
+    w.root = nroot;
     return 0;
 }
 
@@ -1798,9 +1909,21 @@ pub fn drop_index[&q, &z, &x, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, 
     if g < 0 {
         return exec.tree_err(g);
     }
-    let nw = exec.del_key(p, w, root, contents(w.key2), kl);
+    var nw = exec.del_key(p, w, root, contents(w.key2), kl);
     if nw < 0 {
         return nw;
+    }
+    // a built index's entries go with it (6bo)
+    let z = index.name_end(contents(w.cur)[0..g]);
+    if z >= 0 && z + 5 <= g {
+        let id = commit.be(contents(w.cur), z + 1, 4);
+        region s {
+            let v = alloc_slice[s](1024, byte_of(0));
+            nw = index.clear(p, contents(w.sc), nw, id, contents(w.ixa), contents(w.ixb), v);
+        }
+        if nw < 0 {
+            return exec.tree_err(nw);
+        }
     }
     w.root = nw;
     return 0;

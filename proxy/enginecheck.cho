@@ -19,6 +19,7 @@ import cdb.facts;
 import cdb.session;
 import cdb.token;
 import cdb.tables;
+import cdb.index;
 import cdb.build;
 import cdb.row;
 
@@ -27,6 +28,7 @@ import cdb.row;
 //
 //     !commit        make the statements so far durable (src/pstore.cho)      -> `committed SEQ` or `err CODE`
 //     !sweep         zero and reuse the pages nothing names                   -> `swept N` or `err CODE`
+//     !indexes       every built index against its table's rows (6bo)        -> `indexes N ok`, or `indexes bad NAME should S has H found F`
 //     !indexed       whether the tree says all of its history is findable by key (6bi)   -> `indexed` or `unindexed`
 //     !unindex       make the tree one from before that: the mark and every by-key entry are removed    -> `unindexed`
 //     !purge         the same from what was written since the last sweep or purge (6bh), checked against the sweep's walk
@@ -550,6 +552,14 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                         put_int(io, r);
                     }
                     putchar(io, '\n');
+                } else if starts(all, ls, le, "!indexes") {
+                    // every built index has exactly the entries its table's rows say it should (docs/m3-engine.md 6bo): `indexes N ok`, or what differs
+                    let bad = indexes_ok(io, pg, w, rs[cur]);
+                    if bad < 0 {
+                        put_str(io, "err ");
+                        put_int(io, bad);
+                        putchar(io, '\n');
+                    }
                 } else if starts(all, ls, le, "!indexed") || starts(all, ls, le, "!unindex") {
                     // whether the tree says its history is findable by key (6bi); `!unindex` makes the tree one from before that: the mark and every such entry go
                     var said = 0;
@@ -1020,6 +1030,143 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
     }
     unbox_slice(heap, roots);
     unbox_slice(heap, flags);
+    return status;
+}
+
+// `!indexes` (docs/m3-engine.md 6bo): for each built index of the tree `root`, the entries its table's rows should have (`should`), how many of those the tree has
+// (`found`) and how many entries are under the index's number (`has`). The three are one number, or the index is not what its table says. 0, or a tree's error.
+fn indexes_ok[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root: int) -> [io_write, file_read] int {
+    var status = 0;
+    var count = 0;
+    var wrong = 0;
+    region g {
+        let ck = alloc_slice[g](256, byte_of(0));
+        let ck2 = alloc_slice[g](256, byte_of(0));
+        let cv = alloc_slice[g](1024, byte_of(0));
+        let rk = alloc_slice[g](256, byte_of(0));
+        let rk2 = alloc_slice[g](256, byte_of(0));
+        let rv = alloc_slice[g](1024, byte_of(0));
+        let ent = alloc_slice[g](1024, byte_of(0));
+        let ek = alloc_slice[g](256, byte_of(0));
+        let one = alloc_slice[g](1024, byte_of(0));
+        let rec = alloc_slice[g](16, byte_of(0));
+        build.put_be(ck, 0, 0, 4);
+        ck[4] = byte_of(1);
+        var ckl = 5;
+        var more = root != 0;
+        while more && status == 0 {
+            let r = btree.next_after(pg, exec.scratch(w), root, ck[0..ckl], false, ck2, cv);
+            if r == btree.not_found() {
+                more = false;
+            } else if r < 0 {
+                status = r;
+            } else if r / 1024 < 6 || commit.be(ck2, 0, 4) != 0 || int_of(ck2[4]) != 1 {
+                more = false;
+            } else {
+                let nk = r / 1024;
+                let nv = r % 1024;
+                let zb = index.name_end(cv[0..nv]);
+                if zb >= 0 && zb + 8 <= nv {
+                    count = count + 1;
+                    var c = 0;
+                    while c < 16 {
+                        rec[c] = byte_of(0);
+                        c = c + 1;
+                    }
+                    c = 0;
+                    while c < nv - zb - 1 && c < 16 {
+                        rec[c] = cv[zb + 1 + c];
+                        c = c + 1;
+                    }
+                    let id = commit.be(rec, 0, 4);
+                    var should = 0;
+                    var found = 0;
+                    var has = 0;
+                    let en = tables.find(pg, exec.scratch(w), root, cv[0..zb], rk, ent);
+                    if en < 0 {
+                        status = en;
+                    } else {
+                        let dl = tables.def_len(ent);
+                        build.put_be(rk, 0, tables.id_of(ent), 4);
+                        var rkl = 4;
+                        var rows = true;
+                        while rows && status == 0 {
+                            let rr = btree.next_after(pg, exec.scratch(w), root, rk[0..rkl], false, rk2, rv);
+                            if rr == btree.not_found() {
+                                rows = false;
+                            } else if rr < 0 {
+                                status = rr;
+                            } else if rr / 1024 < 4 || commit.be(rk2, 0, 4) != tables.id_of(ent) {
+                                rows = false;
+                            } else {
+                                let rn = rr / 1024;
+                                let el = index.entry(rec, 0, ent[6..6 + dl], rv[32..rr % 1024], rk2[4..rn], ek);
+                                if el < 0 {
+                                    status = btree.err_bad();
+                                } else if el > 0 {
+                                    should = should + 1;
+                                    if btree.get(pg, exec.scratch(w), root, ek[0..el], one) >= 0 {
+                                        found = found + 1;
+                                    }
+                                }
+                                rkl = 0;
+                                while rkl < rn {
+                                    rk[rkl] = rk2[rkl];
+                                    rkl = rkl + 1;
+                                }
+                            }
+                        }
+                        build.put_be(rk, 0, id, 4);
+                        rkl = 4;
+                        rows = true;
+                        while rows && status == 0 {
+                            let rr = btree.next_after(pg, exec.scratch(w), root, rk[0..rkl], false, rk2, rv);
+                            if rr == btree.not_found() {
+                                rows = false;
+                            } else if rr < 0 {
+                                status = rr;
+                            } else if rr / 1024 < 4 || commit.be(rk2, 0, 4) != id {
+                                rows = false;
+                            } else {
+                                has = has + 1;
+                                rkl = 0;
+                                while rkl < rr / 1024 {
+                                    rk[rkl] = rk2[rkl];
+                                    rkl = rkl + 1;
+                                }
+                            }
+                        }
+                    }
+                    if status == 0 && (should != found || should != has) {
+                        wrong = wrong + 1;
+                        put_str(io, "indexes bad ");
+                        var c2 = 5;
+                        while c2 < nk {
+                            putchar(io, int_of(ck2[c2]));
+                            c2 = c2 + 1;
+                        }
+                        put_str(io, " should ");
+                        put_int(io, should);
+                        put_str(io, " has ");
+                        put_int(io, has);
+                        put_str(io, " found ");
+                        put_int(io, found);
+                        putchar(io, '\n');
+                    }
+                }
+                ckl = 0;
+                while ckl < nk {
+                    ck[ckl] = ck2[ckl];
+                    ckl = ckl + 1;
+                }
+            }
+        }
+    }
+    if status == 0 && wrong == 0 {
+        put_str(io, "indexes ");
+        put_int(io, count);
+        put_str(io, " ok\n");
+    }
     return status;
 }
 

@@ -468,7 +468,8 @@ pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], r
                 }
                 at = lit(out, at, " on ");
                 i = 0;
-                while i < nv {
+                // (the table's name ends at a zero byte in the value of an index that is built: what follows is its number and columns, src/index.cho)
+                while i < nv && int_of(ent[i]) != 0 {
                     out[at] = ent[i];
                     at = at + 1;
                     i = i + 1;

@@ -1,0 +1,286 @@
+edition 9;
+module cdb.index;
+
+// SPDX-License-Identifier: EUPL-1.2
+// Copyright (c) 2026 Alpibru S.L.
+import cdb.commit;
+import cdb.build;
+import cdb.btree;
+import cdb.pager;
+import cdb.row;
+import cdb.tables;
+
+// Indexes that are built (docs/m3-engine.md 6bo). An index's entry in the catalog (`tables.index_key`) has for its value the table's name, a zero byte, and then:
+// the index's own number (4 bytes; no table has it), its flags (1: it is partial), the column of its condition, how many columns it is on, and those columns' numbers
+// in the table's definition. A value with no zero byte is an index from before there were any built: a name, and nothing under it.
+//
+// An entry of the index is a key of the tree under the index's number: for each of its columns one byte (0: null; 1: a value) and the value as a key stores it (a
+// text cut to `part_max()` bytes), then the row's own key as the tree has it. Its value is one byte. It is written and removed plainly: an index has no history
+// (a statement that reads the past reads no index).
+
+// How many built indexes a table may have.
+pub fn max_per_table() -> [] int {
+    return 16;
+}
+
+// How many columns an index may be on.
+pub fn max_cols() -> [] int {
+    return 8;
+}
+
+// What `load` writes for one index: its number (4), flags, the condition's column, the count of columns, the columns.
+pub fn rec() -> [] int {
+    return 16;
+}
+
+// How many bytes of a text or a bytea an entry has of it: the row's own key ends the entry, so two rows never share one, and a reader by a value looks at the row.
+pub fn part_max() -> [] int {
+    return 24;
+}
+
+// Where the zero byte after the table's name is in the value of an index's catalog entry, or -1: an index that is only a name.
+pub fn name_end[&v](cv: &v [byte]) -> [] int {
+    var i = 0;
+    while i < len(cv) {
+        if int_of(cv[i]) == 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// The value of a built index's catalog entry, into `out`: its length. `cols` are `n` column numbers, a byte each.
+pub fn value[&t, &c, &o](table: &t [byte], id: int, partial: bool, cond: int, cols: &c [byte], n: int, out: &!o [byte]) -> [] int {
+    var at = 0;
+    while at < len(table) {
+        out[at] = table[at];
+        at = at + 1;
+    }
+    out[at] = byte_of(0);
+    build.put_be(out, at + 1, id, 4);
+    out[at + 5] = byte_of(0);
+    if partial {
+        out[at + 5] = byte_of(1);
+    }
+    out[at + 6] = byte_of(cond);
+    out[at + 7] = byte_of(n);
+    var i = 0;
+    while i < n {
+        out[at + 8 + i] = cols[i];
+        i = i + 1;
+    }
+    return at + 8 + n;
+}
+
+// Whether what follows the table's name in a catalog value is a built index's: the number above 0, at most `max_cols()` columns, and no bytes over.
+fn tail_ok[&v](cv: &v [byte], z: int) -> [] bool {
+    if z + 8 > len(cv) {
+        return false;
+    }
+    let n = int_of(cv[z + 7]);
+    return commit.be(cv, z + 1, 4) > 0 && n >= 1 && n <= max_cols() && z + 8 + n == len(cv) && int_of(cv[z + 5]) <= 1;
+}
+
+// The built indexes of the table `name` in the tree `root`, a record of `rec()` bytes each into `out`: how many, or an error (`btree.err_big()`: more than
+// `max_per_table()`; `btree.err_bad()`: a catalog value that is not one). `key`, `key2` (256 bytes) and `cv` (1024) are scratch.
+pub fn load[&q, &s, &n, &k, &j, &v, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, name: &n [byte], key: &!k [byte], key2: &!j [byte], cv: &!v [byte], out: &!o [byte]) -> [file_read] int {
+    build.put_be(key, 0, 0, 4);
+    key[4] = byte_of(1);
+    var kl = 5;
+    var count = 0;
+    var more = root != 0;
+    while more {
+        let r = btree.next_after(p, sc, root, key[0..kl], false, key2, cv);
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return r;
+        } else {
+            let nk = r / 1024;
+            let nv = r % 1024;
+            if nk < 6 || commit.be(key2, 0, 4) != 0 || int_of(key2[4]) != 1 {
+                more = false;
+            } else {
+                let z = name_end(cv[0..nv]);
+                if z == len(name) && same(cv, 0, name, z) {
+                    if !tail_ok(cv[0..nv], z) {
+                        return btree.err_bad();
+                    }
+                    if count >= max_per_table() {
+                        return btree.err_big();
+                    }
+                    let at = count * rec();
+                    var i = 0;
+                    while i < rec() {
+                        out[at + i] = byte_of(0);
+                        i = i + 1;
+                    }
+                    i = 0;
+                    while i < 7 + int_of(cv[z + 7]) {
+                        out[at + i] = cv[z + 1 + i];
+                        i = i + 1;
+                    }
+                    count = count + 1;
+                }
+                var c = 0;
+                while c < nk {
+                    key[c] = key2[c];
+                    c = c + 1;
+                }
+                kl = nk;
+            }
+        }
+    }
+    return count;
+}
+
+fn same[&a, &b](x: &a [byte], xa: int, y: &b [byte], n: int) -> [] bool {
+    if len(y) != n {
+        return false;
+    }
+    var i = 0;
+    while i < n {
+        if int_of(x[xa + i]) != int_of(y[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The entry the row `r` (a row of `def`, whose key in the tree after the table's number is `pk`) has in the index whose record is at `ix[at..]`, into `out`: its
+// length; 0 if the row has none (a partial index whose condition the row does not meet); -1 if it is longer than a key of the tree may be, or the row is not one.
+pub fn entry[&x, &d, &r, &k, &o](ix: &x [byte], at: int, def: &d [byte], r: &r [byte], pk: &k [byte], out: &!o [byte]) -> [] int {
+    if int_of(ix[at + 4]) == 1 {
+        let ca = row.value_at(def, r, int_of(ix[at + 5]));
+        if ca < 0 {
+            return 0 - 1;
+        }
+        if int_of(r[ca]) != 2 || int_of(r[ca + 1]) != 1 {
+            return 0;
+        }
+    }
+    build.put_be(out, 0, commit.be(ix, at, 4), 4);
+    var w = 4;
+    let n = int_of(ix[at + 6]);
+    var i = 0;
+    while i < n && w >= 0 {
+        let va = row.value_at(def, r, int_of(ix[at + 7 + i]));
+        if va < 0 {
+            return 0 - 1;
+        }
+        w = row.index_part(r, va, part_max(), out, w);
+        i = i + 1;
+    }
+    if w < 0 || w + len(pk) > btree.max_key() || w + len(pk) > len(out) {
+        return 0 - 1;
+    }
+    i = 0;
+    while i < len(pk) {
+        out[w + i] = pk[i];
+        i = i + 1;
+    }
+    return w + len(pk);
+}
+
+// After a row of the table was written, removed or changed: each of the table's `n` indexes (`ix`, from `load`) loses the entry of the row as it was (`old`, if
+// `has_old`) and gains the entry of the row as it is (`new`, if `has_new`); an entry that stays the same is not touched. The new root, or an error (`btree.err_big()`:
+// an entry longer than a key may be). `a` and `b` are scratch, 256 bytes each.
+pub fn apply[&q, &s, &x, &d, &k, &o, &w, &a, &b](p: &!q pager.Pager, sc: &!s [byte], root: int, ix: &x [byte], n: int, def: &d [byte], pk: &k [byte], old: &o [byte], has_old: bool, new: &w [byte], has_new: bool, a: &!a [byte], b: &!b [byte]) -> [file_read, file_write] int {
+    var nroot = root;
+    var i = 0;
+    while i < n {
+        var ol = 0;
+        var nl = 0;
+        if has_old {
+            ol = entry(ix, i * rec(), def, old, pk, a);
+        }
+        if has_new {
+            nl = entry(ix, i * rec(), def, new, pk, b);
+        }
+        if ol < 0 || nl < 0 {
+            return btree.err_big();
+        }
+        var keep = ol == nl && ol > 0;
+        var c = 0;
+        while keep && c < ol {
+            if int_of(a[c]) != int_of(b[c]) {
+                keep = false;
+            }
+            c = c + 1;
+        }
+        if !keep {
+            if ol > 0 {
+                let d = btree.del(p, sc, nroot, a[0..ol]);
+                if d >= 0 {
+                    nroot = d;
+                } else if d != btree.not_found() {
+                    return d;
+                }
+            }
+            if nl > 0 {
+                a[0] = byte_of(1);
+                let u = btree.put(p, sc, nroot, b[0..nl], a[0..1]);
+                if u < 0 {
+                    return u;
+                }
+                nroot = u;
+            }
+        }
+        i = i + 1;
+    }
+    return nroot;
+}
+
+// Every entry under the index number `id` is removed (the index is dropped): the new root, or an error. `key` and `key2` are scratch, 256 bytes each; `cv` 1024.
+pub fn clear[&q, &s, &k, &j, &v](p: &!q pager.Pager, sc: &!s [byte], root: int, id: int, key: &!k [byte], key2: &!j [byte], cv: &!v [byte]) -> [file_read, file_write] int {
+    var nroot = root;
+    build.put_be(key, 0, id, 4);
+    var more = root != 0;
+    while more {
+        let r = btree.next_after(p, sc, nroot, key[0..4], true, key2, cv);
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return r;
+        } else if r / 1024 < 4 || commit.be(key2, 0, 4) != id {
+            more = false;
+        } else {
+            let d = btree.del(p, sc, nroot, key2[0..r / 1024]);
+            if d < 0 {
+                return d;
+            }
+            nroot = d;
+            if nroot == 0 {
+                more = false;
+            }
+        }
+    }
+    return nroot;
+}
+
+// A number for a new index, from the counter the tables take theirs from (`tables.create`): `out[0]` is the number, and the answer the root with the counter one
+// on; or an error. `key` is scratch.
+pub fn number[&q, &s, &k, &o](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &!k [byte], out: &!o [int]) -> [file_read, file_write] int {
+    build.put_be(key, 0, 0, 4);
+    var id = 1;
+    var err = 0;
+    region r {
+        let b = alloc_slice[r](8, byte_of(0));
+        let g = btree.get(p, sc, root, key[0..4], b);
+        if g == 4 {
+            id = commit.be(b, 0, 4);
+        } else if g >= 0 {
+            err = btree.err_bad();
+        } else if g != btree.not_found() {
+            err = g;
+        }
+        if err == 0 {
+            build.put_be(b, 0, id + 1, 4);
+            err = btree.put(p, sc, root, key[0..4], b[0..4]);
+        }
+    }
+    out[0] = id;
+    return err;
+}
