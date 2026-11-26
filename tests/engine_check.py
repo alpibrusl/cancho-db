@@ -1711,6 +1711,9 @@ UNSUP = [
     ("drop index fuc_u_key", "2BP01"),                                    # the index of a constraint: an error of its own, and another statement to drop it by
     ("alter table fuc add column v integer unique", None),               # a constraint added to a table that has rows
     ("create table fue (k integer primary key, u integer unique)", None), # the constraint's name is a sequence's: PostgreSQL takes another
+    ("create table fuj (a integer, unique (a), b integer, primary key (b))", None),          # a constraint of the table written before a column
+    ("create table fuj (a integer, b integer, unique (a, a), primary key (b))", "42701"),   # a column twice in one list
+    ("create table fuj (k integer primary key, a integer, unique (a), unique (a))", None),    # the same constraint twice: PostgreSQL makes one
     ("create table fug (k integer primary key, %s)" % ", ".join("a%d integer unique" % i for i in range(9)), None),   # more unique columns than the engine takes
     ("create table fuf (k integer primary key, a_column_whose_name_is_not_too_long_but_is_with_the_tables integer unique)", None),
     ("select fw.m, count(*) from fz join fw on fz.k = fw.wk group by fw.wk", None),   # m depends on fw's key
@@ -2027,6 +2030,25 @@ UNIQFIXED = [
     ("alter table fub rename to fubr", "ddl"),
     ("insert into fubr values (3, 2)", "write"),
     ("select * from fubr order by k", "order"),
+    # UNIQUE (column, ...) as a constraint of the table: of two columns, of one, beside a column's own
+    ("create table fuh (k integer primary key, a integer, b text, c integer unique, unique (a, b), unique (b))", "ddl"),
+    ("insert into fuh values (1, 1, 'x', 1), (2, 1, 'y', 2), (3, null, 'z', 3)", "write"),
+    ("insert into fuh values (4, 1, 'w', 1)", "write"),
+    ("insert into fuh values (4, 1, 'y', 4)", "write"),
+    ("insert into fuh values (4, 2, 'x', 4)", "write"),
+    ("insert into fuh values (4, null, 'z', 4)", "write"),
+    ("insert into fuh values (4, null, null, 4), (5, null, null, 5)", "write"),
+    ("update fuh set a = 1, b = 'x' where k = 2", "write"),
+    ("update fuh set a = 2 where k = 2", "write"),
+    ("create index fuh_a_b_key on fuh (a)", "ddl"),
+    ("create index fuh_b_key on fuh (a)", "ddl"),
+    ("select * from fuh order by k", "order"),
+    # a column of the list that the table has not; the lists after the key, and one over the key's column
+    ("create table fui (a integer, b integer, unique (a, nope), primary key (b))", "ddl"),
+    ("create table fui (a integer, b integer, primary key (b), unique (a), unique (b, a))", "ddl"),
+    ("insert into fui values (1, 1), (1, 2)", "write"),
+    ("insert into fui values (1, 1), (2, 2)", "write"),
+    ("select * from fui order by b", "order"),
 ]
 
 
@@ -2418,7 +2440,7 @@ def main():
         raise SystemExit("engine_check: %d statements read by an index, and %d should have" % (VIA[0], wanted))
     with tempfile.TemporaryDirectory() as d:
         ueng = run_engine(os.path.join(d, "uniq.db"), lines(u[0] for u in UNIQFIXED))
-    ucounts, ufails, _, _ = compare(pg, [(sql, how, "fubr" if " fubr" in sql else "fub" if " fub" in sql else "fua") for sql, how in UNIQFIXED], ueng, True)
+    ucounts, ufails, _, _ = compare(pg, [(sql, how, "fubr" if " fubr" in sql else "fub" if " fub" in sql else "fuh" if " fuh" in sql else "fui" if " fui" in sql else "fua") for sql, how in UNIQFIXED], ueng, True)
     fails += ufails
     print("engine_check: %d statements on a table with four unique indexes, none refused: %s" % (len(UNIQFIXED), ", ".join("%s=%d" % kv for kv in sorted(ucounts.items()))))
     _, vfails, _, _ = compare(pg, [(sql, how, "fvj" if " fvj" in str(sql) else "fvl" if " fvl" in str(sql) else "fvi") for sql, how, _ in VIAFIXED], veng, True)

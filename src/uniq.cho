@@ -105,34 +105,41 @@ pub fn changed[&q, &z, &o, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: i
     return out;
 }
 
-// After CREATE TABLE has made the table `name`, whose entry (`nc` columns) is in `ent` and whose columns written UNIQUE are listed in `ua` (how many, then their
-// numbers): a unique index `<table>_<column>_key` on each, marked as a constraint's, in the tree `root`. The new root; or a refusal, when a name is taken (PostgreSQL
-// tries another) or longer than a name may be (PostgreSQL cuts it).
+// After CREATE TABLE has made the table `name`, whose entry (`nc` columns) is in `ent` and whose UNIQUE constraints are listed in `ua` (how many at 0; from 1,
+// for each, how many columns and their numbers): a unique index `<table>_<column>_..._key` on each, marked as a constraint's, in the tree `root`. The new root; or
+// a refusal, when a name is taken (PostgreSQL tries another) or longer than a name may be (PostgreSQL cuts it).
 pub fn constraints[&q, &z, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, name: &n [byte], nc: int) -> [file_read, file_write] int {
     var out = root;
     let nu = int_of(contents(w.ua)[0]);
+    var ua = 1;
     var u = 0;
     while u < nu && out >= 0 {
-        let col = int_of(contents(w.ua)[1 + u]);
-        // the column's name in the entry (its columns from 8: a type, a place in the key, a length, the name)
-        var oa = 8;
-        var c = 0;
-        while c < col && c < nc {
-            oa = oa + 4 + commit.be(contents(w.ent), oa + 2, 2);
-            c = c + 1;
-        }
-        let cl = commit.be(contents(w.ent), oa + 2, 2);
+        let m = int_of(contents(w.ua)[ua]);
         var nl = exec.copy(name, 0, len(name), contents(w.nrow), 0);
-        contents(w.nrow)[nl] = byte_of('_');
-        nl = exec.copy(contents(w.ent), oa + 4, cl, contents(w.nrow), nl + 1);
+        var j = 0;
+        while j < m {
+            let col = int_of(contents(w.ua)[ua + 1 + j]);
+            // the column's name in the entry (its columns from 8: a type, a place in the key, a length, the name)
+            var oa = 8;
+            var c = 0;
+            while c < col && c < nc {
+                oa = oa + 4 + commit.be(contents(w.ent), oa + 2, 2);
+                c = c + 1;
+            }
+            let cl = commit.be(contents(w.ent), oa + 2, 2);
+            if nl + 1 + cl + 4 > 63 {
+                return exec.unsupported();
+            }
+            contents(w.nrow)[nl] = byte_of('_');
+            nl = exec.copy(contents(w.ent), oa + 4, cl, contents(w.nrow), nl + 1);
+            contents(w.ub)[j] = byte_of(col);
+            j = j + 1;
+        }
         contents(w.nrow)[nl] = byte_of('_');
         contents(w.nrow)[nl + 1] = byte_of('k');
         contents(w.nrow)[nl + 2] = byte_of('e');
         contents(w.nrow)[nl + 3] = byte_of('y');
         nl = nl + 4;
-        if nl > 63 {
-            return exec.unsupported();
-        }
         // the name is free: no index has it, no table, no sequence
         let kl = tables.index_key(contents(w.nrow)[0..nl], contents(w.key2));
         let g = btree.get(p, contents(w.sc), out, contents(w.key2)[0..kl], contents(w.uv));
@@ -150,15 +157,15 @@ pub fn constraints[&q, &z, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, 
             let idn = alloc_slice[r](1, 0);
             out = index.number(p, contents(w.sc), out, contents(w.key), idn);
             if out >= 0 {
-                contents(w.ub)[0] = byte_of(col);
                 // (flags: 2 a unique index, 4 a constraint's)
-                vl = index.value(name, idn[0], 6, 0, contents(w.ub), 1, contents(w.uv));
+                vl = index.value(name, idn[0], 6, 0, contents(w.ub), m, contents(w.uv));
             }
         }
         if out < 0 {
             return exec.tree_err(out);
         }
         out = exec.put_key(p, w, out, contents(w.key2), kl, contents(w.uv)[0..vl]);
+        ua = ua + 1 + m;
         u = u + 1;
     }
     return out;

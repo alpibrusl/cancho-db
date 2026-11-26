@@ -1035,7 +1035,7 @@ fn name_list[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], from: int, 
     return pos + 1;
 }
 
-// CREATE TABLE [IF NOT EXISTS] t (column definition | PRIMARY KEY (column, ...), ...): `ex` of the root is 1 for IF NOT EXISTS
+// CREATE TABLE [IF NOT EXISTS] t (column definition | PRIMARY KEY (column, ...) | UNIQUE (column, ...), ...): `ex` of the root is 1 for IF NOT EXISTS
 fn create_table[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], from: int, end: int, nodes: &!n [int], kids: &!k [int], vs: &!v [int], os: &!o [int], tmp: &!g [int], st: &!x [int]) -> [] int {
     st[10] = 0;
     let ine = if_not_exists(sql, toks, from + 2, end, st);
@@ -1064,6 +1064,22 @@ fn create_table[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], 
                 return pos;
             }
             let id = close_list(nodes, kids, tmp, st, parse.n_cols(), mark, 0 - 1);
+            if id < 0 {
+                return parse.fail(st, pos, 0 - id);
+            }
+            let r = stage(tmp, st, id);
+            if r < 0 {
+                return parse.fail(st, pos, 0 - r);
+            }
+        } else if parse.kw(sql, toks, pos, end, "unique") && parse.punct(sql, toks, pos + 1, end, '(') {
+            // UNIQUE (column, ...): a COLS too, told from the key's by its data (-2); any number of them (docs/m3-engine.md 6bo)
+            engine_form(st, parse.e_unsupported_statement());
+            let mark = st[10];
+            pos = name_list(sql, toks, pos + 2, end, nodes, kids, tmp, st);
+            if pos < 0 {
+                return pos;
+            }
+            let id = close_list(nodes, kids, tmp, st, parse.n_cols(), mark, 0 - 2);
             if id < 0 {
                 return parse.fail(st, pos, 0 - id);
             }
