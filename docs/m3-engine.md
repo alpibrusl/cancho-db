@@ -2845,6 +2845,26 @@ a parameter, a negative number, the constant first, an empty range, one of exact
 one-sided and wide, texts beginning alike, the key bounding the scan, an `or`, what can raise), PostgreSQL holding every answer and the count of
 reads by an index exact. 14 mutants.
 
+**Slice 4, second part: `order by` an indexed column with a `limit`, the design.** `select ... from t order by c limit n` reads the whole table and
+sorts it to give `n` rows. With an index on `c` the first `n` entries are the answer.
+
+- *The tree is read backwards for `desc`.* `btree.prev_before`: the last entry before a key, as `next_after` is the first after one. It walks from
+  the root each time (no leaf is kept): a read of this kind is a few rows. Held, like `next_after`, to a model in `tests/btree_check.py`.
+- *When.* A `select` of one table, not grouped, not `distinct`, with no `where`, ordered by one item that is a column, the first of a built index
+  that is not partial, of an integer type, `asc` or `desc` with the nulls where PostgreSQL puts them by default (last for `asc`, first for `desc`),
+  and a `limit` (an `offset` may come with it). Then the rows are read by the index in that order, and the read ends when `offset + limit` rows are
+  had. They are sorted like any answer afterwards, which changes nothing: they come sorted.
+- *Not a text column*: an entry has only a text's first 24 bytes, and texts that begin alike are in the order of their keys, not their own.
+- *Not when an item of the select list can raise an error.* A row that is not read is a row whose error is not found (6g); PostgreSQL may compute
+  the list before it sorts, and the engine already refuses `select 10 / (k - 2) ... order by k limit 1` as depending on that order. So the list has
+  to be columns, constants and what cannot raise.
+- *Not with a `where`*, in this part: the rows that pass may be few and far along the index, and reading most of a table by an index costs four
+  times what reading the table does (the first part's measure). Without a count of what passes there is nothing to decide by.
+- *Rows that tie.* Where rows have the same value in `c`, which of them are within the limit is not said by the statement; PostgreSQL gives
+  whichever its plan meets. For `asc` the index gives those with the least keys, as the sort of the whole table did. **For `desc` it gives those with
+  the greatest keys, where the sort gave the least**: an answer PostgreSQL may give as well, and another than this engine gave before. The test
+  holds such answers by their number of rows, as it always has.
+
 **`unique` on a column of `create table` (after slice 3).** PostgreSQL makes of it a constraint named `<table>_<column>_key`, held by a unique index
 of that name. Here it is that index and a mark on it:
 

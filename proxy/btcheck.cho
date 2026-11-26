@@ -263,7 +263,9 @@ fn run[&h, &i, &p, &r](heap: &!h Heap, io: &!i Io, pg: &!p pager.Pager, roots: &
                         putchar(io, '\n');
                     }
                 }
-            } else if ce - cs == 4 && int_of(all[cs]) == 'n' {
+            } else if ce - cs == 4 && (int_of(all[cs]) == 'n' || int_of(all[cs]) == 'p') {
+                // `next SLOT KEY INCL`, or `prev SLOT KEY`: the last entry before the key
+                let back = int_of(all[cs]) == 'p';
                 let (ks, ke) = word(all, ls, le, 2);
                 let (is, ie) = word(all, ls, le, 3);
                 var klen = 0 - 1;
@@ -282,7 +284,11 @@ fn run[&h, &i, &p, &r](heap: &!h Heap, io: &!i Io, pg: &!p pager.Pager, roots: &
                         borrow kb as &kr in {
                             borrow mut ko as &!xw in {
                                 borrow mut vo as &!ow in {
-                                    r = btree.next_after(pg, contents(sw), roots[slot], contents(kr)[0..klen], incl, contents(xw), contents(ow));
+                                    if back {
+                                        r = btree.prev_before(pg, contents(sw), roots[slot], contents(kr)[0..klen], contents(xw), contents(ow));
+                                    } else {
+                                        r = btree.next_after(pg, contents(sw), roots[slot], contents(kr)[0..klen], incl, contents(xw), contents(ow));
+                                    }
                                 }
                             }
                         }

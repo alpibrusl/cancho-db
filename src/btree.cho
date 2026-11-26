@@ -1013,3 +1013,81 @@ pub fn scan_step[&q, &s, &k, &a, &b, &l, &c](p: &!q pager.Pager, sc: &!s [byte],
     }
     return err_deep();
 }
+
+// The child at index `j` (0 to count) of the internal page `pg`.
+fn child_at[&p](pg: &p [byte], j: int) -> [] int {
+    var child = child0(pg);
+    var at = 11;
+    var i = 1;
+    while i <= j {
+        let kl = int_of(pg[at]);
+        child = commit.be(pg, at + 1 + kl, 4);
+        at = at + 5 + kl;
+        i = i + 1;
+    }
+    return child;
+}
+
+// The last entry before `key` in the tree `root`, in key order: as `next_after` answers the first after one (the key and value into `kout` and `vout`,
+// `key length * 1024 + value length`, `not_found()` if there is none). Calling it with the key it answered walks the tree backwards. The tree is walked from
+// the root at each call: when the leaf that would hold `key` has nothing before it, the answer is the last entry under the child to the left, at the lowest
+// level that has one.
+pub fn prev_before[&q, &s, &k, &a, &b](p: &!q pager.Pager, sc: &!s [byte], root: int, key: &k [byte], kout: &!a [byte], vout: &!b [byte]) -> [file_read] int {
+    if root == 0 {
+        return not_found();
+    }
+    var id = root;
+    var alt = 0;
+    var depth = 0;
+    while depth < 40 {
+        let rc = pager.read_page(p, id, sc[0..4096]);
+        if rc < 0 {
+            return fail(rc);
+        }
+        let t = int_of(sc[0]);
+        if t == 1 {
+            let count = commit.be(sc, 1, 2);
+            var at = 7;
+            var best = 0 - 1;
+            var i = 0;
+            var more = true;
+            while i < count && more {
+                let kl = int_of(sc[at]);
+                if cmp(sc[at + 3..at + 3 + kl], key) < 0 {
+                    best = at;
+                    at = leaf_next(sc[0..4096], at);
+                    i = i + 1;
+                } else {
+                    more = false;
+                }
+            }
+            if best >= 0 {
+                let kl = int_of(sc[best]);
+                let vl = commit.be(sc, best + 1, 2);
+                if kl > len(kout) || vl > len(vout) {
+                    return err_big();
+                }
+                copy(kout, 0, sc, best + 3, kl);
+                copy(vout, 0, sc, best + 3 + kl, vl);
+                return kl * 1024 + vl;
+            }
+            if alt == 0 {
+                return not_found();
+            }
+            // (every key under it is before `key`: the walk goes on as before, and ends at its last entry)
+            id = alt;
+            alt = 0;
+        } else {
+            if t != 2 {
+                return err_bad();
+            }
+            let (ix, ch, al) = pick(sc[0..4096], key);
+            if ix > 0 {
+                alt = child_at(sc[0..4096], ix - 1);
+            }
+            id = ch;
+        }
+        depth = depth + 1;
+    }
+    return err_deep();
+}

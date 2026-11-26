@@ -38,6 +38,10 @@ class Model:
         ks = sorted(k for k in self.slots[s] if (k >= key if incl else k > key))
         return ks[0] if ks else None
 
+    def prev_before(self, s, key):
+        ks = sorted(k for k in self.slots[s] if k < key)
+        return ks[-1] if ks else None
+
 
 def rand_key(rng, alphabet):
     return bytes(rng.choice(alphabet) for _ in range(rng.choice([1, 1, 2, 3, 5, 8, 20, 60, 200])))
@@ -74,6 +78,12 @@ def script(seed, n):
             k = rng.choice(keys)
             lines.append("get %d %s" % (s, k.hex()))
             want.append("val " + m.slots[s][k].hex() if k in m.slots[s] else "none")
+        elif op < 0.84:
+            # the last entry before a key: one of the keys, the empty key (none is before it), or a key after every key
+            k = rng.choice(keys) if rng.random() < .85 else rng.choice([b"", bytes([255]) * 200])
+            lines.append("prev %d %s" % (s, k.hex() or "-"))
+            pk = m.prev_before(s, k)
+            want.append("none" if pk is None else "kv %s %s" % (pk.hex(), m.slots[s][pk].hex()))
         elif op < 0.92:
             k, incl = (rng.choice(keys) if rng.random() < .9 else b""), rng.randrange(2)
             lines.append("next %d %s %d" % (s, k.hex() or "-", incl))
@@ -87,7 +97,23 @@ def script(seed, n):
     return lines, want, m
 
 
+def deep():
+    """A tree three levels deep (long keys, long values) walked backwards: the page to the left is then a page of pages."""
+    rng = random.Random(77)
+    keys = sorted(set(bytes([rng.randrange(256) for _ in range(190)]) + bytes([i // 256, i % 256]) for i in range(1500)))
+    order = list(keys)
+    rng.shuffle(order)
+    with tempfile.TemporaryDirectory() as d:
+        lines = ["put 0 %s %s" % (k.hex(), (k[:4] * 150).hex()) for k in order]
+        lines += ["prev 0 %s" % (bytes([255]) * 200).hex()] + ["prev 0 %s" % k.hex() for k in reversed(keys)]
+        out, rc = run(os.path.join(d, "pages"), lines)
+        want = ["kv %s %s" % (k.hex(), (k[:4] * 150).hex()) for k in reversed(keys)] + ["none"]
+        check("a tree of %d long keys, three levels deep, is walked backwards from after its last key to before its first" % len(keys), rc == 0 and out[len(keys):] == want,
+              (rc, [(a, w) for a, w in zip(out[len(keys):], want) if a != w][:1]))
+
+
 def main():
+    deep()
     for seed in range(SEEDS):
         n = [400, 1500, 4000][seed % 3]
         lines, want, m = script(seed, n)
@@ -104,6 +130,15 @@ def main():
                     tail_want.append("kv %s %s" % (b.hex(), m.slots[s][b].hex()))
                 if keys:
                     tail.append("next %d %s 0" % (s, keys[-1].hex()))
+                    tail_want.append("none")
+                # and backwards: from after every key to the first, and none before it
+                tail.append("prev %d %s" % (s, (bytes([255]) * 200).hex()))
+                tail_want.append("none" if not keys else "kv %s %s" % (keys[-1].hex(), m.slots[s][keys[-1]].hex()))
+                for a, b in zip(keys, keys[1:]):
+                    tail.append("prev %d %s" % (s, b.hex()))
+                    tail_want.append("kv %s %s" % (a.hex(), m.slots[s][a].hex()))
+                if keys:
+                    tail.append("prev %d %s" % (s, keys[0].hex()))
                     tail_want.append("none")
             out, rc = run(path, lines + tail)
             check("seed %d: the process ends well" % seed, rc == 0, rc)

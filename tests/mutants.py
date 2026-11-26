@@ -1527,6 +1527,11 @@ def run_l3a_cho(cancho):
 
 # ---- the copy-on-write B+tree and its pages (src/btree.cho, src/pager.cho), judged by tests/btree_check.py; the superblocks and the commit (src/pstore.cho), judged by tests/pstore_check.py
 BTREE = [
+    ("btree: backwards: the first entry of the leaf before the key is answered, not the last", "src/btree.cho", "                if cmp(sc[at + 3..at + 3 + kl], key) < 0 {\n                    best = at;", "                if cmp(sc[at + 3..at + 3 + kl], key) < 0 {\n                    if best < 0 {\n                        best = at;\n                    }"),
+    ("btree: backwards: an entry at the key is before it", "src/btree.cho", "                if cmp(sc[at + 3..at + 3 + kl], key) < 0 {\n                    best = at;", "                if cmp(sc[at + 3..at + 3 + kl], key) <= 0 {\n                    best = at;"),
+    ("btree: backwards: the walk stops at the page to the left, and does not go down it", "src/btree.cho", "            id = alt;\n            alt = 0;\n        } else {\n            if t != 2 {", "            id = alt;\n            alt = 0;\n            depth = 40;\n        } else {\n            if t != 2 {"),
+    ("btree: backwards: nothing is looked for to the left of the leaf", "src/btree.cho", "            if ix > 0 {\n                alt = child_at(sc[0..4096], ix - 1);", "            if ix > 9999 {\n                alt = child_at(sc[0..4096], ix - 1);"),
+    ("btree: backwards: the page to the left is the first of its parent", "src/btree.cho", "                alt = child_at(sc[0..4096], ix - 1);", "                alt = child0(sc[0..4096]);"),
     ("pager: a page changed under the cache is still served", "src/pager.cho", "    var rc = 0;\n    forget(p, id);", "    var rc = 0;"),
     ("btree: a page above one written anew is left as it was", "src/btree.cho", "        if !split && cid == was(sc, level + 1) {", "        if !split {"),
     ("btree: after a removal a page above a new page is left as it was", "src/btree.cho", "        if !removed && cid == was(sc, level + 1) {", "        if !removed {"),
