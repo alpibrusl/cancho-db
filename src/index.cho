@@ -76,7 +76,7 @@ fn tail_ok[&v](cv: &v [byte], z: int) -> [] bool {
         return false;
     }
     let n = int_of(cv[z + 7]);
-    return commit.be(cv, z + 1, 4) > 0 && n >= 1 && n <= max_cols() && z + 8 + n == len(cv) && int_of(cv[z + 5]) <= 3;
+    return commit.be(cv, z + 1, 4) > 0 && n >= 1 && n <= max_cols() && z + 8 + n == len(cv) && int_of(cv[z + 5]) <= 7;
 }
 
 // The built indexes of the table `name` in the tree `root`, a record of `rec()` bytes each into `out`: how many, or an error (`btree.err_big()`: more than

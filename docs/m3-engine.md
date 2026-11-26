@@ -2782,6 +2782,22 @@ whether the row's entry changed, and the two entries are the same bytes. So `upd
 held, with a unique index on `s`, and the list of statements above had not caught it because an earlier statement of the list had changed that other
 row. It now asks whether the values changed (`index.stays`), and the list has the case, both ways.
 
+**`unique` on a column of `create table` (after slice 3).** PostgreSQL makes of it a constraint named `<table>_<column>_key`, held by a unique index
+of that name. Here it is that index and a mark on it:
+
+- `create table t (k integer primary key, u integer unique)` makes the table and, in the same statement, a unique index `t_u_key` on `u`, marked in
+  the catalog as a constraint's. Everything slice 3 does for a unique index it does for this one. The name is taken as any index's is.
+- *`drop index t_u_key` is refused* (`engine-unsupported`): PostgreSQL's answer is an error of its own (`2BP01`, the constraint needs it), and the
+  way to drop it there is `alter table ... drop constraint`, which the engine has not.
+- *Refused, and said:* when the name `<table>_<column>_key` is already a table's, an index's or a sequence's (PostgreSQL then tries the name with a
+  number after it), or is longer than 63 bytes (PostgreSQL cuts it); `alter table ... add column ... unique`; and a `unique (a, b)` written as a
+  constraint of the table, which the parser does not read. More than eight unique columns in one table.
+
+*Built and tested.* `uniq.constraints`, called by `create table` once the table is made; the mark is a bit of the index's flags, which `drop index`
+reads. The list of slice 3 has 23 more statements (95): a table with three unique columns, the conflicts of each, a default that conflicts, the
+constraint's name taken by an index, a table and a sequence, the table dropped and made again, and renamed. Five statements are in the list of those
+refused on purpose, each beside what PostgreSQL 16 does. 11 mutants.
+
 *A limit of the check, said plainly (slice 1's; slice 2 narrows it).* Since slice 2 a fault in `index.entry` that loses a row from a read is seen by
 PostgreSQL's answer. One that only makes entries longer than they need be is still on both sides.
 
