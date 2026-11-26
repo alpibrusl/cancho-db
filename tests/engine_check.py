@@ -769,12 +769,26 @@ def jselect(g, tables):
 
 
 def run_engine(path, lines):
-    r = subprocess.run([EXE, path], input="\n".join(lines) + "\n", capture_output=True, text=True)
+    # Every run of the test program ends by holding each built index to its table's rows (docs/m3-engine.md 6bo): an index that has an entry too many or too few after
+    # whatever the run did (statements that failed, transactions rolled back, a table dropped, a crash before it) ends the test.
+    if os.environ.get("INDEX_EVERY"):
+        # (to find the statement after which an index is wrong: the check after every line, and the line named)
+        rr = subprocess.run([EXE, path + ".dbg"], input="\n".join(x for l in lines for x in (l, "!indexes")) + "\n", capture_output=True, text=True)
+        seen = 0
+        for o in rr.stdout.split("\n"):
+            if o.startswith("indexes "):
+                seen += 1
+                if not o.endswith(" ok"):
+                    raise SystemExit("engine_check: after line %d %r (before it %r): %s" % (seen, lines[seen - 1][:300], [x[:120] for x in lines[max(0, seen - 4):seen - 1]], o))
+    r = subprocess.run([EXE, path], input="\n".join(list(lines) + ["!indexes"]) + "\n", capture_output=True, text=True)
     if r.returncode != 0:
         raise SystemExit("engine_check: enginecheck ended with %d: %s%s" % (r.returncode, r.stdout[-300:], r.stderr[-300:]))
     out, cur = [], []
     for line in r.stdout.split("\n"):
-        if line == ".":
+        if line.startswith("indexes "):
+            if not line.endswith(" ok"):
+                raise SystemExit("engine_check: %s" % line)
+        elif line == ".":
             out.append(cur)
             cur = []
         elif line.startswith("committed ") or line.startswith("swept ") or line.startswith("err ") or line == "unseeded":

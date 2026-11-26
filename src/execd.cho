@@ -6,6 +6,7 @@ import cdb.build;
 import cdb.btree;
 import cdb.pager;
 import cdb.tables;
+import cdb.index;
 import cdb.parse;
 import cdb.lower;
 import cdb.exec;
@@ -135,8 +136,16 @@ pub fn rename_table[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, ro
             if nk < 6 || commit.be(contents(w.key2), 0, 4) != 0 || int_of(contents(w.key2)[4]) != 1 {
                 more = false;
             } else {
-                if exec.same(contents(w.cur), 0, r % 1024, contents(w.lit), 2, ol) {
-                    nroot = exec.put_key(p, w, nroot, contents(w.key2), nk, contents(w.lit)[302..302 + nl]);
+                // (a built index's value is the table's name, a zero byte and what the index is: the name changes and the rest stays, src/index.cho)
+                let nv = r % 1024;
+                var tl = index.name_end(contents(w.cur)[0..nv]);
+                if tl < 0 {
+                    tl = nv;
+                }
+                if exec.same(contents(w.cur), 0, tl, contents(w.lit), 2, ol) {
+                    var vl = exec.copy(contents(w.lit), 302, nl, contents(w.ent), 0);
+                    vl = exec.copy(contents(w.cur), tl, nv - tl, contents(w.ent), vl);
+                    nroot = exec.put_key(p, w, nroot, contents(w.key2), nk, contents(w.ent)[0..vl]);
                     if nroot < 0 {
                         return nroot;
                     }

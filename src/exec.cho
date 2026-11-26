@@ -8,6 +8,7 @@ import cdb.eval;
 import cdb.btree;
 import cdb.pager;
 import cdb.tables;
+import cdb.index;
 import cdb.lex;
 import std.crypto;
 
@@ -474,6 +475,11 @@ pub res struct Work {
     said: Box[[byte]],
     nsaid: int,
     lsaid: int,
+    // the built indexes of the table last bound (`index.load`: `nix` records in `ix`), and two keys' room to keep them by (docs/m3-engine.md 6bo)
+    ix: Box[[byte]],
+    ixa: Box[[byte]],
+    ixb: Box[[byte]],
+    nix: int,
 }
 
 pub fn rows_size() -> [] int {
@@ -485,11 +491,14 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0, said: box_slice(heap, 110000, byte_of(0)), nsaid: 0, lsaid: 0 };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0, said: box_slice(heap, 110000, byte_of(0)), nsaid: 0, lsaid: 0, ix: box_slice(heap, 256, byte_of(0)), ixa: box_slice(heap, 256, byte_of(0)), ixb: box_slice(heap, 256, byte_of(0)), nix: 0 };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount, said, nsaid, lsaid } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount, said, nsaid, lsaid, ix, ixa, ixb, nix } = w;
+    unbox_slice(heap, ix);
+    unbox_slice(heap, ixa);
+    unbox_slice(heap, ixb);
     unbox_slice(heap, sc);
     unbox_slice(heap, ws);
     unbox_slice(heap, ar);
@@ -1059,6 +1068,18 @@ pub fn bind_table[&q, &z, &x](p: &!z pager.Pager, w: &!q Work, root: int, e: &x 
     w.dlen = dl;
     w.nlen = nl;
     w.tid = tables.id_of(contents(w.ent));
+    // its built indexes, for whoever writes a row of it (6bo)
+    var xn = 0;
+    region g {
+        let k1 = alloc_slice[g](256, byte_of(0));
+        let k2 = alloc_slice[g](256, byte_of(0));
+        let v = alloc_slice[g](1024, byte_of(0));
+        xn = index.load(p, contents(w.sc), root, e[at + 2..at + 2 + nl], k1, k2, v, contents(w.ix));
+    }
+    if xn < 0 {
+        return tree_err(xn);
+    }
+    w.nix = xn;
     let x = contents(w.cx);
     x[0] = 0;
     x[1] = nl;
@@ -1370,7 +1391,22 @@ pub fn row_put[&q, &z, &k, &v, &o](p: &!z pager.Pager, w: &!q Work, root: int, k
     if nw < 0 {
         return tree_err(nw);
     }
-    return nw;
+    return indexed(p, w, nw, k, kn, v, true, old, how != 0);
+}
+
+// The entries of the table's built indexes follow the row (6bo): the tree with them, or an error. The table is the one last bound, as the row's is.
+pub fn indexed[&q, &z, &k, &v, &o](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int, new: &v [byte], has_new: bool, old: &o [byte], has_old: bool) -> [file_read, file_write] int {
+    if w.nix == 0 {
+        return root;
+    }
+    if kn < 4 || commit.be(k, 0, 4) != w.tid {
+        return damaged();
+    }
+    let r = index.apply(p, contents(w.sc), root, contents(w.ix), w.nix, contents(w.ctx)[64..64 + w.dlen], k[4..kn], old, has_old, new, has_new, contents(w.ixa), contents(w.ixb));
+    if r < 0 {
+        return tree_err(r);
+    }
+    return r;
 }
 
 // Remove the row last read (`old`: what it was) from the key `k`: the new root, or an error.
@@ -1385,7 +1421,7 @@ pub fn row_del[&q, &z, &k, &o](p: &!z pager.Pager, w: &!q Work, root: int, k: &k
     if nw < 0 {
         return tree_err(nw);
     }
-    return nw;
+    return indexed(p, w, nw, k, kn, old, false, old, true);
 }
 
 // Whether the key `k[ka..ka + kn]` is after the key `h[0..hn]` in the tree's order (bytes, a shorter one first).
@@ -1896,78 +1932,6 @@ pub fn last_txn[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_rea
         return damaged();
     }
     return commit.be(contents(w.uval), 0, 8);
-}
-
-// The tree `root` with `t` as the number of its last transaction: what a statement that wrote ends with. The new tree, or a refusal.
-pub fn mark_txn[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, t: int) -> [file_read, file_write] int {
-    build.put_be(contents(w.key), 0, 4294967295, 4);
-    build.put_be(contents(w.uval), 0, t, 8);
-    var nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..4], contents(w.uval)[0..8]);
-    if nw >= 0 && t == 1 {
-        // a new tree's first transaction: every history entry it has or will have is findable by its key (6bi)
-        let ik = tables.indexed_key(contents(w.key));
-        contents(w.uval)[0] = byte_of(1);
-        nw = btree.put(p, contents(w.sc), nw, contents(w.key)[0..ik], contents(w.uval)[0..1]);
-    }
-    if nw < 0 {
-        return tree_err(nw);
-    }
-    return nw;
-}
-
-// The tree `root` as it was when transaction `t` was its last: the entries of every later transaction are applied, newest first, onto a tree that shares every page it does not change. The answer is a tree
-// to read and then forget (it is named by no root: the next sweep takes its pages), or a refusal.
-pub fn as_of[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int, t: int) -> [file_read, file_write] int {
-    var out = root;
-    if root == 0 {
-        return 0;
-    }
-    // what was before the history was trimmed (6bb) cannot be put back: it is refused, not answered with what is there
-    let fk = tables.trim_key(contents(w.key));
-    let fr = btree.get(p, contents(w.sc), root, contents(w.key)[0..fk], contents(w.cur));
-    if fr == 8 && t < commit.be(contents(w.cur), 0, 8) {
-        return trimmed();
-    }
-    if fr != 8 && fr != btree.not_found() {
-        return damaged();
-    }
-    build.put_be(contents(w.key), 0, 4294967295, 4);
-    var kl = 4;
-    var more = true;
-    while more {
-        let r = btree.next_after(p, contents(w.sc), root, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
-        if r == btree.not_found() {
-            more = false;
-        } else if r < 0 {
-            return tree_err(r);
-        } else {
-            let nk = r / 1024;
-            let nv = r % 1024;
-            if nk < 12 || nv < 1 || commit.be(contents(w.key2), 0, 4) != 4294967295 {
-                return damaged();
-            }
-            if 9223372036854775807 - commit.be(contents(w.key2), 4, 8) <= t {
-                more = false;
-            } else {
-                var nw = 0;
-                if int_of(contents(w.cur)[0]) == 0 {
-                    nw = btree.del(p, contents(w.sc), out, contents(w.key2)[12..nk]);
-                    if nw == btree.not_found() {
-                        nw = out;
-                    }
-                } else {
-                    nw = btree.put(p, contents(w.sc), out, contents(w.key2)[12..nk], contents(w.cur)[1..nv]);
-                }
-                if nw < 0 {
-                    return tree_err(nw);
-                }
-                out = nw;
-                copy(contents(w.key2), 0, nk, contents(w.key), 0);
-                kl = nk;
-            }
-        }
-    }
-    return out;
 }
 
 // The snapshot of the tree `root` that the lowering reads (`tables.schema_text`), into `out`: its length, or a refusal.

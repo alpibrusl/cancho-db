@@ -1855,10 +1855,10 @@ ENGINE = [
      '    if iflags % 2 == 1 {\n        return exec.unsupported();\n    }\n',
      ''),
     ("index: a dropped table's indexes stay", 'src/execw.cho',
-     '                if exec.same(contents(w.cur), 0, nv, e, 4, nl) {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);',
+     '                if exec.same(contents(w.cur), 0, tl, e, 4, nl) {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);',
      '                if false {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);'),
     ('index: a dropped table takes every index with it', 'src/execw.cho',
-     '                if exec.same(contents(w.cur), 0, nv, e, 4, nl) {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);',
+     '                if exec.same(contents(w.cur), 0, tl, e, 4, nl) {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);',
      '                if true {\n                    let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);'),
     ('index: the lowering is not told of it', 'src/tables.cho',
      '            } else if int_of(key2[4]) == 1 {\n                // an index (`index_key`): a line `index NAME on TABLE`\n                if at + 6 + (nk - 5) + 4 + nv + 1 > len(out) {\n                    return btree.err_big();\n                }\n                at = lit(out, at, "index ");',
@@ -1881,19 +1881,19 @@ ENGINE = [
     ('history: a key that was not there is recorded as there', 'src/exec.cho',
      '    } else if o == btree.not_found() {\n        contents(w.uval)[0] = byte_of(0);',
      '    } else if o == btree.not_found() {\n        contents(w.uval)[0] = byte_of(1);'),
-    ('history: AS OF t undoes t as well', 'src/exec.cho',
+    ('history: AS OF t undoes t as well', 'src/facts.cho',
      '            if 9223372036854775807 - commit.be(contents(w.key2), 4, 8) <= t {',
      '            if 9223372036854775807 - commit.be(contents(w.key2), 4, 8) < t {'),
-    ('history: AS OF puts back the entry, not the value', 'src/exec.cho',
+    ('history: AS OF puts back the entry, not the value', 'src/facts.cho',
      '                    nw = btree.put(p, contents(w.sc), out, contents(w.key2)[12..nk], contents(w.cur)[1..nv]);',
      '                    nw = btree.put(p, contents(w.sc), out, contents(w.key2)[12..nk], contents(w.cur)[0..nv]);'),
-    ('history: AS OF removes nothing that was not there', 'src/exec.cho',
+    ('history: AS OF removes nothing that was not there', 'src/facts.cho',
      '                if int_of(contents(w.cur)[0]) == 0 {\n                    nw = btree.del(p, contents(w.sc), out, contents(w.key2)[12..nk]);\n                    if nw == btree.not_found() {\n                        nw = out;\n                    }',
      '                if int_of(contents(w.cur)[0]) == 0 {\n                    nw = out;\n                    if nw == btree.not_found() {\n                        nw = out;\n                    }'),
     ('history: entries are kept oldest first', 'src/exec.cho',
      '    build.put_be(out, 4, 9223372036854775807 - txn, 8);',
      '    build.put_be(out, 4, txn, 8);'),
-    ("history: a transaction's number is given twice", 'src/exec.cho',
+    ("history: a transaction's number is given twice", 'src/facts.cho',
      '    build.put_be(contents(w.uval), 0, t, 8);',
      '    build.put_be(contents(w.uval), 0, t - 1, 8);'),
     ('history: a value set leaves no entry', 'src/exec.cho',
@@ -2234,8 +2234,8 @@ ENGINE = [
      '                } else if g2 == btree.not_found() {\n                    exec.note(w, exec.e_unique());',
      '                } else if g2 == btree.not_found() {\n                    exec.note(w, 0);'),
     ('update: the old keys are not left', 'src/execw.cho',
-     '                if pass == 0 {\n                    nw = exec.del_key(p, w, out, contents(w.tmp)[65536..65539 + nk], 3 + nk);',
-     '                if pass == 0 {\n                    nw = out;'),
+     '                    nw = exec.del_key(p, w, out, contents(w.tmp)[65536..65539 + nk], 3 + nk);\n                    if nw >= 0 && og > 32 {',
+     '                    nw = out;\n                    if nw >= 0 && og > 32 {'),
     ('delete: the row stays', 'src/execw.cho',
      '                nroot = nw;\n                let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);',
      '                let cr = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);'),
@@ -2607,7 +2607,7 @@ ENGINE = [
      '            root = exec.seq_replay(p, w, branch);\n        } else if after != branch {',
      '            root = branch;\n        } else if after != branch {'),
     ("session: a statement's commit takes no number", 'src/session.cho',
-     'root = exec.mark_txn(p, w, after, last + 1);',
+     'root = facts.mark_txn(p, w, after, last + 1);',
      'root = after;'),
     ('session: what was drawn is not forgotten when nothing can roll back', 'src/session.cho',
      '            exec.seq_forget(w);\n        }\n        return root;',
@@ -2619,7 +2619,7 @@ ENGINE = [
      'if after == is_commit() && ss[0] == open_txn() {',
      'if after == is_commit() {'),
     ("session: a transaction's commit takes no number", 'src/session.cho',
-     'root = exec.mark_txn(p, w, ss[1], last + 1);',
+     'root = facts.mark_txn(p, w, ss[1], last + 1);',
      'root = ss[1];'),
     ('session: a transaction that wrote has no facts', 'src/session.cho',
      '            ss[2] = facts.take(p, w, ss[2]);\n            ss[3] = 1;\n',
@@ -2733,7 +2733,7 @@ ENGINE = [
      '    nroot = exec.del_key(p, w, nroot, contents(w.key), kl);\n    if nroot < 0 {\n        return nroot;\n    }\n    // its indexes are',
      '    // its indexes are'),
     ('rename: its indexes stay with the old name', 'src/execd.cho',
-     '                if exec.same(contents(w.cur), 0, r % 1024, contents(w.lit), 2, ol) {',
+     '                if exec.same(contents(w.cur), 0, tl, contents(w.lit), 2, ol) {',
      '                if false {'),
     ('rename: what follows the new name is ignored', 'src/stmt.cho',
      '        if pos < end {\n            return parse.fail(st, pos, parse.e_syntax());\n        }\n        let root = parse.mk(nodes, kids, st, parse.n_rename(),',
@@ -2766,8 +2766,8 @@ ENGINE = [
      '        contents(w.key)[fk] = byte_of(0);\n        state.key_commit(',
      '        contents(w.key)[fk] = byte_of(1);\n        state.key_commit('),
     ('session: a statement that wrote has no facts', 'src/session.cho',
-     '                note_facts(ss, fr);\n            }\n            root = exec.mark_txn(p, w, after, last + 1);',
-     '            }\n            root = exec.mark_txn(p, w, after, last + 1);'),
+     '                note_facts(ss, fr);\n            }\n            root = facts.mark_txn(p, w, after, last + 1);',
+     '            }\n            root = facts.mark_txn(p, w, after, last + 1);'),
     ('log: the facts of a commit are not kept', 'src/facts.cho',
      '                if int_of(contents(w.key2)[0]) > 3 {\n                    let dk = tables.fact_key(seq, contents(w.lit));',
      '                if false {\n                    let dk = tables.fact_key(seq, contents(w.lit));'),
@@ -2895,9 +2895,9 @@ ENGINE = [
     ('log: the trim does not say up to where', 'src/facts.cho',
      '        if gone > 0 {\n            let num = alloc_slice[g](8, byte_of(0));',
      '        if false {\n            let num = alloc_slice[g](8, byte_of(0));'),
-    ('log: the tree as of a trimmed transaction is read as it is now', 'src/exec.cho',
-     '    if fr == 8 && t < commit.be(contents(w.cur), 0, 8) {\n        return trimmed();',
-     '    if false {\n        return trimmed();'),
+    ('log: the tree as of a trimmed transaction is read as it is now', 'src/facts.cho',
+     '    if fr == 8 && t < commit.be(contents(w.cur), 0, 8) {\n        return exec.trimmed();',
+     '    if false {\n        return exec.trimmed();'),
     ('log: the trim is a commit of what the statement before changed', 'src/facts.cho',
      "    w.rfill = 18;\n    // it changed no row: what the statement before reported is not this one's (a commit of the log is made of a statement's changes)\n    w.nchg = 0;\n    w.cfill = 0;",
      '    w.rfill = 18;'),
@@ -2938,7 +2938,7 @@ ENGINE = [
     ('scrub: purge: what was born and is not in the tree is left', 'src/pstore.cho', '                                mk[id] = byte_of(b + 1);\n                                gl[ng] = id;\n                                ng = ng + 1;', '                                mk[id] = byte_of(b + 1);\n                                gl[ng] = id;'),
     ('scrub: by key: the entry that finds a history entry is not under the key', 'src/exec.cho', '    let il = tables.past_key(k, kn, w.txn, contents(w.ukey));', '    let il = tables.past_key(k, 0, w.txn, contents(w.ukey));'),
     ('scrub: by key: an erase goes by the entries though the tree has no mark', 'src/execw.cho', '    if ig >= 0 {\n        w.root = nroot;\n        return 0;\n    }', '    if ig != 0 - 9999 {\n        w.root = nroot;\n        return 0;\n    }'),
-    ('scrub: by key: a new tree has no mark', 'src/exec.cho', '    if nw >= 0 && t == 1 {', '    if nw >= 0 && t == 0 {'),
+    ('scrub: by key: a new tree has no mark', 'src/facts.cho', '    if nw >= 0 && t == 1 {', '    if nw >= 0 && t == 0 {'),
     ('scrub: by key: a trim that finds no history left gives no mark', 'src/facts.cho', '        if gone == 0 && root != 0 {', '        if gone < 0 && root != 0 {'),
     ('scrub: by key: a trim gives the mark while history is left', 'src/facts.cho', '        if gone == 0 && root != 0 {', '        if root != 0 {'),
     ("scrub: by key: an erase leaves the entry that found the row's history", 'src/execw.cho', '                    let xd = btree.del(p, contents(w.sc), nroot, contents(w.key2)[0..nk]);\n                    if xd < 0 {', '                    let xd = nroot;\n                    if xd < 0 {'),
@@ -2959,12 +2959,24 @@ ENGINE = [
     ("log: the schema has a column's type and not its place in the key", 'src/tables.cho', 'at = small(out, at + 1, row.col_pk(def, c));', 'at = small(out, at + 1, 0);'),
     ("log: the schema has a column's type and key and not what the entry marks it with", 'src/tables.cho', 'at = small(out, at + 1, int_of(ent[marks_at(ent[0..nv], c)]));', 'at = small(out, at + 1, 0);'),
     ('log: the schema says a column has a default and not which', 'src/tables.cho', "                        if da >= 0 {\n                            out[at] = byte_of('=');", "                        if da >= 9999 {\n                            out[at] = byte_of('=');"),
+    ("index: a row written has no entry in its table's indexes", 'src/exec.cho', '    return indexed(p, w, nw, k, kn, v, true, old, how != 0);', '    return nw;'),
+    ('index: a row removed keeps its entries', 'src/exec.cho', '    return indexed(p, w, nw, k, kn, old, false, old, true);', '    return nw;'),
+    ('index: a row changed keeps the entry it had', 'src/index.cho', '            if ol > 0 {\n                let d = btree.del(p, sc, nroot, a[0..ol]);', '            if ol > 9999 {\n                let d = btree.del(p, sc, nroot, a[0..ol]);'),
+    ('index: an index made on a table with rows has no entries', 'src/execw.cho', '            if xl > 0 {\n                contents(w.ixb)[0] = byte_of(1);', '            if xl > 9999 {\n                contents(w.ixb)[0] = byte_of(1);'),
+    ('index: a dropped index leaves its entries', 'src/execw.cho', '    if z >= 0 && z + 5 <= g {\n        let id = commit.be(contents(w.cur), z + 1, 4);', '    if z >= 9999 && z + 5 <= g {\n        let id = commit.be(contents(w.cur), z + 1, 4);'),
+    ('index: a row moved to another key leaves its entry under the old one', 'src/execw.cho', '                    if nw >= 0 && og > 32 {', '                    if nw >= 0 && og > 99999 {'),
+    ('index: a row moved to another key has no entry under the new one', 'src/execw.cho', '                    if nw >= 0 && nv > 32 {', '                    if nw >= 0 && nv > 99999 {'),
+    ("index: a renamed table's indexes are names again, their entries nobody's", 'src/execd.cho', '                    vl = exec.copy(contents(w.cur), tl, nv - tl, contents(w.ent), vl);', '                    vl = vl + 0;'),
+    ("index: a table's indexes are not looked for when it is bound", 'src/exec.cho', '    w.nix = xn;', '    w.nix = 0;'),
+    ('scrub: index: an erased row keeps its index entries', 'src/execw.cho', '            if there {\n                let d = btree.del(p, contents(w.sc), nroot, contents(w.ixa)[0..l]);', '            if false {\n                let d = btree.del(p, contents(w.sc), nroot, contents(w.ixa)[0..l]);'),
+    ("scrub: index: the keys of an erased row's index entries stay in the internal pages", 'src/execw.cho', '            let s = btree.scrub(p, contents(w.sc), nroot, contents(w.ixa)[0..l]);', '            let s = nroot;'),
+    ("scrub: index: what an erased row's indexes had of its earlier forms is not looked for", 'src/execw.cho', '                        nroot = unindexed(p, w, nroot, 33, hg, kn, false);', '                        nroot = nroot + 0;'),
     ('log: a table as of a commit is read as it is now', 'src/drive.cho',
      '        } else if kind == 6 && view > 0 {',
      '        } else if kind == 6 && view < 0 {'),
     ('log: a table as of a commit is read as of the transaction after it', 'src/drive.cho',
-     '                view = exec.as_of(pg, w, root, view);',
-     '                view = exec.as_of(pg, w, root, view + 1);'),
+     '                view = facts.as_of(pg, w, root, view);',
+     '                view = facts.as_of(pg, w, root, view + 1);'),
     ('log: one table as it was is read beside one as it is, on the tree as it was', 'src/drive.cho',
      '    if !same || with != tables {',
      '    if !same {'),
@@ -3437,7 +3449,7 @@ def run_export(cancho):
     """Each mutant is an export tool of its own, held against what the test assembles from the test program's output (build/enginecheck, not mutated here)."""
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in EXPORT if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "execs.cho",
             "execw.cho", "execd.cho", "facts.cho", "token.cho", "ir.cho")
     survivors = []
     for label, rel, old, new in table:
@@ -3486,7 +3498,7 @@ def run_wire(cancho):
             print("MUTANT_SLICE: %s is not K/N with 0 <= K < N" % part)
             return 1
         table = table[k::n]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "execs.cho",
             "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
 
     def one(mutant):
@@ -3530,7 +3542,7 @@ def run_engine(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "exec.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
 
     def one(mutant):
         label, rel, old, new = mutant
