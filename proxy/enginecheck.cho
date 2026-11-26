@@ -553,6 +553,11 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                         put_int(io, r);
                     }
                     putchar(io, '\n');
+                } else if starts(all, ls, le, "!via") {
+                    // how many statements have read by an index (docs/m3-engine.md 6bo, slice 2)
+                    put_str(io, "via ");
+                    put_int(io, w.viac);
+                    putchar(io, '\n');
                 } else if starts(all, ls, le, "!indexes") {
                     // every built index has exactly the entries its table's rows say it should (docs/m3-engine.md 6bo): `indexes N ok`, or what differs
                     let bad = indexes_ok(io, pg, w, rs[cur]);
@@ -921,7 +926,9 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                     }
                 } else if le > ls {
                     if view >= 0 {
+                        w.past = true;
                         run_sql(heap, io, pg, w, all[ls..le], view, 1, fl, false);
+                        w.past = false;
                         put_str(io, "S I\n.\n");
                     } else {
                         // which tree the statement runs on, and what it leaves, is the session's (src/session.cho)

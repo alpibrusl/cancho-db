@@ -7,6 +7,7 @@ import cdb.eval;
 import cdb.pager;
 import cdb.btree;
 import cdb.exec;
+import cdb.via;
 
 // SELECT of the engine (docs/m3-engine.md 6g to 6i) over one table: the rows the WHERE lets through, their items, ORDER BY, DISTINCT, LIMIT and OFFSET; and, grouped, aggregates, GROUP BY and HAVING.
 
@@ -392,7 +393,7 @@ fn commit_key[&q](w: &!q exec.Work, tid: int) -> [] int {
 // `exec.scan_next`.
 fn rows_next[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], kinds: &k [int]) -> [file_read] int {
     if w.ntab == 1 {
-        return exec.scan_next(p, w, root);
+        return via.next(p, w, root);
     }
     let b = eval.max_nodes();
     let last = w.ntab - 1;
@@ -971,6 +972,7 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
     if rw < 0 {
         return rw;
     }
+    via.choose(w, e, kinds);
     exec.no_rows(w);
     i = 0;
     while i < ng {
@@ -1090,7 +1092,7 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
     reset_aggs(w);
     var m = 0;
     var cf = 0;
-    exec.scan_start(w);
+    via.start(w);
     var more = true;
     while more {
         let rl = rows_next(p, w, root, e, kinds);
@@ -1471,6 +1473,7 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if rw < 0 {
         return rw;
     }
+    via.choose(w, e, kinds);
     exec.no_rows(w);
     i = 0;
     while i < no {
@@ -1517,7 +1520,7 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     }
     // the rows
     var n = 0;
-    exec.scan_start(w);
+    via.start(w);
     var more = true;
     while more {
         let rl = rows_next(p, w, root, e, kinds);

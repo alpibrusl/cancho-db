@@ -661,7 +661,7 @@ def as_of(work):
             elif l.startswith("R ") and cur is not None:
                 cur.append(tuple(None if x == "-" else bytes.fromhex(x).decode() if x != "." else "" for x in l.split()[1:]))
         return got
-    out = run(path, WHO + ["create table t (a integer primary key, b text)", "create table u (k integer primary key, t_a integer, note text)", "create table live (k integer primary key)",
+    out = run(path, WHO + ["create table t (a integer primary key, b text)", "create index tb on t (b)", "create table u (k integer primary key, t_a integer, note text)", "create table live (k integer primary key)",
                            "insert into live values (1)",
                            "insert into t values (1, 'one'), (2, 'two')", "insert into u values (10, 1, 'first')", "select cancho_last_commit()",
                            "update t set b = 'ONE' where a = 1", "insert into u values (11, 2, 'second')", "select cancho_last_commit()",

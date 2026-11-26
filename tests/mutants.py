@@ -2962,7 +2962,7 @@ ENGINE = [
     ("index: a row written has no entry in its table's indexes", 'src/exec.cho', '    return indexed(p, w, nw, k, kn, v, true, old, how != 0);', '    return nw;'),
     ('index: a row removed keeps its entries', 'src/exec.cho', '    return indexed(p, w, nw, k, kn, old, false, old, true);', '    return nw;'),
     ('index: a row changed keeps the entry it had', 'src/index.cho', '            if ol > 0 {\n                let d = btree.del(p, sc, nroot, a[0..ol]);', '            if ol > 9999 {\n                let d = btree.del(p, sc, nroot, a[0..ol]);'),
-    ('index: an index made on a table with rows has no entries', 'src/execw.cho', '            if xl > 0 {\n                contents(w.ixb)[0] = byte_of(1);', '            if xl > 9999 {\n                contents(w.ixb)[0] = byte_of(1);'),
+    ('index: an index made on a table with rows has no entries', 'src/execw.cho', '            if xl > 0 {\n                contents(w.ixb)[0] = byte_of(xl', '            if xl > 9999 {\n                contents(w.ixb)[0] = byte_of(xl'),
     ('index: a dropped index leaves its entries', 'src/execw.cho', '    if z >= 0 && z + 5 <= g {\n        let id = commit.be(contents(w.cur), z + 1, 4);', '    if z >= 9999 && z + 5 <= g {\n        let id = commit.be(contents(w.cur), z + 1, 4);'),
     ('index: a row moved to another key leaves its entry under the old one', 'src/execw.cho', '                    if nw >= 0 && og > 32 {', '                    if nw >= 0 && og > 99999 {'),
     ('index: a row moved to another key has no entry under the new one', 'src/execw.cho', '                    if nw >= 0 && nv > 32 {', '                    if nw >= 0 && nv > 99999 {'),
@@ -2971,6 +2971,29 @@ ENGINE = [
     ('scrub: index: an erased row keeps its index entries', 'src/execw.cho', '            if there {\n                let d = btree.del(p, contents(w.sc), nroot, contents(w.ixa)[0..l]);', '            if false {\n                let d = btree.del(p, contents(w.sc), nroot, contents(w.ixa)[0..l]);'),
     ("scrub: index: the keys of an erased row's index entries stay in the internal pages", 'src/execw.cho', '            let s = btree.scrub(p, contents(w.sc), nroot, contents(w.ixa)[0..l]);', '            let s = nroot;'),
     ("scrub: index: what an erased row's indexes had of its earlier forms is not looked for", 'src/execw.cho', '                        nroot = unindexed(p, w, nroot, 33, hg, kn, false);', '                        nroot = nroot + 0;'),
+    ("via: the past is read by the present's index", 'src/via.cho', 'if !w.quiet || w.past || w.ret >= 2', 'if !w.quiet || w.ret >= 2'),
+    ('via: an index is read though a condition of the WHERE can raise', 'src/via.cho', 'if !w.quiet || w.past || w.ret >= 2', 'if w.past || w.ret >= 2'),
+    ('via: an index is read under a join', 'src/via.cho', ' || w.ntab != 1 || w.nix == 0', ' || w.nix == 0'),
+    ('via: an index is read though the key bounds the scan', 'src/via.cho', ' || w.nix == 0 || w.lon >= 0 || w.hin >= 0 {', ' || w.nix == 0 {'),
+    ('via: any comparison with a constant is read as an equality', 'src/via.cho', '        if int_of(e[a]) == 5 && int_of(e[a + 1]) == 0 {\n            let (c1, mid)', '        if int_of(e[a]) == 5 && int_of(e[a + 1]) <= 5 {\n            let (c1, mid)'),
+    ('via: a partial index is read as if it had every row', 'src/via.cho', 'if int_of(contents(w.ix)[at + 4]) == 0 && exec.is_col(w, e, cat, col) {', 'if exec.is_col(w, e, cat, col) {'),
+    ("via: any index of the table is read, whatever its first column", 'src/via.cho', 'if int_of(contents(w.ix)[at + 4]) == 0 && exec.is_col(w, e, cat, col) {', 'if int_of(contents(w.ix)[at + 4]) == 0 {'),
+    ('via: a null constant is read as a value', 'src/via.cho', 'if exec.ev_open(w, e, vat, kinds, 0) >= 0 && contents(w.ws)[b + 1] == 0 {', 'if exec.ev_open(w, e, vat, kinds, 0) >= 0 {'),
+    ('via: a string or a parameter is not read as the integer the column has', 'src/via.cho', '                        if inty && vt == 0 {', '                        if inty && vt == 99 {'),
+    ('via: a parameter is not a constant', 'src/via.cho', 'if exec.ev_open(w, e, vat, kinds, 0) >= 0 && contents(w.ws)[b + 1] == 0 {', 'if exec.ev(w, e, vat, kinds, 0) == 0 && contents(w.ws)[b + 1] == 0 {'),
+    ('via: a text is read by the entries of its first byte', 'src/via.cho', '                            contents(w.nrow)[2] = byte_of(vn);\n                            exec.copy(contents(w.ar), va, vn, contents(w.nrow), 3);', '                            contents(w.nrow)[2] = byte_of(1);\n                            exec.copy(contents(w.ar), va, vn, contents(w.nrow), 3);'),
+    ("via: the entries read do not end where the value's do", 'src/via.cho', 'if nk < pl || !exec.same(contents(w.key2), 0, pl, contents(w.via), 0, pl) {', 'if nk < pl {'),
+    ('via: the first entry of the value is read again and again', 'src/via.cho', '    exec.copy(contents(w.key2), 0, nk, contents(w.via), 256);\n    w.viak = nk;', '    w.viak = w.viak + 0;'),
+    ("via: the row read is the one of the entry's first bytes", 'src/via.cho', '    exec.copy(contents(w.key2), off, nk - off, contents(w.key), 4);\n    let rk = 4 + nk - off;', '    exec.copy(contents(w.key2), pl, nk - pl, contents(w.key), 4);\n    let rk = 4 + nk - pl;'),
+    ("via: the row's salts are left in front of it", 'src/via.cho', '        let c = contents(w.cur)[32 + i];', '        let c = contents(w.cur)[i];'),
+    ('via: an entry written with a row does not say where its key begins', 'src/index.cho', '                a[0] = byte_of(nl - len(pk));', '                a[0] = byte_of(1);'),
+    ('via: an entry made with the index does not say where its key begins', 'src/execw.cho', 'contents(w.ixb)[0] = byte_of(xl - (w.klen - 4));', 'contents(w.ixb)[0] = byte_of(1);'),
+    ('via: a select begins as a read of the table whatever it chose', 'src/execs.cho', '    // the rows\n    var n = 0;\n    via.start(w);', '    // the rows\n    var n = 0;\n    exec.scan_start(w);'),
+    ('via: a grouped select begins as a read of the table whatever it chose', 'src/execs.cho', '    var cf = 0;\n    via.start(w);', '    var cf = 0;\n    exec.scan_start(w);'),
+    ('via: a select does not look for an index', 'src/execs.cho', '    via.choose(w, e, kinds);\n    exec.no_rows(w);\n    i = 0;\n    while i < no {', '    exec.no_rows(w);\n    i = 0;\n    while i < no {'),
+    ('via: a grouped select does not look for an index', 'src/execs.cho', '    via.choose(w, e, kinds);\n    exec.no_rows(w);\n    i = 0;\n    while i < ng {', '    exec.no_rows(w);\n    i = 0;\n    while i < ng {'),
+    ('via: a parameter in the WHERE is taken for what can raise', 'src/exec.cho', "tag == 2 && (contents(w.cx)[eval.inner_at()] == 0 || commit.be(e, p + 1, 4) < contents(w.cx)[eval.inner_at()]) ||", 'tag == 99 ||'),
+    ("log: via: a table as of a commit is read by the present's index", 'src/drive.cho', '            w.past = true;\n            rc = execs.select(pg, w, view, ir2[0..l2], sc2);', '            rc = execs.select(pg, w, view, ir2[0..l2], sc2);'),
     ('log: a table as of a commit is read as it is now', 'src/drive.cho',
      '        } else if kind == 6 && view > 0 {',
      '        } else if kind == 6 && view < 0 {'),
@@ -3449,7 +3472,7 @@ def run_export(cancho):
     """Each mutant is an export tool of its own, held against what the test assembles from the test program's output (build/enginecheck, not mutated here)."""
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in EXPORT if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "execs.cho",
             "execw.cho", "execd.cho", "facts.cho", "token.cho", "ir.cho")
     survivors = []
     for label, rel, old, new in table:
@@ -3498,7 +3521,7 @@ def run_wire(cancho):
             print("MUTANT_SLICE: %s is not K/N with 0 <= K < N" % part)
             return 1
         table = table[k::n]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "execs.cho",
             "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
 
     def one(mutant):
@@ -3542,7 +3565,7 @@ def run_engine(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
 
     def one(mutant):
         label, rel, old, new = mutant

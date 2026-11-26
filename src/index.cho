@@ -220,7 +220,7 @@ pub fn apply[&q, &s, &x, &d, &k, &o, &w, &a, &b](p: &!q pager.Pager, sc: &!s [by
                 }
             }
             if nl > 0 {
-                a[0] = byte_of(1);
+                a[0] = byte_of(nl - len(pk));
                 let u = btree.put(p, sc, nroot, b[0..nl], a[0..1]);
                 if u < 0 {
                     return u;

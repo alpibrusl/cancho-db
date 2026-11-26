@@ -1875,7 +1875,7 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
                 return exec.too_big();
             }
             if xl > 0 {
-                contents(w.ixb)[0] = byte_of(1);
+                contents(w.ixb)[0] = byte_of(xl - (w.klen - 4));
                 let u = btree.put(p, contents(w.sc), nroot, contents(w.ixa)[0..xl], contents(w.ixb)[0..1]);
                 if u < 0 {
                     return exec.tree_err(u);

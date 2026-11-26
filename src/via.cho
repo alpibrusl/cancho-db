@@ -1,0 +1,163 @@
+edition 9;
+module cdb.via;
+
+// SPDX-License-Identifier: EUPL-1.2
+// Copyright (c) 2026 Alpibru S.L.
+// A read by an index (docs/m3-engine.md 6bo, slice 2): a SELECT of one table whose WHERE has a condition `column = constant`, where the column is the first of a
+// built index, reads the entries of that value and each one's row, not the table. Every row read is still judged by the whole WHERE, so the index may give
+// more rows than the condition is true for (a text is in an entry by its first bytes) and never fewer.
+import cdb.commit;
+import cdb.build;
+import cdb.row;
+import cdb.eval;
+import cdb.pager;
+import cdb.btree;
+import cdb.index;
+import cdb.exec;
+
+// Before the rows of a SELECT, after `exec.where_static`: whether it reads by an index, and by which entries (`w.vian`, `w.via`). Not when a condition of the
+// WHERE can raise an error (a row not read is a row whose error is not found, 6g), not when the key already bounds the scan, not when the tree is the past's
+// (an index has no history: the entries in that tree are the present's), not under a join, and not for the rows a RETURNING wrote. 0.
+pub fn choose[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int]) -> [] int {
+    w.vian = 0 - 1;
+    if !w.quiet || w.past || w.ret >= 2 || w.ntab != 1 || w.nix == 0 || w.lon >= 0 || w.hin >= 0 {
+        return 0;
+    }
+    let dl = w.dlen;
+    let b = eval.max_nodes();
+    var j = 0;
+    while j < w.nconj && w.vian < 0 {
+        let a = contents(w.pos)[exec.p_conj() + j];
+        if int_of(e[a]) == 5 && int_of(e[a + 1]) == 0 {
+            let (c1, mid) = eval.scan(e, a + 2, contents(w.ws));
+            let (c2, end) = eval.scan(e, mid, contents(w.ws));
+            var cat = 0 - 1;
+            var vat = 0 - 1;
+            if c1 == 1 && c2 == 1 && int_of(e[a + 2]) == 0 && (int_of(e[mid]) == 1 || int_of(e[mid]) == 2) {
+                cat = a + 2;
+                vat = mid;
+            } else if c1 == 1 && c2 == 1 && int_of(e[mid]) == 0 && (int_of(e[a + 2]) == 1 || int_of(e[a + 2]) == 2) {
+                cat = mid;
+                vat = a + 2;
+            }
+            var i = 0;
+            while cat >= 0 && i < w.nix && w.vian < 0 {
+                let at = i * index.rec();
+                let col = int_of(contents(w.ix)[at + 7]);
+                if int_of(contents(w.ix)[at + 4]) == 0 && exec.is_col(w, e, cat, col) {
+                    let ct = row.col_type(contents(w.ctx)[64..64 + dl], col);
+                    let id = commit.be(contents(w.ix), at, 4);
+                    if exec.ev_open(w, e, vat, kinds, 0) >= 0 && contents(w.ws)[b + 1] == 0 {
+                        // the constant as a row has a value, in `nrow`; then as an entry has it, after the index's number
+                        var vt = contents(w.ws)[b];
+                        var have = false;
+                        let inty = ct != row.t_text() && ct != row.t_bool() && ct != row.t_bytea();
+                        if inty && vt == 0 {
+                            // a parameter or a string: the integer the column's type reads it as (one that is none was refused before any row)
+                            if eval.assign(contents(w.ws), b, ct, contents(w.ar), contents(w.info)) == 0 && contents(w.ws)[b + 1] == 0 {
+                                vt = contents(w.ws)[b];
+                            }
+                        }
+                        if inty && (vt == 1 || vt == 5 || vt == 6) {
+                            contents(w.nrow)[0] = byte_of(1);
+                            exec.put_i64(contents(w.nrow), 1, contents(w.ws)[b + 2]);
+                            have = true;
+                        } else if ct == row.t_text() && (vt == 0 || vt == 3) {
+                            let va = contents(w.ws)[b + 2];
+                            var vn = contents(w.ws)[b + 3];
+                            if vn > index.part_max() {
+                                vn = index.part_max();
+                            }
+                            contents(w.nrow)[0] = byte_of(3);
+                            contents(w.nrow)[1] = byte_of(0);
+                            contents(w.nrow)[2] = byte_of(vn);
+                            exec.copy(contents(w.ar), va, vn, contents(w.nrow), 3);
+                            have = true;
+                        }
+                        if have {
+                            build.put_be(contents(w.via), 0, id, 4);
+                            let pl = row.index_part(contents(w.nrow), 0, index.part_max(), contents(w.via)[0..256], 4);
+                            if pl > 0 {
+                                w.vian = pl;
+                                w.viac = w.viac + 1;
+                            }
+                        }
+                    }
+                }
+                i = i + 1;
+            }
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+// Begin reading the rows: of the table (`exec.scan_start`), or of the index `choose` found.
+pub fn start[&q](w: &!q exec.Work) -> [] int {
+    exec.scan_start(w);
+    if w.vian >= 0 {
+        var i = 0;
+        while i < w.vian {
+            let c = contents(w.via)[i];
+            contents(w.via)[256 + i] = c;
+            i = i + 1;
+        }
+        w.viak = w.vian;
+    }
+    return 0;
+}
+
+// The next row, as `exec.scan_next` answers it: of the table, or the row of the index's next entry that begins as the value does (an entry's one byte says where
+// in it the row's key begins). An entry without its row is a damaged file.
+pub fn next[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_read] int {
+    if w.vian < 0 {
+        return exec.scan_next(p, w, root);
+    }
+    let pl = w.vian;
+    let kl = w.viak;
+    let at_it = w.fresh;
+    w.fresh = false;
+    let r = btree.scan_step(p, contents(w.sc), root, contents(w.via)[256..256 + kl], at_it, contents(w.key2), contents(w.cur), contents(w.leaf), contents(w.lst));
+    if r == btree.not_found() {
+        return 0 - 1;
+    }
+    if r < 0 {
+        return exec.tree_err(r);
+    }
+    let nk = r / 1024;
+    if nk < pl || !exec.same(contents(w.key2), 0, pl, contents(w.via), 0, pl) {
+        return 0 - 1;
+    }
+    let off = int_of(contents(w.cur)[0]);
+    if r % 1024 != 1 || off < pl || off >= nk {
+        return exec.damaged();
+    }
+    exec.copy(contents(w.key2), 0, nk, contents(w.via), 256);
+    w.viak = nk;
+    build.put_be(contents(w.key), 0, w.tid, 4);
+    exec.copy(contents(w.key2), off, nk - off, contents(w.key), 4);
+    let rk = 4 + nk - off;
+    w.klen = rk;
+    let g = btree.get(p, contents(w.sc), root, contents(w.key)[0..rk], contents(w.cur));
+    if g == btree.not_found() || g >= 0 && g < 32 {
+        return exec.damaged();
+    }
+    if g < 0 {
+        return exec.tree_err(g);
+    }
+    let nv = g - 32;
+    exec.copy(contents(w.cur), 0, 32, contents(w.salts), 0);
+    var i = 0;
+    while i < nv {
+        let c = contents(w.cur)[32 + i];
+        contents(w.cur)[i] = c;
+        i = i + 1;
+    }
+    let dl = w.dlen;
+    if !row.row_ok(contents(w.ctx)[64..64 + dl], contents(w.cur)[0..nv]) {
+        return exec.damaged();
+    }
+    exec.copy(contents(w.cur), 0, nv, contents(w.ctx), 1024);
+    contents(w.cx)[5] = nv;
+    return nv;
+}
