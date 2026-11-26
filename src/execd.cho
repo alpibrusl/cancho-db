@@ -187,16 +187,14 @@ pub fn rename_table[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, ro
     return 0;
 }
 
-// CREATE INDEX (`Ddl` kind 3; 6q): the name is recorded and nothing is built. An index that is not UNIQUE changes no answer; a UNIQUE one is a constraint the engine cannot hold yet, and is refused.
+// CREATE INDEX (`Ddl` kind 3; 6q, 6bo): the index is given a number, recorded with its columns, and an entry is made for each row. A UNIQUE one is refused with 23505 if two rows have the
+// same values in its columns.
 pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &x [byte], sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], stmt: int) -> [file_read, file_write] int {
     exec.start(w, root);
     if len(e) < 5 || int_of(e[0]) != 4 || int_of(e[1]) != 3 || nodes[6 * stmt] != parse.n_create_index() {
         return exec.malformed();
     }
     let iflags = nodes[6 * stmt + 4];
-    if iflags % 2 == 1 {
-        return exec.unsupported();
-    }
     let r0 = exec.bind_table(p, w, root, e, 2);
     if r0 != 0 {
         return r0;
@@ -303,7 +301,7 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
         let idn = alloc_slice[g](1, 0);
         nroot = index.number(p, contents(w.sc), root, contents(w.key), idn);
         if nroot >= 0 {
-            vl = index.value(contents(w.ctx)[0..nl], idn[0], iflags / 4 % 2 == 1, cond, contents(w.ixb), ncols, contents(w.ent));
+            vl = index.value(contents(w.ctx)[0..nl], idn[0], iflags / 4 % 2 + 2 * (iflags % 2), cond, contents(w.ixb), ncols, contents(w.ent));
         }
     }
     if nroot < 0 {
@@ -327,6 +325,16 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
             let xl = index.entry(contents(w.ix), 0, contents(w.ctx)[64..64 + dl], contents(w.cur)[0..rl], contents(w.key)[4..w.klen], contents(w.ixa));
             if xl < 0 {
                 return exec.too_big();
+            }
+            if xl > 0 && iflags % 2 == 1 {
+                // a unique index: no row already entered has these values, or there is no index (23505)
+                let h = index.holder(p, contents(w.sc), nroot, w.tid, contents(w.ix), 0, contents(w.ctx)[64..64 + dl], contents(w.cur)[0..rl], contents(w.key)[4..w.klen], contents(w.ixa), contents(w.ixb), contents(w.ua), contents(w.ub), contents(w.uv));
+                if h < 0 {
+                    return exec.tree_err(h);
+                }
+                if h > 0 {
+                    return exec.e_unique();
+                }
             }
             if xl > 0 {
                 contents(w.ixb)[0] = byte_of(xl - (w.klen - 4));

@@ -45,7 +45,7 @@ pub fn choose[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int]) -> []
             while cat >= 0 && i < w.nix && w.vian < 0 {
                 let at = i * index.rec();
                 let col = int_of(contents(w.ix)[at + 7]);
-                if int_of(contents(w.ix)[at + 4]) == 0 && exec.is_col(w, e, cat, col) {
+                if int_of(contents(w.ix)[at + 4]) % 2 == 0 && exec.is_col(w, e, cat, col) {
                     let ct = row.col_type(contents(w.ctx)[64..64 + dl], col);
                     let id = commit.be(contents(w.ix), at, 4);
                     if exec.ev_open(w, e, vat, kinds, 0) >= 0 && contents(w.ws)[b + 1] == 0 {

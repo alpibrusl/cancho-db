@@ -2727,6 +2727,52 @@ held to what the table had then, with a count of 0 (`past_by_value`), and throug
 
 The same 3,341 rows answered either way on the larger table. The two indexes made the file 14 % larger (60.0 MiB for 52.4) and the load 40 % longer.
 
+**Slice 3: `create unique index`, the design.** A unique index is an index (slices 1 and 2: built, kept, read) whose catalog entry says so, and a
+row may not be written while another row has the same values in its columns. As in PostgreSQL a null is equal to nothing, so a row with a null in one
+of the columns conflicts with none, and a partial unique index holds only the rows its condition is true for.
+
+- *Looking a value up.* The entries of the value (slice 2's read), and for each the row it leads to, compared with the new row column by column:
+  an entry has only the first 24 bytes of a text, so two entries that begin alike are not yet two equal values.
+- *`insert`.* Each row, after its own key is found free, is looked up in every unique index against the tree as the statement has made it so far (so
+  two rows of one statement conflict as they do in PostgreSQL). A conflict is `23505`, or with `on conflict do nothing` the row is left out.
+- *`create unique index` on a table with rows* builds the entries and is `23505` if two rows have the same values; nothing is made then.
+- *`update`* is where the order matters. PostgreSQL checks each row as it writes it, in the order it happens to visit them, against rows of which
+  some are already changed and some not. The engine does not know that order, so it answers only what does not depend on it:
+  - the new value of a row is held by a row the statement does not change, or by one it changes that keeps or takes the same value: `23505`,
+    whatever the order;
+  - the new value of a row is the *old* value of another row the statement changes to something else (`set u = u + 1`): PostgreSQL fails or not by
+    the order it visits them. **Refused, `engine-order-dependent`**, as the same thing is for the key (6g);
+  - no row's new value is any other row's old or new value: the update is made.
+
+  How it is decided while reading the table once: a row's new value is looked up in the tree as the statement has made it so far. A row that holds
+  it there is remembered. If that row is read later and gives the value up, the statement is order-dependent; if it is still remembered when the
+  statement ends, it kept the value or took it in this statement, which is the error. If no row holds it there, it is looked up in the tree as it
+  was before the statement: a row that held it then has given it up since, and the statement is order-dependent.
+  (*As first written* this told a holder already read from one not yet read, by the order of the keys, and one that had the value before the
+  statement from one that took it. Neither changes an answer: a holder that will not be read again stays remembered, and that is the error either
+  way. The mutants of those two tests could not be killed, and the tests are gone.)
+- *An update that changes the key* of a table with a unique index is refused (`engine-unsupported`) in this slice: it goes by another path (the rows
+  leave their keys and then take the new ones) and the reasoning above is not made for it.
+- *A column or table `unique` constraint* in `create table` stays refused: it needs the index's name to be the constraint's, and `drop index` on it
+  to be an error. `create unique index` is the whole of this slice.
+- *The schema.* Whether an index is unique is part of what the schema hash is made of (6bl): it is a constraint, not a way of reading.
+
+*The test, first.* A list of statements in `tests/engine_check.py` (72), each held to PostgreSQL's answer and none refused: inserts
+that conflict (one row, two rows of one statement, with nulls, on a text longer than an entry keeps, under a partial index, on two columns), `on
+conflict do nothing`, `create unique index` over duplicates, updates of the kinds above that have an answer, a delete that frees a value, a rollback,
+and `!indexes` at the end. The updates whose outcome depends on the order are in the list of those (`DEP`), each with what PostgreSQL 16 does: one
+that fails there, one that succeeds there, and two rows that change places, which fails in either order and is refused all the same. The random
+history against PostgreSQL makes a unique index now and then, as it did when they were refused.
+
+**Slice 3, built.** `index.holder` (a row that has a row's values in a unique index: the entries of the value, and each one's row compared),
+`src/uniq.cho` (`taken` for an insert, `changed` for an update), `execd.create_index` (the flag, and the check as the entries are made). The schema
+text a commit's hash is of says `unique` after such an index.
+
+*What writing the mutants found.* **An update from one long text to another that begins with the same 24 bytes was not checked.** The update asked
+whether the row's entry changed, and the two entries are the same bytes. So `update t set s = '<24 bytes>-2' where k = 4` took a value another row
+held, with a unique index on `s`, and the list of statements above had not caught it because an earlier statement of the list had changed that other
+row. It now asks whether the values changed (`index.stays`), and the list has the case, both ways.
+
 *A limit of the check, said plainly (slice 1's; slice 2 narrows it).* Since slice 2 a fault in `index.entry` that loses a row from a read is seen by
 PostgreSQL's answer. One that only makes entries longer than they need be is still on both sides.
 

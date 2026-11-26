@@ -12,6 +12,7 @@ import cdb.index;
 import cdb.parse;
 import cdb.lower;
 import cdb.exec;
+import cdb.uniq;
 
 // The statements of the engine that write (docs/m3-engine.md 6g): INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE. Each reads the tree it is given and answers as src/exec.cho says; on 0 the new root is
 // `exec.root_of`, the number of rows `exec.count_of`, and the changes are recorded. Nothing of the tree it was given is overwritten, so a statement that fails has changed nothing.
@@ -388,7 +389,18 @@ fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int, 
         if g < 0 && g != btree.not_found() {
             return exec.tree_err(g);
         }
-        if g < 0 {
+        // and no row has its values in a unique index (6bo): the same error, or with ON CONFLICT DO NOTHING the row is left out
+        var dup = 0;
+        if g < 0 && w.nix > 0 {
+            dup = uniq.taken(p, w, nroot, contents(w.cur)[0..rl], contents(w.key2), kl);
+            if dup < 0 {
+                return dup;
+            }
+            if dup == 1 && !skip {
+                return exec.e_unique();
+            }
+        }
+        if g < 0 && dup == 0 {
             let nw = exec.row_put(p, w, nroot, contents(w.key2), kl, contents(w.cur)[0..rl], contents(w.cur)[0..0], 0);
             if nw < 0 {
                 return nw;
@@ -506,6 +518,7 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     }
     var nroot = root;
     var side = 0;
+    var seen = 0;
     exec.scan_start(w);
     var more = true;
     while more {
@@ -595,6 +608,17 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                         }
                         moved = !exec.same(contents(w.key), 0, okl, contents(w.key2), 0, kl);
                     }
+                    if uniq.any(w) {
+                        if moved {
+                            // (a key that changes on a table with a unique index: not reasoned about in this slice, 6bo)
+                            return exec.unsupported();
+                        }
+                        let us = uniq.changed(p, w, root, nroot, seen, contents(w.cur)[0..rl], contents(w.nrow)[0..ra], contents(w.key), okl);
+                        if us < 0 {
+                            return us;
+                        }
+                        seen = us;
+                    }
                     if !moved {
                         let nw = exec.row_put(p, w, nroot, contents(w.key), okl, contents(w.nrow)[0..ra], contents(w.cur)[0..rl], 1);
                         if nw < 0 {
@@ -646,6 +670,10 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                 }
             }
         }
+    }
+    if seen != 0 && !w.orderdep {
+        // a row remembered as holding a value another row took kept it (`uniq.changed`)
+        exec.note(w, exec.e_unique());
     }
     if side != 0 {
         let rm = settle(p, w, root, nroot, side);
