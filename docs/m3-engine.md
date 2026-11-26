@@ -2864,6 +2864,32 @@ sorts it to give `n` rows. With an index on `c` the first `n` entries are the an
   whichever its plan meets. For `asc` the index gives those with the least keys, as the sort of the whole table did. **For `desc` it gives those with
   the greatest keys, where the sort gave the least**: an answer PostgreSQL may give as well, and another than this engine gave before. The test
   holds such answers by their number of rows, as it always has.
+- *At most 1,024 rows* (`offset + limit`). A row by the index is a lookup, and a `limit` as large as the table would read all of it that way, at
+  four times the table's cost. A thousand lookups are a few milliseconds whatever the table.
+
+**Built.** `btree.prev_before`; in `src/via.cho`, `ordered` (called by the plain `select` once it knows its `limit` and `offset`), and `step`, the
+one place the read moves, forwards or backwards. The read has two parts, the values and the nulls, in the order the direction asks.
+
+*What the mutants of `prev_before` showed*: it was written with a second way of walking, "the last leaf under the page to the left", for when a
+leaf has nothing before the key. Both mutants of it lived, and rightly: everything under that page is before the key, so the walk as it already was
+ends at the last entry there. The second way is gone.
+
+**Measured** (100,000 rows, by hand with the test program, each of 20 runs):
+
+| | sorting the table | by the index |
+|---|---|---|
+| `order by a limit 10` | 115 ms | 0.06 ms |
+| `order by a desc limit 10` | 114 ms | 0.12 ms |
+| `order by a desc limit 100 offset 900` | 91 ms | 9.1 ms |
+| `order by a limit 1025` (over the bound) | 99 ms | 98 ms (the table, as before) |
+
+Backwards costs about twice forwards a row: each step walks from the root.
+
+*Tested.* In the list of slice 2: 17 ordered reads that have to go by an index (both directions, an offset, past the values into the nulls and
+the other way, a limit of 0 and of 1,024, parameters, after writes and inside a transaction that is rolled back) and 11 that may not (1,025 rows, no
+limit, a text column, two items, an expression, `distinct`, a `where`, a partial index, an item that can raise). PostgreSQL holds the answers: in
+order where the order is total, by their number where rows tie at the edge. `first_rows` holds the number of rows the index gave to the number
+asked for, which no answer shows. The past is read without it (`past_by_value`). 19 mutants, and 5 of `prev_before` with the tree's model.
 
 **`unique` on a column of `create table` (after slice 3).** PostgreSQL makes of it a constraint named `<table>_<column>_key`, held by a unique index
 of that name. Here it is that index and a mark on it:

@@ -1963,12 +1963,46 @@ VIAFIXED = [
     ("select k from fvr where a > 390 and 10 / (k - 395) > 0", "set", False),
     ("select k from fvr where a > k + 390", "set", False),
     ("select k from fvr where a <> 5 and a is not null and k < 0", "set", False),
+    # ORDER BY an indexed integer column with a LIMIT and no WHERE (slice 4, second part): the first rows of the index, forwards or backwards.
+    # (the ten nulls tie: where they are at the edge of the limit the answer is held by its number of rows, as PostgreSQL's choice among them is its own)
+    ("select k, a from fvr order by a limit 5", "order", True),
+    ("select k, a from fvr order by a asc limit 3 offset 7", "order", True),
+    ("select k, a from fvr order by a desc limit 5 offset 12", "order", True),
+    ("select a, k from fvr order by a desc limit 30 offset 10", "order", True),
+    ("select k from fvr order by a desc limit 4", "count", True),
+    ("select k, a from fvr order by a limit 3 offset 398", "count", True),
+    ("select k, a from fvr order by a limit 1024", "set", True),
+    ("select k, a from fvr order by a desc limit 1024", "set", True),
+    ("select a from fvr order by a limit 0", "set", True),
+    ("select a is null, k, 7 from fvr order by a limit 2", "order", True),
+    (P("select k, a from fvr order by a limit $1", "3"), "order", True),
+    (P("select k, a from fvr order by a desc limit $1 offset $2", "3", "10"), "order", True),
+    # not by an index: more rows than are read one by one, no limit, a text, two items, an expression, DISTINCT, a WHERE, a partial index, an item that can raise
+    ("select k, a from fvr order by a limit 1025", "set", False),
+    ("select k, a from fvr order by a", "set", False),
+    ("select k, b from fvr order by b limit 3", "count", False),
+    ("select k from fvr order by a, k limit 3", "order", False),
+    ("select k from fvr order by a + 0 limit 3", "order", False),
+    ("select distinct a from fvr order by a limit 3", "order", False),
+    ("select k from fvr where k > 3 order by a limit 3", "order", False),
+    ("select k from fvr where f order by a limit 3", "order", False),
+    ("select k from fvr order by k limit 3", "order", False),
+    ("select 10 / (k - 500), a from fvr order by a limit 2", "order", False),
+    ("select b || 'x', a from fvr order by a limit 2", "order", False),
     # after writes
     ("update fvr set a = a + 1000 where k < 5", "write", False),
     ("delete from fvr where k = 398", "write", False),
     ("select k from fvr where a < 8", "set", True),
     ("select k from fvr where a > 395", "set", True),
     ("select k, a from fvr where a >= 1000 and a <= 1002", "set", True),
+    ("select k, a from fvr order by a desc limit 12 offset 10", "order", True),
+    ("select k, a from fvr order by a limit 6", "order", True),
+    ("begin", "ddl", False),
+    ("insert into fvr values (500, -1, 'new', 'new', true), (501, 5000, 'new', 'new', true)", "write", False),
+    ("select k, a from fvr order by a limit 2", "order", True),
+    ("select k, a from fvr order by a desc limit 2 offset 10", "order", True),
+    ("rollback", "ddl", False),
+    ("select k, a from fvr order by a limit 2", "order", True),
     ("truncate fvi", "ddl", False),
     ("select k from fvi where a = 5", "set", True),
     ("insert into fvi values (1, 5, 'x', 7, 3, true)", "write", False),
@@ -2289,7 +2323,7 @@ def past_by_value():
         t = [int(l.split()[1]) for l in r.stdout.split("\n") if l.startswith("txn ")]
         if r.returncode != 0 or len(t) != 1:
             raise SystemExit("engine_check: the past by value: %s" % r.stdout[-300:])
-        asks = ["select k from pv where a = 5", "select k from pv where b = 'x'", "select count(*) from pv where a = 6"]
+        asks = ["select k from pv where a = 5", "select k from pv where b = 'x'", "select count(*) from pv where a = 6", "select k from pv order by a desc limit 1"]
         script = ["!asof %d" % t[0], "!mark"] + asks + ["!mark", "!via", "!asof -", "!mark"] + asks + ["!mark", "!via"]
         r = subprocess.run([EXE, os.path.join(d, "pv.db")], input="\n".join(script) + "\n", capture_output=True, text=True)
         blocks, cur, inside, via = [], [], False, []
@@ -2302,9 +2336,25 @@ def past_by_value():
                 cur.append(l[2:])
             elif l.startswith("via "):
                 via.append(int(l[4:]))
-        want = [["31", "32", "31", "34", "30"], ["33", "34", "33", "34", "31"]]
-        if r.returncode != 0 or blocks != want or via != [0, 3]:
-            raise SystemExit("engine_check: the past by value: the answers then and now %r (should be %r), read by an index %r (should be [0, 3])" % (blocks, want, via))
+        want = [["31", "32", "31", "34", "30", "34"], ["33", "34", "33", "34", "31", "31"]]
+        if r.returncode != 0 or blocks != want or via != [0, 4]:
+            raise SystemExit("engine_check: the past by value: the answers then and now %r (should be %r), read by an index %r (should be [0, 4])" % (blocks, want, via))
+
+
+def first_rows():
+    """ORDER BY an indexed column with a LIMIT reads as many rows as it gives (docs/m3-engine.md 6bo, slice 4): that is the point of it, and no answer shows it."""
+    with tempfile.TemporaryDirectory() as d:
+        script = ["create table fr1 (k integer primary key, a integer)", "create index fr1a on fr1 (a)",
+                  "insert into fr1 values " + ", ".join("(%d, %s)" % (i, "null" if i % 10 == 0 else str(1000 - i)) for i in range(300)), "!commit"]
+        asks = [("select k from fr1 order by a limit 3", 3), ("select k from fr1 order by a desc limit 2 offset 1", 3), ("select k from fr1 order by a limit 5 offset 268", 273),
+                ("select k from fr1 order by a desc limit 40", 40), ("select k from fr1 order by a limit 0", 0), ("select k from fr1 where a = 999", 1)]
+        for sql, _ in asks:
+            script += [sql, "!viarows"]
+        r = subprocess.run([EXE, os.path.join(d, "fr1.db")], input="\n".join(script) + "\n", capture_output=True, text=True)
+        seen = [int(l[8:]) for l in r.stdout.split("\n") if l.startswith("viarows ")]
+        got = [b - a for a, b in zip([0] + seen, seen)]
+        if r.returncode != 0 or got != [n for _, n in asks]:
+            raise SystemExit("engine_check: rows read by an index for %r: %r" % (asks, got))
 
 
 def erasure():
@@ -2519,6 +2569,8 @@ def main():
     npoints, nforked = history(SEED)
     print("engine_check: AS OF %d points of a history reads what was there, from another process, after a sweep and more writes, and on a fork (%d points); the branch is untouched by its fork" % (npoints, nforked))
     past_by_value()
+    first_rows()
+    print("engine_check: ORDER BY an indexed column with a LIMIT reads the rows it gives and no more")
     print("engine_check: a read of the past by an indexed column's value reads the table as it was, and no index")
     erasure()
     print("engine_check: a deleted row and a dropped table stay in the history; an erased key is gone from the page file two commits and a sweep later, with every salt it had, and from every AS OF")

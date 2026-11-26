@@ -1518,6 +1518,25 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if w.code != 0 {
         return exec.verdict(w);
     }
+    if wpos == 0 && !distinct && w.ntab == 1 && no == 1 && limit >= 0 {
+        // ORDER BY one column and a LIMIT, no WHERE: by an index on the column, if no item can raise an error for a row that is then not read (6bo, slice 4)
+        var calm = true;
+        i = 0;
+        while i < ni {
+            if !quiet(e, contents(w.pos)[exec.p_item() + i], contents(w.pos)[exec.p_iend() + i]) {
+                calm = false;
+            }
+            i = i + 1;
+        }
+        var need = limit;
+        if offset > 0 {
+            need = limit + offset;
+        }
+        // (and not for more rows than are cheap to read one by one: a row by the index is a lookup, 6bo)
+        if calm && need <= 1024 {
+            via.ordered(w, e, contents(w.pos)[exec.p_ord()], contents(w.pos)[exec.p_odir()], need);
+        }
+    }
     // the rows
     var n = 0;
     via.start(w);
