@@ -1915,6 +1915,57 @@ VIAFIXED = [
     ("create index fvla on fvl (a)", "ddl", False),
     ("insert into fvl values " + ", ".join("(%d, %d)" % (i, i % 3) for i in range(1200)), "write", False),
     ("select k from fvl where a = 1", "set", True),
+    # a range of an indexed column (slice 4): by the index when the range is at most a quarter of it, by the table when it is more
+    ("create table fvr (k integer primary key, a integer, b text, c text, f boolean)", "ddl", False),
+    ("insert into fvr values " + ", ".join("(%d, %d, 'v%03d', '%s%03d', %s)" % (i, i, i % 50, LONG, i, "true" if i % 2 else "false") for i in range(400)), "write", False),
+    ("insert into fvr values " + ", ".join("(%d, null, null, null, null)" % i for i in range(400, 410)), "write", False),
+    ("create index fvra on fvr (a)", "ddl", False),
+    ("create index fvrb on fvr (b)", "ddl", False),
+    ("create index fvrc on fvr (c)", "ddl", False),
+    ("create index fvr0 on fvr (k) where f", "ddl", False),
+    ("select k from fvr where a >= 10 and a < 20", "set", True),
+    ("select k from fvr where a > 10 and a < 12", "set", True),
+    ("select k from fvr where a > 390", "set", True),
+    ("select k from fvr where a < 5", "set", True),
+    ("select k from fvr where 395 <= a", "set", True),
+    ("select k from fvr where 3 > a", "set", True),
+    ("select k from fvr where a between 100 and 110", "set", True),
+    ("select count(*), min(a), max(b) from fvr where a between 100 and 110", "set", True),
+    ("select k from fvr where a > -5 and a < 5", "set", True),
+    ("select k from fvr where a > 1000", "set", True),
+    ("select k from fvr where a < 20 and a > 30", "set", True),
+    ("select k from fvr where a >= 20 and a <= 20", "set", True),
+    ("select k from fvr where a > 3000000000", "set", True),
+    ("select k from fvr where b >= 'v010' and b <= 'v011'", "set", True),
+    ("select k from fvr where b > 'v048'", "set", True),
+    ("select k from fvr where b < 'v001'", "set", True),
+    (P("select k from fvr where a >= $1 and a < $2", "50", "60"), "set", True),
+    ("select k from fvr where a >= 0 and a < 100", "set", True),
+    # an equality is taken before a range
+    ("select k from fvr where b > 'v000' and a = 5", "set", True),
+    ("select k from fvr where a > 1 and b = 'v005'", "set", True),
+    # more than a quarter: the table
+    ("select k from fvr where a >= 0 and a < 104", "set", False),
+    ("select k from fvr where a > 100", "set", False),
+    ("select k from fvr where a >= 0", "set", False),
+    ("select k from fvr where a < 300", "set", False),
+    ("select k from fvr where b >= 'v010'", "set", False),
+    # (the first index with a bound is the one asked about, and its range is too much of it)
+    ("select k from fvr where b > 'v01' and b < 'v02' and a < 300", "set", False),
+    # texts that begin alike are all one entry's value: the range is all of them, and the table is read
+    ("select k from fvr where c >= '%s010' and c <= '%s012'" % (LONG, LONG), "set", False),
+    # not by an index: the key bounds the scan, an OR, what can raise, a column on both sides, the past is elsewhere
+    ("select k from fvr where a > 390 and k > 5", "set", False),
+    ("select k from fvr where a > 390 or a < 3", "set", False),
+    ("select k from fvr where a > 390 and 10 / (k - 395) > 0", "set", False),
+    ("select k from fvr where a > k + 390", "set", False),
+    ("select k from fvr where a <> 5 and a is not null and k < 0", "set", False),
+    # after writes
+    ("update fvr set a = a + 1000 where k < 5", "write", False),
+    ("delete from fvr where k = 398", "write", False),
+    ("select k from fvr where a < 8", "set", True),
+    ("select k from fvr where a > 395", "set", True),
+    ("select k, a from fvr where a >= 1000 and a <= 1002", "set", True),
     ("truncate fvi", "ddl", False),
     ("select k from fvi where a = 5", "set", True),
     ("insert into fvi values (1, 5, 'x', 7, 3, true)", "write", False),
@@ -2453,7 +2504,7 @@ def main():
     ucounts, ufails, _, _ = compare(pg, [(sql, how, "fubr" if " fubr" in sql else "fub" if " fub" in sql else "fuh" if " fuh" in sql else "fui" if " fui" in sql else "fua") for sql, how in UNIQFIXED], ueng, True)
     fails += ufails
     print("engine_check: %d statements on a table with four unique indexes, none refused: %s" % (len(UNIQFIXED), ", ".join("%s=%d" % kv for kv in sorted(ucounts.items()))))
-    _, vfails, _, _ = compare(pg, [(sql, how, "fvj" if " fvj" in str(sql) else "fvl" if " fvl" in str(sql) else "fvi") for sql, how, _ in VIAFIXED], veng, True)
+    _, vfails, _, _ = compare(pg, [(sql, how, "fvj" if " fvj" in str(sql) else "fvl" if " fvl" in str(sql) else "fvr" if " fvr" in str(sql) else "fvi") for sql, how, _ in VIAFIXED], veng, True)
     fails += vfails
     print("engine_check: %d statements read by an index and %d beside them that may not be, each with PostgreSQL's answer" % (wanted, sum(1 for v in VIAFIXED if v[1] in ("set", "order") and not v[2])))
     print("engine_check: %d fixed statements, none refused: %s" % (len(FIXED), ", ".join("%s=%d" % kv for kv in sorted(fcounts.items()))))

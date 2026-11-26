@@ -2787,6 +2787,47 @@ whether the row's entry changed, and the two entries are the same bytes. So `upd
 held, with a unique index on `s`, and the list of statements above had not caught it because an earlier statement of the list had changed that other
 row. It now asks whether the values changed (`index.stays`), and the list has the case, both ways.
 
+**Slice 4, first part: a read by a range of an indexed column.** `where c > x`, `c >= x`, `c < x`, `c <= x`, alone or two of them (which is
+what `between` is), on the first column of a built index, reads the entries from the lower bound to the upper and each one's row. Slice 2's rules
+hold: when it is done (no condition that can raise, no bound by the key, one table, not the past, no partial index), what a constant is, and that
+every row read is still judged by the whole `where`.
+
+- *The bounds are wide, never narrow.* `>` is read as `>=` and `<` as `<=`, and a text bound is cut to the 24 bytes an entry keeps: an entry's value
+  is not after its text's, so cutting a bound can only let more in. The `where` takes out what is over.
+- *A null is in no range*: its entries come before every value's, and the read begins after them.
+- *An equality is preferred* to a range when the `where` has both for indexed columns.
+- *The rows come in the order of the indexed values*, not of their keys as slice 2's do. No answer depends on it: a `select` without `order by`
+  has no order to PostgreSQL either, and the test holds such answers as sets.
+- *What it costs when the range is most of the table* is the number to measure before this is kept as it is: a read by the index takes a lookup by
+  key for every row, which a read of the table does not.
+
+**Measured, and what it changed.** 100,000 rows, an integer column of as many values, `select count(*) ... where a >= x and a < y`, by hand with
+the test program:
+
+| the range is | reading the table | every range by the index | as built |
+|---|---|---|---|
+| 0.1 % of the table | 83 ms | 1.3 ms | 1.5 ms |
+| 1 % | 84 ms | 3.9 ms | 5.2 ms |
+| 10 % | 88 ms | 32 ms | 35 ms |
+| 50 % | 86 ms | 151 ms | 101 ms (the table) |
+| all of it (`a >= 0`) | 65 ms | 253 ms | 75 ms (the table) |
+
+Read by the index whatever its size, a range of half the table took nearly twice the table's time and one of all of it four times: the two reads
+cost the same at about 28 % of the table. The engine keeps no statistics, so **it counts** (`via.worth`): at the first row, the entries of the range
+(an entry is a few bytes of a leaf already in hand, where a row is a lookup), then the index's other entries until there are three times as many.
+If there are, the range is a quarter of the index or less and is read by it; if not, the table is read, as before. The count is the third column's
+price: up to a third more on a small range that is read by the index all the same, 15 % on a wide one that is not.
+
+- *Which index is asked.* The first, by name, that has a bound on its first column. If its range is too wide the table is read, though another
+  index might have had a narrow one: `where b > 'v01' and b < 'v02' and a < 300` reads the table when `a`'s index is met first.
+- *An equality is not counted.* A value that half the rows have is read by its index, slower than the table would be. Slice 2's, unchanged.
+- *A text bound cut to 24 bytes can make the range all of the index* (every text beginning alike): counted as that, and the table is read.
+
+*Tested.* A table of 410 rows with three indexes in the list of slice 2: 26 ranges that have to be read by an index (each bound, both, `between`,
+a parameter, a negative number, the constant first, an empty range, one of exactly a quarter) and 12 that may not be (one row more than a quarter,
+one-sided and wide, texts beginning alike, the key bounding the scan, an `or`, what can raise), PostgreSQL holding every answer and the count of
+reads by an index exact. 14 mutants.
+
 **`unique` on a column of `create table` (after slice 3).** PostgreSQL makes of it a constraint named `<table>_<column>_key`, held by a unique index
 of that name. Here it is that index and a mark on it:
 
