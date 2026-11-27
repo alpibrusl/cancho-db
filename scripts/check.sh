@@ -10,6 +10,7 @@ CANCHO_REPO=${CANCHO_REPO:-$(cd "$(dirname "$(command -v "$CANCHO")")/../.." && 
 TLS_PKG=""
 for f in tls record message slot cident client12 client hello identity clientauth ticket server saved; do TLS_PKG="$TLS_PKG $CANCHO_REPO/packages/tls/$f.cho"; done
 for f in verify names x509 key; do TLS_PKG="$TLS_PKG $CANCHO_REPO/packages/x509/$f.cho"; done
+export TLS_PKG
 mkdir -p build
 
 # What to run: `all` (the default: everything, as before), `checks` (everything but the mutants), or one shard of the mutants, `mutants-a` to `mutants-f`
