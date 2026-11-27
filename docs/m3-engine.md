@@ -3589,6 +3589,52 @@ rewritten by someone else with the values it had is a conflict (its bytes differ
 Nothing is measured against the first part's rule for how many transactions it saves under a real load: the random history has 24
 keys on purpose, so that they meet.
 
+## 6bx. What a sibling's own SQL asks of the engine: the measure, and the order
+
+*A plan, measured before anything is built. The owner asked for "what ota needs" (27 Nov 2026). `cancho-ota` is the one sibling that
+uses PostgreSQL broadly; its repository is private, so nothing of its SQL is quoted here: only counts, by the engine's own refusal.*
+
+**The measure** (`python3 scripts/measure_client.py build/engine build/enginecheck <its migrations> <its store's source>`, at its commit
+feb14de, the engine at a92ea11 with 6bw): its 17 migration files are 49 statements, and its store sends 134 distinct statements.
+
+| | run | refused |
+|---|---|---|
+| migrations, as they are | **2 of 49** | 17 for a table an earlier refusal did not make, 13 `syntax`, 6 `unsupported-operator`, 5 `unknown-type`, 3 `reserved-word`, 2 `engine-unsupported`, 1 `unsupported-statement` |
+| queries, on that schema | 2 of 134 | 71 for a table that is not there |
+| migrations, with CHECK and REFERENCES taken out and `bigserial` written as an identity column | **45 of 49** | 2 `reserved-word`, 1 `syntax`, 1 `unsupported-statement` |
+| queries, on that schema | **64 of 134** | 30 `engine-unsupported`, 12 `syntax`, 10 `subquery`, 7 `reserved-word`, 4 for the one table still missing, 2 `on-conflict`, 2 `unsupported-statement`, and one each of `cannot-lower`, `nondeterministic`, `insert-select` |
+
+Taking the three out one at a time (the same script's `soften`, each alone and in pairs): none alone gets past 13 of 49, any two
+at most 34, all three 45. **They are needed together.** What they are, counted in the migrations:
+
+- **50 `check` constraints.** The engine has a range on an integer column (6x) and no other check. 17 of the 50 use `~` with a
+  pattern, of ten distinct patterns: every one has a character class, seven are anchored at both ends, seven have `{m,n}`, three have
+  `+` or `*`, one has an escape; none has a group or an alternation. 12 use `length(...)`, 6 `in (...)`.
+- **19 `references`**, two kinds of `on delete` among them (`cascade`, `set null`).
+- **5 `bigserial` columns.**
+
+**The order (choice).**
+
+1. *The schema applies.* `bigserial`; then `check` as an expression held to every row stored (with the pattern operator, of the subset
+   above, and `length`, `in`); then `references`, with the two `on delete` forms. Then the four that remain: a generated column, a
+   constraint added and dropped by `alter table`, and two words the parser keeps for itself.
+2. *The queries.* Measured again on the real schema, since the 64 of 134 is on a softened one. By the count now: what
+   `engine-unsupported` hides (30: to be split by reading), a subquery where a table or a value stands (10), `on conflict ... do
+   update`, a statement with `with` that writes, `select` with no table (three of the single ones are that), `insert ... select`.
+3. *Then it is run:* its own tests against the engine's server, which is the measure that counts. Until then "N of 134 run" says a
+   statement was answered, not that the answer is PostgreSQL's; each feature is held to PostgreSQL by the differential as it is built.
+
+**Built so far.**
+
+- *`bigserial`, `serial`, `smallserial`* (`src/stmt.cho`, `coldef`): an integer of that size with the table's counter, which is the
+  engine's identity column (6x). Held to PostgreSQL by the differential (`tests/engine_check.py`: three tables, a rollback between
+  draws). **Where it departs, by refusing:** PostgreSQL takes a value given to a serial column and a table may have several; the engine
+  refuses both (`engine-unsupported`), and the test says so (`UNSUP`). Three mutants of the parser. *Measured after it:* still 2 of
+  49, as the table above said it would be: the tables it unlocks have checks and references too.
+
+*What is not planned:* its advisory lock is one statement; the engine has no lock to give, and a plain transaction already has the
+database to itself, so what it is for is to be read before anything is built.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:
