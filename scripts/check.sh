@@ -144,6 +144,8 @@ for seed in 1 2 3; do quiet 2 python3 tests/engine_wire.py build/engine build/en
 echo "== the engine's server under load for a minute (docs/m3-engine.md 6az): money never made or lost, the journal, a copy of the log kept up beside it, kills;"
 echo "   and beside those (6bg) definitions, erases and reads as of a commit, with the log archived and the history trimmed"
 quiet 12 python3 tests/engine_soak.py build/engine build/enginecheck 60 1 archive,mixed
+echo "== TLS on the engine's server (docs/m3-engine.md 6bq): the differential through TLS, psql with verify-full, records of every shape, handshakes that are garbage, a login, the certificates refused"
+for seed in 1 2 3; do quiet 2 python3 tests/engine_tls.py build/engine build/enginecheck 300 $seed; done
 echo "== cancho-hooks, the program, on the engine's server (docs/m3-engine.md 6an): skipped unless HOOKS_BIN names a hooks binary"
 quiet 2 python3 tests/hooks_server.py build/engine
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"
