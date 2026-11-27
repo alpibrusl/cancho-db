@@ -128,19 +128,31 @@ def shapes(d, ident, ctx):
     for b in ew.message(b"Q", b"select max(k) from big\0"):
         c.s.sendall(bytes([b]))
     check("a query sent a byte a record is answered", c.answer(c.until_ready())[4] == [[b"2999"]])
-    # more than the connection's buffer holds (1 MiB), sent at once: what waits in the package and in the connection's room is read when there is room for it
+    # more than the connection's buffer holds (1 MiB), sent while the server cannot run any of it (another connection is in a transaction, and these are writes): the
+    # buffer and the connection's room for ciphertext are both full and the socket is no longer read. When the transaction ends, what waits in the room and in the
+    # package is moved as the buffer empties; nothing but that can, since the socket is not being asked. (Sent while the server could run them, the buffer never
+    # filled on a fast machine: the mutant this is for survived in CI, having been killed here.)
     import threading
-    n = 45000
-    sender = threading.Thread(target=lambda: c.s.sendall(ew.message(b"Q", b"select count(*) from wide\0") * n))
+    n = 40000
+    owner = Client(srv.port)
+    owner.query("begin")
+    owner.query("insert into wide values (7, 'held')")
+    sender = threading.Thread(target=lambda: c.s.sendall(ew.message(b"Q", b"update wide set v = v where k < 0\0") * n))
     sender.start()
+    sender.join(30)
+    sent = not sender.is_alive()
+    early = c.answered(0.5)
+    owner.query("commit")
     got = 0
     try:
-        while got < n and c.answer(c.until_ready())[4] == [[b"1"]]:
+        while got < n and c.answer(c.until_ready())[5] == "UPDATE 0":
             got += 1
     except (OSError, EOFError, ssl.SSLError):
         pass
     sender.join()
-    check("%d queries sent at once (%d bytes, more than the connection's buffer) are all answered" % (n, n * 31), got == n, got)
+    owner.close()
+    check("%d writes (%d bytes, more than the connection's buffer) sent while another connection's transaction makes them wait: none is answered before it ends, all after" % (n, n * 39),
+          sent and early is None and got == n, (sent, early, got))
     # the server ends a connection with close_notify, and answers one
     c.s.sendall(ew.message(b"X", b""))
     try:

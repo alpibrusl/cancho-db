@@ -3130,7 +3130,8 @@ out, and the test program never had it.
 
 *As built, the test (three seeds in the gate):* the differential of 6al through TLS (929 statements at seed 1, the page file and the log
 as in clear); psql 16 with `verify-full`, and refusing a server it does not trust; a row of 24,000 bytes; sixty queries in one record; a
-query a byte a record; 45,000 queries sent at once (more than the connection's buffer); `close_notify` sent, answered, and after a query in
+query a byte a record; 40,000 writes sent while another connection's transaction makes them wait (more than the connection's buffer;
+*corrected: it was 45,000 queries sent at once, below*); `close_notify` sent, answered, and after a query in
 the same packet; a record that is no handshake; 24 handshakes of random bytes, cut short or with a byte changed; six certificates and keys
 that stop the server from starting. **19 mutants, all killed** (`MUTANT_ONLY=tls python3 tests/mutants.py wire`). One line has none: a
 failure the package would say only when read from, which no test reaches (it says it when fed). Nor has the rule that stops the socket
@@ -3138,6 +3139,11 @@ being asked while the connection's room is full: without it the server would spi
 
 *Found by CI:* the test read psql 16's sentence for `\conninfo` ("protocol: TLSv1.3"); CI's psql is newer and prints a table ("SSL
 Protocol | TLSv1.3"), so the first run there failed on a connection that was TLS 1.3. The test reads either.
+
+*Found by CI, a PR later:* the mutant "what waits in the package is read only when the socket has more" was killed here and in one
+run of CI, and survived in the next. Its test sent 45,000 queries at once and relied on the buffer filling, which depends on how fast the
+server empties it. The test now fills it for certain: the statements are writes sent while another connection's transaction makes them
+wait, so the buffer and the room are full and the socket is not asked; when the transaction ends, only the pass can move what waits.
 
 *Found by the gate:* the seventeenth connection, which is told `53300` before it has a place, went through the new `push`, which asks
 whether its place is inside TLS: a place past the last, so the server stopped on an index out of range. `tests/engine_wire.py` (`several`)
