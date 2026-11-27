@@ -2891,6 +2891,23 @@ limit, a text column, two items, an expression, `distinct`, a `where`, a partial
 order where the order is total, by their number where rows tie at the edge. `first_rows` holds the number of rows the index gave to the number
 asked for, which no answer shows. The past is read without it (`past_by_value`). 19 mutants, and 5 of `prev_before` with the tree's model.
 
+**`update` and `delete` by an index (after slice 4).** They read the table, or the key's bounds, and so `delete from t where a = 5` cost what a
+read of every row costs. They now find their rows as a `select` does: `via.choose` after the `where` is read, and the rows by the index's entries
+of the value, or of the range if it is a quarter of the index or less (the first part's count). Nothing else about them changes.
+
+- *The rows are read in the tree as it was before the statement*, as they always were, and written into the tree it is making: an `update` that
+  changes the indexed column does not meet its own rows again.
+- *The order they are read in is the index's*, not the key's. What an `update` decides about a unique index (slice 3) and about keys that move
+  does not depend on the order rows are read in: that was why the mutants of the order tests could not be killed.
+- *The same rules for when* as a `select`: no condition of the `where` that can raise, no bound by the key, not a partial index.
+
+*Measured* (100,000 rows, 10 rows a value, by hand with the test program, 30 statements each with its commit): `update ... where a = N` 53 ms
+with no index and 2.2 ms with one; `delete ... where a = N` 54 ms and 1.7 ms.
+
+*Tested.* In the list of slice 2: 17 updates and deletes that have to be read by an index (a value, a small range, a parameter, a key moved, with
+`returning`, inside a transaction rolled back) and 5 that may not be, the tables held to PostgreSQL's after each. `first_rows` holds the rows an
+`update` and a `delete` are given by the index to the rows of the value or range. 4 mutants.
+
 **`unique` on a column of `create table` (after slice 3).** PostgreSQL makes of it a constraint named `<table>_<column>_key`, held by a unique index
 of that name. Here it is that index and a mark on it:
 

@@ -1907,12 +1907,12 @@ VIAFIXED = [
     ("update fvi set a = 6 where k = 1", "write", False),
     ("select k from fvi where a = 5", "set", True),
     ("select k from fvi where a = 6", "set", True),
-    ("update fvi set c = c + 1, b = b || '!' where a = 5", "write", False),
+    ("update fvi set c = c + 1, b = b || '!' where a = 5", "write", True),
     ("select k, c from fvi where b = 'x!'", "set", True),
     ("select k from fvi where b = 'x'", "set", True),
     ("select k from fvi where c = 8", "set", True),
     ("delete from fvi where k = 2", "write", False),
-    ("delete from fvi where a = 6", "write", False),
+    ("delete from fvi where a = 6", "write", True),
     ("select k from fvi where a = 5", "set", True),
     ("select k from fvi where a = 6", "set", True),
     ("update fvi set k = k + 100 where k = 3", "write", False),
@@ -2024,6 +2024,30 @@ VIAFIXED = [
     ("select k from fvr order by k limit 3", "order", False),
     ("select 10 / (k - 500), a from fvr order by a limit 2", "order", False),
     ("select b || 'x', a from fvr order by a limit 2", "order", False),
+    # UPDATE and DELETE find their rows as a SELECT does: by a value, by a small range, and by the table when the range is wide or the key bounds the scan
+    ("update fvr set b = b || '+' where a = 77", "write", True),
+    ("update fvr set a = a + 5000 where a >= 200 and a < 210", "write", True),
+    ("update fvr set a = a - 5000 where a >= 5200", "write", True),
+    ("update fvr set c = 'same' where b = 'v010'", "write", True),
+    (P("update fvr set c = $1 where a = $2", "by a parameter", "78"), "write", True),
+    ("update fvr set a = a where a > 100", "write", False),
+    ("update fvr set f = not f where k = 77 and a = 77", "write", False),
+    ("update fvr set b = 'x' where a = 77 or a = 78", "write", False),
+    ("update fvr set k = k + 1000 where a = 79", "write", True),
+    ("update fvr set k = k - 1000 where a = 79 returning k, a", "write", True),
+    ("delete from fvr where a = 80", "write", True),
+    ("delete from fvr where a >= 81 and a <= 83 returning k", "write", True),
+    ("delete from fvr where b = 'v010' and a > 300", "write", True),
+    ("delete from fvr where a < 300 and c = 'nothing'", "write", True),
+    ("delete from fvr where a < 300 and f is null", "write", False),
+    ("insert into fvr values (80, 80, 'v030', 'back', true), (81, 81, 'v031', 'back', false), (82, 82, 'v032', 'back', true), (83, 83, 'v033', 'back', false)", "write", False),
+    ("begin", "ddl", False),
+    ("delete from fvr where a = 84", "write", True),
+    ("update fvr set a = 84 where a = 85", "write", True),
+    ("select k from fvr where a = 84", "set", True),
+    ("rollback", "ddl", False),
+    ("select k, a from fvr where a >= 84 and a <= 85", "set", True),
+    ("select count(*), sum(a) from fvr", "set", False),
     # after writes
     ("update fvr set a = a + 1000 where k < 5", "write", False),
     ("delete from fvr where k = 398", "write", False),
@@ -2488,7 +2512,11 @@ def first_rows():
         script = ["create table fr1 (k integer primary key, a integer)", "create index fr1a on fr1 (a)",
                   "insert into fr1 values " + ", ".join("(%d, %s)" % (i, "null" if i % 10 == 0 else str(1000 - i)) for i in range(300)), "!commit"]
         asks = [("select k from fr1 order by a limit 3", 3), ("select k from fr1 order by a desc limit 2 offset 1", 3), ("select k from fr1 order by a limit 5 offset 268", 273),
-                ("select k from fr1 order by a desc limit 40", 40), ("select k from fr1 order by a limit 0", 0), ("select k from fr1 where a = 999", 1)]
+                ("select k from fr1 order by a desc limit 40", 40), ("select k from fr1 order by a limit 0", 0), ("select k from fr1 where a = 999", 1),
+                # an UPDATE and a DELETE are given their rows by the index too, and no others
+                ("update fr1 set a = a where a = 998", 1), ("update fr1 set k = k + 1000 where a >= 990 and a <= 992", 2), ("delete from fr1 where a = 997", 1),
+                # (the row of 990 and of 980 has a null there; `<` is read as `<=`, so the row of 983 is given and the WHERE takes it out)
+                ("delete from fr1 where a >= 980 and a < 983", 3), ("select k from fr1 where a = 997", 0)]
         for sql, _ in asks:
             script += [sql, "!viarows"]
         r = subprocess.run([EXE, os.path.join(d, "fr1.db")], input="\n".join(script) + "\n", capture_output=True, text=True)

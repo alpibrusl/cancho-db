@@ -513,6 +513,8 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if rw < 0 {
         return rw;
     }
+    // the rows are found as a SELECT finds them: by an index, if the WHERE has a value or a small range of one (6bo)
+    via.choose(w, e, kinds);
     contents(w.cx)[5] = 0 - 1;
     i = 0;
     while i < ns {
@@ -528,10 +530,10 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     var nroot = root;
     var side = 0;
     var seen = 0;
-    exec.scan_start(w);
+    via.start(w);
     var more = true;
     while more {
-        let rl = exec.scan_next(p, w, root);
+        let rl = via.next(p, w, root);
         if rl == 0 - 1 {
             more = false;
         } else if rl < 0 {
@@ -829,14 +831,15 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if rw < 0 {
         return rw;
     }
+    via.choose(w, e, kinds);
     if w.code != 0 {
         return exec.verdict(w);
     }
     var nroot = root;
-    exec.scan_start(w);
+    via.start(w);
     var more = true;
     while more {
-        let rl = exec.scan_next(p, w, root);
+        let rl = via.next(p, w, root);
         if rl == 0 - 1 {
             more = false;
         } else if rl < 0 {
