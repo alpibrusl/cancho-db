@@ -15,104 +15,247 @@ import cdb.btree;
 import cdb.index;
 import cdb.exec;
 
-// Before the rows of a SELECT, after `exec.where_static`: whether it reads by an index, and by which entries (`w.vian`, `w.via`). Not when a condition of the
-// WHERE can raise an error (a row not read is a row whose error is not found, 6g), not when the key already bounds the scan, not when the tree is the past's
-// (an index has no history: the entries in that tree are the present's), and not for the rows a RETURNING wrote. Under a join `exec.where_static` does not say
-// the WHERE is quiet (a column of that name may be another table's), so there is none here either. 0.
+// The constant at `vat` of `e` as an entry of the index `id` has a value of a column of type `ct`, after the index's number, into `via` from `off`: its
+// length, or -1 if it is none an entry can have (a null, a type that is not the column's). A text is cut as an entry's is.
+fn part[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], vat: int, ct: int, id: int, off: int) -> [] int {
+    let b = eval.max_nodes();
+    if exec.ev_open(w, e, vat, kinds, 0) < 0 || contents(w.ws)[b + 1] != 0 {
+        return 0 - 1;
+    }
+    // the constant as a row has a value, in `nrow`
+    var vt = contents(w.ws)[b];
+    let inty = ct != row.t_text() && ct != row.t_bool() && ct != row.t_bytea();
+    if inty && vt == 0 {
+        // a parameter or a string: the integer the column's type reads it as (one that is none was refused before any row)
+        if eval.assign(contents(w.ws), b, ct, contents(w.ar), contents(w.info)) == 0 && contents(w.ws)[b + 1] == 0 {
+            vt = contents(w.ws)[b];
+        }
+    }
+    if inty && (vt == 1 || vt == 5 || vt == 6) {
+        contents(w.nrow)[0] = byte_of(1);
+        exec.put_i64(contents(w.nrow), 1, contents(w.ws)[b + 2]);
+    } else if ct == row.t_text() && (vt == 0 || vt == 3) {
+        let va = contents(w.ws)[b + 2];
+        var vn = contents(w.ws)[b + 3];
+        if vn > index.part_max() {
+            vn = index.part_max();
+        }
+        contents(w.nrow)[0] = byte_of(3);
+        contents(w.nrow)[1] = byte_of(0);
+        contents(w.nrow)[2] = byte_of(vn);
+        exec.copy(contents(w.ar), va, vn, contents(w.nrow), 3);
+    } else {
+        return 0 - 1;
+    }
+    build.put_be(contents(w.via), off, id, 4);
+    let pl = row.index_part(contents(w.nrow), 0, index.part_max(), contents(w.via)[off..off + 128], 4);
+    if pl <= 0 {
+        return 0 - 1;
+    }
+    return pl;
+}
+
+// Before the rows of a SELECT, after `exec.where_static`: whether it reads by an index, and by which entries: from the one at `via[128..128 + vial]` on, while
+// an entry is not after `via[0..vian]`. For `column = constant` the two are the value; for a range (docs/m3-engine.md 6bo, slice 4) they are its bounds, or
+// where the index's values begin and end. Not when a condition of the WHERE can raise an error (a row not read is a row whose error is not found, 6g), not
+// when the key already bounds the scan, not when the tree is the past's (an index has no history: the entries in that tree are the present's), and not for
+// the rows a RETURNING wrote. Under a join `exec.where_static` does not say the WHERE is quiet (a column of that name may be another table's), so there is
+// none here either. An equality is looked for first (`ops` 0), then a range. 0.
 pub fn choose[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int]) -> [] int {
     w.vian = 0 - 1;
     if !w.quiet || w.past || w.ret >= 2 || w.nix == 0 || w.lon >= 0 || w.hin >= 0 {
         return 0;
     }
     let dl = w.dlen;
-    let b = eval.max_nodes();
-    var j = 0;
-    while j < w.nconj && w.vian < 0 {
-        let a = contents(w.pos)[exec.p_conj() + j];
-        if int_of(e[a]) == 5 && int_of(e[a + 1]) == 0 {
-            let (c1, mid) = eval.scan(e, a + 2, contents(w.ws));
-            let (c2, end) = eval.scan(e, mid, contents(w.ws));
-            var cat = 0 - 1;
-            var vat = 0 - 1;
-            if c1 == 1 && int_of(e[a + 2]) == 0 && eval.constant(e, mid, c2) {
-                cat = a + 2;
-                vat = mid;
-            } else if c2 == 1 && int_of(e[mid]) == 0 && eval.constant(e, a + 2, c1) {
-                cat = mid;
-                vat = a + 2;
-            }
-            var i = 0;
-            while cat >= 0 && i < w.nix && w.vian < 0 {
-                let at = i * index.rec();
-                let col = int_of(contents(w.ix)[at + 7]);
-                if int_of(contents(w.ix)[at + 4]) % 2 == 0 && exec.is_col(w, e, cat, col) {
-                    let ct = row.col_type(contents(w.ctx)[64..64 + dl], col);
-                    let id = commit.be(contents(w.ix), at, 4);
-                    if exec.ev_open(w, e, vat, kinds, 0) >= 0 && contents(w.ws)[b + 1] == 0 {
-                        // the constant as a row has a value, in `nrow`; then as an entry has it, after the index's number
-                        var vt = contents(w.ws)[b];
-                        var have = false;
-                        let inty = ct != row.t_text() && ct != row.t_bool() && ct != row.t_bytea();
-                        if inty && vt == 0 {
-                            // a parameter or a string: the integer the column's type reads it as (one that is none was refused before any row)
-                            if eval.assign(contents(w.ws), b, ct, contents(w.ar), contents(w.info)) == 0 && contents(w.ws)[b + 1] == 0 {
-                                vt = contents(w.ws)[b];
-                            }
+    var ranges = 0;
+    while ranges < 2 && w.vian < 0 {
+        var i = 0;
+        while i < w.nix && w.vian < 0 {
+            let at = i * index.rec();
+            let col = int_of(contents(w.ix)[at + 7]);
+            let ct = row.col_type(contents(w.ctx)[64..64 + dl], col);
+            let id = commit.be(contents(w.ix), at, 4);
+            var lo = 0 - 1;
+            var hi = 0 - 1;
+            var j = 0;
+            while j < w.nconj && int_of(contents(w.ix)[at + 4]) % 2 == 0 {
+                let a = contents(w.pos)[exec.p_conj() + j];
+                var op = 0 - 1;
+                if int_of(e[a]) == 5 {
+                    op = int_of(e[a + 1]);
+                }
+                if op == 0 && ranges == 0 || op >= 2 && op <= 5 && ranges == 1 {
+                    let (c1, mid) = eval.scan(e, a + 2, contents(w.ws));
+                    let (c2, end) = eval.scan(e, mid, contents(w.ws));
+                    var cat = 0 - 1;
+                    var vat = 0 - 1;
+                    if c1 == 1 && int_of(e[a + 2]) == 0 && eval.constant(e, mid, c2) {
+                        cat = a + 2;
+                        vat = mid;
+                    } else if c2 == 1 && int_of(e[mid]) == 0 && eval.constant(e, a + 2, c1) {
+                        cat = mid;
+                        vat = a + 2;
+                        // constant < column is column > constant
+                        if op == 2 || op == 3 {
+                            op = op + 2;
+                        } else if op == 4 || op == 5 {
+                            op = op - 2;
                         }
-                        if inty && (vt == 1 || vt == 5 || vt == 6) {
-                            contents(w.nrow)[0] = byte_of(1);
-                            exec.put_i64(contents(w.nrow), 1, contents(w.ws)[b + 2]);
-                            have = true;
-                        } else if ct == row.t_text() && (vt == 0 || vt == 3) {
-                            let va = contents(w.ws)[b + 2];
-                            var vn = contents(w.ws)[b + 3];
-                            if vn > index.part_max() {
-                                vn = index.part_max();
+                    }
+                    if cat >= 0 && exec.is_col(w, e, cat, col) {
+                        // (an upper bound in `via` from 0, a lower from 128; an equality is both)
+                        if op == 0 || op == 2 || op == 3 {
+                            hi = part(w, e, kinds, vat, ct, id, 0);
+                            if op == 0 && hi > 0 {
+                                lo = exec.copy(contents(w.via), 0, hi, contents(w.ukey), 0);
+                                exec.copy(contents(w.ukey), 0, hi, contents(w.via), 128);
                             }
-                            contents(w.nrow)[0] = byte_of(3);
-                            contents(w.nrow)[1] = byte_of(0);
-                            contents(w.nrow)[2] = byte_of(vn);
-                            exec.copy(contents(w.ar), va, vn, contents(w.nrow), 3);
-                            have = true;
-                        }
-                        if have {
-                            build.put_be(contents(w.via), 0, id, 4);
-                            let pl = row.index_part(contents(w.nrow), 0, index.part_max(), contents(w.via)[0..256], 4);
-                            if pl > 0 {
-                                w.vian = pl;
-                                w.viac = w.viac + 1;
-                            }
+                        } else {
+                            lo = part(w, e, kinds, vat, ct, id, 128);
                         }
                     }
                 }
-                i = i + 1;
+                j = j + 1;
             }
+            if lo > 0 || hi > 0 {
+                // a side with no bound: where the index's values begin (after its nulls), or end
+                if lo <= 0 {
+                    build.put_be(contents(w.via), 128, id, 4);
+                    contents(w.via)[132] = byte_of(1);
+                    lo = 5;
+                }
+                if hi <= 0 {
+                    build.put_be(contents(w.via), 0, id, 4);
+                    contents(w.via)[4] = byte_of(1);
+                    hi = 5;
+                }
+                w.vian = hi;
+                w.vial = lo;
+                // (a range is read by the index only if it is a small part of it: asked at the first row, `worth`)
+                contents(w.via)[511] = byte_of(ranges);
+                if ranges == 0 {
+                    w.viac = w.viac + 1;
+                }
+            }
+            i = i + 1;
         }
-        j = j + 1;
+        ranges = ranges + 1;
     }
     return 0;
 }
 
-// Begin reading the rows: of the table (`exec.scan_start`), or of the index `choose` found.
+// Begin reading the rows: of the table (`exec.scan_start`), or of the index `choose` found, from its lower bound.
 pub fn start[&q](w: &!q exec.Work) -> [] int {
     exec.scan_start(w);
     if w.vian >= 0 {
-        var i = 0;
-        while i < w.vian {
-            let c = contents(w.via)[i];
-            contents(w.via)[256 + i] = c;
-            i = i + 1;
-        }
-        w.viak = w.vian;
+        seek(w, 128, w.vial);
     }
     return 0;
 }
 
-// The next row, as `exec.scan_next` answers it: of the table, or the row of the index's next entry that begins as the value does (an entry's one byte says where
-// in it the row's key begins). An entry without its row is a damaged file.
+// The entry in `key2` (`nk` bytes) beside the bound at `via[off..off + n]`: 1 if it is after it, -1 if before, 0 if it begins as the bound does (the first
+// byte that differs says; an entry of another index is after or before).
+fn beside[&q](w: &q exec.Work, nk: int, off: int, n: int) -> [] int {
+    var i = 0;
+    while i < n && i < nk {
+        let d = int_of(contents(w.key2)[i]) - int_of(contents(w.via)[off + i]);
+        if d > 0 {
+            return 1;
+        }
+        if d < 0 {
+            return 0 - 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Put the read at `via[from..from + n]`: the entry it goes on from.
+fn seek[&q](w: &!q exec.Work, from: int, n: int) -> [] int {
+    var i = 0;
+    while i < n {
+        let c = contents(w.via)[from + i];
+        contents(w.via)[256 + i] = c;
+        i = i + 1;
+    }
+    w.viak = n;
+    contents(w.lst)[0] = 0;
+    return 0;
+}
+
+// How many entries the tree `root` has, from where the read is on, that are not after the bound at `via[off..off + sl]` (`strict`: that are before it),
+// counted up to `cap`: or an error. The read is left at the last one counted.
+fn count[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, off: int, sl: int, strict: bool, cap: int) -> [file_read] int {
+    var m = 0;
+    while m < cap {
+        let kl = w.viak;
+        let r = btree.scan_step(p, contents(w.sc), root, contents(w.via)[256..256 + kl], false, contents(w.key2), contents(w.cur), contents(w.leaf), contents(w.lst));
+        if r == btree.not_found() {
+            return m;
+        }
+        if r < 0 {
+            return exec.tree_err(r);
+        }
+        let nk = r / 1024;
+        let c = beside(w, nk, off, sl);
+        if c > 0 || strict && c == 0 {
+            return m;
+        }
+        exec.copy(contents(w.key2), 0, nk, contents(w.via), 256);
+        w.viak = nk;
+        m = m + 1;
+    }
+    return m;
+}
+
+// Whether a range is worth reading by the index (docs/m3-engine.md 6bo, slice 4): a row read by an index costs a lookup by its key, which a row read with
+// the table does not, so past about a quarter of the table the table is the faster read. The entries of the range are counted, which is cheap beside either
+// read, and then the index's other entries (after the range, then before it) until there are three times as many: 1 if there are, 0 if not, or an error.
+fn worth[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_read] int {
+    seek(w, 128, w.vial);
+    let m = count(p, w, root, 0, w.vian, false, 1099511627776);
+    if m < 0 {
+        return m;
+    }
+    // after the range: the bound is the index's number alone (`via[0..4]`), and the count goes on from the range's last entry
+    var other = count(p, w, root, 0, 4, false, 3 * m);
+    if other >= 0 && other < 3 * m {
+        // before it: from the index's first entry to the lower bound
+        seek(w, 0, 4);
+        let before = count(p, w, root, 128, w.vial, true, 3 * m - other);
+        if before < 0 {
+            return before;
+        }
+        other = other + before;
+    }
+    if other < 0 {
+        return other;
+    }
+    seek(w, 128, w.vial);
+    if other >= 3 * m {
+        return 1;
+    }
+    return 0;
+}
+
+// The next row, as `exec.scan_next` answers it: of the table, or the row of the index's next entry that is not after the upper bound (an entry's one byte says
+// where in it the row's key begins). An entry without its row is a damaged file.
 pub fn next[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_read] int {
     if w.vian < 0 {
         return exec.scan_next(p, w, root);
+    }
+    if int_of(contents(w.via)[511]) == 1 {
+        // a range, at its first row: by the index if it is a small part of it, or else the table is read after all
+        contents(w.via)[511] = byte_of(0);
+        let use = worth(p, w, root);
+        if use < 0 {
+            return use;
+        }
+        if use == 0 {
+            w.vian = 0 - 1;
+            return exec.scan_next(p, w, root);
+        }
+        w.viac = w.viac + 1;
     }
     let pl = w.vian;
     let kl = w.viak;
@@ -126,11 +269,12 @@ pub fn next[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_re
         return exec.tree_err(r);
     }
     let nk = r / 1024;
-    if nk < pl || !exec.same(contents(w.key2), 0, pl, contents(w.via), 0, pl) {
+    // an entry after the upper bound ends the read
+    if beside(w, nk, 0, pl) > 0 {
         return 0 - 1;
     }
     let off = int_of(contents(w.cur)[0]);
-    if r % 1024 != 1 || off < pl || off >= nk {
+    if r % 1024 != 1 || off < 5 || off >= nk {
         return exec.damaged();
     }
     exec.copy(contents(w.key2), 0, nk, contents(w.via), 256);

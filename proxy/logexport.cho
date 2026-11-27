@@ -632,7 +632,8 @@ fn export[&i, &z, &q, &a](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, roo
 // The whole page file to the output, as one state of the database (docs/m3-engine.md 6bn). `first` is the two superblocks as they were read before the database was
 // loaded: if the file's are no longer those, a commit came between and the state loaded may not be theirs (`raced()`). They are written for pages 1 and 2, and
 // every other page as the file has it now, to the end of the file as it is now: every page the two name was in the file before they were. 0, or a refusal's code.
-fn pages[&i, &z, &f](io: &!i Io, pg: &!z pager.Pager, first: &f [byte]) -> [io_write, file_read] int {
+// Of the two superblocks only the one of the state loaded (`seq`) is written; the other's page is zeros, as in a file that has had one commit.
+fn pages[&i, &z, &f](io: &!i Io, pg: &!z pager.Pager, first: &f [byte], seq: int) -> [io_write, file_read] int {
     var status = 0;
     region g {
         let buf = alloc_slice[g](4096, byte_of(0));
@@ -654,8 +655,18 @@ fn pages[&i, &z, &f](io: &!i Io, pg: &!z pager.Pager, first: &f [byte]) -> [io_w
         var id = 0;
         var going = status == 0;
         while going {
-            if id == 1 || id == 2 {
+            if id == 1 + seq % 2 {
+                // the superblock of the state that was loaded (a superblock is in the page of its number's parity)
                 put_raw(io, first, 4096 * (id - 1), 4096 * id);
+            } else if id == 1 || id == 2 {
+                // the other superblock is not copied: it names the state before, and nothing here says that one's pages were kept. An erase commits twice
+                // and then zeroes what only the state before it named (6bh); a copy begun between the two would name those pages by its older superblock
+                var z = 0;
+                while z < 4096 {
+                    buf[z] = byte_of(0);
+                    z = z + 1;
+                }
+                put_raw(io, buf, 0, 4096);
             } else {
                 let n = pager.raw(pg, id, buf);
                 if n < 0 {
@@ -792,7 +803,7 @@ fn main(world: World) -> [] int {
                                             } else if paging {
                                                 borrow mut io as &!oo in {
                                                     borrow first as &fr in {
-                                                        status = pages(oo, pp, contents(fr));
+                                                        status = pages(oo, pp, contents(fr), seq);
                                                     }
                                                 }
                                             } else {
