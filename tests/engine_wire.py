@@ -143,14 +143,14 @@ def message(t, body):
 class Client:
     """The simple query protocol, and the bytes of anything else."""
 
-    def __init__(self, port, ssl_first=False, rcvbuf=None, password=None, database="anything", tls=None):
+    def __init__(self, port, ssl_first=False, rcvbuf=None, password=None, database="anything", tls=None, host="127.0.0.1"):
         self.s = socket.socket()
         if rcvbuf:
             self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
         self.s.settimeout(20)
         # as libpq does: a small write is not held for the acknowledgement of the one before it
         self.s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.s.connect(("127.0.0.1", port))
+        self.s.connect((host, port))
         self.buf, self.status, self.names, self.params = b"", "?", [], {}
         if ssl_first:
             self.s.sendall(struct.pack(">II", 8, 80877103))

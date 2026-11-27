@@ -3144,6 +3144,43 @@ failed on it. That one answer is written in clear, with `put`, and never asks.
 That a server is safe to put on a network: it still serves this machine only. Certificates other than ECDSA P-256; a certificate renewed
 without a restart; client certificates.
 
+## 6br. Clients from other machines
+
+*Design, written before the code. Choices are marked; what is measured has its command.*
+
+**What there is.** The server takes a client from this machine and closes any other unread (`from_here`, 6al), because everything travelled
+in clear. Since 6bq it can end TLS. A database only this machine can reach is not what TLS was built for.
+
+**The rule (choice).** A client from another machine is given a place only by a server that has **both** a certificate (`tls=`, 6bq) and
+a login (the root's key, 6at). With either missing it is closed unread, as before: a server with no login would serve anyone who can reach
+its port, and one with no certificate would be handed tokens in clear.
+
+- Its first packet must be the `SSLRequest`. A startup in clear is answered `28000`, `cancho-db: refused tls-required`, and the connection
+  is ended **before a password is asked for**, so a client set to fall back to clear never sends its token.
+- After the handshake it is a connection like any other: it logs in with its token and is held to it.
+- A client from this machine is as before: it may come in clear.
+- *Read (`src/login.cho`):* the listener binds every address (cancho's `tcp_listen` has no other form at this revision), so there is no
+  "listen on this address only"; who is served is decided by the peer's address at `accept`.
+
+**A time limit for the startup.** 6bq found that a client that connects and says nothing holds one of the sixteen places for as long as
+it likes. From this machine that was a nuisance; from anywhere it is an attack one socket wide. *Choice:* a connection that has not
+finished its startup (the TLS handshake, the startup packet and, with a login, the password) within `WRITE_MS` of being accepted is ended
+unanswered. `WRITE_MS` is already "how long a client may keep the server waiting" (default 10 s); a second number was not worth a seventh
+word on the command line. The server looks once a turn, which is at least once a second, so the limit is kept to within a second.
+
+**What this does not do, said plainly.**
+
+- **Sixteen places are still sixteen.** A client that cannot log in holds a place for at most the limit, but nothing stops it coming back,
+  and there is no bound per address. Someone who can reach the port can keep others out. *Not built:* more places, or a bound per address.
+- The certificate proves the server to the client; the token proves the client to the server. There are no client certificates.
+- The TLS package is unreviewed by anyone outside (6bq). Putting the server on a network rests on it.
+
+**Test** (`tests/engine_tls.py`, from this host's own address that is not loopback; skipped, and saying so, on a host that has none):
+a client from there is closed unread by a server with no certificate, and by one with a certificate and no login; with both, a startup in
+clear is answered `28000` and no password is asked for, a token through TLS is let in and held to what it allows, a wrong one refused. The
+limit: a socket that says nothing, one that stops after the `SSLRequest`, and one that stops before its password are each ended at the
+limit and not before; a connection that has logged in and then idles is not. Mutants, each killed.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

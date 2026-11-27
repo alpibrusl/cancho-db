@@ -13,6 +13,8 @@ A P-256 certificate is made for the run. Then:
   * bytes sent with the SSLRequest; a second SSLRequest inside TLS; a handshake that is garbage, or half of one; a client that goes without close_notify inside a
     transaction: each ended, nothing of it kept, and the next connection served;
   * a login by token through TLS, and a wrong one refused through it;
+  * clients from another address of this host (6br): closed unread unless the server has a certificate and a login, then told `tls-required` in clear and served through
+    TLS; and the time limit of a startup;
   * a server that is not started: no key, a key that is not the certificate's, an RSA key, an expired certificate, each with its reason.
 """
 import datetime
@@ -298,6 +300,112 @@ def logins(d, ident, ctx):
     srv.stop()
 
 
+def outside_address():
+    """An IPv4 address of this host that is not loopback: a client that connects to it comes, to the server, from it. None if there is none."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("192.0.2.1", 9))                                # nothing is sent: the kernel only chooses the address it would send from
+        a = s.getsockname()[0]
+        s.close()
+    except OSError:
+        return None
+    return None if a.startswith("127.") else a
+
+
+def reply_to(host, port, data, wait=5):
+    """What a server says to `data` sent in clear, until it closes or `wait` seconds pass: the bytes, and whether it closed."""
+    s = socket.create_connection((host, port), timeout=20)
+    s.settimeout(wait)
+    got, closed = b"", False
+    try:
+        if data:
+            s.sendall(data)
+        while True:
+            more = s.recv(65536)
+            if not more:
+                closed = True
+                break
+            got += more
+    except socket.timeout:
+        pass
+    except OSError:
+        closed = True
+    s.close()
+    return got, closed
+
+
+def far(d, ident, ctx):
+    """Clients from another machine (6br)."""
+    out = outside_address()
+    if out is None:
+        print("skip clients from another machine: this host has no IPv4 address that is not loopback")
+        return
+    startup = struct.pack(">I", 196608) + b"user\0tester\0database\0main\0\0"
+    startup = struct.pack(">I", len(startup) + 4) + startup
+    full = ew.mint("password", "--effects", ew.ALL)
+    for name, srv in (("no certificate", Server(os.path.join(d, "far1.db"), login=True)), ("a certificate and no login", Server(os.path.join(d, "far2.db"), tls=ident))):
+        a = reply_to(out, srv.port, SSL_REQUEST, wait=3)
+        b = reply_to(out, srv.port, startup, wait=3)
+        check("a server with %s: a client from another address (%s) is closed unread, whatever it sends" % (name, out), a == (b"", True) and b == (b"", True), (a, b))
+        srv.stop()
+    srv = Server(os.path.join(d, "far3.db"), login=True, tls=ident)
+    got, closed = reply_to(out, srv.port, startup)
+    check("a server with both: a startup in clear from another address is answered 28000 tls-required, no password is asked for, and it is ended",
+          closed and got[:1] == b"E" and b"C28000\0" in got and b"refused tls-required" in got and b"R\0\0\0\x08" not in got, (got, closed))
+    c = Client(srv.port, password=full, database="main", tls=ctx, host=out)
+    ok = c.status == "I" and c.query("create table ft (k integer primary key)")[0] is None and c.query("insert into ft values (1), (2)")[5] == "INSERT 0 2"
+    c.close()
+    r = Client(srv.port, password=ew.mint("password", "--effects", "r:*"), database="main", tls=ctx, host=out)
+    denied, seen = r.query("delete from ft")[0], r.query("select k from ft order by k")[4]
+    r.close()
+    w = Client(srv.port, password="nonsense", database="main", tls=ctx, host=out)
+    refused = w.answer(w.first)
+    here = Client(srv.port, password=full, database="main")
+    local = here.query("select count(*) from ft")[4]
+    here.close()
+    check("and through TLS it logs in with its token, is held to it, and a password that is no token is refused; a client of this machine still comes in clear",
+          ok and denied == "42501" and seen == [[b"1"], [b"2"]] and refused[0] == "28P01" and w.status == "closed" and local == [[b"2"]], (ok, denied, seen, refused[:2], w.status, local))
+    srv.stop()
+
+
+def limit(d, ident, ctx):
+    """A startup has a time limit (6br): WRITE_MS, here two seconds."""
+    import time
+    srv = Server(os.path.join(d, "limit.db"), 30000, 2000, login=True, tls=ident)
+    full = ew.mint("password", "--effects", ew.ALL)
+    startup = struct.pack(">I", 196608) + b"user\0tester\0database\0main\0\0"
+    startup = struct.pack(">I", len(startup) + 4) + startup
+    # one that logged in before the others begin, and then says nothing for longer than the limit
+    idle = Client(srv.port, password=full, database="main", tls=ctx)
+    socks = {"says nothing": socket.create_connection(("127.0.0.1", srv.port), timeout=20), "stops after the SSLRequest": socket.create_connection(("127.0.0.1", srv.port), timeout=20),
+             "stops before its password": socket.create_connection(("127.0.0.1", srv.port), timeout=20), "stops inside the handshake": socket.create_connection(("127.0.0.1", srv.port), timeout=20)}
+    t0 = time.time()
+    socks["stops after the SSLRequest"].sendall(SSL_REQUEST)
+    socks["stops before its password"].sendall(startup)
+    inc, outb = ssl.MemoryBIO(), ssl.MemoryBIO()
+    o = ctx.wrap_bio(inc, outb, server_hostname="localhost")
+    try:
+        o.do_handshake()
+    except ssl.SSLWantReadError:
+        pass
+    socks["stops inside the handshake"].sendall(SSL_REQUEST + outb.read()[:40])
+    took = {}
+    for name, s in socks.items():
+        s.settimeout(8)
+        try:
+            while s.recv(65536):
+                pass
+            took[name] = time.time() - t0
+        except OSError as e:
+            took[name] = repr(e)
+        s.close()
+    check("a connection that %s is ended at the limit (2 s) and not before" % ", ".join(socks), all(isinstance(v, float) and 1.9 < v < 4.5 for v in took.values()), took)
+    still = idle.query("select 1 from ft where false")
+    check("one that logged in and has said nothing since is not ended", idle.status == "I" and still[0] is not None or still[5] is not None, still)
+    idle.close()
+    srv.stop()
+
+
 def not_started(d, p256, cert):
     other = curves.generate_private_key(curves.SECP256R1())
     r2048 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -330,6 +438,8 @@ def main():
         shapes(d, ident, ctx)
         with_psql(d, ident)
         logins(d, ident, ctx)
+        far(d, ident, ctx)
+        limit(d, ident, ctx)
         not_started(d, p256, cert)
     if ew.FAILED:
         print("FAIL engine tls: %d failed" % len(ew.FAILED))

@@ -408,6 +408,10 @@ fn startup_step[&t, &g, &b, &o, &s, &a, &x, &n](tab: &!t conns.Table, eng: &!n t
         if st[6] > 3 || !push(tab, eng, slot, gs, out[0..1]) {
             st[3] = 1;
         }
+    } else if kind == login.kind_startup() && st[18] == 1 && gs[g_tls_on() + slot] == 0 {
+        // from another machine and in clear (6br): told so, before a password is asked for
+        push(tab, eng, slot, gs, out[0..wire.error(out, 0, true, "28000", "cancho-db: refused ", "tls-required")]);
+        st[3] = 1;
     } else if kind == login.kind_startup() && gs[g_login()] == 1 {
         // a login: the password is asked for, and nothing is served before it is right
         let n9 = login.auth_cleartext(out);
@@ -1170,7 +1174,9 @@ fn accept_all[&h, &l, &p, &g, &s, &x, &o](heap: &!h Heap, table: conns.Table, li
                 tab = t1;
                 if a >= 0 {
                     borrow mut tab as &!tw in {
-                        if !from_here(tw, a) {
+                        let here = from_here(tw, a);
+                        if !here && (gs[g_tls()] == 0 || gs[g_login()] == 0) {
+                            // from another machine (6br): only a server with a certificate and a login has a place for it
                             conns.close(tw, a);
                         } else if a >= max_clients() {
                             put(tw, a, gs, out[0..wire.error(out, 0, true, "53300", "cancho-db: too many connections", "")]);
@@ -1189,6 +1195,9 @@ fn accept_all[&h, &l, &p, &g, &s, &x, &o](heap: &!h Heap, table: conns.Table, li
                                 st[0] = 1;
                                 st[5] = gs[g_now()];
                                 st[17] = 1;
+                                if !here {
+                                    st[18] = 1;
+                                }
                             } else {
                                 conns.close(tw, a);
                             }
@@ -1356,6 +1365,17 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w](heap:
                                 c = c + 1;
                             }
                             gs[g_turn()] = (gs[g_turn()] + 1) % max_clients();
+                        }
+                        // a connection that has not finished its startup within the limit is ended (6br): a place is not held by saying nothing
+                        var late = 0;
+                        while late < max_clients() && gs[g_stop()] == 0 {
+                            let ls = sts[stride() * late..stride() * late + stride()];
+                            if (ls[0] == 1 || ls[0] == 3) && gs[g_now()] - ls[5] > gs[g_write_ms()] {
+                                borrow mut tab as &!tw in {
+                                    finish(heap, tw, eng, late, gs, pg, w, roots, ls);
+                                }
+                            }
+                            late = late + 1;
                         }
                         // a transaction that idles while another connection waits for it is ended (6aq): `25P03`, as PostgreSQL's idle_in_transaction_session_timeout
                         if gs[g_owner()] != 0 && gs[g_stop()] == 0 {
