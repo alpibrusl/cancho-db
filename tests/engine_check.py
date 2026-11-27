@@ -2361,9 +2361,12 @@ def history(seed):
     g = Gen(rng)
     names = ["ta", "tb", "tc"]
     added = [0]
-    dumps = ["select * from %s order by k" % n for n in names]
+    dumps = ["select * from %s order by k" % n for n in names + ["th"]]
     tables = {}
-    lines = []
+    # a table the random writes do not know, written by a fixed transaction after each run of them: whatever the seed drew, every point has before it a
+    # committed transaction of several statements that wrote one key more than once
+    lines = ["create table th (k integer primary key, v integer)"]
+    fixed = [0]
     for name in names[:2]:
         tables[name] = g.table(name)
         lines.append(tables[name].ddl())
@@ -2393,6 +2396,10 @@ def history(seed):
                 out.append(g.update())
             else:
                 out.append(g.delete())
+        i = fixed[0]
+        fixed[0] += 1
+        out += ["begin", "insert into th values (%d, 0)" % i, "update th set v = v + 1 where k = %d" % i, "update th set v = v + 1",
+                "delete from th where k = %d" % (i - 2), "update th set v = v + 3 where k = %d" % i, "commit"]
         return out
 
     def checkpoint():
