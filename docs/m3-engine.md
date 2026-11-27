@@ -3140,13 +3140,20 @@ being asked while the connection's room is full: without it the server would spi
 *Found by CI:* the test read psql 16's sentence for `\conninfo` ("protocol: TLSv1.3"); CI's psql is newer and prints a table ("SSL
 Protocol | TLSv1.3"), so the first run there failed on a connection that was TLS 1.3. The test reads either.
 
-*Found by CI, a PR later, twice:* the mutant "what waits in the package is read only when the socket has more" was killed here and in
-one run of CI, and survived in the next two. Its first test sent 45,000 queries at once and relied on the buffer filling, which depends
-on how fast the server empties it. The second made the statements wait (writes, beside another connection's transaction) and sent half
-as much again as the buffer holds: still a matter of speed, because with that much left over the socket has more to give, and reading it
-moves what waits, so the pass is not needed. What the pass is for is the case where **nothing more will come**: the test now sends
-3,020 bytes more than the buffer holds, which are left in the package with the socket empty, and are answered only if the pass moves
-them. That does not depend on who is faster.
+*Found by CI, a PR later, and then by slowing the client down:* the mutant "what waits in the package is read only when the socket has
+more" was killed here and in one run of CI, and survived in the next two. Its tests, in order, and why each was a matter of speed:
+
+1. 45,000 queries sent at once: it relied on the buffer filling, which depends on how fast the server empties it.
+2. The statements made to wait (writes, beside another connection's transaction), half as much again as the buffer holds: with that
+   much left over the socket has more to give, and reading it moves what waits, so the pass is not needed.
+3. 3,020 bytes more than the buffer holds: killed here, but run with the client slowed by hand (16 KiB every half millisecond) the
+   mutant answered everything. A slow client's last bytes arrive after the buffer is full, stay **in the socket**, and are read when the
+   buffer empties.
+
+What the pass is for is bytes left **in the package** with the socket empty. The test now sends the bytes that cross the buffer's end
+as one record: the package opens it whole, the buffer takes 2,000 bytes of it, and 3,020 are left where only the pass reaches them. Run
+by hand at five speeds of the client (all at once; 16 KiB, 4 KiB and 64 KiB at a time with pauses; 1,000 bytes at a time), the mutant
+stops at statement 26,886 of 26,964 every time, and the server as it is answers all of them.
 
 *Found by the gate:* the seventeenth connection, which is told `53300` before it has a place, went through the new `push`, which asks
 whether its place is inside TLS: a place past the last, so the server stopped on an index out of range. `tests/engine_wire.py` (`several`)

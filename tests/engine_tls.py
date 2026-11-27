@@ -129,16 +129,23 @@ def shapes(d, ident, ctx):
         c.s.sendall(bytes([b]))
     check("a query sent a byte a record is answered", c.answer(c.until_ready())[4] == [[b"2999"]])
     # a little more than the connection's buffer holds (1 MiB), sent while the server cannot run any of it (another connection is in a transaction, and these are
-    # writes): the buffer fills, and the last few thousand bytes are left in the package, with nothing more to come on the socket. When the transaction ends, only the
-    # pass over the connections can move them: the socket will never say there is more. (Two tests before this one depended on how fast the server read against how
-    # fast the client sent, and the mutant this is for survived in CI both times, having been killed here: with much more than the buffer, the socket still has some,
-    # and reading it moves what waits.)
+    # writes), and **the bytes that cross the buffer's end sent as one record**: the package opens the record whole, the buffer takes the part there is room for, and
+    # the rest (3,020 bytes) is left in the package with nothing more to come on the socket. When the transaction ends, only the pass over the connections can move
+    # it: the socket will never say there is more. (Three tests before this one depended on how fast the server read against how fast the client sent; the mutant
+    # this is for survived in CI twice, and with a client slowed by hand a third time. Left in the socket, what waits is read when the buffer empties; it has to be
+    # left in the package. scratch runs at five speeds of the client: the mutant stops at statement 26,886 of 26,964 at each.)
     import threading
     n = (1048576 + 3000) // 39 + 1
     owner = Client(srv.port)
     owner.query("begin")
     owner.query("insert into wide values (7, 'held')")
-    sender = threading.Thread(target=lambda: c.s.sendall(ew.message(b"Q", b"update wide set v = v where k < 0\0") * n))
+    data = ew.message(b"Q", b"update wide set v = v where k < 0\0") * n
+    cut = 1048576 - 2000                                           # the last call is one record of 5,020 bytes, 2,000 of them the buffer's last
+
+    def send():
+        c.s.sendall(data[:cut])
+        c.s.sendall(data[cut:])
+    sender = threading.Thread(target=send)
     sender.start()
     sender.join(30)
     sent = not sender.is_alive()
