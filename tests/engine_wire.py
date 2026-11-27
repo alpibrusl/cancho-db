@@ -86,7 +86,7 @@ def die_with_parent():
 
 
 class Server:
-    def __init__(self, path, *limits, key=True, login=False, fsize=None, revoked=None, tls=None):
+    def __init__(self, path, *limits, key=True, login=False, fsize=None, revoked=None, tls=None, places=None):
         self.path, self.port = path, free_port()
         args = [SERVER, path, str(self.port)]
         if key:
@@ -110,6 +110,9 @@ class Server:
         if tls is not None:
             # the directory of the server's certificate and key (6bq)
             args += ["tls=" + tls]
+        if places is not None:
+            # how many connections at once (6bt)
+            args += ["places=%d" % places]
         if key and os.environ.get("PURGE_CHECK", "1") != "0":
             # every erase's garbage is held to the sweep's walk before it is zeroed, and the server stops if they differ (6bh). (PURGE_CHECK=0: as a server is run, to measure it)
             args += ["check-purge"]

@@ -3056,7 +3056,7 @@ reviewed. TLS 1.3 only; the key is ECDSA P-256 only (`tls-server-key-type` for a
 certificates, the server's first) and `key.pem` (PKCS#8 or SEC 1, not encrypted). A directory named whose files cannot be read, or that the
 package refuses (a key that is not the certificate's, an expired certificate, an RSA key), is a refusal to start (status 2, and the package's
 tag on the error stream), not a server without TLS. The files are read once, at start: a renewed certificate needs a restart (*not in this
-part:* a reload).
+part:* a reload; *built since, 6bu*).
 
 **The protocol (read: PostgreSQL's `protocol-flow`, "SSL Session Encryption").** A client sends `SSLRequest` in clear; the server answers one
 byte, `S` or `N`; after `S` the client begins the TLS handshake, and the startup message comes inside.
@@ -3252,7 +3252,7 @@ read after its commit sees all of it. A reader that needs two statements to agre
 `begin`, which waits.
 
 *Not in this part:* a statement of the extended protocol that reads (it waits as before: the rule is applied to a simple query's text
-first, and the Execute path has its own skipping rules; next); two transactions at once.
+first, and the Execute path has its own skipping rules; next. *Built since, below*); two transactions at once.
 
 **Test** (`tests/engine_wire.py`, `beside_reads`). A history from the differential's generator is run by one connection in transactions
 of a few statements each, some rolled back, while a second connection reads between every two statements. (1) The first connection's
@@ -3282,6 +3282,14 @@ clock (`st[20]`), `exec.seq_hold` (`src/serve.cho`, `src/drive.cho`, `src/exec.c
 - *Not tested:* the net (`read-beside-wrote`): no statement is known to reach it, which is what it is for. That a read beside a
   transaction costs the transaction nothing in time is not measured.
 
+**An Execute that reads** (*added after the first part; a driver that prepares its statements sends nothing else*). The rule is applied
+to the text of the statement the portal was bound to (`reads_portal`): the unnamed statement's, or the named one's. The messages before
+the Execute (Parse, Bind, Describe) never waited. An Execute with no portal is refused whenever it is let through (nothing runs); a
+rule that made it wait first had a mutant that survived, and was removed. *Test:* the second connection of the interleaved history reads every other time by Parse, Bind, Describe,
+Execute, Sync; a read with a parameter and one prepared under a name are answered beside a transaction; a write, a `select` that draws
+from a sequence, and a write prepared under a name while the unnamed statement is a read, each sent by the extended protocol, wait.
+Three more mutants.
+
 **The second part, sketched: two transactions that write.** Each on a tree of its own from the root it began with. At `commit`, if the
 branch has not moved, as now. If it has: the transaction's facts (6as: every row it wrote, with what the row held before) are held
 against the facts committed since it began; if no row is in both, they are applied to the branch's tree as it is now, and if one is,
@@ -3289,6 +3297,90 @@ the commit is refused `40001` (PostgreSQL's serialization failure, which clients
 first committer winning. Open, and the owner's to decide before it is built: whether a unique index or a sequence makes two
 transactions conflict, and whether `read committed` is to be claimed (it cannot be, as designed: a statement would see its own
 transaction's snapshot, not each statement's).
+
+## 6bt. More places, and a bound for an address
+
+*Design, written before the code.*
+
+**What there is.** Sixteen places (6aq), fixed in the source; and since 6br a client from anywhere may take one. 6br said it plainly:
+"who can reach the port can keep others out by coming back". Two things are missing: a server that many clients use needs more than
+sixteen, and one address should not be able to hold them all.
+
+**Places (choice).** One more word on the command line, `places=N`, beside `tls=` and before `check-purge` (the three in any order after
+the words that have a place): 1 to 128, 16 without it. A place costs what a connection may hold, allocated when the server starts:
+its buffer (1 MiB), what the extended protocol keeps (2.07 MiB), its room for ciphertext (17 KiB), and the TLS package's slot. *To be
+measured:* the server's memory at 16, 64 and 128 places. A number that is none of 1 to 128 is a refusal to start (status 2).
+
+*Why not places that grow:* everything a connection holds is one allocation made at start, sliced by its number; the server never
+allocates while it serves, which is why a client cannot make it run out of memory. That is kept.
+
+**A bound for an address (choice).** A client that is not of this machine is given a place only while its address holds fewer than a
+quarter of the places (at least one): with 16 places four, with 64 sixteen. One more is told `53300`,
+`cancho-db: too many connections from this address`, in clear, and closed; nothing of it is read. The address is the peer's IPv4
+address (*read, the compiler's `docs/conn-peer.md`: every cancho socket is IPv4 at this revision*; an IPv6 peer, when there is one, is
+counted by its /64).
+
+- Clients of this machine are not bounded: an application beside the server pools as many connections as it likes, as before.
+- A place counts for its address from `accept` until the connection ends, whether or not it has logged in: a client that never logs in
+  holds at most its quarter, each for at most the startup's limit (6br).
+
+**What this does not do.** Someone with many addresses still fills the places a quarter at a time; clients behind one address (a NAT,
+a proxy) share its quarter. A bound that an operator sets, and a list of addresses, are not built.
+
+**Test** (`tests/engine_tls.py`): a server with `places=8` and both a certificate and a login: from this host's other address two
+connections are given places and the third is told `53300 ... from this address` and closed, while six clients of this machine are
+served; when one of the two ends, another from there is let in. A server with `places=40`: forty clients served at once, each
+answering, and the forty-first told `53300`; without the word, the seventeenth (6aq's test, unchanged). `places=0`, `places=129` and
+`places=x` do not start. Mutants, each killed.
+
+*As built, and measured.* `places=N` and `tls=` are read in any order after the words that have a place (`proxy/engine.cho`); the bound
+is at `accept` (`src/serve.cho`), with the address in two ints of the connection's state. The server's memory when it starts
+(`/proc/<pid>/status`, one run each): 166 MB of address space and 3.6 MB resident at 16 places; 331 MB and 3.7 MB at 64; 550 MB and
+3.4 MB at 128. So a place is 3.4 MB of address space, and of memory only what its connection comes to use: the buffers are allocated
+zeroed and the kernel gives a page when it is first written. *The design said "allocated when the server starts"; that is the address
+space, not the memory.* **5 mutants, all killed** (`MUTANT_ONLY="tls: places"`). *Not tested:* that two addresses are counted apart (the
+host the test runs on has one address that is not loopback); the parsing of `places=` has a test and no mutant, since the mutants are
+of `src/` and it is in `proxy/engine.cho`.
+
+## 6bu. A certificate renewed while the server runs
+
+*Written with the code, not before it: the design was three decisions, each said here with what was built and measured.*
+
+**What was missing (6bq).** The certificate was read once, at start. A certificate lasts ninety days or less; a restart for each renewal
+ends every connection.
+
+**How the server learns of a renewal (choice): it looks.** Every two seconds it reads `chain.pem` and `key.pem` again, hashes each, and
+if either differs from what it last took, gives the pair to the package in place of the one it has (`tls.replace_identity`). Considered
+and not chosen: a signal (the server has no signals, and its authority report says so: `tests/authority.sh`); the files' times (a
+renewal replaces two files, and one can be seen changed before the other).
+
+**Half a renewal is not a problem, because the package refuses it.** A new key beside the old certificate is a key that is not the
+certificate's: `tls-server-key-mismatch`, and the identity there is stays (*read: `packages/tls/tls.cho`, `replace_identity`: "refused
+as `add_identity` is, and then the identity is as it was"*). Two seconds later the certificate is there too and the pair is taken. The
+same for anything else the package refuses (an RSA key, an expired certificate): the old one is served, and the server says why on
+standard error, **once** for each reason and not every two seconds. When a pair is taken it says so.
+
+**The server holds no path for it.** The directory is opened once, at start (`open_dir`), and everything after is read beneath the
+handle (`src/tlsid.cho`: `dir_read`, `file_read`): the loop that faces the network can read that directory and name no other file. The
+cost, as the compiler's own TLS example found: **a symbolic link in the directory is refused.** certbot's `live/` is links into
+`archive/`; a deployment copies the two files in (a deploy hook does). With no `tls=` the handle is the directory the server was started
+in, never read: a handle has to be passed, and a server with no certificate has no other directory.
+
+- Connections made before a renewal go on with the keys they have; the next handshake uses the new certificate.
+- The key is read into memory every two seconds and overwritten after, as at start.
+
+**Measured.** A renewed pair is served 1.5 s after the second file is moved into place (one run; at most the two seconds and a turn).
+The files are some 800 bytes together; reading and hashing them every two seconds is not measured against anything, and is not claimed
+to cost nothing.
+
+**Test** (`tests/engine_tls.py`, `renewed`): three certificates, each trusted by a client that trusts no other. The first is served and
+the second is not; the second's key alone is moved in, and after 4.5 s the first is still served; its certificate is moved in, and the
+second is served within eight seconds and the first no longer, while a connection made at the start still writes; an RSA pair is moved
+in and the second goes on being served; the third is moved in and served. The server's standard error has "not taken:
+tls-server-key-type" once, "not taken: tls-server-key-mismatch" at least once, and "read again" twice. A directory that cannot be
+opened, and one with no `chain.pem`, do not start. **6 mutants, all killed** (`MUTANT_ONLY="tls: renew"`).
+
+*Not built:* a chain that changes its names (the identity keeps the one name it was given); more than one certificate (SNI).
 
 ## 7. Taking over, safely
 
