@@ -3136,6 +3136,10 @@ that stop the server from starting. **19 mutants, all killed** (`MUTANT_ONLY=tls
 failure the package would say only when read from, which no test reaches (it says it when fed). Nor has the rule that stops the socket
 being asked while the connection's room is full: without it the server would spin, and answer the same.
 
+*Found by the gate:* the seventeenth connection, which is told `53300` before it has a place, went through the new `push`, which asks
+whether its place is inside TLS: a place past the last, so the server stopped on an index out of range. `tests/engine_wire.py` (`several`)
+failed on it. That one answer is written in clear, with `put`, and never asks.
+
 **What this does not show.** That the package's cryptography is right: that is its own tests' claim and nobody outside has reviewed it.
 That a server is safe to put on a network: it still serves this machine only. Certificates other than ECDSA P-256; a certificate renewed
 without a restart; client certificates.
