@@ -1349,6 +1349,25 @@ FIXED += [
 ]
 
 # an identity column (6y): the counter is drawn from by every row an insert reaches, and a failed statement and a rollback do not give the values back
+# bigserial, serial, smallserial (docs/m3-engine.md 6bx): an integer of that size that the table's counter fills, from 1
+FIXED += [
+    ("create table srl (id bigserial primary key, e text)", "ddl"),
+    ("insert into srl (e) values ('a'), ('b')", "write"),
+    ("insert into srl (e) values ('c'), (null)", "write"),
+    ("select * from srl order by id", "order"),
+    ("begin", "ddl"),
+    ("insert into srl (e) values ('gone')", "write"),
+    ("rollback", "ddl"),
+    ("insert into srl (e) values ('after a rollback')", "write"),
+    ("select id, e from srl where id > 3 order by id", "order"),
+    ("create table srl2 (k integer primary key, n serial)", "ddl"),
+    ("insert into srl2 (k) values (5), (6)", "write"),
+    ("select * from srl2 order by k", "order"),
+    ("create table srl3 (n smallserial primary key, v integer)", "ddl"),
+    ("insert into srl3 (v) values (10), (20), (30)", "write"),
+    ("update srl3 set v = v + 1 where n = 2", "write"),
+    ("select * from srl3 order by n", "order"),
+]
 FIXED += [
     ("create table fs (id bigint generated always as identity primary key, e text not null, n integer default 1 check (n between 0 and 5))", "ddl"),
     ("insert into fs (e) values ('a'), ('b')", "write"),
@@ -1673,7 +1692,8 @@ DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into 
              "create table ft (k integer primary key, s text)", "insert into ft values (1, '3000000000 7abc')", "create sequence fzs",
              "create table fu (k integer primary key, u integer)", "insert into fu values (1, 1), (2, 2), (3, 3), (4, 40)", "create unique index fuu on fu (u)",
              "create table fuc (k integer primary key, u integer unique)", "create sequence fue_u_key",
-             "create table fts (k integer primary key, at timestamptz, d timestamp)", "insert into fts values (1, '2026-11-27 10:00:00+00', '2026-11-27 10:00:00')"]
+             "create table fts (k integer primary key, at timestamptz, d timestamp)", "insert into fts values (1, '2026-11-27 10:00:00+00', '2026-11-27 10:00:00')",
+             "create table fsr (id bigserial primary key, e text)", "insert into fsr (e) values ('a')"]
 DEP = [
     # the cheaper condition is computed first, wherever it is written: the row with k = 2 never reaches the division
     ("select k from fz where k > 2 and 10 / (k - 2) > 0", None),
@@ -1706,6 +1726,8 @@ DEP = [
 # Statements the engine REFUSES as `engine-unsupported` on purpose, and what PostgreSQL 16 does with each: answers PostgreSQL has rules for that the engine does not reproduce. A change that starts
 # answering one of them has to show that the answer is PostgreSQL's.
 UNSUP = [
+    ("insert into fsr (id, e) values (9, 'z')", None),                   # a value given to a serial column: PostgreSQL takes it (and its counter does not move); the engine's is an identity column
+    ("create table fsr2 (a serial, b bigserial, k integer primary key)", None),   # two counters in a table
     ("select sum(cast(n as bigint)) from fz", None),                    # a numeric
     ("select k, count(*) from fz group by cast(k as integer)", None),   # the cast is nothing, so k is grouped
     ("select k, n from fz group by k", None),                           # n depends on the key

@@ -896,7 +896,25 @@ fn coldef[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: i
         return p;
     }
     let col = st[9];
-    p = parse.parse_type(sql, toks, p, end, st);
+    // `bigserial`, `serial`, `smallserial` (docs/m3-engine.md 6bx): an integer of that size whose values the table's counter gives, which here is an identity
+    // column (PostgreSQL's takes a value given to it; the engine's refuses one, 6x). One of the engine's forms
+    var serial = 0;
+    if parse.kw(sql, toks, p, end, "bigserial") {
+        serial = 3;
+    } else if parse.kw(sql, toks, p, end, "serial") {
+        serial = 2;
+    } else if parse.kw(sql, toks, p, end, "smallserial") {
+        serial = 1;
+    }
+    if serial > 0 {
+        st[6] = serial;
+        st[7] = 0 - 1;
+        st[8] = 0 - 1;
+        engine_form(st, parse.e_unsupported_statement());
+        p = p + 1;
+    } else {
+        p = parse.parse_type(sql, toks, p, end, st);
+    }
     if p < 0 {
         return p;
     }
@@ -910,6 +928,9 @@ fn coldef[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: i
         return parse.fail(st, pos, 0 - r);
     }
     var flags = 0;
+    if serial > 0 {
+        flags = 32;
+    }
     var more = true;
     while more {
         var bit = 0;

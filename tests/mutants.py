@@ -815,6 +815,15 @@ PARSE = [
 
 # ---- the SELECT parser (src/stmt.cho, and the statement half of the renderer in src/parse.cho; tests/stmt_test.cho)
 STMT = [
+    ('stmt: bigserial is no type', 'src/stmt.cho',
+     '    if parse.kw(sql, toks, p, end, "bigserial") {\n        serial = 3;',
+     '    if false {\n        serial = 3;'),
+    ('stmt: a serial column may be an identity column as well', 'src/stmt.cho',
+     '    if serial > 0 {\n        flags = 32;\n    }\n',
+     ''),
+    ('stmt: serial is a form of the proxy grammar', 'src/stmt.cho',
+     '        st[8] = 0 - 1;\n        engine_form(st, parse.e_unsupported_statement());\n        p = p + 1;',
+     '        st[8] = 0 - 1;\n        p = p + 1;'),
     ("ddl: CREATE SEQUENCE is a statement of the proxy", "src/stmt.cho", "    st[10] = 0;\n    engine_form(st, parse.e_unsupported_statement());\n    let ine = if_not_exists(sql, toks, from + 2, end, st);", "    st[10] = 0;\n    let ine = 0;"),
     ("dml: INSERT ... SELECT with no table is a statement of the proxy", "src/stmt.cho", "        engine_form(st, parse.e_insert_select());\n        let at = pos;", "        let at = pos;"),
     ("dml: INSERT ... SELECT ... FROM is read as far as the FROM", "src/stmt.cho", '        if pos < end && !parse.kw(sql, toks, pos, end, "on") && !parse.kw(sql, toks, pos, end, "returning") {\n            return parse.fail(st, at, parse.e_insert_select());\n        }', ''),
