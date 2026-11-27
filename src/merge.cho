@@ -1,0 +1,138 @@
+edition 9;
+module cdb.merge;
+
+import cdb.btree;
+import cdb.pager;
+import cdb.exec;
+import cdb.uniq;
+import cdb.build;
+
+// A transaction beside the others, put on a branch that has moved since it began (docs/m3-engine.md 6bw): whether a row it wrote, or a counter it drew from, was
+// written by someone else meanwhile, and its rows copied to the branch's tree as it is now.
+
+// What `onto` answers when the transaction cannot be put there: it is refused (`40001`).
+pub fn conflict() -> [] int {
+    return 0 - 1;
+}
+
+// A key the transaction noted (`exec.track`): the name of its table, then the key.
+fn name_len[&t](tk: &t [byte]) -> [] int {
+    return int_of(tk[0]);
+}
+
+// Whether the key `k` holds the same bytes in the trees `a` and `b` (or nothing in both): 1, 0, or a refusal.
+fn same[&q, &z, &k](p: &!z pager.Pager, w: &!q exec.Work, a: int, b: int, k: &k [byte]) -> [file_read] int {
+    var out = 1;
+    region g {
+        let va = alloc_slice[g](1024, byte_of(0));
+        let vb = alloc_slice[g](1024, byte_of(0));
+        let na = btree.get(p, exec.scratch(w), a, k, va);
+        let nb = btree.get(p, exec.scratch(w), b, k, vb);
+        if na < 0 && na != btree.not_found() {
+            out = exec.tree_err(na);
+        } else if nb < 0 && nb != btree.not_found() {
+            out = exec.tree_err(nb);
+        } else if na != nb {
+            out = 0;
+        } else {
+            var i = 0;
+            while i < na {
+                if int_of(va[i]) != int_of(vb[i]) {
+                    out = 0;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    return out;
+}
+
+// The transaction's rows put on the tree `cur`: `base` is the tree it began on, `mine` the tree it made, `wrote` the tree of the keys it noted, `draws` the counters
+// it drew from (`exec.seq_room()` ints). The tree to commit, `conflict()`, or a refusal. Nothing of `cur` is changed (a write makes another tree), so a conflict
+// found half way leaves nothing behind but pages no tree names.
+pub fn onto[&q, &z, &d](p: &!z pager.Pager, w: &!q exec.Work, base: int, mine: int, cur: int, wrote: int, draws: &d [int]) -> [file_read, file_write] int {
+    // a counter both drew from: the numbers it gave this transaction it has given since
+    var c = 0;
+    while c < draws[0] {
+        let id = draws[1 + 2 * c];
+        if exec.seq_last(p, w, base, id) != exec.seq_last(p, w, cur, id) {
+            return conflict();
+        }
+        c = c + 1;
+    }
+    var out = cur;
+    region g {
+        let tk = alloc_slice[g](512, byte_of(0));
+        let next = alloc_slice[g](512, byte_of(0));
+        let one = alloc_slice[g](8, byte_of(0));
+        let old = alloc_slice[g](1024, byte_of(0));
+        let new = alloc_slice[g](1024, byte_of(0));
+        let bind = alloc_slice[g](80, byte_of(0));
+        // first every key is held to the rule; only then is anything written
+        var pass = 0;
+        while pass < 2 && out >= 0 {
+            var tl = 0;
+            var first = true;
+            var going = wrote > 0;
+            while going && out >= 0 {
+                let r = btree.next_after(p, exec.scratch(w), wrote, tk[0..tl], first, next, one);
+                first = false;
+                if r == btree.not_found() {
+                    going = false;
+                } else if r < 0 {
+                    out = exec.tree_err(r);
+                } else {
+                    tl = exec.copy(next, 0, r / 1024, tk, 0);
+                    let nl = name_len(tk);
+                    let k = tk[1 + nl..tl];
+                    if pass == 0 {
+                        // what the branch holds there now is what it held when the transaction began: nobody else wrote the row
+                        let s = same(p, w, base, cur, k);
+                        if s < 0 {
+                            out = s;
+                        } else if s == 0 {
+                            out = conflict();
+                        }
+                    } else {
+                        build.put_be(bind, 0, nl, 2);
+                        exec.copy(tk, 1, nl, bind, 2);
+                        let b = exec.bind_table(p, w, out, bind[0..2 + nl], 0);
+                        let on = btree.get(p, exec.scratch(w), out, k, old);
+                        let nn = btree.get(p, exec.scratch(w), mine, k, new);
+                        if b != 0 {
+                            // (the table is in the branch's tree: a definition on either side was a conflict before this was called)
+                            out = exec.damaged();
+                        } else if on < 0 && on != btree.not_found() {
+                            out = exec.tree_err(on);
+                        } else if nn < 0 && nn != btree.not_found() {
+                            out = exec.tree_err(nn);
+                        } else {
+                            // the old row and its index entries go; then the new row comes, unless its values are another row's in a unique index now
+                            if on >= 32 {
+                                out = exec.del_known(p, w, out, k, len(k), old[0..on]);
+                                if out >= 0 {
+                                    out = exec.indexed(p, w, out, k, len(k), old[32..on], false, old[32..on], true);
+                                }
+                            }
+                            if nn >= 32 && out >= 0 {
+                                let taken = uniq.taken(p, w, out, new[32..nn], k, len(k));
+                                if taken < 0 {
+                                    out = taken;
+                                } else if taken == 1 {
+                                    out = conflict();
+                                } else {
+                                    out = exec.put_known(p, w, out, k, len(k), new[0..nn], old[0..0], false);
+                                    if out >= 0 {
+                                        out = exec.indexed(p, w, out, k, len(k), new[32..nn], true, new[32..nn], false);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            pass = pass + 1;
+        }
+    }
+    return out;
+}

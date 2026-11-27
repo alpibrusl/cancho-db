@@ -67,6 +67,41 @@ pub fn wrote[&s](ss: &s [int], base: int) -> [] bool {
     return ss[1] != base;
 }
 
+// The tree of the transaction that is open, and another put in its place (6bw: its rows as they are on the branch as it is now).
+pub fn tree[&s](ss: &s [int]) -> [] int {
+    return ss[1];
+}
+
+pub fn retree[&s](ss: &!s [int], root: int) -> [] int {
+    ss[1] = root;
+    return 0;
+}
+
+// Whether two trees hold the same schema (the text a commit's hash is of, 6bc): 1, 0, or a refusal.
+pub fn schema_same[&h, &q, &z](heap: &!h Heap, p: &!z pager.Pager, w: &!q exec.Work, a: int, b: int) -> [heap, file_read] int {
+    var out = 1;
+    region g {
+        let ha = alloc_slice[g](32, byte_of(0));
+        let hb = alloc_slice[g](32, byte_of(0));
+        let ra = schema_hash(heap, p, w, a, ha);
+        let rb = schema_hash(heap, p, w, b, hb);
+        if ra < 0 {
+            out = ra;
+        } else if rb < 0 {
+            out = rb;
+        } else {
+            var i = 0;
+            while i < 32 {
+                if int_of(ha[i]) != int_of(hb[i]) {
+                    out = 0;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    return out;
+}
+
 // How the next statement is run: 0, or 3 in a transaction that has failed (it is refused unless it ends the transaction).
 pub fn mode[&s](ss: &s [int]) -> [] int {
     if ss[0] == failed() {

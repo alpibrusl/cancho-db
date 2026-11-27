@@ -486,6 +486,7 @@ pub res struct Work {
     pend: int,
     sq: Box[[int]],
     nsq: int,
+    wroot: int,
     frow: int,
     ret: int,
     retn: int,
@@ -537,11 +538,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0, said: box_slice(heap, 110000, byte_of(0)), nsaid: 0, lsaid: 0, ix: box_slice(heap, 256, byte_of(0)), ixa: box_slice(heap, 256, byte_of(0)), ixb: box_slice(heap, 256, byte_of(0)), nix: 0, via: box_slice(heap, 512, byte_of(0)), vian: 0 - 1, vial: 0, viak: 0, viar: 0, viaf: 0, quiet: false, past: false, viac: 0, ua: box_slice(heap, 256, byte_of(0)), ub: box_slice(heap, 256, byte_of(0)), uv: box_slice(heap, 1100, byte_of(0)) };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, wroot: 0 - 1, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0, said: box_slice(heap, 110000, byte_of(0)), nsaid: 0, lsaid: 0, ix: box_slice(heap, 256, byte_of(0)), ixa: box_slice(heap, 256, byte_of(0)), ixb: box_slice(heap, 256, byte_of(0)), nix: 0, via: box_slice(heap, 512, byte_of(0)), vian: 0 - 1, vial: 0, viak: 0, viar: 0, viaf: 0, quiet: false, past: false, viac: 0, ua: box_slice(heap, 256, byte_of(0)), ub: box_slice(heap, 256, byte_of(0)), uv: box_slice(heap, 1100, byte_of(0)) };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount, said, nsaid, lsaid, ix, ixa, ixb, nix, via, vian, vial, viak, viar, viaf, quiet, past, viac, ua, ub, uv } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, wroot, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount, said, nsaid, lsaid, ix, ixa, ixb, nix, via, vian, vial, viak, viar, viaf, quiet, past, viac, ua, ub, uv } = w;
     unbox_slice(heap, ua);
     unbox_slice(heap, ub);
     unbox_slice(heap, uv);
@@ -1757,9 +1758,43 @@ fn by_key[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], 
     return nw;
 }
 
+// The keys a transaction beside the others writes are noted in a tree of its own (docs/m3-engine.md 6bw): `track` says which (its root; below 0: none is kept),
+// `tracked` what it has become. A key is noted with the name of the table last bound, which for a row is its table's.
+pub fn track[&q](w: &!q Work, root: int) -> [] int {
+    w.wroot = root;
+    return 0;
+}
+
+pub fn tracked[&q](w: &q Work) -> [] int {
+    return w.wroot;
+}
+
+fn noted[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, k: &k [byte], kn: int) -> [file_read, file_write] int {
+    if w.wroot < 0 {
+        return 0;
+    }
+    var nw = 0;
+    region g {
+        let tk = alloc_slice[g](1 + w.nlen + kn, byte_of(0));
+        tk[0] = byte_of(w.nlen);
+        copy(contents(w.ctx), 0, w.nlen, tk, 1);
+        copy(k, 0, kn, tk, 1 + w.nlen);
+        nw = btree.put(p, contents(w.sc), w.wroot, tk, tk[0..1]);
+    }
+    if nw < 0 {
+        return tree_err(nw);
+    }
+    w.wroot = nw;
+    return 0;
+}
+
 // Before the key `k[0..kn]` of the tree `root` is written by the current transaction: record what it holds now (`0`: nothing; `1` and the value), unless this transaction has recorded it already (what a
 // key held BEFORE the transaction is its first record). The tree with the entry, or a refusal.
 pub fn remember[&q, &z, &k](p: &!z pager.Pager, w: &!q Work, root: int, k: &k [byte], kn: int) -> [file_read, file_write] int {
+    let nt = noted(p, w, k, kn);
+    if nt < 0 {
+        return nt;
+    }
     if w.txn == 0 {
         return root;
     }
