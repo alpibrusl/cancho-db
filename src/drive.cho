@@ -329,6 +329,33 @@ pub fn prepare[&z, &q, &b, &s](pg: &!z pager.Pager, w: &!q exec.Work, b: &!b Sub
 
 // What an erase is refused for before anything runs (docs/m3-engine.md 6bf): the statement is the call and its arguments are not a table and a key the engine
 // erases by.
+// Whether the statement `sql` only reads (docs/m3-engine.md 6bs), from its tokens: one `select`, with none of the words by which a select writes (a sequence drawn from
+// or set, a table made, the engine's own functions). It errs on the side of no: what it refuses waits, and loses nothing.
+pub fn reads_only[&b, &s](b: &!b Sub, sql: &s [byte]) -> [] bool {
+    if 4 * (len(sql) + 4) > 32768 {
+        return false;
+    }
+    let toks = contents(b.t2);
+    let n = lex.tokenize(sql, toks);
+    if n < 1 || !parse.kw(sql, toks, 0, n, "select") {
+        return false;
+    }
+    var i = 1;
+    while i < n {
+        if parse.tkind(toks, i) == lex.t_semicolon() && i + 1 < n {
+            return false;
+        }
+        if parse.kw(sql, toks, i, n, "nextval") || parse.kw(sql, toks, i, n, "setval") || parse.kw(sql, toks, i, n, "into") {
+            return false;
+        }
+        if parse.tkind(toks, i) == lex.t_ident() && parse.tlen(toks, i) >= 7 && parse.word_is(sql, parse.tstart(toks, i), 7, "cancho_") {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
 pub fn erase_malformed() -> [] int {
     return 0 - 3;
 }

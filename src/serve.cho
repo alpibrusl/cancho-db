@@ -235,9 +235,10 @@ pub fn reclaim[&h, &g, &z, &q, &r](heap: &!h Heap, gs: &!g [int], pg: &!z pager.
 // What it keeps for one connection (`st`, `stride()` ints): 0 whether the place is taken (1: before its startup is answered, 3: its password is awaited, 2: it is served); 1 how many bytes of its buffer are
 // held; 2 whether its messages are skipped up to the next Sync (an error of the extended protocol); 3 whether it is to be closed; 4 how many bytes of a message too long to
 // hold are still to be read past; 5 when it last did something; 6 how many requests for TLS it has made; 7 whether it has a statement that waits for another connection's
-// transaction; 8 to 15 its session (src/session.cho); 16 whether the client has closed its side; 17 whether the server is reading it.
+// transaction; 8 to 15 its session (src/session.cho); 16 whether the client has closed its side; 17 whether the server is reading it;
+// 18 whether it is from another machine (6br); 19 how many bytes of its room for ciphertext are held (6bq); 20 its clock, the time of its transaction's beginning (6bs).
 pub fn stride() -> [] int {
-    return 20;
+    return 24;
 }
 
 pub fn max_clients() -> [] int {
@@ -718,8 +719,14 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
     let mode = session.mode(st[8..16]);
     if session.state(st[8..16]) == session.idle() {
         // now() is the time a transaction began (6bp): the clock is read when none is open, and a transaction keeps what its BEGIN read
-        exec.clock(w, (gs[g_now()] - 946684800000) * 1000);
+        st[20] = (gs[g_now()] - 946684800000) * 1000;
     }
+    // the connection's own clock: a statement another connection ran since has not moved it (6bs)
+    exec.clock(w, st[20]);
+    // whether another connection is in a transaction: this statement was let through as one that only reads, and is held to it
+    let beside = gs[g_owner()] != 0 && gs[g_owner()] != slot + 1;
+    // (the draws from counters noted in the working memory are that transaction's: this statement leaves them)
+    exec.seq_hold(w, beside);
     // an erase (6bf): `select cancho_erase('<table>', '<key>')`, a statement of its own, outside a transaction, for a token that may call it. `pre`: why it does
     // not run (1 in a transaction, 2 the token, 3 not a table and a key the engine erases by)
     var el = 0 - 1;
@@ -757,6 +764,10 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
             after = drive.run(heap, pg, w, m, sql, on, mode, false, tk);
         }
         let o = drive.outcome(m);
+        if beside && after != on {
+            // it wrote (6bs): not committed beside a transaction, whatever let it through
+            pre = 4;
+        }
         var nr = 0;
         region kr {
             // with a key, a commit is recorded in the tree with what it wrote (6as); one that cannot be recorded is not made, and the server stops
@@ -785,6 +796,12 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
             }
             nr = session.close(heap, pg, w, st[8..16], roots[0], after, !bound || pre != 0 || o != drive.o_ok() && o != drive.o_control(), key, who, rec);
         }
+        if beside && nr >= 0 && nr != roots[0] {
+            // (and nothing its ending wrote either)
+            nr = roots[0];
+            pre = 4;
+        }
+        exec.seq_hold(w, false);
         if nr >= 0 && nr != roots[0] {
             // durable before it is acknowledged: the page file's commit comes before the answer
             roots[0] = nr;
@@ -840,6 +857,8 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
                 p = wire.error(out, p, false, "25001", "cancho-db: refused ", "erase-in-transaction");
             } else if pre == 2 {
                 p = wire.error(out, p, false, "42501", "cancho-db: refused ", "effect-denied");
+            } else if pre == 4 {
+                p = wire.error(out, p, false, wire.refused_state(), "cancho-db: refused ", "read-beside-wrote");
             } else if pre == 3 {
                 p = wire.error(out, p, false, wire.refused_state(), "cancho-db: refused ", "erase-malformed");
             } else if !bound {
@@ -983,6 +1002,12 @@ fn close_message[&b, &a, &x, &o, &t](body: &b [byte], ar: &a [byte], xi: &!x [in
     return wire.bare(out, at, '3');
 }
 
+// Whether a simple query's body is one statement that only reads (6bs).
+fn reads[&b, &i](sub: &!b drive.Sub, body: &i [byte]) -> [] bool {
+    let e = wire.query_end(body);
+    return e > 0 && drive.reads_only(sub, body[0..e]);
+}
+
 // One unit of a connection's work: its messages up to the next that ends a batch (a Query, a Sync, a Flush, a Terminate), or as many as are whole. `free`: no other
 // connection is in a transaction, so a statement may run; if not, the connection's statement waits where it is (`st[7]`). 1 if anything was done, 0 if not. The answers are
 // written to the connection before this returns: `out` is everyone's.
@@ -1033,8 +1058,8 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x, &n](heap: &!h Heap, tab:
                     op = wire.error(out, op, true, "28P01", "cancho-db: refused ", "token-revoked");
                 }
                 st[3] = 1;
-            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free {
-                // another connection is in a transaction: this statement waits for it to end (6aq)
+            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free && !(t == 'Q' && reads(sub, buf[5..n])) {
+                // another connection is in a transaction: this statement waits for it to end (6aq), unless it only reads (6bs)
                 st[7] = 1;
                 more = false;
             } else {

@@ -3190,6 +3190,70 @@ idle transaction's. The test runs from 192.0.2.2 in the sandbox it was written i
 still killed by `tests/engine_wire.py`. *Found while testing, and not a fault:* a token of `r:*` is refused `select count(*)`; a call
 is an effect of its own (kind 3, `c:` in `tools/mint.py`; `docs/spec/ir.md`), so the token needs `c:count` too.
 
+## 6bs. Reads beside a transaction
+
+*Design, written before the code. The first part of more than one session at work at a time; the second (two transactions that write) is
+sketched at the end and is not built here.*
+
+**What there is (6aq).** While a connection is in a transaction, everything the others send waits, reads too. 6aq said why reads could be
+answered and were not: "one rule first". A dashboard that reads while a batch job holds a transaction for a minute waits a minute.
+
+**Why a read can be answered.** The tree is copy-on-write (D-M3-1): a transaction builds a tree of its own and the branch's root does not
+move until its `commit`. So the branch's tree, read while a transaction is open, is exactly what is committed: a read on it sees none of
+the transaction's writes, never half of them, and is the read PostgreSQL would give at `read committed` for a statement that began before
+the commit.
+
+**The rule.** While another connection is in a transaction, a connection that is in none has its statement run on the branch's tree if
+the statement **only reads**; any other statement waits, as before. A statement only reads when all of this holds, decided from its tokens
+before it runs (`drive.reads_only`):
+
+- its first word is `select`, and it is one statement (no `;` before its end);
+- it has none of the words `nextval`, `setval`, `into`, and no word that begins `cancho_` (the engine's own functions: an erase, a trim
+  of the history). A sequence is drawn from, and written, by a `select`; so those wait.
+
+Everything else waits: `insert`, `update`, `delete`, any definition, `begin` (a second transaction beside the first is the second part).
+The rule errs on the side of waiting: a `select` over a column named `into_x` reads, one with a string `'nextval'` reads (a string is not
+a word), and a `select` with the word `into` waits though PostgreSQL's `select ... into` is refused by the engine anyway.
+
+**A net under the rule.** If a statement that the rule let through turns out to have written (the tree it leaves is not the tree it was
+given), it is not committed: what it did is discarded as a failed statement's is, and the client is told `0A000`,
+`cancho-db: refused read-beside-wrote`. No statement is known to reach it; it is there so that a hole in the rule is a refusal and not a
+lost update.
+
+**What the transaction must not notice** (read: `src/serve.cho`, `src/session.cho`, `src/exec.cho`). One thread still runs one statement
+at a time; a read beside a transaction runs *between* two of the transaction's statements, and uses the same working memory.
+
+- *The clock.* `now()` is the time a transaction began (6bp), kept in the working memory and set whenever a statement runs with no
+  transaction open. A read beside would set it, and the transaction's next `now()` would move. So the clock becomes each connection's own
+  (one more int of its state), set when it is in no transaction and given to the working memory before every statement.
+- *The numbers a statement writes with* (`set_txn`, `set_once`, the draws) are set by `session.open` before every statement already.
+- *The pages.* A statement's window (6p) is flushed when the next begins; a read hands back the pages it took (6be). The transaction's
+  tree is in the file, named by its session.
+- Whatever else there is, the test below is what finds it: a transaction interleaved with reads must answer and commit exactly as alone.
+
+**What a reader sees, said plainly.** The committed state, statement by statement: two reads beside one transaction see the same rows; a
+read after its commit sees all of it. A reader that needs two statements to agree with each other across someone else's commit has
+`begin`, which waits.
+
+*Not in this part:* a statement of the extended protocol that reads (it waits as before: the rule is applied to a simple query's text
+first, and the Execute path has its own skipping rules; next); two transactions at once.
+
+**Test** (`tests/engine_wire.py`, `beside_reads`). A history from the differential's generator is run by one connection in transactions
+of a few statements each, some rolled back, while a second connection reads between every two statements. (1) The first connection's
+answers, the page file at the end and the log are what the test program gives for the same history alone. (2) Every read of the second
+connection inside a transaction's span equals the read it made just before the `begin`, and after a `commit` equals what the first
+connection reads. (3) `now()` in a transaction is the same before and after a read beside it that comes a second later. (4) Beside a
+transaction, each of these waits until it ends: an `insert`, a `select nextval(...)`, a `select cancho_...`, a `begin`, two statements in
+one query. (5) The 30-second rule of 6aq is unchanged for those that wait. Mutants of the rule and of the clock, each killed.
+
+**The second part, sketched: two transactions that write.** Each on a tree of its own from the root it began with. At `commit`, if the
+branch has not moved, as now. If it has: the transaction's facts (6as: every row it wrote, with what the row held before) are held
+against the facts committed since it began; if no row is in both, they are applied to the branch's tree as it is now, and if one is,
+the commit is refused `40001` (PostgreSQL's serialization failure, which clients already retry). That is snapshot isolation with the
+first committer winning. Open, and the owner's to decide before it is built: whether a unique index or a sequence makes two
+transactions conflict, and whether `read committed` is to be claimed (it cannot be, as designed: a statement would see its own
+transaction's snapshot, not each statement's).
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

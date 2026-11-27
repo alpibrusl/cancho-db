@@ -372,8 +372,9 @@ def verified(d, path, history, what, login=False):
     return len(ids)
 
 
-def differential(d, tls=None):
-    """`tls`: None, or the directory of the server's certificate and the client's ssl.SSLContext (6bq, tests/engine_tls.py): the same history through TLS."""
+def differential(d, tls=None, between=None):
+    """`tls`: None, or the directory of the server's certificate and the client's ssl.SSLContext (6bq, tests/engine_tls.py): the same history through TLS.
+    `between`: None, or what is called after every statement with the server and the connection (6bs, tests/engine_beside.py): what another connection does meanwhile."""
     # the statements with parameters go as cancho-pg sends them (the extended protocol), the others as simple queries
     fixed = [sql for sql, _ in ec.FIXED]
     rnd = [st[0] for st in ec.generate(random.Random(SEED), COUNT)]
@@ -406,6 +407,8 @@ def differential(d, tls=None):
             bad += 1
             if bad <= 5:
                 print("FAIL %d: %s\n     server:       %s\n     test program: %s" % (i, sql[:200], str(got)[:500], str(want)[:500]))
+        if between is not None:
+            between(srv, c)
     check("%d statements, %d of them with parameters by the extended protocol: the server answers as the test program does (%s)" % (len(history), sent, ", ".join("%s %d" % kv for kv in sorted(kinds.items()))), bad == 0 and sent > 50, "%d differ" % bad)
     c.close()
     srv.stop()
