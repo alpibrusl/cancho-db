@@ -3150,6 +3150,95 @@ ENGINE = [
 
 # The engine's server (docs/m3-engine.md 6al): the messages and one connection. Judged by tests/engine_wire.py, which holds the server against the test program.
 WIRE = [
+    # clients from other machines, and the time limit of a startup (6br): held to tests/engine_tls.py
+    ('tls: far: a server with no certificate has a place for a client from elsewhere', 'src/serve.cho',
+     'if !here && (gs[g_tls()] == 0 || gs[g_login()] == 0) {',
+     'if !here && gs[g_login()] == 0 {'),
+    ('tls: far: a server with no login has a place for a client from elsewhere', 'src/serve.cho',
+     'if !here && (gs[g_tls()] == 0 || gs[g_login()] == 0) {',
+     'if !here && gs[g_tls()] == 0 {'),
+    ('tls: far: a client from elsewhere is taken to be of this machine', 'src/serve.cho',
+     '                                if !here {\n                                    st[18] = 1;\n                                }\n',
+     ''),
+    ('tls: far: a client from elsewhere is told to use TLS when it does', 'src/serve.cho',
+     '} else if kind == login.kind_startup() && st[18] == 1 && gs[g_tls_on() + slot] == 0 {',
+     '} else if kind == login.kind_startup() && st[18] == 1 {'),
+    ('tls: far: a client of this machine is told to use TLS', 'src/serve.cho',
+     '} else if kind == login.kind_startup() && st[18] == 1 && gs[g_tls_on() + slot] == 0 {',
+     '} else if kind == login.kind_startup() && gs[g_tls_on() + slot] == 0 {'),
+    ('tls: far: after it is told to use TLS a client is asked for its password', 'src/serve.cho',
+     '"tls-required")]);\n        st[3] = 1;',
+     '"tls-required")]);\n        st[0] = 3;'),
+    ('tls: limit: a startup has no time limit', 'src/serve.cho',
+     'if (ls[0] == 1 || ls[0] == 3) && gs[g_now()] - ls[5] > gs[g_write_ms()] {',
+     'if false {'),
+    ('tls: limit: a startup that waits for its password has no time limit', 'src/serve.cho',
+     'if (ls[0] == 1 || ls[0] == 3) && gs[g_now()] - ls[5] > gs[g_write_ms()] {',
+     'if ls[0] == 1 && gs[g_now()] - ls[5] > gs[g_write_ms()] {'),
+    ('tls: limit: a connection that has logged in is ended at the limit', 'src/serve.cho',
+     'if (ls[0] == 1 || ls[0] == 3) && gs[g_now()] - ls[5] > gs[g_write_ms()] {',
+     'if ls[0] != 0 && gs[g_now()] - ls[5] > gs[g_write_ms()] {'),
+    ('tls: limit: a startup is ended at once', 'src/serve.cho',
+     'if (ls[0] == 1 || ls[0] == 3) && gs[g_now()] - ls[5] > gs[g_write_ms()] {',
+     'if (ls[0] == 1 || ls[0] == 3) && gs[g_now()] - ls[5] > 0 {'),
+    # TLS (docs/m3-engine.md 6bq): each of these is held to tests/engine_tls.py
+    ('tls: a server with a certificate answers N', 'src/serve.cho',
+     'if kind == login.kind_ssl() && gs[g_tls()] == 1 {',
+     'if kind == login.kind_ssl() && false {'),
+    ('tls: what came with the SSLRequest is read inside TLS', 'src/serve.cho',
+     'if st[1] > 0 || gs[g_tls_on() + slot] == 1 || !push(',
+     'if gs[g_tls_on() + slot] == 1 || !push('),
+    ('tls: TLS asked for inside TLS is answered', 'src/serve.cho',
+     'if st[1] > 0 || gs[g_tls_on() + slot] == 1 || !push(',
+     'if st[1] > 0 || !push('),
+    ('tls: a connection given TLS is read in clear', 'src/serve.cho',
+     '        } else {\n            gs[g_tls_on() + slot] = 1;\n        }',
+     '        }'),
+    ('tls: what the package wants written is not', 'src/serve.cho',
+     '            } else if !put(tab, slot, gs, rec[0..n]) {',
+     '            } else if !put(tab, slot, gs, rec[0..0]) {'),
+    ('tls: an answer inside TLS is sent in clear', 'src/serve.cho',
+     '    if gs[g_tls_on() + slot] == 0 {\n        return put(tab, slot, gs, data);',
+     '    if true {\n        return put(tab, slot, gs, data);'),
+    ('tls: a slot is not given back when its connection ends', 'src/serve.cho',
+     '        tls.drop(eng, slot);\n        gs[g_tls_on() + slot] = 0;',
+     '        gs[g_tls_on() + slot] = 0;'),
+    ('tls: the connection after one inside TLS is taken to be', 'src/serve.cho',
+     '        tls.drop(eng, slot);\n        gs[g_tls_on() + slot] = 0;',
+     '        tls.drop(eng, slot);'),
+    ('tls: a connection is ended with no close_notify', 'src/serve.cho',
+     '        tls.finish(eng, slot);\n',
+     ''),
+    ('tls: the close_notify is made and not written', 'src/serve.cho',
+     '            if n > 0 {\n                // once, and not waited for',
+     '            if false {\n                // once, and not waited for'),
+    ('tls: a connection the package failed is waited on', 'src/serve.cho',
+     '        if a == tlsio.failed() || !wrote {',
+     '        if !wrote {'),
+    ("tls: a peer's close_notify is not an end", 'src/serve.cho',
+     '        if a == tlsio.closed() {\n            st[16] = 1;\n        }\n',
+     ''),
+    ('tls: what waits in the package is read only when the socket has more', 'src/serve.cho',
+     '                                        if gs[g_tls_on() + slot] == 1 {\n                                            // what the package',
+     '                                        if false {\n                                            // what the package'),
+    ('tls: a connection inside TLS is read as one in clear', 'src/serve.cho',
+     '                                    if gs[g_tls_on() + token - 1] == 1 {',
+     '                                    if false {'),
+    ('tlsio: what the package did not take is lost', 'src/tlsio.cho',
+     '                st[19] = st[19] - k;',
+     '                st[19] = 0;'),
+    ('tlsio: what the package took is given to it again', 'src/tlsio.cho',
+     '                    raw[j] = raw[k + j];\n',
+     ''),
+    ('tlsio: what came in clear is not counted', 'src/tlsio.cho',
+     '                st[1] = st[1] + n;\n',
+     ''),
+    ("tlsio: a peer's close is a failure", 'src/tlsio.cho',
+     '            } else if n == 0 {\n                return closed();',
+     '            } else if n == 0 {\n                return failed();'),
+    ('tlsio: a failure of the package is nothing', 'src/tlsio.cho',
+     '            if k < 0 {\n                return failed();',
+     '            if k < 0 {\n                return 0;'),
     ('wire: now: the clock is read at every statement of a transaction', 'src/serve.cho', '    if session.state(st[8..16]) == session.idle() {\n        // now() is the time a transaction began', '    if true {\n        // now() is the time a transaction began'),
     ('wire: now: the server has no clock for now()', 'src/serve.cho', '    if session.state(st[8..16]) == session.idle() {\n        // now() is the time a transaction began', '    if false {\n        // now() is the time a transaction began'),
     ('wire: now: the clock counts from 1970', 'src/serve.cho', '        exec.clock(w, (gs[g_now()] - 946684800000) * 1000);', '        exec.clock(w, gs[g_now()] * 1000);'),
@@ -3205,7 +3294,7 @@ WIRE = [
      '    if st[0] == 2 && session.state(st[8..16]) != session.idle() && gs[g_stop()] == 0 {\n        pager.begin(pg);',
      '    if false {\n        pager.begin(pg);'),
     ('serve: a client from anywhere is served', 'src/serve.cho',
-     '                        if !from_here(tw, a) {',
+     '                        if !here && (gs[g_tls()] == 0 || gs[g_login()] == 0) {',
      '                        if false {'),
     ('serve: BEGIN in a failed transaction has another SQLSTATE', 'src/serve.cho',
      'p = wire.error(out, p, false, "25P02",',
@@ -3304,8 +3393,8 @@ WIRE = [
      '                    xi[0] = 0 - 1;\n                    xi[3] = 0 - 2;\n                    xi[4] = 0;\n                    let e = wire.query_end(',
      '                    let e = wire.query_end('),
     ('serve: answers wait for more than the client', 'src/serve.cho',
-     "    } else if op > 0 {\n        // the connection gets what was answered before anyone else's statement runs\n        if !push(tab, slot, gs, out[0..op]) {",
-     "    } else if false {\n        // the connection gets what was answered before anyone else's statement runs\n        if !push(tab, slot, gs, out[0..op]) {"),
+     "    } else if op > 0 {\n        // the connection gets what was answered before anyone else's statement runs\n        if !push(tab, eng, slot, gs, out[0..op]) {",
+     "    } else if false {\n        // the connection gets what was answered before anyone else's statement runs\n        if !push(tab, eng, slot, gs, out[0..op]) {"),
     ('serve: a Flush after a Describe is waited on', 'src/serve.cho',
      '                        if xi[4] == 1 {',
      '                        if false {'),
@@ -3319,7 +3408,7 @@ WIRE = [
      '                        op = fails(out, op, st, wire.refused_state(), "cancho-db: refused ", "function-call");',
      '                        op = op;'),
     ('serve: a buffer that is full is not sent before it is written again', 'src/serve.cho',
-     '                            if !push(tab, slot, gs, out[0..p]) {\n                                next = 0 - 1;',
+     '                            if !push(tab, eng, slot, gs, out[0..p]) {\n                                next = 0 - 1;',
      '                            if false {\n                                next = 0 - 1;'),
     ('serve: types given for parameters are ignored', 'src/serve.cho',
      '    if te == 0 - 2 {',
@@ -3334,8 +3423,8 @@ WIRE = [
      "            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free {",
      "            } else if t == 'Q' && !free {"),
     ('serve: a connection that ends keeps the database', 'src/serve.cho',
-     '    if gs[g_owner()] == slot + 1 {\n        gs[g_owner()] = 0;\n    }\n    conns.close(tab, slot);',
-     '    conns.close(tab, slot);'),
+     '    if gs[g_owner()] == slot + 1 {\n        gs[g_owner()] = 0;\n    }\n    if gs[g_tls_on() + slot] == 1 {',
+     '    if gs[g_tls_on() + slot] == 1 {'),
     ('serve: a transaction may idle for ever while another waits', 'src/serve.cho',
      '                            if waiting && gs[g_now()] - sts[stride() * owner + 5] > gs[g_idle_ms()] {',
      '                            if false {'),
@@ -3654,7 +3743,9 @@ def run_wire(cancho):
             return 1
         table = table[k::n]
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
-            "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
+            "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
+    # the server and what only it needs: TLS (docs/m3-engine.md 6bq), which is a package of the compiler's repository
+    served = ("serve.cho", "tlsio.cho")
 
     def one(mutant):
         label, rel, old, new = mutant
@@ -3668,11 +3759,12 @@ def run_wire(cancho):
                 return label, "STALE  %-48s original text occurs %d times" % (label, text.count(old)), True
             f.write_text(text.replace(old, new))
             exe = work / "engine"
-            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/engine.cho")] + [str(work / "src" / x) for x in srcs] + ["-o", str(exe)], capture_output=True, text=True)
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/engine.cho")] + [str(work / "src" / x) for x in srcs + served] + tls_package(cancho) + ["-o", str(exe)], capture_output=True, text=True)
             if b.returncode != 0:
                 return label, "BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]), True
             try:
-                r = subprocess.run([sys.executable, str(ROOT / "tests/engine_wire.py"), str(exe), str(ROOT / "build/enginecheck"), "300", "1"], capture_output=True, text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
+                test = "tests/engine_tls.py" if label.startswith("tls") else "tests/engine_wire.py"
+                r = subprocess.run([sys.executable, str(ROOT / test), str(exe), str(ROOT / "build/enginecheck"), "300", "1"], capture_output=True, text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
                 rc, out = r.returncode, r.stdout + r.stderr
             except subprocess.TimeoutExpired:
                 rc, out = 1, "FAIL timed out"
@@ -3689,6 +3781,13 @@ def run_wire(cancho):
                 survivors.append(label)
     print("%d mutants, %d not killed" % (len(table), len(survivors)))
     return 1 if survivors else 0
+
+
+def tls_package(cancho):
+    """The files of the compiler's TLS package (docs/m3-engine.md 6bq): in the compiler's repository, which the compiler was built in."""
+    root = Path(shutil.which(cancho) or cancho).resolve().parents[2]
+    return [str(root / "packages/tls" / (n + ".cho")) for n in ("tls", "record", "message", "slot", "cident", "client12", "client", "hello", "identity", "clientauth", "ticket", "server", "saved")] + \
+           [str(root / "packages/x509" / (n + ".cho")) for n in ("verify", "names", "x509", "key")]
 
 
 def run_engine(cancho):
@@ -3824,7 +3923,8 @@ def run(kind, cancho):
                 cmd = [sys.executable, str(work / "tools/verify.py")]
             else:
                 exe = work / "verify"
-                sources = sorted(str(p) for p in (work / "src").glob("*.cho"))
+                # all of src but the server, which is built with a package (docs/m3-engine.md 6bq) and by the engine's own mutants
+                sources = sorted(str(p) for p in (work / "src").glob("*.cho") if p.name not in ("serve.cho", "tlsio.cho"))
                 b = subprocess.run([cancho, "build", "--std"] + sources + ["-o", str(exe)],
                                    capture_output=True, text=True)
                 if b.returncode != 0:

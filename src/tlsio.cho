@@ -1,0 +1,69 @@
+edition 9;
+module cdb.tlsio;
+
+import tls;
+
+// TLS on a connection of the server (docs/m3-engine.md 6bq): the bytes moved between the package's slot and the connection's two rooms. Nothing here holds a socket:
+// `cdb.serve` reads and writes it, and a connection has the same slot in the package as in the server's table.
+
+// A connection's room for what the socket gave and the package has not taken: a record and its header fit.
+pub fn raw_size() -> [] int {
+    return 17408;
+}
+
+// The room a turn needs for what the package wants written.
+pub fn out_size() -> [] int {
+    return 17408;
+}
+
+// What `absorb` answers for a connection the package has failed, and for one whose peer has closed it (what it sent before is whole, and still to be answered).
+pub fn failed() -> [] int {
+    return 0 - 1;
+}
+
+pub fn closed() -> [] int {
+    return 0 - 2;
+}
+
+// Give the package the `held` bytes of `raw` and move what it then has in clear to `buf`, which holds `fill`: 1 if anything moved, 0 if nothing could, `failed()` or
+// `closed()`. `st` is the connection's: `st[1]` is `fill`, `st[19]` is `held`; both are kept.
+pub fn absorb[&e, &r, &b, &t](eng: &!e tls.Engine, slot: int, raw: &!r [byte], buf: &!b [byte], st: &!t [int]) -> [] int {
+    var moved = 0;
+    var going = true;
+    while going {
+        going = false;
+        if st[19] > 0 {
+            let k = tls.feed(eng, slot, raw[0..st[19]]);
+            if k < 0 {
+                return failed();
+            }
+            if k > 0 {
+                var j = 0;
+                while k + j < st[19] {
+                    raw[j] = raw[k + j];
+                    j = j + 1;
+                }
+                st[19] = st[19] - k;
+                moved = 1;
+                going = true;
+            }
+        }
+        var more = true;
+        while more && st[1] < len(buf) {
+            let n = tls.recv(eng, slot, buf[st[1]..len(buf)]);
+            if n > 0 {
+                st[1] = st[1] + n;
+                moved = 1;
+                going = true;
+            } else if n == tls.would_block() {
+                more = false;
+            } else if n == 0 {
+                return closed();
+            } else {
+                // (the package says a failure when it is fed, above; this is for one it would say only here, and no test reaches it)
+                return failed();
+            }
+        }
+    }
+    return moved;
+}
