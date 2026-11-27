@@ -968,7 +968,7 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
     }
     let na = contents(w.pos)[p_marks()];
     // before any row: the types
-    let rw = exec.where_static(w, e, kinds, wpos);
+    let rw = via.where_static(w, e, kinds, wpos);
     if rw < 0 {
         return rw;
     }
@@ -1469,7 +1469,7 @@ pub fn select[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         }
         i = i + 1;
     }
-    let rw = exec.where_static(w, e, kinds, wpos);
+    let rw = via.where_static(w, e, kinds, wpos);
     if rw < 0 {
         return rw;
     }

@@ -12,6 +12,7 @@ import cdb.index;
 import cdb.parse;
 import cdb.lower;
 import cdb.exec;
+import cdb.via;
 import cdb.uniq;
 
 // The statements of the engine that write (docs/m3-engine.md 6g): INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE. Each reads the tree it is given and answers as src/exec.cho says; on 0 the new root is
@@ -500,7 +501,7 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     } else if at + 1 != len(e) {
         return exec.malformed();
     }
-    let rw = exec.where_static(w, e, kinds, wpos);
+    let rw = via.where_static(w, e, kinds, wpos);
     if rw < 0 {
         return rw;
     }
@@ -816,7 +817,7 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     } else if at + 1 != len(e) {
         return exec.malformed();
     }
-    let rw = exec.where_static(w, e, kinds, wpos);
+    let rw = via.where_static(w, e, kinds, wpos);
     if rw < 0 {
         return rw;
     }
@@ -909,7 +910,7 @@ pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
     if at + 1 >= len(e) || int_of(e[at]) != 1 {
         return exec.unsupported();
     }
-    let rw = exec.where_static(w, e, kinds, at + 1);
+    let rw = via.where_static(w, e, kinds, at + 1);
     if rw < 0 {
         return rw;
     }

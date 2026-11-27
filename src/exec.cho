@@ -1468,116 +1468,6 @@ pub fn is_col[&q, &x](w: &!q Work, e: &x [byte], at: int, c: int) -> [] bool {
     return same(nm, 0, len(nm), e, at + 5 + tn, cn);
 }
 
-// The part of the table a scan has to read, from the WHERE's conditions (listed by `where_static`): if the key is one column of integers or text and a condition compares it with a constant, the rows
-// before (`lo`) or after (`hi`) what that condition allows are not read. That may only be done when no condition can raise an error, because a row that is not read is a row whose error is not found (6g):
-// so every condition must be made of columns, constants, comparisons, AND, OR, NOT, IS NULL and IN and nothing else. The bounds leave out no row the WHERE is true for, and every row read is still judged
-// by the whole WHERE. 0, or a refusal.
-fn bounds[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int]) -> [] int {
-    let dl = w.dlen;
-    let b = eval.max_nodes();
-    if w.ntab != 1 {
-        // under a join a column of that name may be another table's
-        return 0;
-    }
-    var j = 0;
-    while j < w.nconj {
-        let (cnt, end) = eval.scan(e, contents(w.pos)[p_conj() + j], contents(w.ws));
-        if cnt < 0 {
-            return malformed();
-        }
-        var i = 0;
-        while i < cnt {
-            let p = contents(w.ws)[i];
-            let tag = int_of(e[p]);
-            // (a parameter the client bound is a constant: what it cannot be read as was refused before any row)
-            let quiet = tag == 0 || tag == 1 || tag == 2 && (contents(w.cx)[eval.inner_at()] == 0 || commit.be(e, p + 1, 4) < contents(w.cx)[eval.inner_at()]) || tag == 8 || tag == 5 && int_of(e[p + 1]) <= 7 || tag == 7 && (int_of(e[p + 1]) != 1 || eval.neg_const(e, p));
-            if !quiet {
-                return 0;
-            }
-            i = i + 1;
-        }
-        j = j + 1;
-    }
-    w.quiet = true;
-    if row.key_columns(contents(w.ctx)[64..64 + dl]) != 1 {
-        return 0;
-    }
-    var kc = 0;
-    while row.col_pk(contents(w.ctx)[64..64 + dl], kc) != 1 {
-        kc = kc + 1;
-    }
-    let kt = row.col_type(contents(w.ctx)[64..64 + dl], kc);
-    if kt == row.t_bool() || kt == row.t_bytea() {
-        return 0;
-    }
-    j = 0;
-    while j < w.nconj {
-        let a = contents(w.pos)[p_conj() + j];
-        var op = 0 - 1;
-        if int_of(e[a]) == 5 {
-            op = int_of(e[a + 1]);
-        }
-        if op == 0 || op >= 2 && op <= 5 {
-            let (c1, mid) = eval.scan(e, a + 2, contents(w.ws));
-            let (c2, end) = eval.scan(e, mid, contents(w.ws));
-            var vat = 0 - 1;
-            if c1 == 1 && int_of(e[a + 2]) == 0 && eval.constant(e, mid, c2) && is_col(w, e, a + 2, kc) {
-                vat = mid;
-            } else if c2 == 1 && int_of(e[mid]) == 0 && eval.constant(e, a + 2, c1) && is_col(w, e, mid, kc) {
-                vat = a + 2;
-                // constant < key is key > constant
-                if op == 2 || op == 3 {
-                    op = op + 2;
-                } else if op == 4 || op == 5 {
-                    op = op - 2;
-                }
-            }
-            var n = 0 - 1;
-            if vat >= 0 && ev_open(w, e, vat, kinds, 0) >= 0 && contents(w.ws)[b + 1] == 0 {
-                // the constant as a stored key (src/row.cho), in `nrow`
-                var vt = contents(w.ws)[b];
-                if kt != row.t_text() && vt == 0 && eval.assign(contents(w.ws), b, kt, contents(w.ar), contents(w.info)) == 0 && contents(w.ws)[b + 1] == 0 {
-                    // a parameter or a string: the integer the key's type reads it as
-                    vt = contents(w.ws)[b];
-                }
-                if kt != row.t_text() && (vt == 1 || vt == 5 || vt == 6) {
-                    put_i64(contents(w.nrow), 0, contents(w.ws)[b + 2]);
-                    contents(w.nrow)[0] = byte_of((int_of(contents(w.nrow)[0]) + 128) % 256);
-                    n = 8;
-                } else if kt == row.t_text() && (vt == 0 || vt == 3) && contents(w.ws)[b + 3] <= 90 {
-                    let va = contents(w.ws)[b + 2];
-                    let vn = contents(w.ws)[b + 3];
-                    n = 0;
-                    var i = 0;
-                    while i < vn {
-                        let c = int_of(contents(w.ar)[va + i]);
-                        contents(w.nrow)[n] = byte_of(c);
-                        n = n + 1;
-                        if c == 0 {
-                            contents(w.nrow)[n] = byte_of(255);
-                            n = n + 1;
-                        }
-                        i = i + 1;
-                    }
-                    contents(w.nrow)[n] = byte_of(0);
-                    contents(w.nrow)[n + 1] = byte_of(0);
-                    n = n + 2;
-                }
-            }
-            if n >= 0 && (op == 0 || op == 4 || op == 5) {
-                copy(contents(w.nrow), 0, n, contents(w.lo), 0);
-                w.lon = n;
-            }
-            if n >= 0 && (op == 0 || op == 2 || op == 3) {
-                copy(contents(w.nrow), 0, n, contents(w.hi), 0);
-                w.hin = n;
-            }
-        }
-        j = j + 1;
-    }
-    return 0;
-}
-
 // The WHERE at `wpos` of `e` (0: there is none), before any row: its type is checked (an error is noted) and its top-level conditions (the operands of its ANDs) are listed. 0 or a refusal.
 pub fn where_static[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int], wpos: int) -> [] int {
     w.nconj = 0;
@@ -1627,7 +1517,7 @@ pub fn where_static[&q, &x, &k](w: &!q Work, e: &x [byte], kinds: &k [int], wpos
             w.nconj = w.nconj + 1;
         }
     }
-    return bounds(w, e, kinds);
+    return 0;
 }
 
 // Whether the bound row passes the WHERE at `wpos`: 1 it does, 0 it does not, 2 it raises an error (noted), or a refusal. With several conditions, an error in one beside another that is not true is
