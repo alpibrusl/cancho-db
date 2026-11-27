@@ -3184,8 +3184,8 @@ limit and not before; a connection that has logged in and then idles is not. Mut
 *As built:* the place's mark is one int of the connection's (`st[18]`), set at `accept`; the limit is looked for once a turn, before the
 idle transaction's. The test runs from 192.0.2.2 in the sandbox it was written in. **10 mutants, all killed**
 (`MUTANT_ONLY="tls: far"` and `"tls: limit"`, `python3 tests/mutants.py wire`), and the older mutant that serves a client from anywhere is
-still killed by `tests/engine_wire.py`. *Found while testing, and not a fault:* a token of `r:*` is refused `select count(*)`; a function
-is an effect of its own (`n:`), as 6at says.
+still killed by `tests/engine_wire.py`. *Found while testing, and not a fault:* a token of `r:*` is refused `select count(*)`; a call
+is an effect of its own (kind 3, `c:` in `tools/mint.py`; `docs/spec/ir.md`), so the token needs `c:count` too.
 
 ## 7. Taking over, safely
 
