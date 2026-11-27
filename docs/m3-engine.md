@@ -1355,7 +1355,7 @@ client. It waits on all of them (a poller over the listener and every connection
   - The cost is the obvious one, and it is stated as a limit: a client that says `begin` and goes quiet stops everyone. So a transaction that has been idle for 30 s while
     another connection waits is ended by the server: its connection is told `25P03` (PostgreSQL's code for exactly this, `idle_in_transaction_session_timeout`) and
     closed, its transaction rolled back. With nobody waiting, a transaction may idle as long as it likes.
-  - Reads by the others wait too. They could be answered from the branch's tree as it stands (it is what is committed), and are not, yet: one rule first.
+  - Reads by the others wait too (*no longer: 6bs answers them*). They could be answered from the branch's tree as it stands (it is what is committed), and are not, yet: one rule first.
 - *Fairness:* each pass over the connections runs at most one statement of each, in turn, starting after the one that was first the pass before.
 - *Writing an answer* is the one place the server still waits on a single client: an answer is written to its connection before the next statement of anyone runs, and a
   client that does not take it stops the others while it does not. After 10 s of a client taking nothing, its connection is closed. An answer of any size to a client
@@ -3245,6 +3245,26 @@ connection inside a transaction's span equals the read it made just before the `
 connection reads. (3) `now()` in a transaction is the same before and after a read beside it that comes a second later. (4) Beside a
 transaction, each of these waits until it ends: an `insert`, a `select nextval(...)`, a `select cancho_...`, a `begin`, two statements in
 one query. (5) The 30-second rule of 6aq is unchanged for those that wait. Mutants of the rule and of the clock, each killed.
+
+**As built, and what building it found.** `drive.reads_only` (the rule), `reads` and the one condition in `step`, the connection's
+clock (`st[20]`), `exec.seq_hold` (`src/serve.cho`, `src/drive.cho`, `src/exec.cho`).
+
+- *Found by the test, on its first run:* the transaction did notice. Statement 416 of the history, a `rollback`, answered
+  `engine-damaged`, and everything after it. The draws a transaction has made from counters are noted in the working memory until it ends
+  (6y), and a statement that runs with no transaction open forgets them when it ends, or, **if it failed, writes them into the branch's
+  tree**: a read of a table that is not there, beside a transaction that had drawn from a sequence, committed a tree beside the
+  transaction's. The design's list had "the draws" as set before every statement; that was false. A statement beside a transaction now
+  leaves the draws alone (`seq_hold`), and the net was widened: whatever its ending would write is not committed either.
+- *The rule's `;`:* the lexer gives no token for a `;` that ends the text, so "no `;` before its end" is "no `;` token"; the mutant
+  written for the difference survived, and the condition it stood on was removed.
+- *Three older tests said reads wait* (`tests/engine_wire.py`, `several`): they used a `select` as the statement that waits. They use a
+  write that changes nothing, and one now says a read is answered at once with what is committed.
+- *The test, as run* (three seeds in the gate; at seed 1): 107 times the second connection read three tables inside a transaction of the
+  first, each answered at once and equal to its read before the `begin`; 929 statements of the first answered as the test program, the
+  page file and the log the same. Nine statements that wait, four that read. **12 mutants, all killed**
+  (`MUTANT_ONLY=beside python3 tests/mutants.py wire`).
+- *Not tested:* the net (`read-beside-wrote`): no statement is known to reach it, which is what it is for. That a read beside a
+  transaction costs the transaction nothing in time is not measured.
 
 **The second part, sketched: two transactions that write.** Each on a tree of its own from the root it began with. At `commit`, if the
 branch has not moved, as now. If it has: the transaction's facts (6as: every row it wrote, with what the row held before) are held
