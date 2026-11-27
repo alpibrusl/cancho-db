@@ -951,7 +951,7 @@ fn coldef[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: i
             engine_form(st, parse.e_unsupported_statement());
             p = q;
         } else if bit == 8 {
-            // the default is a literal: a number (optionally negative), a string, NULL, TRUE or FALSE
+            // the default is a literal: a number (optionally negative), a string, NULL, TRUE or FALSE; or now()
             let q = parse.expr(sql, toks, p + 1, end, nodes, kids, vs, os, st);
             if q < 0 {
                 return q;
@@ -963,6 +963,9 @@ fn coldef[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: i
                 if kind != parse.n_num() {
                     return parse.fail(st, p + 1, parse.e_unknown_construct());
                 }
+            } else if kind == parse.n_call() && nodes[6 * root + 3] == 0 && parse.word_is(sql, parse.tstart(toks, nodes[6 * root + 1]), parse.tlen(toks, nodes[6 * root + 1]), "now") {
+                // DEFAULT now(): the engine's (docs/m3-engine.md 6bp)
+                engine_form(st, parse.e_unsupported_statement());
             } else if kind != parse.n_num() && kind != parse.n_str() && kind != parse.n_null() && kind != parse.n_true() && kind != parse.n_false() {
                 return parse.fail(st, p + 1, parse.e_unknown_construct());
             }

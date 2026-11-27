@@ -648,6 +648,10 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
         return 0 - 1;
     }
     let mode = session.mode(st[8..16]);
+    if session.state(st[8..16]) == session.idle() {
+        // now() is the time a transaction began (6bp): the clock is read when none is open, and a transaction keeps what its BEGIN read
+        exec.clock(w, (gs[g_now()] - 946684800000) * 1000);
+    }
     // an erase (6bf): `select cancho_erase('<table>', '<key>')`, a statement of its own, outside a transaction, for a token that may call it. `pre`: why it does
     // not run (1 in a transaction, 2 the token, 3 not a table and a key the engine erases by)
     var el = 0 - 1;

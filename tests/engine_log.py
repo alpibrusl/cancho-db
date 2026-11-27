@@ -708,6 +708,23 @@ def as_of(work):
           said == ["refused history-trimmed", "refused asof-unknown-commit"], said)
 
 
+def clocked(work):
+    """A transaction that asked for now() and rows that took it by default (docs/m3-engine.md 6bp): the log holds the statements (their IR says `nondet now`) and
+    the rows hold the time; it verifies as any other."""
+    path = str(work / "clock")
+    out = run(path, WHO + ["!clock 849088800123000", "create table ev (k integer primary key, at timestamptz not null default now(), n text)",
+                           "insert into ev (k, n) values (1, 'a'), (2, 'b')", "begin", "insert into ev (k) values (3)", "update ev set at = now(), n = 'now' where k = 1",
+                           "delete from ev where at = now() and k = 2", "commit", "!clock 849088899000000", "insert into ev (k) values (4)", "select k from ev where at < now()", "!commit"])
+    said = [l for l in out if l.startswith(("refused", "err"))]
+    (work / "c.log").write_bytes(export(path, "log")[1])
+    (work / "c.tok").write_bytes(export(path, "tokens")[1])
+    (work / "c.st").write_bytes(export(path, "stmts")[1])
+    for cmd in L2:
+        r = subprocess.run(cmd.split() + [str(work / "c.log"), "--root", ROOT_KEY, "--tokens", str(work / "c.tok"), "--stmts", str(work / "c.st")], capture_output=True, text=True, cwd=ROOT)
+        v = (r.stdout + r.stderr).strip()
+        check("%s: commits whose statements asked for now(), and rows that took it by default: level=2+ir" % cmd, not said and v.startswith("ok commits=") and v.endswith("level=2+ir"), (said, v))
+
+
 def main():
     rng = random.Random(SEED)
     history = FIXED + random_history(rng, COUNT)
@@ -757,6 +774,7 @@ def main():
         trimming(work, path, *archiving(work, path))
         definitions(work)
         as_of(work)
+        clocked(work)
         print("commits %d, changes %d, rows at the end %d" % (len(files.records), len(files.deltas), nrows))
     if FAILED:
         print("FAIL engine log: %d failed" % len(FAILED))

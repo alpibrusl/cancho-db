@@ -3,13 +3,15 @@ module cdb.row;
 
 import cdb.commit;
 import cdb.build;
+import cdb.time;
 
 // Rows of the engine (docs/m3-engine.md D-M3-5 and D-M3-6, slice M3c): how a table is described, how a row and its key are stored, and the two texts the facts are made of: the row's *image*, which is
 // byte for byte what PostgreSQL's `to_jsonb(row)::text` gives, and the *plain key*, which is `jsonb_build_array(<key columns>)::text`. Pure functions on bytes.
 //
 // A table definition: `u16` column count, then for each column its type (`u8`), its place in the primary key (`u8`: 0 if it is not part of it, else 1 for the first key column, 2 for the second...) and its
 // name (`u16` length and bytes).
-// Types: 1 `bigint`, 5 `integer`, 6 `smallint` (all three stored as one 64-bit value, which must be in the type's range), 2 `boolean`, 3 text (`text`, `varchar`), 4 `bytea`.
+// Types: 1 `bigint`, 5 `integer`, 6 `smallint` (all three stored as one 64-bit value, which must be in the type's range), 2 `boolean`, 3 text (`text`, `varchar`), 4 `bytea`,
+// 7 `timestamp` and 8 `timestamptz` (docs/m3-engine.md 6bp: stored as the integers are, the microseconds since 2000-01-01, of a year from 1 to 9999).
 // A stored row: for each column in order a tag, 0 for null or the column's storage tag (1 for the three integer types, else the type), then the value: integer 8 bytes (two's complement, big-endian), boolean 1 byte, text and bytea a `u16` length and the bytes.
 // A stored key: for each key column in key order, integer as 8 bytes big-endian with the sign bit flipped, boolean as 1 byte, text and bytea as the bytes with each 0x00 written 0x00 0xFF and then 0x00 0x00:
 // so keys compare as their values do, column by column.
@@ -38,9 +40,22 @@ pub fn t_int2() -> [] int {
     return 6;
 }
 
+pub fn t_ts() -> [] int {
+    return 7;
+}
+
+pub fn t_tstz() -> [] int {
+    return 8;
+}
+
+// Whether `ty` is one of the two types of time.
+pub fn is_time(ty: int) -> [] bool {
+    return ty == 7 || ty == 8;
+}
+
 // The tag a value of type `ty` is stored with.
 pub fn storage_tag(ty: int) -> [] int {
-    if ty == 5 || ty == 6 {
+    if ty == 5 || ty == 6 || ty == 7 || ty == 8 {
         return 1;
     }
     return ty;
@@ -73,6 +88,9 @@ pub fn int_fits(ty: int, v: int) -> [] bool {
     if ty == 6 {
         return v >= 0 - 32768 && v <= 32767;
     }
+    if ty == 7 || ty == 8 {
+        return time.holds(v);
+    }
     return true;
 }
 
@@ -100,7 +118,7 @@ pub fn columns[&d](def: &d [byte]) -> [] int {
         let ty = int_of(def[at]);
         let pk = int_of(def[at + 1]);
         let nl = commit.be(def, at + 2, 2);
-        if ty < 1 || ty > 6 || nl < 1 || at + 4 + nl > len(def) || pk > n {
+        if ty < 1 || ty > 8 || nl < 1 || at + 4 + nl > len(def) || pk > n {
             return 0 - 1;
         }
         if pk > 0 {
@@ -314,11 +332,16 @@ fn json_int[&o, &r](out: &!o [byte], at: int, row: &r [byte], vat: int) -> [] in
     return w + digits;
 }
 
-// The stored value at `vat` of `row` as jsonb text.
-fn json_value[&o, &r](out: &!o [byte], at: int, row: &r [byte], vat: int) -> [] int {
+// The stored value at `vat` of `row`, of a column of type `ty`, as jsonb text.
+fn json_value[&o, &r](out: &!o [byte], at: int, row: &r [byte], vat: int, ty: int) -> [] int {
     let tag = int_of(row[vat]);
     if tag == 0 {
         return puts(out, at, "null");
+    }
+    if tag == 1 && is_time(ty) {
+        // a time, as to_jsonb writes it: a string, ISO 8601 with a T, and `+00:00` for a moment
+        let w = put1(out, at, '"');
+        return put1(out, time.format(int_at(row, vat + 1), ty == 8, true, out, w), '"');
     }
     if tag == 1 {
         return json_int(out, at, row, vat + 1);
@@ -393,7 +416,7 @@ pub fn image[&d, &r, &o](def: &d [byte], row: &r [byte], out: &!o [byte]) -> [] 
         w = json_string(out, w, col_name(def, best));
         w = puts(out, w, ": ");
         if w >= 0 {
-            w = json_value(out, w, row, value_at(def, row, best));
+            w = json_value(out, w, row, value_at(def, row, best), col_type(def, best));
         }
         last = best;
         done = done + 1;
@@ -424,7 +447,7 @@ pub fn plain_key[&d, &r, &o](def: &d [byte], row: &r [byte], out: &!o [byte]) ->
             w = puts(out, w, ", ");
         }
         if w >= 0 {
-            w = json_value(out, w, row, value_at(def, row, key_col(def, k)));
+            w = json_value(out, w, row, value_at(def, row, key_col(def, k)), col_type(def, key_col(def, k)));
         }
         k = k + 1;
     }

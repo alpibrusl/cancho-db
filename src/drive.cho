@@ -265,7 +265,7 @@ pub fn prepare[&z, &q, &b, &s](pg: &!z pager.Pager, w: &!q exec.Work, b: &!b Sub
             }
             var vn = 0 - 1;
             if exec.count_of(w) == 1 {
-                vn = answer.text(exec.rows_of(w), exec.row_at(w, 0), contents(b.vtx), 0);
+                vn = answer.text(exec.type_of(w, 0), exec.rows_of(w), exec.row_at(w, 0), contents(b.vtx), 0);
                 if vn < 0 - 1 {
                     return 0 - 2;
                 }

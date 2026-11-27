@@ -12,6 +12,7 @@ import cdb.index;
 import cdb.parse;
 import cdb.lower;
 import cdb.exec;
+import cdb.via;
 import cdb.uniq;
 
 // The statements of the engine that write (docs/m3-engine.md 6g): INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE. Each reads the tree it is given and answers as src/exec.cho says; on 0 the new root is
@@ -259,7 +260,15 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                 } else {
                     let el = w.elen;
                     let da = tables.default_at(contents(w.ent)[0..el], c);
-                    if da < 0 {
+                    if da < 0 && tables.default_now(contents(w.ent)[0..el], c) {
+                        // DEFAULT now(): the time the transaction began, if there is a clock to say it
+                        if !exec.clock_set(w) || ra + 9 > exec.max_stored_row() {
+                            return exec.unsupported();
+                        }
+                        contents(w.nrow)[ra] = byte_of(1);
+                        exec.put_i64(contents(w.nrow), ra + 1, exec.clock_of(w));
+                        ra = ra + 9;
+                    } else if da < 0 {
                         if ra + 1 > exec.max_stored_row() {
                             return exec.too_big();
                         }
@@ -500,10 +509,12 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     } else if at + 1 != len(e) {
         return exec.malformed();
     }
-    let rw = exec.where_static(w, e, kinds, wpos);
+    let rw = via.where_static(w, e, kinds, wpos);
     if rw < 0 {
         return rw;
     }
+    // the rows are found as a SELECT finds them: by an index, if the WHERE has a value or a small range of one (6bo)
+    via.choose(w, e, kinds);
     contents(w.cx)[5] = 0 - 1;
     i = 0;
     while i < ns {
@@ -519,10 +530,10 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     var nroot = root;
     var side = 0;
     var seen = 0;
-    exec.scan_start(w);
+    via.start(w);
     var more = true;
     while more {
-        let rl = exec.scan_next(p, w, root);
+        let rl = via.next(p, w, root);
         if rl == 0 - 1 {
             more = false;
         } else if rl < 0 {
@@ -816,18 +827,19 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     } else if at + 1 != len(e) {
         return exec.malformed();
     }
-    let rw = exec.where_static(w, e, kinds, wpos);
+    let rw = via.where_static(w, e, kinds, wpos);
     if rw < 0 {
         return rw;
     }
+    via.choose(w, e, kinds);
     if w.code != 0 {
         return exec.verdict(w);
     }
     var nroot = root;
-    exec.scan_start(w);
+    via.start(w);
     var more = true;
     while more {
-        let rl = exec.scan_next(p, w, root);
+        let rl = via.next(p, w, root);
         if rl == 0 - 1 {
             more = false;
         } else if rl < 0 {
@@ -909,7 +921,7 @@ pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
     if at + 1 >= len(e) || int_of(e[at]) != 1 {
         return exec.unsupported();
     }
-    let rw = exec.where_static(w, e, kinds, at + 1);
+    let rw = via.where_static(w, e, kinds, at + 1);
     if rw < 0 {
         return rw;
     }
@@ -1135,6 +1147,10 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
             ty = row.t_text();
         } else if code == 5 {
             ty = row.t_bool();
+        } else if code == 9 {
+            ty = row.t_ts();
+        } else if code == 10 {
+            ty = row.t_tstz();
         } else {
             return exec.unsupported();
         }
@@ -1185,7 +1201,16 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
         var marks = flags % 2;
         let ma = xa;
         xa = xa + 1;
-        if has_default == 1 {
+        var literal = has_default == 1;
+        if literal && nodes[6 * kids[nodes[6 * cd + 2] + def_kid]] == parse.n_call() {
+            // DEFAULT now() (6bp): the time of each insert, so a mark and no value; for a column of times, of a table that is being made
+            if !row.is_time(ty) || c0 != 0 {
+                return exec.unsupported();
+            }
+            marks = marks + 16;
+            literal = false;
+        }
+        if literal {
             let dn = kids[nodes[6 * cd + 2] + def_kid];
             let ln = lower.literal(sql, toks, nodes, kids, dn, contents(w.lrs), contents(w.lit), contents(w.lsc));
             if ln < 0 {

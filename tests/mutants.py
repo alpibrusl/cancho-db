@@ -1654,7 +1654,7 @@ def run_row(cancho):
                 continue
             f.write_text(text.replace(old, new))
             exe = work / "rowcheck"
-            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/rowcheck.cho")] + [str(work / "src" / x) for x in ("row.cho", "state.cho", "commit.cho", "build.cho")] + ["-o", str(exe)],
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/rowcheck.cho")] + [str(work / "src" / x) for x in ("time.cho", "row.cho", "state.cho", "commit.cho", "build.cho")] + ["-o", str(exe)],
                                capture_output=True, text=True)
             if b.returncode != 0:
                 print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
@@ -1716,7 +1716,7 @@ def run_eval(cancho):
                 continue
             f.write_text(text.replace(old, new))
             exe = work / "evalcheck"
-            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/evalcheck.cho")] + [str(work / "src" / x) for x in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho")] + ["-o", str(exe)],
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/evalcheck.cho")] + [str(work / "src" / x) for x in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho")] + ["-o", str(exe)],
                                capture_output=True, text=True)
             if b.returncode != 0:
                 print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
@@ -1962,7 +1962,7 @@ ENGINE = [
     ('join: a table joined to itself is taken', 'src/exec.cho',
      '    if tid == w.tid {\n        return unsupported();\n    }',
      '    if false {\n        return unsupported();\n    }'),
-    ("join: the key's bounds are taken from any table's column", 'src/exec.cho',
+    ("join: the key's bounds are taken from any table's column", 'src/via.cho',
      "    if w.ntab != 1 {\n        // under a join a column of that name may be another table's\n        return 0;\n    }",
      ''),
     ('grouped: the min of text by its first bytes', 'src/execs.cho',
@@ -2067,10 +2067,10 @@ ENGINE = [
     ('slots: a given value is a constant', 'src/eval.cho',
      '            set(ws, base + 6 * sp, cx[s + 2], cx[s + 3], cx[s + 4], cx[s + 5], 0);',
      '            set(ws, base + 6 * sp, cx[s + 2], cx[s + 3], cx[s + 4], cx[s + 5], 1);'),
-    ('bounds: rows skipped although a condition can raise', 'src/exec.cho',
+    ('bounds: rows skipped although a condition can raise', 'src/via.cho',
      '            if !quiet {\n                return 0;\n            }',
      '            if false {\n                return 0;\n            }'),
-    ('bounds: arithmetic counted as unable to raise', 'src/exec.cho',
+    ('bounds: arithmetic counted as unable to raise', 'src/via.cho',
      'tag == 5 && int_of(e[p + 1]) <= 7 ||',
      'tag == 5 ||'),
     ('bounds: the first key is left out', 'src/exec.cho',
@@ -2079,22 +2079,22 @@ ENGINE = [
     ('bounds: the last key is left out', 'src/exec.cho',
      '    return kn > hn;\n}',
      '    return kn >= hn;\n}'),
-    ('bounds: constant < key read as key < constant', 'src/exec.cho',
+    ('bounds: constant < key read as key < constant', 'src/via.cho',
      '                if op == 2 || op == 3 {\n                    op = op + 2;',
      '                if op == 2 || op == 3 {\n                    op = op + 0;'),
-    ('bounds: constant > key read as key > constant', 'src/exec.cho',
+    ('bounds: constant > key read as key > constant', 'src/via.cho',
      '                } else if op == 4 || op == 5 {\n                    op = op - 2;',
      '                } else if op == 4 || op == 5 {\n                    op = op - 0;'),
-    ('bounds: > sets the upper bound', 'src/exec.cho',
+    ('bounds: > sets the upper bound', 'src/via.cho',
      '            if n >= 0 && (op == 0 || op == 2 || op == 3) {',
      '            if n >= 0 && (op == 0 || op == 4 || op == 5) {'),
-    ('bounds: < sets the lower bound', 'src/exec.cho',
+    ('bounds: < sets the lower bound', 'src/via.cho',
      '            if n >= 0 && (op == 0 || op == 4 || op == 5) {',
      '            if n >= 0 && (op == 0 || op == 2 || op == 3) {'),
-    ('bounds: an integer key without its sign flipped', 'src/exec.cho',
+    ('bounds: an integer key without its sign flipped', 'src/via.cho',
      '                    contents(w.nrow)[0] = byte_of((int_of(contents(w.nrow)[0]) + 128) % 256);',
      '                    contents(w.nrow)[0] = byte_of((int_of(contents(w.nrow)[0]) + 0) % 256);'),
-    ('bounds: a text key without its end', 'src/exec.cho',
+    ('bounds: a text key without its end', 'src/via.cho',
      '                    contents(w.nrow)[n + 1] = byte_of(0);\n                    n = n + 2;',
      '                    contents(w.nrow)[n + 1] = byte_of(0);\n                    n = n + 0;'),
     ('bounds: any column is the key', 'src/exec.cho',
@@ -2200,8 +2200,8 @@ ENGINE = [
      '        if !eval.assignable(contents(w.ws)[b], to) {\n            exec.note(w, 6);',
      '        if !eval.assignable(contents(w.ws)[b], to) {\n            exec.note(w, 5);'),
     ('insert: defaults ignored', 'src/execw.cho',
-     '                    let da = tables.default_at(contents(w.ent)[0..el], c);\n                    if da < 0 {',
-     '                    let da = tables.default_at(contents(w.ent)[0..el], c);\n                    if true {'),
+     '                    } else if da < 0 {\n                        if ra + 1 > exec.max_stored_row() {',
+     '                    } else if true {\n                        if ra + 1 > exec.max_stored_row() {'),
     ('insert: a key that is there is overwritten', 'src/execw.cho',
      '        if g >= 0 && !skip {\n            return exec.e_unique();\n        }',
      '        if false {\n            return exec.e_unique();\n        }'),
@@ -2269,8 +2269,8 @@ ENGINE = [
      '        if m / 2 % 2 == 1 {\n            at = at + stored_len(ent, at);\n        }\n        if m / 4 % 2 == 1 {\n            at = at + 16;\n        }\n        k = k + 1;',
      '        if false {\n            at = at + stored_len(ent, at);\n        }\n        if m / 4 % 2 == 1 {\n            at = at + 16;\n        }\n        k = k + 1;'),
     ('assign: an integer is not stored as text', 'src/eval.cho',
-     '    return from == to || from == 0 || is_int(from) && is_int(to) || to == 3;',
-     '    return from == to || from == 0 || is_int(from) && is_int(to);'),
+     '    return from == to || from == 0 || is_int(from) && is_int(to) || is_time(from) && is_time(to) || to == 3;',
+     '    return from == to || from == 0 || is_int(from) && is_int(to) || is_time(from) && is_time(to);'),
     ('params: the second parameter is read where the third is', 'src/eval.cho',
      '            set(ws, out, 0, 0, cx[params_at() + 2 * idx - 1], pn, constant);',
      '            set(ws, out, 0, 0, cx[params_at() + 2 * idx + 1], pn, constant);'),
@@ -2991,7 +2991,7 @@ ENGINE = [
     ('via: a grouped select begins as a read of the table whatever it chose', 'src/execs.cho', '    var cf = 0;\n    via.start(w);', '    var cf = 0;\n    exec.scan_start(w);'),
     ('via: a select does not look for an index', 'src/execs.cho', '    via.choose(w, e, kinds);\n    exec.no_rows(w);\n    i = 0;\n    while i < no {', '    exec.no_rows(w);\n    i = 0;\n    while i < no {'),
     ('via: a grouped select does not look for an index', 'src/execs.cho', '    via.choose(w, e, kinds);\n    exec.no_rows(w);\n    i = 0;\n    while i < ng {', '    exec.no_rows(w);\n    i = 0;\n    while i < ng {'),
-    ('via: a parameter in the WHERE is taken for what can raise', 'src/exec.cho', "tag == 2 && (contents(w.cx)[eval.inner_at()] == 0 || commit.be(e, p + 1, 4) < contents(w.cx)[eval.inner_at()]) ||", 'tag == 99 ||'),
+    ('via: a parameter in the WHERE is taken for what can raise', 'src/via.cho', "tag == 2 && (contents(w.cx)[eval.inner_at()] == 0 || commit.be(e, p + 1, 4) < contents(w.cx)[eval.inner_at()]) ||", 'tag == 99 ||'),
     ("log: via: a table as of a commit is read by the present's index", 'src/drive.cho', '            w.past = true;\n            rc = execs.select(pg, w, view, ir2[0..l2], sc2);', '            rc = execs.select(pg, w, view, ir2[0..l2], sc2);'),
     ('unique: a null is equal to a null', 'src/index.cho', '        if int_of(r[va]) == 0 {\n            return 0;\n        }\n        i = i + 1;\n    }\n    let el = entry(ix, at, def, r, pk, a);', '        i = i + 1;\n    }\n    let el = entry(ix, at, def, r, pk, a);'),
     ('unique: two texts that begin alike are taken for one value', 'src/index.cho', '        if same_cols(ix, at, def, v[32..g], r) {\n            found = nk - off;\n        }', '        found = nk - off;'),
@@ -3020,7 +3020,7 @@ ENGINE = [
     ('log: unique: a unique index and one that is not are one schema', 'src/tables.cho', 'if typed && i + 5 < nv && int_of(ent[i + 5]) / 2 % 2 == 1 {', 'if typed && i + 5 < nv && int_of(ent[i + 5]) / 2 % 2 == 9 {'),
     ('neg: a minus sign over anything is a negative number as written', 'src/eval.cho', '&& int_of(e[p + 1]) == 1 && int_of(e[p + 2]) == 1 && int_of(e[p + 3]) == 1 && row.int_at(e, p + 4) >= 0;', '&& int_of(e[p + 1]) == 1;'),
     ('neg: a negative number is not a constant an indexed column is compared with', 'src/eval.cho', '|| c == 2 && neg_const(e, at);', '|| c == 99 && neg_const(e, at);'),
-    ('neg: a negative number in the WHERE is taken for what can raise', 'src/exec.cho', 'tag == 7 && (int_of(e[p + 1]) != 1 || eval.neg_const(e, p));', 'tag == 7 && int_of(e[p + 1]) != 1;'),
+    ('neg: a negative number in the WHERE is taken for what can raise', 'src/via.cho', 'tag == 7 && (int_of(e[p + 1]) != 1 || eval.neg_const(e, p));', 'tag == 7 && int_of(e[p + 1]) != 1;'),
     ('constraint: UNIQUE on a column added later is read and nothing is made', 'src/execw.cho', '            if c0 != 0 || nu >= 8 {', '            if nu >= 8 {'),
     ('constraint: any number of unique columns is taken', 'src/execw.cho', '            if c0 != 0 || nu >= 8 {', '            if c0 != 0 {'),
     ('constraint: CREATE TABLE makes no index for a unique column', 'src/execw.cho', '    nw = uniq.constraints(p, w, nw, e[4..4 + nl], nc);\n', '    nw = nw + 0;\n'),
@@ -3072,6 +3072,56 @@ ENGINE = [
     ("order: descending, the values are read from before them", 'src/via.cho', '            contents(w.via)[260] = byte_of(2);', '            contents(w.via)[260] = byte_of(1);'),
     ('order: descending, the read does not end at the least value', 'src/via.cho', '        if beside(w, nk, 128, w.vial) < 0 {\n            return 0 - 1;\n        }', '        if beside(w, nk, 128, w.vial) < 0 - 9 {\n            return 0 - 1;\n        }'),
     ('order: descending, the same entry is read again and again', 'src/via.cho', '    exec.copy(contents(w.key2), 0, nk, contents(w.via), 256);\n    w.viak = nk;\n    return r;', '    return r;'),
+    ('time: a year that divides by 100 is a leap year', 'src/time.cho', '        if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {', '        if y % 4 == 0 {'),
+    ('time: April has 31 days', 'src/time.cho', '    if m == 4 || m == 6 || m == 9 || m == 11 {', '    if m == 6 || m == 9 || m == 11 {'),
+    ('time: an offset to the west is read as one to the east', 'src/time.cho', '            if west {\n                off = 0 - off;\n            }\n', ''),
+    ('time: an offset moves a moment the wrong way', 'src/time.cho', '        v = v - off;', '        v = v + off;'),
+    ('time: an offset moves a time of no zone', 'src/time.cho', '    if tz {\n        v = v - off;', '    if true {\n        v = v - off;'),
+    ('time: a fraction of fewer than six digits is that many microseconds', 'src/time.cho', '                while places < 6 {\n                    us = us * 10;\n                    places = places + 1;\n                }\n', ''),
+    ('time: an hour of 24 and a second of 60 are read', 'src/time.cho', '    if h == 24 || sec == 60 {\n        return unread();\n    }\n', ''),
+    ('time: a month of 13 is read', 'src/time.cho', '    if mo < 1 || mo > 12 || d < 1', '    if mo < 1 || mo > 13 || d < 1'),
+    ('time: a day past the end of its month is read', 'src/time.cho', ' || d < 1 || d > days_in(y, mo) || h > 24', ' || d < 1 || d > 31 || h > 24'),
+    ('time: an offset of any number of hours is read', 'src/time.cho', '            if oh < 0 || om < 0 || oh > 15 || om > 59 {', '            if oh < 0 || om < 0 || oh > 99 || om > 59 {'),
+    ('time: seven digits of a fraction are read', 'src/time.cho', '                if places < 1 || places > 6 {', '                if places < 1 || places > 7 {'),
+    ('time: what follows a time is not looked at', 'src/time.cho', '        if at != end {\n            return unread();\n        }\n', ''),
+    ('time: the year 0 is read', 'src/time.cho', '    if y < 1 {\n        return unread();\n    }\n', ''),
+    ('time: a moment an offset puts outside the years held is read', 'src/time.cho', '        if v < 0 || v >= end_days() * day_us() {\n            return unread();\n        }\n', ''),
+    ('time: every day is counted from a day later', 'src/time.cho', '    return era * 146097 + doe - 306;', '    return era * 146097 + doe - 305;'),
+    ('time: the trailing zeros of a fraction are written', 'src/time.cho', '        while us % 10 == 0 {', '        while us % 10 == 99 {'),
+    ('time: jsonb has a space where it has a T', 'src/time.cho', "    if json {\n        at = put(out, at, 'T');", "    if !json {\n        at = put(out, at, 'T');"),
+    ("time: jsonb's zone is written as the text's", 'src/time.cho', "        if json {\n            at = put(out, at, ':');", "        if false {\n            at = put(out, at, ':');"),
+    ('time: January and February are of the year before', 'src/time.cho', '        m = mp - 9;\n        y = y + 1;', '        m = mp - 9;'),
+    ('time: a time of no zone is written with one', 'src/time.cho', "    if tz {\n        at = put(out, at, '+');", "    if true {\n        at = put(out, at, '+');"),
+    ('time: a time before the year 1 is written', 'src/time.cho', '    if abs < 0 || abs >= end_days() * day_us() {\n        return 0 - 1;\n    }\n    let days', '    if abs >= end_days() * day_us() {\n        return 0 - 1;\n    }\n    let days'),
+    ('times: a text with a field out of range is an integer out of range', 'src/eval.cho', '                return set(ws, v, to, 2, 21, 0, 0);', '                return set(ws, v, to, 2, 3, 0, 0);'),
+    ('times: a time of no zone and a moment are not compared', 'src/eval.cho', '    if is_time(tx) && is_time(ty) {\n        // a time of no zone beside a moment: read as that moment in UTC\n        return 8;\n    }\n', ''),
+    ('times: two times are compared as texts', 'src/eval.cho', '    if is_int(t) || t == 2 || is_time(t) {', '    if is_int(t) || t == 2 {'),
+    ('times: arithmetic on a time has no operator, where PostgreSQL has intervals', 'src/eval.cho', 'if tx == 0 && ty == 0 || is_time(tx) || is_time(ty) {', 'if tx == 0 && ty == 0 {'),
+    ('times: a moment is not stored in a column of no zone', 'src/eval.cho', '|| is_int(from) && is_int(to) || is_time(from) && is_time(to) || to == 3;', '|| is_int(from) && is_int(to) || to == 3;'),
+    ('times: a moment cast to text has no zone, and a time of no zone has one', 'src/eval.cho', '        let end = time.format(a, from == 8, false, ar, start);', '        let end = time.format(a, from == 7, false, ar, start);'),
+    ('times: a text read as a time of no zone is moved by its offset', 'src/eval.cho', '            let rc = time.parse(ar, a, b, to == 8, ws[v + 3..v + 4]);', '            let rc = time.parse(ar, a, b, to == 7, ws[v + 3..v + 4]);'),
+    ('times: a CASE of the two types is a mismatch', 'src/eval.cho', '                } else if is_time(t) && is_time(bt) && t != bt {\n                    return unsupported();\n', '                } else if false {\n                    return unsupported();\n'),
+    ('times: a COALESCE of the two types is a mismatch', 'src/eval.cho', '                } else if is_time(t) && is_time(mt) && t != mt {\n                    return unsupported();\n', '                } else if false {\n                    return unsupported();\n'),
+    ('times: timestamp names the type of moments', 'src/eval.cho', '    if name_is(e, at, n, "timestamp") {\n        return 7;', '    if name_is(e, at, n, "timestamp") {\n        return 8;'),
+    ("times: the row's image writes a moment with no zone", 'src/row.cho', 'ty == 8, true, out, w), \'"\');', 'ty == 7, true, out, w), \'"\');'),
+    ('times: a client is told a moment is a time of no zone', 'src/answer.cho', '    if ty == row.t_ts() {\n        return 1114;', '    if ty == row.t_ts() {\n        return 1184;'),
+    ('times: a client is sent a moment with no zone', 'src/answer.cho', 'ty == row.t_tstz(), false, out, oat);', 'ty == row.t_ts(), false, out, oat);'),
+    ('times: a field out of range has no SQLSTATE of its own', 'src/exec.cho', '    if code == 20 {\n        return "22008";\n    }\n', ''),
+    ('times: the least and the greatest of times are not computed', 'src/execs.cho', '|| ty == 3 || row.is_time(ty)) {', '|| ty == 3) {'),
+    ('times: an index is not read by a time', 'src/via.cho', '    if inty && (vt == 1 || vt == 5 || vt == 6 || row.is_time(vt)) {', '    if inty && (vt == 1 || vt == 5 || vt == 6) {'),
+    ('times: a column of moments is made one of no zone', 'src/execw.cho', '        } else if code == 10 {\n            ty = row.t_tstz();', '        } else if code == 10 {\n            ty = row.t_ts();'),
+    ('now: with no clock now() is the year 2000', 'src/eval.cho', ' && len(cx) > now_at() + 1 && cx[now_at() + 1] == 1 {', ' && len(cx) > now_at() + 1 {'),
+    ('now: now() is a time of no zone', 'src/eval.cho', '        set(ws, out, 8, 0, cx[now_at()], 0, 0);', '        set(ws, out, 7, 0, cx[now_at()], 0, 0);'),
+    ('now: a row takes its default now() with no clock to say it', 'src/execw.cho', '                        if !exec.clock_set(w) || ra + 9 > exec.max_stored_row() {', '                        if ra + 9 > exec.max_stored_row() {'),
+    ('now: a column that is no time takes DEFAULT now()', 'src/execw.cho', '            if !row.is_time(ty) || c0 != 0 {\n                return exec.unsupported();\n            }\n            marks = marks + 16;', '            if c0 != 0 {\n                return exec.unsupported();\n            }\n            marks = marks + 16;'),
+    ('now: a column added to a table takes DEFAULT now(), and its rows nothing', 'src/execw.cho', '            if !row.is_time(ty) || c0 != 0 {\n                return exec.unsupported();\n            }\n            marks = marks + 16;', '            if !row.is_time(ty) {\n                return exec.unsupported();\n            }\n            marks = marks + 16;'),
+    ('now: DEFAULT now() is no default', 'src/execw.cho', '            marks = marks + 16;\n            literal = false;', '            literal = false;'),
+    ('now: an entry with a column of DEFAULT now() is not one', 'src/tables.cho', '        if m > 31 || m / 16 == 1 && m / 2 % 2 == 1 {', '        if m > 15 || m / 16 == 1 && m / 2 % 2 == 1 {'),
+    ('now: any call is a default, and is now()', 'src/stmt.cho', ' && nodes[6 * root + 3] == 0 && parse.word_is(sql, parse.tstart(toks, nodes[6 * root + 1]), parse.tlen(toks, nodes[6 * root + 1]), "now") {', ' && nodes[6 * root + 3] == 0 {'),
+    ('via: an UPDATE does not look for an index', 'src/execw.cho', '    // the rows are found as a SELECT finds them: by an index, if the WHERE has a value or a small range of one (6bo)\n    via.choose(w, e, kinds);\n', ''),
+    ('via: a DELETE does not look for an index', 'src/execw.cho', '    via.choose(w, e, kinds);\n    if w.code != 0 {\n        return exec.verdict(w);\n    }\n    var nroot = root;', '    if w.code != 0 {\n        return exec.verdict(w);\n    }\n    var nroot = root;'),
+    ('via: an UPDATE reads the table whatever it chose', 'src/execw.cho', '        let rl = via.next(p, w, root);\n        if rl == 0 - 1 {\n            more = false;\n        } else if rl < 0 {\n            return rl;\n        } else {\n            let pass = exec.passes(w, e, kinds, wpos);\n            if pass < 0 {\n                return pass;\n            }\n            if pass == 1 {\n                w.count = w.count + 1;', '        let rl = exec.scan_next(p, w, root);\n        if rl == 0 - 1 {\n            more = false;\n        } else if rl < 0 {\n            return rl;\n        } else {\n            let pass = exec.passes(w, e, kinds, wpos);\n            if pass < 0 {\n                return pass;\n            }\n            if pass == 1 {\n                w.count = w.count + 1;'),
+    ('via: a DELETE reads the table whatever it chose', 'src/execw.cho', '        let rl = via.next(p, w, root);\n        if rl == 0 - 1 {\n            more = false;\n        } else if rl < 0 {\n            return rl;\n        } else {\n            let pass = exec.passes(w, e, kinds, wpos);\n            if pass < 0 {\n                return pass;\n            }\n            if pass == 1 {\n                let kl = w.klen;', '        let rl = exec.scan_next(p, w, root);\n        if rl == 0 - 1 {\n            more = false;\n        } else if rl < 0 {\n            return rl;\n        } else {\n            let pass = exec.passes(w, e, kinds, wpos);\n            if pass < 0 {\n                return pass;\n            }\n            if pass == 1 {\n                let kl = w.klen;'),
     ('log: a table as of a commit is read as it is now', 'src/drive.cho',
      '        } else if kind == 6 && view > 0 {',
      '        } else if kind == 6 && view < 0 {'),
@@ -3100,6 +3150,9 @@ ENGINE = [
 
 # The engine's server (docs/m3-engine.md 6al): the messages and one connection. Judged by tests/engine_wire.py, which holds the server against the test program.
 WIRE = [
+    ('wire: now: the clock is read at every statement of a transaction', 'src/serve.cho', '    if session.state(st[8..16]) == session.idle() {\n        // now() is the time a transaction began', '    if true {\n        // now() is the time a transaction began'),
+    ('wire: now: the server has no clock for now()', 'src/serve.cho', '    if session.state(st[8..16]) == session.idle() {\n        // now() is the time a transaction began', '    if false {\n        // now() is the time a transaction began'),
+    ('wire: now: the clock counts from 1970', 'src/serve.cho', '        exec.clock(w, (gs[g_now()] - 946684800000) * 1000);', '        exec.clock(w, gs[g_now()] * 1000);'),
     ('wire: the startup is answered with a request for a password', 'src/wire.cho',
      "return shut(out, at, be(out, open(out, at, 'R'), 0, 4));",
      "return shut(out, at, be(out, open(out, at, 'R'), 3, 4));"),
@@ -3551,7 +3604,7 @@ def run_export(cancho):
     """Each mutant is an export tool of its own, held against what the test assembles from the test program's output (build/enginecheck, not mutated here)."""
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in EXPORT if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
             "execw.cho", "execd.cho", "facts.cho", "token.cho", "ir.cho")
     survivors = []
     for label, rel, old, new in table:
@@ -3600,7 +3653,7 @@ def run_wire(cancho):
             print("MUTANT_SLICE: %s is not K/N with 0 <= K < N" % part)
             return 1
         table = table[k::n]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
             "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
 
     def one(mutant):
@@ -3644,7 +3697,7 @@ def run_engine(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
 
     def one(mutant):
         label, rel, old, new = mutant
@@ -3661,6 +3714,17 @@ def run_engine(cancho):
             b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/enginecheck.cho")] + [str(work / "src" / x) for x in srcs] + ["-o", str(exe)], capture_output=True, text=True)
             if b.returncode != 0:
                 return label, "BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]), True
+            if label.startswith("time: "):
+                # the two ways between a time and its text are judged on their own, against Python's datetime (tests/time_check.py)
+                tx = work / "timecheck"
+                tb = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/timecheck.cho"), str(work / "src" / "time.cho"), "-o", str(tx)], capture_output=True, text=True)
+                if tb.returncode != 0:
+                    return label, "BROKEN %-48s does not build: %s" % (label, (tb.stdout + tb.stderr).strip()[:160]), True
+                r = subprocess.run([sys.executable, str(ROOT / "tests/time_check.py"), str(tx)], capture_output=True, text=True, timeout=600)
+                if r.returncode != 0:
+                    first = [l for l in (r.stdout + r.stderr).splitlines() if l.startswith("FAIL")]
+                    return label, "killed   %-46s %s" % (label, (first[0] if first else "a crash")[:90]), False
+                return label, "SURVIVED %-46s every time is read and written as before" % label, True
             if label.startswith("scrub: "):
                 # what an erase leaves in the file is judged by the search of the whole file (tests/engine_erase.py), on two seeds
                 for seed in ("1", "2"):

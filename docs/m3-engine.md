@@ -2891,6 +2891,23 @@ limit, a text column, two items, an expression, `distinct`, a `where`, a partial
 order where the order is total, by their number where rows tie at the edge. `first_rows` holds the number of rows the index gave to the number
 asked for, which no answer shows. The past is read without it (`past_by_value`). 19 mutants, and 5 of `prev_before` with the tree's model.
 
+**`update` and `delete` by an index (after slice 4).** They read the table, or the key's bounds, and so `delete from t where a = 5` cost what a
+read of every row costs. They now find their rows as a `select` does: `via.choose` after the `where` is read, and the rows by the index's entries
+of the value, or of the range if it is a quarter of the index or less (the first part's count). Nothing else about them changes.
+
+- *The rows are read in the tree as it was before the statement*, as they always were, and written into the tree it is making: an `update` that
+  changes the indexed column does not meet its own rows again.
+- *The order they are read in is the index's*, not the key's. What an `update` decides about a unique index (slice 3) and about keys that move
+  does not depend on the order rows are read in: that was why the mutants of the order tests could not be killed.
+- *The same rules for when* as a `select`: no condition of the `where` that can raise, no bound by the key, not a partial index.
+
+*Measured* (100,000 rows, 10 rows a value, by hand with the test program, 30 statements each with its commit): `update ... where a = N` 53 ms
+with no index and 2.2 ms with one; `delete ... where a = N` 54 ms and 1.7 ms.
+
+*Tested.* In the list of slice 2: 17 updates and deletes that have to be read by an index (a value, a small range, a parameter, a key moved, with
+`returning`, inside a transaction rolled back) and 5 that may not be, the tables held to PostgreSQL's after each. `first_rows` holds the rows an
+`update` and a `delete` are given by the index to the rows of the value or range. 4 mutants.
+
 **`unique` on a column of `create table` (after slice 3).** PostgreSQL makes of it a constraint named `<table>_<column>_key`, held by a unique index
 of that name. Here it is that index and a mark on it:
 
@@ -2954,6 +2971,37 @@ as that moment in UTC, which is what PostgreSQL does in a session whose zone is 
 already records, so a statement that asks for it is still one the log can hold); arithmetic (`+ interval`, a difference); `extract`,
 `date_trunc`, `to_char`; `date`, `time` and `interval` as types; a precision (`timestamp(3)`); `at time zone`.
 
+**Slice 2: `now()`, the design.**
+
+- *What it is.* The time the transaction began, a `timestamptz`, as in PostgreSQL: the same for every statement of a transaction, and for a
+  statement outside one the time it began. From the server's clock, which counts milliseconds: a `now()` has no finer part.
+- *Where the clock is.* The server sets it before a statement when no transaction is open (`exec.clock`), so `begin` takes it and the statements
+  after it keep it. The test program has no clock of its own: `!clock MICROSECONDS` sets one, and without it `now()` is refused as before.
+- *`default now()`* on a column of either type of time: a mark of the column, and the time is taken when a row is inserted that gives the column
+  no value. Not a value kept in the entry: that would be the time the table was made.
+- *What it is not.* A constant for a key's bounds or an index (a `where` with `now()` reads the table); `current_timestamp`, which the parser
+  does not read as an expression; `clock_timestamp()` and `statement_timestamp()`, which differ within a transaction; a default of a column added
+  to a table that has rows.
+- *The log.* The statement's IR already says `nondet now` (docs/spec/ir.md): the log holds the statement, and the rows it wrote hold the time.
+  Nothing replays a statement to find its values.
+- *The test cannot be the differential alone*: PostgreSQL's clock is not the engine's. With the test program's clock set, the answers are held
+  to what that clock says; the statements whose answers no clock changes (`now() = now()`, a row inserted by default equal to `now()` within one
+  transaction, the type a client is told) are held to PostgreSQL's too; and through the server, to the test's own clock within a few seconds.
+
+**Slice 2, built.** `exec.clock` and a place for it beside the evaluator's parameters; `eval`'s answer to the IR's `nondet now`; a mark of the
+column (16) in the table's entry for `default now()`, read by the insert; the server reads its clock before a statement when no transaction is
+open; `!clock` in the test program.
+
+*Tested.* `clocked` in `tests/engine_check.py`: with the clock set, 22 answers held to what the clock says (no clock: refused; the same time
+through a transaction; another after the clock moves; `update` and `delete` by it; a default on a column that is no time, on a column added
+later, and a call that is not `now()`, each refused), and 13 statements whose answers no clock changes held to PostgreSQL's. `clock` in
+`tests/engine_wire.py`: through the server, the test's own time within 5 s, one time for statements of a transaction 1.1 s apart and for the rows
+they insert, a later one after it. `clocked` in `tests/engine_log.py`: the log of such commits verifies with each verifier. 8 mutants and 3 of
+the server.
+
+*Found on the way*: `select now()` with no table is refused, as every `select` without a `from` is. A client that asks the time that way gets
+no answer; `select now() from <a table of one row>` does.
+
 **The slices.**
 
 1. *The types, stored and compared* (this one), with the test first: a list of statements over a table of both types, each held to PostgreSQL's
@@ -2961,7 +3009,27 @@ already records, so a statement that asks for it is still one the log can hold);
 2. *`now()`*, as the transaction's time.
 3. *Arithmetic with intervals*, if the first two say an application needs it here rather than in its own code.
 
-**What the first slice has to change**, read from the code and to be confirmed as it is built: the closed list of types in `src/row.cho` and what
+**Slice 1, built.** `src/time.cho` (a text read as a time, a time written: held to Python's `datetime` by `tests/time_check.py`, on their own);
+types 7 and 8 in `src/row.cho`, stored with the integers' tag, and the row image writing them as `to_jsonb` does; `src/eval.cho`: a text or a
+parameter beside a time is read as one, the two types compare as one number, the casts, and a refusal wherever a time meets arithmetic or a
+choice between the two types; `execw.column_defs`; `src/answer.cho` (what a client is told and sent, which now takes the column's type: a stored
+time does not say it is one); the constant of a key's bounds and of an index. `exec.bounds` moved to `via.cho` unchanged to make room.
+
+*Nothing else had to learn the types.* The three verifiers of the log read a row's image as bytes; the log of a run with times in it verifies
+with all three (`tests/engine_log.py`), and the server's test passes with them (`tests/engine_wire.py`).
+
+*What the first run by hand showed*: a time was stored as an empty text. The one place a value is written into a row (`exec.enc`) knew the
+integers by their three types and took everything else but a boolean for text. The row then failed its own check, and every read of the table was
+refused `engine-damaged`: nothing wrong was answered, and nothing was readable.
+
+*Tested.* 78 statements on three tables (`TIMEFIXED`), none refused, each answer PostgreSQL's in UTC: every way a time is written, the fields no
+date has (`22008`), a time where another type is wanted and the other way (`42804`, `42883`), each comparison, a parameter, `order by`, `group
+by`, `distinct`, `min` and `max`, the casts, `coalesce`, `case`, `greatest`, a time as a key and as half of one, an index and a unique index on
+one. 18 statements PostgreSQL answers and the engine refuses on purpose, each beside what PostgreSQL 16 does. 10 more in the list of reads by an
+index. **The random history's tables have columns of both types** (2 in 9), in keys too, with texts of times among their values and conditions:
+3 seeds of 3,000 statements agree. 21 mutants of `time.cho` judged by `time_check.py`, 17 of the rest judged by the differential.
+
+**What the first slice had to change**, as it was read from the code before (kept: it was right but for `exec.enc`): the closed list of types in `src/row.cho` and what
 a stored value of each is; `src/eval.cho` (a text read as a time, a time written, the comparison, the casts, what unifies with what);
 `execw.column_defs` (the parser already knows the two names: the proxy passes them to PostgreSQL); `src/answer.cho` (the type a client is told and
 the text it is sent); the row image in `src/row.cho`; the key's bounds and the index's constant (`exec.bounds`, `via.part`), which take an

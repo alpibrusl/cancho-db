@@ -4,7 +4,7 @@ module cdb.stmt_cases;
 // generator. Inputs and renderings are hex.
 
 pub fn n_stmt() -> [] int {
-    return 401;
+    return 403;
 }
 
 pub fn stmt_input(i: int) -> [] &static [byte] {
@@ -834,381 +834,387 @@ pub fn stmt_input(i: int) -> [] &static [byte] {
         return "637265617465207461626c65207420286120696e742064656661756c7420312064656661756c74203229";
     }
     if i == 275 {
-        return "637265617465207461626c65207420286120696e742064656661756c74206e6f77282929";
+        return "637265617465207461626c6520742028612074696d657374616d70747a2064656661756c74206e6f77282929";
     }
     if i == 276 {
-        return "637265617465207461626c65207420286120696e742064656661756c742031202b203129";
+        return "637265617465207461626c65207420286120696e742064656661756c742072616e646f6d282929";
     }
     if i == 277 {
-        return "637265617465207461626c65207420286120696e742064656661756c74206229";
+        return "637265617465207461626c6520742028612074696d657374616d70747a2064656661756c74206e6f7728312929";
     }
     if i == 278 {
-        return "637265617465207461626c65207420286120746578742064656661756c74202d27782729";
+        return "637265617465207461626c65207420286120696e742064656661756c742031202b203129";
     }
     if i == 279 {
-        return "637265617465207461626c65207420286120696e742064656661756c7429";
+        return "637265617465207461626c65207420286120696e742064656661756c74206229";
     }
     if i == 280 {
-        return "637265617465207461626c65207420286120696e74206e756c6c29";
+        return "637265617465207461626c65207420286120746578742064656661756c74202d27782729";
     }
     if i == 281 {
-        return "637265617465207461626c65207420286120696e74207265666572656e636573207529";
+        return "637265617465207461626c65207420286120696e742064656661756c7429";
     }
     if i == 282 {
-        return "637265617465207461626c65207420286120696e7420636865636b202861203e20312929";
+        return "637265617465207461626c65207420286120696e74206e756c6c29";
     }
     if i == 283 {
-        return "637265617465207461626c65207420286120696e7420636865636b202861206265747765656e203020616e642039292064656661756c74203129";
+        return "637265617465207461626c65207420286120696e74207265666572656e636573207529";
     }
     if i == 284 {
-        return "637265617465207461626c65207420286120696e7420636865636b2061203e203129";
+        return "637265617465207461626c65207420286120696e7420636865636b202861203e20312929";
     }
     if i == 285 {
-        return "637265617465207461626c65207420286120696e742c207072696d617279206b65792028612929";
+        return "637265617465207461626c65207420286120696e7420636865636b202861206265747765656e203020616e642039292064656661756c74203129";
     }
     if i == 286 {
-        return "637265617465207461626c65207420286120696e742c207072696d617279206b6579202861292c207072696d617279206b65792028612929";
+        return "637265617465207461626c65207420286120696e7420636865636b2061203e203129";
     }
     if i == 287 {
-        return "637265617465207461626c65207420286120696e742c207072696d617279206b657920282929";
+        return "637265617465207461626c65207420286120696e742c207072696d617279206b65792028612929";
     }
     if i == 288 {
-        return "637265617465207461626c65207420286120696e742067656e65726174656420616c77617973206173206964656e7469747929";
+        return "637265617465207461626c65207420286120696e742c207072696d617279206b6579202861292c207072696d617279206b65792028612929";
     }
     if i == 289 {
-        return "637265617465207461626c65207420286120696e742067656e6572617465642062792064656661756c74206173206964656e7469747929";
+        return "637265617465207461626c65207420286120696e742c207072696d617279206b657920282929";
     }
     if i == 290 {
-        return "637265617465207461626c65207420286120696e7420636f6c6c617465207829";
+        return "637265617465207461626c65207420286120696e742067656e65726174656420616c77617973206173206964656e7469747929";
     }
     if i == 291 {
-        return "637265617465207461626c65206966206e6f7420657869737473207420286120696e7429";
+        return "637265617465207461626c65207420286120696e742067656e6572617465642062792064656661756c74206173206964656e7469747929";
     }
     if i == 292 {
-        return "637265617465207461626c6520696620657869737473207420286120696e7429";
+        return "637265617465207461626c65207420286120696e7420636f6c6c617465207829";
     }
     if i == 293 {
-        return "637265617465207461626c6520732e7420286120696e7429";
+        return "637265617465207461626c65206966206e6f7420657869737473207420286120696e7429";
     }
     if i == 294 {
-        return "637265617465207461626c652073656c65637420286120696e7429";
+        return "637265617465207461626c6520696620657869737473207420286120696e7429";
     }
     if i == 295 {
-        return "637265617465207461626c652074202873656c65637420696e7429";
+        return "637265617465207461626c6520732e7420286120696e7429";
     }
     if i == 296 {
-        return "637265617465207461626c65207420286120696e742920696e68657269747320287529";
+        return "637265617465207461626c652073656c65637420286120696e7429";
     }
     if i == 297 {
-        return "637265617465207461626c6520742061732073656c6563742031";
+        return "637265617465207461626c652074202873656c65637420696e7429";
     }
     if i == 298 {
-        return "6372656174652074656d70207461626c65207420286120696e7429";
+        return "637265617465207461626c65207420286120696e742920696e68657269747320287529";
     }
     if i == 299 {
-        return "637265617465207461626c65207420286120696e7429203b";
+        return "637265617465207461626c6520742061732073656c6563742031";
     }
     if i == 300 {
-        return "616c746572207461626c6520742061646420636f6c756d6e206120696e74";
+        return "6372656174652074656d70207461626c65207420286120696e7429";
     }
     if i == 301 {
-        return "414c544552205441424c4520742041444420612074657874206e6f74206e756c6c2064656661756c7420277827";
+        return "637265617465207461626c65207420286120696e7429203b";
     }
     if i == 302 {
-        return "616c746572207461626c6520742061646420636f6c756d6e2061206e756d6572696328382c332920756e69717565";
+        return "616c746572207461626c6520742061646420636f6c756d6e206120696e74";
     }
     if i == 303 {
-        return "616c746572207461626c652074";
+        return "414c544552205441424c4520742041444420612074657874206e6f74206e756c6c2064656661756c7420277827";
     }
     if i == 304 {
-        return "616c746572207461626c65207420616464";
+        return "616c746572207461626c6520742061646420636f6c756d6e2061206e756d6572696328382c332920756e69717565";
     }
     if i == 305 {
-        return "616c746572207461626c6520742061646420636f6c756d6e";
+        return "616c746572207461626c652074";
     }
     if i == 306 {
-        return "616c746572207461626c6520742064726f7020636f6c756d6e2061";
+        return "616c746572207461626c65207420616464";
     }
     if i == 307 {
-        return "616c746572207461626c6520742072656e616d6520746f2075";
+        return "616c746572207461626c6520742061646420636f6c756d6e";
     }
     if i == 308 {
-        return "616c746572207461626c6520742061646420636f6c756d6e206120696e742c2061646420636f6c756d6e206220696e74";
+        return "616c746572207461626c6520742064726f7020636f6c756d6e2061";
     }
     if i == 309 {
-        return "616c746572207461626c6520742061646420636f6e73747261696e74206320756e6971756520286129";
-    }
-    if i == 310 {
-        return "616c746572207461626c6520742061646420636f6c756d6e2061206d6f6e6579";
-    }
-    if i == 311 {
-        return "616c746572207461626c652069662065786973747320742061646420636f6c756d6e206120696e74";
-    }
-    if i == 312 {
-        return "616c746572207461626c6520732e742061646420636f6c756d6e206120696e74";
-    }
-    if i == 313 {
-        return "616c74657220696e64657820692072656e616d6520746f206a";
-    }
-    if i == 314 {
-        return "63726561746520696e6465782069206f6e207420286129";
-    }
-    if i == 315 {
-        return "43524541544520554e4951554520494e4445582049204f4e20542028412c204229";
-    }
-    if i == 316 {
-        return "63726561746520696e6465782022497822206f6e2074202822432229";
-    }
-    if i == 317 {
-        return "64726f70207461626c652074";
-    }
-    if i == 318 {
-        return "44524f50205441424c452054";
-    }
-    if i == 319 {
-        return "64726f7020696e6465782069";
-    }
-    if i == 320 {
-        return "63726561746520696e646578206f6e207420286129";
-    }
-    if i == 321 {
-        return "63726561746520696e6465782069206f6e2074";
-    }
-    if i == 322 {
-        return "63726561746520696e6465782069206174207420286129";
-    }
-    if i == 323 {
-        return "63726561746520696e6465782069207420286129";
-    }
-    if i == 324 {
-        return "63726561746520696e6465782069206f6e2074202829";
-    }
-    if i == 325 {
-        return "63726561746520696e6465782069206f6e20742028612c29";
-    }
-    if i == 326 {
-        return "63726561746520696e6465782069206f6e2074202861202b203129";
-    }
-    if i == 327 {
-        return "63726561746520696e6465782069206f6e2074202861206465736329";
-    }
-    if i == 328 {
-        return "63726561746520696e6465782069206f6e2074202861292077686572652061203e2031";
-    }
-    if i == 329 {
-        return "63726561746520696e6465782069206f6e207420286129207768657265";
-    }
-    if i == 330 {
-        return "63726561746520696e6465782069206f6e2074207573696e67206861736820286129";
-    }
-    if i == 331 {
-        return "63726561746520696e64657820636f6e63757272656e746c792069206f6e207420286129";
-    }
-    if i == 332 {
-        return "63726561746520696e6465782069206f6e206f6e6c79207420286129";
-    }
-    if i == 333 {
-        return "63726561746520696e6465782069206f6e20732e7420286129";
-    }
-    if i == 334 {
-        return "63726561746520696e646578206966206e6f74206578697374732069206f6e207420286129";
-    }
-    if i == 335 {
-        return "63726561746520756e697175652069206f6e207420286129";
-    }
-    if i == 336 {
-        return "6372656174652073657175656e63652073";
-    }
-    if i == 337 {
-        return "6372656174652073657175656e6365206966206e6f74206578697374732073206d696e76616c7565203020737461727420776974682030";
-    }
-    if i == 338 {
-        return "6372656174652073657175656e63652073207374617274";
-    }
-    if i == 339 {
-        return "6372656174652073657175656e6365207320696e6372656d656e742032";
-    }
-    if i == 340 {
-        return "6372656174652073657175656e6365";
-    }
-    if i == 341 {
         return "616c746572207461626c6520742072656e616d6520746f2075";
     }
+    if i == 310 {
+        return "616c746572207461626c6520742061646420636f6c756d6e206120696e742c2061646420636f6c756d6e206220696e74";
+    }
+    if i == 311 {
+        return "616c746572207461626c6520742061646420636f6e73747261696e74206320756e6971756520286129";
+    }
+    if i == 312 {
+        return "616c746572207461626c6520742061646420636f6c756d6e2061206d6f6e6579";
+    }
+    if i == 313 {
+        return "616c746572207461626c652069662065786973747320742061646420636f6c756d6e206120696e74";
+    }
+    if i == 314 {
+        return "616c746572207461626c6520732e742061646420636f6c756d6e206120696e74";
+    }
+    if i == 315 {
+        return "616c74657220696e64657820692072656e616d6520746f206a";
+    }
+    if i == 316 {
+        return "63726561746520696e6465782069206f6e207420286129";
+    }
+    if i == 317 {
+        return "43524541544520554e4951554520494e4445582049204f4e20542028412c204229";
+    }
+    if i == 318 {
+        return "63726561746520696e6465782022497822206f6e2074202822432229";
+    }
+    if i == 319 {
+        return "64726f70207461626c652074";
+    }
+    if i == 320 {
+        return "44524f50205441424c452054";
+    }
+    if i == 321 {
+        return "64726f7020696e6465782069";
+    }
+    if i == 322 {
+        return "63726561746520696e646578206f6e207420286129";
+    }
+    if i == 323 {
+        return "63726561746520696e6465782069206f6e2074";
+    }
+    if i == 324 {
+        return "63726561746520696e6465782069206174207420286129";
+    }
+    if i == 325 {
+        return "63726561746520696e6465782069207420286129";
+    }
+    if i == 326 {
+        return "63726561746520696e6465782069206f6e2074202829";
+    }
+    if i == 327 {
+        return "63726561746520696e6465782069206f6e20742028612c29";
+    }
+    if i == 328 {
+        return "63726561746520696e6465782069206f6e2074202861202b203129";
+    }
+    if i == 329 {
+        return "63726561746520696e6465782069206f6e2074202861206465736329";
+    }
+    if i == 330 {
+        return "63726561746520696e6465782069206f6e2074202861292077686572652061203e2031";
+    }
+    if i == 331 {
+        return "63726561746520696e6465782069206f6e207420286129207768657265";
+    }
+    if i == 332 {
+        return "63726561746520696e6465782069206f6e2074207573696e67206861736820286129";
+    }
+    if i == 333 {
+        return "63726561746520696e64657820636f6e63757272656e746c792069206f6e207420286129";
+    }
+    if i == 334 {
+        return "63726561746520696e6465782069206f6e206f6e6c79207420286129";
+    }
+    if i == 335 {
+        return "63726561746520696e6465782069206f6e20732e7420286129";
+    }
+    if i == 336 {
+        return "63726561746520696e646578206966206e6f74206578697374732069206f6e207420286129";
+    }
+    if i == 337 {
+        return "63726561746520756e697175652069206f6e207420286129";
+    }
+    if i == 338 {
+        return "6372656174652073657175656e63652073";
+    }
+    if i == 339 {
+        return "6372656174652073657175656e6365206966206e6f74206578697374732073206d696e76616c7565203020737461727420776974682030";
+    }
+    if i == 340 {
+        return "6372656174652073657175656e63652073207374617274";
+    }
+    if i == 341 {
+        return "6372656174652073657175656e6365207320696e6372656d656e742032";
+    }
     if i == 342 {
-        return "616c746572207461626c6520742072656e616d6520746f";
+        return "6372656174652073657175656e6365";
     }
     if i == 343 {
-        return "616c746572207461626c6520742072656e616d6520746f20752076";
+        return "616c746572207461626c6520742072656e616d6520746f2075";
     }
     if i == 344 {
-        return "616c746572207461626c6520742072656e616d6520636f6c756d6e206120746f2062";
+        return "616c746572207461626c6520742072656e616d6520746f";
     }
     if i == 345 {
-        return "7472756e636174652074";
+        return "616c746572207461626c6520742072656e616d6520746f20752076";
     }
     if i == 346 {
-        return "7472756e63617465207461626c652074";
+        return "616c746572207461626c6520742072656e616d6520636f6c756d6e206120746f2062";
     }
     if i == 347 {
-        return "7472756e6361746520742c2075";
+        return "7472756e636174652074";
     }
     if i == 348 {
-        return "7472756e6361746520742072657374617274206964656e74697479";
+        return "7472756e63617465207461626c652074";
     }
     if i == 349 {
-        return "7472756e63617465";
+        return "7472756e6361746520742c2075";
     }
     if i == 350 {
-        return "7472756e63617465207461626c65";
+        return "7472756e6361746520742072657374617274206964656e74697479";
     }
     if i == 351 {
-        return "64726f70207461626c65";
+        return "7472756e63617465";
     }
     if i == 352 {
-        return "64726f70207461626c6520742c2075";
+        return "7472756e63617465207461626c65";
     }
     if i == 353 {
-        return "64726f70207461626c6520742063617363616465";
+        return "64726f70207461626c65";
     }
     if i == 354 {
-        return "64726f70207461626c65206966206578697374732074";
+        return "64726f70207461626c6520742c2075";
     }
     if i == 355 {
-        return "64726f70207461626c6520732e74";
+        return "64726f70207461626c6520742063617363616465";
     }
     if i == 356 {
-        return "64726f7020696e646578";
+        return "64726f70207461626c65206966206578697374732074";
     }
     if i == 357 {
-        return "64726f7020696e64657820692c206a";
+        return "64726f70207461626c6520732e74";
     }
     if i == 358 {
-        return "64726f7020696e64657820636f6e63757272656e746c792069";
+        return "64726f7020696e646578";
     }
     if i == 359 {
-        return "64726f7020766965772076";
+        return "64726f7020696e64657820692c206a";
     }
     if i == 360 {
-        return "64726f702064617461626173652064";
+        return "64726f7020696e64657820636f6e63757272656e746c792069";
     }
     if i == 361 {
-        return "6372656174652064617461626173652064";
+        return "64726f7020766965772076";
     }
     if i == 362 {
-        return "637265617465207669657720762061732073656c6563742031";
+        return "64726f702064617461626173652064";
     }
     if i == 363 {
-        return "626567696e";
+        return "6372656174652064617461626173652064";
     }
     if i == 364 {
-        return "424547494e";
+        return "637265617465207669657720762061732073656c6563742031";
     }
     if i == 365 {
-        return "626567696e20776f726b";
+        return "626567696e";
     }
     if i == 366 {
-        return "626567696e207472616e73616374696f6e";
+        return "424547494e";
     }
     if i == 367 {
-        return "7374617274207472616e73616374696f6e";
+        return "626567696e20776f726b";
     }
     if i == 368 {
-        return "636f6d6d6974";
+        return "626567696e207472616e73616374696f6e";
     }
     if i == 369 {
-        return "434f4d4d495420574f524b";
+        return "7374617274207472616e73616374696f6e";
     }
     if i == 370 {
-        return "636f6d6d6974207472616e73616374696f6e";
+        return "636f6d6d6974";
     }
     if i == 371 {
-        return "656e64";
+        return "434f4d4d495420574f524b";
     }
     if i == 372 {
-        return "656e64207472616e73616374696f6e";
+        return "636f6d6d6974207472616e73616374696f6e";
     }
     if i == 373 {
-        return "726f6c6c6261636b";
+        return "656e64";
     }
     if i == 374 {
-        return "726f6c6c6261636b20776f726b";
+        return "656e64207472616e73616374696f6e";
     }
     if i == 375 {
-        return "61626f7274";
+        return "726f6c6c6261636b";
     }
     if i == 376 {
-        return "61626f7274207472616e73616374696f6e";
+        return "726f6c6c6261636b20776f726b";
     }
     if i == 377 {
-        return "7374617274";
+        return "61626f7274";
     }
     if i == 378 {
-        return "737461727420776f726b";
+        return "61626f7274207472616e73616374696f6e";
     }
     if i == 379 {
-        return "626567696e2069736f6c6174696f6e206c6576656c2073657269616c697a61626c65";
+        return "7374617274";
     }
     if i == 380 {
-        return "626567696e2072656164206f6e6c79";
+        return "737461727420776f726b";
     }
     if i == 381 {
-        return "626567696e2064656665727261626c65";
+        return "626567696e2069736f6c6174696f6e206c6576656c2073657269616c697a61626c65";
     }
     if i == 382 {
-        return "7374617274207472616e73616374696f6e2072656164207772697465";
+        return "626567696e2072656164206f6e6c79";
     }
     if i == 383 {
-        return "636f6d6d697420616e6420636861696e";
+        return "626567696e2064656665727261626c65";
     }
     if i == 384 {
-        return "636f6d6d697420707265706172656420277827";
+        return "7374617274207472616e73616374696f6e2072656164207772697465";
     }
     if i == 385 {
-        return "726f6c6c6261636b20707265706172656420277827";
+        return "636f6d6d697420616e6420636861696e";
     }
     if i == 386 {
-        return "726f6c6c6261636b20746f2073617665706f696e742061";
+        return "636f6d6d697420707265706172656420277827";
     }
     if i == 387 {
-        return "726f6c6c6261636b20746f2061";
+        return "726f6c6c6261636b20707265706172656420277827";
     }
     if i == 388 {
-        return "656e6420776f726b206e6f77";
+        return "726f6c6c6261636b20746f2073617665706f696e742061";
     }
     if i == 389 {
-        return "70726570617265207472616e73616374696f6e20277827";
+        return "726f6c6c6261636b20746f2061";
     }
     if i == 390 {
-        return "73617665706f696e742061";
+        return "656e6420776f726b206e6f77";
     }
     if i == 391 {
-        return "72656c656173652073617665706f696e742061";
+        return "70726570617265207472616e73616374696f6e20277827";
     }
     if i == 392 {
-        return "73656c65637420612066726f6d207420756e696f6e2073656c65637420622066726f6d2075";
+        return "73617665706f696e742061";
     }
     if i == 393 {
-        return "73656c65637420612066726f6d207420756e696f6e20616c6c2073656c65637420622066726f6d2075";
+        return "72656c656173652073617665706f696e742061";
     }
     if i == 394 {
-        return "73656c65637420612066726f6d207420696e746572736563742073656c65637420622066726f6d2075";
+        return "73656c65637420612066726f6d207420756e696f6e2073656c65637420622066726f6d2075";
     }
     if i == 395 {
-        return "73656c65637420612066726f6d2074206578636570742073656c65637420622066726f6d2075";
+        return "73656c65637420612066726f6d207420756e696f6e20616c6c2073656c65637420622066726f6d2075";
     }
     if i == 396 {
-        return "73656c65637420612066726f6d2074207768657265206120696e2028312920756e696f6e2073656c6563742031";
+        return "73656c65637420612066726f6d207420696e746572736563742073656c65637420622066726f6d2075";
     }
     if i == 397 {
-        return "73656c65637420612066726f6d20743b";
+        return "73656c65637420612066726f6d2074206578636570742073656c65637420622066726f6d2075";
     }
     if i == 398 {
-        return "73656c65637420612c20622c20632c2064";
+        return "73656c65637420612066726f6d2074207768657265206120696e2028312920756e696f6e2073656c6563742031";
     }
     if i == 399 {
-        return "73656c65637420612c20622c2063";
+        return "73656c65637420612066726f6d20743b";
     }
     if i == 400 {
+        return "73656c65637420612c20622c20632c2064";
+    }
+    if i == 401 {
+        return "73656c65637420612c20622c2063";
+    }
+    if i == 402 {
         return "73656c65637420312c20322c2033";
     }
     return "";
@@ -2116,19 +2122,19 @@ pub fn stmt_ok(i: int) -> [] int {
         return 0;
     }
     if i == 300 {
-        return 1;
+        return 0;
     }
     if i == 301 {
-        return 1;
+        return 0;
     }
     if i == 302 {
         return 1;
     }
     if i == 303 {
-        return 0;
+        return 1;
     }
     if i == 304 {
-        return 0;
+        return 1;
     }
     if i == 305 {
         return 0;
@@ -2158,10 +2164,10 @@ pub fn stmt_ok(i: int) -> [] int {
         return 0;
     }
     if i == 314 {
-        return 1;
+        return 0;
     }
     if i == 315 {
-        return 1;
+        return 0;
     }
     if i == 316 {
         return 1;
@@ -2176,10 +2182,10 @@ pub fn stmt_ok(i: int) -> [] int {
         return 1;
     }
     if i == 320 {
-        return 0;
+        return 1;
     }
     if i == 321 {
-        return 0;
+        return 1;
     }
     if i == 322 {
         return 0;
@@ -2305,10 +2311,10 @@ pub fn stmt_ok(i: int) -> [] int {
         return 0;
     }
     if i == 363 {
-        return 1;
+        return 0;
     }
     if i == 364 {
-        return 1;
+        return 0;
     }
     if i == 365 {
         return 1;
@@ -2347,10 +2353,10 @@ pub fn stmt_ok(i: int) -> [] int {
         return 1;
     }
     if i == 377 {
-        return 0;
+        return 1;
     }
     if i == 378 {
-        return 0;
+        return 1;
     }
     if i == 379 {
         return 0;
@@ -2413,9 +2419,15 @@ pub fn stmt_ok(i: int) -> [] int {
         return 0;
     }
     if i == 399 {
-        return 1;
+        return 0;
     }
     if i == 400 {
+        return 0;
+    }
+    if i == 401 {
+        return 1;
+    }
+    if i == 402 {
         return 0;
     }
     return 0;
@@ -3323,19 +3335,19 @@ pub fn stmt_want(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 300 {
-        return "616c746572207461626c65202274222061646420636f6c756d6e2022612220696e7465676572";
+        return "";
     }
     if i == 301 {
-        return "616c746572207461626c65202274222061646420636f6c756d6e202261222074657874206e6f74206e756c6c2064656661756c7420277827";
+        return "";
     }
     if i == 302 {
-        return "616c746572207461626c65202274222061646420636f6c756d6e20226122206e756d6572696328382c20332920756e69717565";
+        return "616c746572207461626c65202274222061646420636f6c756d6e2022612220696e7465676572";
     }
     if i == 303 {
-        return "";
+        return "616c746572207461626c65202274222061646420636f6c756d6e202261222074657874206e6f74206e756c6c2064656661756c7420277827";
     }
     if i == 304 {
-        return "";
+        return "616c746572207461626c65202274222061646420636f6c756d6e20226122206e756d6572696328382c20332920756e69717565";
     }
     if i == 305 {
         return "";
@@ -3365,28 +3377,28 @@ pub fn stmt_want(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 314 {
-        return "63726561746520696e64657820226922206f6e20227422202822612229";
+        return "";
     }
     if i == 315 {
-        return "63726561746520756e6971756520696e64657820226922206f6e2022742220282261222c2022622229";
+        return "";
     }
     if i == 316 {
-        return "63726561746520696e6465782022497822206f6e20227422202822432229";
+        return "63726561746520696e64657820226922206f6e20227422202822612229";
     }
     if i == 317 {
-        return "64726f70207461626c6520227422";
+        return "63726561746520756e6971756520696e64657820226922206f6e2022742220282261222c2022622229";
     }
     if i == 318 {
-        return "64726f70207461626c6520227422";
+        return "63726561746520696e6465782022497822206f6e20227422202822432229";
     }
     if i == 319 {
-        return "64726f7020696e64657820226922";
+        return "64726f70207461626c6520227422";
     }
     if i == 320 {
-        return "";
+        return "64726f70207461626c6520227422";
     }
     if i == 321 {
-        return "";
+        return "64726f7020696e64657820226922";
     }
     if i == 322 {
         return "";
@@ -3512,10 +3524,10 @@ pub fn stmt_want(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 363 {
-        return "626567696e";
+        return "";
     }
     if i == 364 {
-        return "626567696e";
+        return "";
     }
     if i == 365 {
         return "626567696e";
@@ -3527,10 +3539,10 @@ pub fn stmt_want(i: int) -> [] &static [byte] {
         return "626567696e";
     }
     if i == 368 {
-        return "636f6d6d6974";
+        return "626567696e";
     }
     if i == 369 {
-        return "636f6d6d6974";
+        return "626567696e";
     }
     if i == 370 {
         return "636f6d6d6974";
@@ -3542,10 +3554,10 @@ pub fn stmt_want(i: int) -> [] &static [byte] {
         return "636f6d6d6974";
     }
     if i == 373 {
-        return "726f6c6c6261636b";
+        return "636f6d6d6974";
     }
     if i == 374 {
-        return "726f6c6c6261636b";
+        return "636f6d6d6974";
     }
     if i == 375 {
         return "726f6c6c6261636b";
@@ -3554,10 +3566,10 @@ pub fn stmt_want(i: int) -> [] &static [byte] {
         return "726f6c6c6261636b";
     }
     if i == 377 {
-        return "";
+        return "726f6c6c6261636b";
     }
     if i == 378 {
-        return "";
+        return "726f6c6c6261636b";
     }
     if i == 379 {
         return "";
@@ -3620,9 +3632,15 @@ pub fn stmt_want(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 399 {
-        return "73656c656374202261222c202262222c20226322";
+        return "";
     }
     if i == 400 {
+        return "";
+    }
+    if i == 401 {
+        return "73656c656374202261222c202262222c20226322";
+    }
+    if i == 402 {
         return "";
     }
     return "";
@@ -4455,7 +4473,7 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "syntax";
     }
     if i == 275 {
-        return "unknown-construct";
+        return "unsupported-statement";
     }
     if i == 276 {
         return "unknown-construct";
@@ -4467,22 +4485,22 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "unknown-construct";
     }
     if i == 279 {
-        return "syntax";
+        return "unknown-construct";
     }
     if i == 280 {
-        return "syntax";
+        return "unknown-construct";
     }
     if i == 281 {
         return "syntax";
     }
     if i == 282 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 283 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 284 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 285 {
         return "unsupported-statement";
@@ -4491,91 +4509,91 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "syntax";
     }
     if i == 287 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 288 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 289 {
         return "syntax";
     }
     if i == 290 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 291 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 292 {
         return "syntax";
     }
     if i == 293 {
-        return "unknown-construct";
+        return "unsupported-statement";
     }
     if i == 294 {
-        return "reserved-word";
+        return "syntax";
     }
     if i == 295 {
-        return "reserved-word";
+        return "unknown-construct";
     }
     if i == 296 {
-        return "syntax";
+        return "reserved-word";
     }
     if i == 297 {
-        return "syntax";
+        return "reserved-word";
     }
     if i == 298 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 299 {
         return "syntax";
     }
     if i == 300 {
-        return "";
+        return "unsupported-statement";
     }
     if i == 301 {
-        return "";
+        return "syntax";
     }
     if i == 302 {
         return "";
     }
     if i == 303 {
-        return "unsupported-statement";
+        return "";
     }
     if i == 304 {
-        return "syntax";
+        return "";
     }
     if i == 305 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 306 {
-        return "unsupported-statement";
-    }
-    if i == 307 {
-        return "unsupported-statement";
-    }
-    if i == 308 {
         return "syntax";
     }
-    if i == 309 {
-        return "reserved-word";
+    if i == 307 {
+        return "syntax";
     }
-    if i == 310 {
-        return "unknown-type";
-    }
-    if i == 311 {
+    if i == 308 {
         return "unsupported-statement";
     }
+    if i == 309 {
+        return "unsupported-statement";
+    }
+    if i == 310 {
+        return "syntax";
+    }
+    if i == 311 {
+        return "reserved-word";
+    }
     if i == 312 {
-        return "unknown-construct";
+        return "unknown-type";
     }
     if i == 313 {
         return "unsupported-statement";
     }
     if i == 314 {
-        return "";
+        return "unknown-construct";
     }
     if i == 315 {
-        return "";
+        return "unsupported-statement";
     }
     if i == 316 {
         return "";
@@ -4590,13 +4608,13 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 320 {
-        return "reserved-word";
+        return "";
     }
     if i == 321 {
-        return "syntax";
+        return "";
     }
     if i == 322 {
-        return "syntax";
+        return "reserved-word";
     }
     if i == 323 {
         return "syntax";
@@ -4614,28 +4632,28 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "syntax";
     }
     if i == 328 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 329 {
         return "syntax";
     }
     if i == 330 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 331 {
-        return "reserved-word";
+        return "syntax";
     }
     if i == 332 {
-        return "reserved-word";
+        return "syntax";
     }
     if i == 333 {
-        return "unknown-construct";
+        return "reserved-word";
     }
     if i == 334 {
-        return "unsupported-statement";
+        return "reserved-word";
     }
     if i == 335 {
-        return "unsupported-statement";
+        return "unknown-construct";
     }
     if i == 336 {
         return "unsupported-statement";
@@ -4644,7 +4662,7 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "unsupported-statement";
     }
     if i == 338 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 339 {
         return "unsupported-statement";
@@ -4659,13 +4677,13 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "syntax";
     }
     if i == 343 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 344 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 345 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 346 {
         return "unsupported-statement";
@@ -4677,10 +4695,10 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "unsupported-statement";
     }
     if i == 349 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 350 {
-        return "syntax";
+        return "unsupported-statement";
     }
     if i == 351 {
         return "syntax";
@@ -4695,22 +4713,22 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "syntax";
     }
     if i == 355 {
-        return "unknown-construct";
+        return "syntax";
     }
     if i == 356 {
         return "syntax";
     }
     if i == 357 {
-        return "syntax";
+        return "unknown-construct";
     }
     if i == 358 {
-        return "reserved-word";
+        return "syntax";
     }
     if i == 359 {
-        return "unsupported-statement";
+        return "syntax";
     }
     if i == 360 {
-        return "unsupported-statement";
+        return "reserved-word";
     }
     if i == 361 {
         return "unsupported-statement";
@@ -4719,10 +4737,10 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "unsupported-statement";
     }
     if i == 363 {
-        return "";
+        return "unsupported-statement";
     }
     if i == 364 {
-        return "";
+        return "unsupported-statement";
     }
     if i == 365 {
         return "";
@@ -4761,16 +4779,16 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "";
     }
     if i == 377 {
-        return "unsupported-statement";
+        return "";
     }
     if i == 378 {
-        return "unsupported-statement";
+        return "";
     }
     if i == 379 {
-        return "unknown-construct";
+        return "unsupported-statement";
     }
     if i == 380 {
-        return "unknown-construct";
+        return "unsupported-statement";
     }
     if i == 381 {
         return "unknown-construct";
@@ -4797,19 +4815,19 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "unknown-construct";
     }
     if i == 389 {
-        return "unsupported-statement";
+        return "unknown-construct";
     }
     if i == 390 {
-        return "unsupported-statement";
+        return "unknown-construct";
     }
     if i == 391 {
         return "unsupported-statement";
     }
     if i == 392 {
-        return "set-operation";
+        return "unsupported-statement";
     }
     if i == 393 {
-        return "set-operation";
+        return "unsupported-statement";
     }
     if i == 394 {
         return "set-operation";
@@ -4821,15 +4839,21 @@ pub fn stmt_tag(i: int) -> [] &static [byte] {
         return "set-operation";
     }
     if i == 397 {
-        return "syntax";
+        return "set-operation";
     }
     if i == 398 {
-        return "too-big";
+        return "set-operation";
     }
     if i == 399 {
-        return "";
+        return "syntax";
     }
     if i == 400 {
+        return "too-big";
+    }
+    if i == 401 {
+        return "";
+    }
+    if i == 402 {
         return "too-big";
     }
     return "";
@@ -6039,6 +6063,12 @@ pub fn stmt_oscap(i: int) -> [] int {
     if i == 400 {
         return 64;
     }
+    if i == 401 {
+        return 64;
+    }
+    if i == 402 {
+        return 64;
+    }
     return 0;
 }
 
@@ -7246,6 +7276,12 @@ pub fn stmt_vcap(i: int) -> [] int {
     if i == 400 {
         return 64;
     }
+    if i == 401 {
+        return 64;
+    }
+    if i == 402 {
+        return 64;
+    }
     return 0;
 }
 
@@ -8451,6 +8487,12 @@ pub fn stmt_ncap(i: int) -> [] int {
         return 200;
     }
     if i == 400 {
+        return 200;
+    }
+    if i == 401 {
+        return 200;
+    }
+    if i == 402 {
         return 6;
     }
     return 0;
@@ -9660,6 +9702,12 @@ pub fn stmt_kcap(i: int) -> [] int {
     if i == 400 {
         return 200;
     }
+    if i == 401 {
+        return 200;
+    }
+    if i == 402 {
+        return 200;
+    }
     return 0;
 }
 
@@ -10865,6 +10913,12 @@ pub fn stmt_ocap(i: int) -> [] int {
         return 2048;
     }
     if i == 400 {
+        return 2048;
+    }
+    if i == 401 {
+        return 2048;
+    }
+    if i == 402 {
         return 2048;
     }
     return 0;
@@ -12074,6 +12128,12 @@ pub fn stmt_rcap(i: int) -> [] int {
     if i == 400 {
         return 128;
     }
+    if i == 401 {
+        return 128;
+    }
+    if i == 402 {
+        return 128;
+    }
     return 0;
 }
 
@@ -13273,12 +13333,18 @@ pub fn stmt_tmpcap(i: int) -> [] int {
         return 64;
     }
     if i == 398 {
-        return 3;
+        return 64;
     }
     if i == 399 {
-        return 3;
+        return 64;
     }
     if i == 400 {
+        return 3;
+    }
+    if i == 401 {
+        return 3;
+    }
+    if i == 402 {
         return 64;
     }
     return 0;

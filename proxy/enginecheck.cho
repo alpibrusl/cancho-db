@@ -136,7 +136,7 @@ fn put_rows[&i, &q](io: &!i Io, w: &!q exec.Work) -> [io_write] int {
             while c < nc {
                 putchar(io, ' ');
                 // the value as a client is sent it (src/answer.cho); one longer than this buffer is not printed whole here
-                let n = answer.text(exec.rows_of(w), at, buf, 0);
+                let n = answer.text(exec.type_of(w, c), exec.rows_of(w), at, buf, 0);
                 if n == 0 - 1 {
                     putchar(io, '-');
                 } else if n == 0 {
@@ -558,6 +558,10 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                     put_str(io, "via ");
                     put_int(io, w.viac);
                     putchar(io, '\n');
+                } else if begins(all, ls, le, "!clock ") {
+                    // the time now() answers from here on (6bp): microseconds since 2000-01-01
+                    exec.clock(w, number(all, ls + 7, le));
+                    put_str(io, "clock\n");
                 } else if starts(all, ls, le, "!viarows") {
                     // and how many rows those statements were given by an index (slice 4)
                     put_str(io, "viarows ");
