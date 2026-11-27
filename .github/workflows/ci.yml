@@ -5,10 +5,6 @@ on:
     branches: ["**"]
   pull_request:
 
-env:
-  # The compiler these sources are built with. Also `[package] cancho` in cancho.toml (checked below).
-  CANCHO_REV: 1d3ec24d1b96b39f0b1b474d46ebff7ae94a10e3
-
 jobs:
   # The gate in seven parts, run at once (scripts/check.sh says what each is and checks that this list is its own): the checks, and six shards of the mutants.
   test:
@@ -29,27 +25,14 @@ jobs:
         with:
           path: db
 
-      - uses: actions/checkout@v4
-        with:
-          repository: alpibrusl/cancho
-          ref: ${{ env.CANCHO_REV }}
-          path: cancho
-
-      - name: Cache the compiler
-        id: compiler
-        uses: actions/cache@v4
-        with:
-          path: cancho/target/release/cancho
-          key: cancho-${{ env.CANCHO_REV }}
-
-      - name: Build cancho
-        if: steps.compiler.outputs.cache-hit != 'true'
-        working-directory: cancho
-        run: cargo build --release -p cancho
-
-      - name: cancho.toml names the compiler CI builds
+      # The compiler these sources are built with: the release pinned in cancho.toml (`[package] cancho`), read from there so there is one place to change it, and installed prebuilt.
+      - name: Install the pinned compiler
         working-directory: db
-        run: grep -qx "cancho = \"$CANCHO_REV\"" cancho.toml
+        run: |
+          pin=$(sed -n 's/^cancho *= *"\([0-9a-f.]*\)".*/\1/p' cancho.toml)
+          test -n "$pin" || { echo "cancho.toml has no compiler pin" >&2; exit 1; }
+          curl -fsSL https://raw.githubusercontent.com/alpibrusl/cancho/main/scripts/install.sh | sh -s "$pin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: The second verifier's one dependency (Ed25519)
         run: pip install cryptography
@@ -61,6 +44,4 @@ jobs:
       # differential fuzzing, and the mutants of both verifiers (each must make a vector fail).
       - name: Check
         working-directory: db
-        env:
-          CANCHO: ${{ github.workspace }}/cancho/target/release/cancho
         run: sh scripts/check.sh ${{ matrix.part }}

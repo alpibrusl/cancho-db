@@ -1,6 +1,6 @@
-# cancho-db's project file. The compiler these sources are written for is the one CI builds (CANCHO_REV in
-# .github/workflows/ci.yml; one is checked against the other there). No dependencies: M0 uses only `std`.
+# cancho-db's project file. The compiler these sources are written for is the release pinned below, which CI
+# installs (read from here: one place to change it). No dependencies: M0 uses only `std`.
 
 [package]
 name = "cancho-db"
-cancho = "1d3ec24d1b96b39f0b1b474d46ebff7ae94a10e3"
+cancho = "0.1.1"
