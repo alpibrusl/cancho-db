@@ -1160,7 +1160,7 @@ fn finish[&h, &c, &g, &z, &q, &r, &t, &n](heap: &!h Heap, tab: &!c conns.Table, 
 }
 
 // Take every client waiting on the listener. One from this machine gets a place; any other is closed unread; one more than the places is told so (`53300`).
-fn accept_all[&h, &l, &p, &g, &s, &x, &o, &n](heap: &!h Heap, table: conns.Table, eng: &!n tls.Engine, listener: &!l Listener, poller: &!p Poller, gs: &g [int], sts: &!s [int], xis: &!x [int], out: &!o [byte]) -> [heap, conn_accept, conn_write, poll] conns.Table {
+fn accept_all[&h, &l, &p, &g, &s, &x, &o](heap: &!h Heap, table: conns.Table, listener: &!l Listener, poller: &!p Poller, gs: &g [int], sts: &!s [int], xis: &!x [int], out: &!o [byte]) -> [heap, conn_accept, conn_write, poll] conns.Table {
     var tab = table;
     var more = true;
     while more {
@@ -1173,7 +1173,7 @@ fn accept_all[&h, &l, &p, &g, &s, &x, &o, &n](heap: &!h Heap, table: conns.Table
                         if !from_here(tw, a) {
                             conns.close(tw, a);
                         } else if a >= max_clients() {
-                            push(tw, eng, a, gs, out[0..wire.error(out, 0, true, "53300", "cancho-db: too many connections", "")]);
+                            put(tw, a, gs, out[0..wire.error(out, 0, true, "53300", "cancho-db: too many connections", "")]);
                             conns.close(tw, a);
                         } else {
                             conns.nonblocking(tw, a);
@@ -1294,7 +1294,7 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w](heap:
                         while j < ready {
                             let token = ev[2 * j];
                             if token == 0 {
-                                tab = accept_all(heap, tab, eng, listener, pw, gs, sts, xis, out);
+                                tab = accept_all(heap, tab, listener, pw, gs, sts, xis, out);
                             } else if token <= max_clients() && sts[stride() * (token - 1)] != 0 {
                                 borrow mut tab as &!tw in {
                                     if gs[g_tls_on() + token - 1] == 1 {
