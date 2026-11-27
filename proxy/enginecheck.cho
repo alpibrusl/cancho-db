@@ -558,6 +558,11 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                     put_str(io, "via ");
                     put_int(io, w.viac);
                     putchar(io, '\n');
+                } else if starts(all, ls, le, "!viarows") {
+                    // and how many rows those statements were given by an index (slice 4)
+                    put_str(io, "viarows ");
+                    put_int(io, w.viaf);
+                    putchar(io, '\n');
                 } else if starts(all, ls, le, "!indexes") {
                     // every built index has exactly the entries its table's rows say it should (docs/m3-engine.md 6bo): `indexes N ok`, or what differs
                     let bad = indexes_ok(io, pg, w, rs[cur]);

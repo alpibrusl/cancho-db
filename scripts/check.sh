@@ -76,6 +76,9 @@ E2E_VERIFIERS="build/verify build/verify-go" quiet 3 python3 tests/erase_branch_
 echo "== the engine's rows against PostgreSQL (docs/m3-engine.md, M3c): the image is to_jsonb's, the plain key jsonb_build_array's, the stored keys in key order"
 "$CANCHO" build --std proxy/rowcheck.cho src/row.cho src/state.cho src/commit.cho src/build.cho -o build/rowcheck
 quiet 2 python3 tests/row_check.py build/rowcheck
+echo "== times and their texts (docs/m3-engine.md 6bp): read and written as PostgreSQL does in UTC, held to Python's datetime"
+"$CANCHO" build --std proxy/timecheck.cho src/time.cho -o build/timecheck
+quiet 2 python3 tests/time_check.py build/timecheck
 echo "== the engine's expression evaluator against PostgreSQL (docs/m3-engine.md, M3d): it may refuse; when it answers, the type, every row's value or the SQLSTATE are PostgreSQL's"
 "$CANCHO" build --std proxy/evalcheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/row.cho src/eval.cho -o build/evalcheck
 quiet 4 python3 tests/eval_check.py build/evalcheck 4000 1

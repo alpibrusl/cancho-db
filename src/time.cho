@@ -1,0 +1,275 @@
+edition 9;
+module cdb.time;
+
+// SPDX-License-Identifier: EUPL-1.2
+// Copyright (c) 2026 Alpibru S.L.
+// Times (docs/m3-engine.md 6bp): a `timestamp` or a `timestamptz` is the number of microseconds since 2000-01-01 00:00:00 (PostgreSQL's measure), and these are the
+// two ways between that number and a text: what is read (ISO 8601, and nothing else PostgreSQL would read) and what is written (as PostgreSQL writes it in a
+// session whose zone is UTC). Pure functions on bytes; years 0001 to 9999.
+
+// The answers of `parse` that are not a time: a text PostgreSQL may read and this does not (refused, not an error), and a text of the form with a field out of
+// range (PostgreSQL's 22008).
+pub fn unread() -> [] int {
+    return 1;
+}
+
+pub fn out_of_range() -> [] int {
+    return 2;
+}
+
+fn day_us() -> [] int {
+    return 86400000000;
+}
+
+// The days from 0001-01-01 to 2000-01-01, and to 10000-01-01.
+fn epoch_days() -> [] int {
+    return 730119;
+}
+
+fn end_days() -> [] int {
+    return 3652059;
+}
+
+fn digit[&s](s: &s [byte], at: int, end: int) -> [] bool {
+    return at < end && int_of(s[at]) >= '0' && int_of(s[at]) <= '9';
+}
+
+// The number written in the `n` digits at `at`, or -1 if they are not all digits.
+fn number[&s](s: &s [byte], at: int, end: int, n: int) -> [] int {
+    var v = 0;
+    var i = 0;
+    while i < n {
+        if !digit(s, at + i, end) {
+            return 0 - 1;
+        }
+        v = v * 10 + int_of(s[at + i]) - '0';
+        i = i + 1;
+    }
+    return v;
+}
+
+fn days_in(y: int, m: int) -> [] int {
+    if m == 2 {
+        if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            return 29;
+        }
+        return 28;
+    }
+    if m == 4 || m == 6 || m == 9 || m == 11 {
+        return 30;
+    }
+    return 31;
+}
+
+// The days from 0001-01-01 to the day `y`-`m`-`d` (a year of 1 or more).
+fn days_to(y0: int, m: int, d: int) -> [] int {
+    var y = y0;
+    var mp = m - 3;
+    if m <= 2 {
+        y = y - 1;
+        mp = m + 9;
+    }
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 306;
+}
+
+// Read the text `s[a..a + n]` as a time: 0 and the microseconds since 2000-01-01 in `out[0]`, or `unread()`, or `out_of_range()`. `tz`: the text is of a
+// moment (`timestamptz`): an offset moves it, and none is UTC. Not `tz`: an offset is read and dropped, as PostgreSQL does for a `timestamp`.
+pub fn parse[&s, &o](s: &s [byte], a: int, n: int, tz: bool, out: &!o [int]) -> [] int {
+    var at = a;
+    var end = a + n;
+    while at < end && int_of(s[at]) == ' ' {
+        at = at + 1;
+    }
+    while end > at && int_of(s[end - 1]) == ' ' {
+        end = end - 1;
+    }
+    let y = number(s, at, end, 4);
+    let mo = number(s, at + 5, end, 2);
+    let d = number(s, at + 8, end, 2);
+    if y < 0 || mo < 0 || d < 0 || int_of(s[at + 4]) != '-' || int_of(s[at + 7]) != '-' {
+        return unread();
+    }
+    at = at + 10;
+    var h = 0;
+    var mi = 0;
+    var sec = 0;
+    var us = 0;
+    var off = 0;
+    if at < end {
+        if int_of(s[at]) != ' ' && int_of(s[at]) != 'T' {
+            return unread();
+        }
+        h = number(s, at + 1, end, 2);
+        mi = number(s, at + 4, end, 2);
+        if h < 0 || mi < 0 || int_of(s[at + 3]) != ':' {
+            return unread();
+        }
+        at = at + 6;
+        if at < end && int_of(s[at]) == ':' {
+            sec = number(s, at + 1, end, 2);
+            if sec < 0 {
+                return unread();
+            }
+            at = at + 3;
+            if at < end && int_of(s[at]) == '.' {
+                at = at + 1;
+                var places = 0;
+                while digit(s, at, end) {
+                    us = us * 10 + int_of(s[at]) - '0';
+                    places = places + 1;
+                    at = at + 1;
+                }
+                if places < 1 || places > 6 {
+                    return unread();
+                }
+                while places < 6 {
+                    us = us * 10;
+                    places = places + 1;
+                }
+            }
+        }
+        // an offset: Z, or a sign, two digits of hours and perhaps two of minutes, after one space or none
+        if at < end && int_of(s[at]) == ' ' {
+            at = at + 1;
+            if at >= end || int_of(s[at]) != '+' && int_of(s[at]) != '-' && int_of(s[at]) != 'Z' && int_of(s[at]) != 'z' {
+                return unread();
+            }
+        }
+        if at < end && (int_of(s[at]) == 'Z' || int_of(s[at]) == 'z') {
+            at = at + 1;
+        } else if at < end && (int_of(s[at]) == '+' || int_of(s[at]) == '-') {
+            let west = int_of(s[at]) == '-';
+            let oh = number(s, at + 1, end, 2);
+            var om = 0;
+            at = at + 3;
+            if at < end && int_of(s[at]) == ':' {
+                at = at + 1;
+                om = number(s, at, end, 2);
+                at = at + 2;
+            } else if at < end {
+                om = number(s, at, end, 2);
+                at = at + 2;
+            }
+            if oh < 0 || om < 0 || oh > 15 || om > 59 {
+                return unread();
+            }
+            off = (oh * 60 + om) * 60000000;
+            if west {
+                off = 0 - off;
+            }
+        }
+        if at != end {
+            return unread();
+        }
+    }
+    // the fields: a year this does not hold, an hour of 24 and a second of 60 are PostgreSQL's to read; the rest out of range are its error
+    if y < 1 {
+        return unread();
+    }
+    if mo < 1 || mo > 12 || d < 1 || d > days_in(y, mo) || h > 24 || mi > 59 || sec > 60 {
+        return out_of_range();
+    }
+    if h == 24 || sec == 60 {
+        return unread();
+    }
+    var v = days_to(y, mo, d) * day_us() + ((h * 60 + mi) * 60 + sec) * 1000000 + us;
+    if tz {
+        v = v - off;
+        if v < 0 || v >= end_days() * day_us() {
+            return unread();
+        }
+    }
+    out[0] = v - epoch_days() * day_us();
+    return 0;
+}
+
+fn put[&o](out: &!o [byte], at: int, c: int) -> [] int {
+    if at < 0 || at >= len(out) {
+        return 0 - 1;
+    }
+    out[at] = byte_of(c);
+    return at + 1;
+}
+
+// `v` in `n` digits.
+fn digits[&o](out: &!o [byte], at0: int, v: int, n: int) -> [] int {
+    var at = at0;
+    var div = 1;
+    var i = 1;
+    while i < n {
+        div = div * 10;
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        at = put(out, at, '0' + v / div % 10);
+        div = div / 10;
+        i = i + 1;
+    }
+    return at;
+}
+
+// Write the time `v` (microseconds since 2000-01-01) into `out` from `at`, as PostgreSQL writes it: `YYYY-MM-DD HH:MM:SS`, a fraction if there is one (its
+// trailing zeros dropped), and `+00` for a moment (`tz`). `json`: as `to_jsonb` writes it, a `T` between the date and the time and `+00:00`. Where it ends, or -1
+// if `out` is too small or the year is not 0001 to 9999.
+pub fn format[&o](v: int, tz: bool, json: bool, out: &!o [byte], at0: int) -> [] int {
+    let abs = v + epoch_days() * day_us();
+    if abs < 0 || abs >= end_days() * day_us() {
+        return 0 - 1;
+    }
+    let days = abs / day_us();
+    let tod = abs - days * day_us();
+    // the day's year, month and day: the days since 0000-03-01, in eras of 400 years
+    let z = days + 306;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    var m = mp + 3;
+    var y = yoe + era * 400;
+    if mp >= 10 {
+        m = mp - 9;
+        y = y + 1;
+    }
+    var at = digits(out, at0, y, 4);
+    at = put(out, at, '-');
+    at = digits(out, at, m, 2);
+    at = put(out, at, '-');
+    at = digits(out, at, d, 2);
+    if json {
+        at = put(out, at, 'T');
+    } else {
+        at = put(out, at, ' ');
+    }
+    let secs = tod / 1000000;
+    var us = tod - secs * 1000000;
+    at = digits(out, at, secs / 3600, 2);
+    at = put(out, at, ':');
+    at = digits(out, at, secs / 60 % 60, 2);
+    at = put(out, at, ':');
+    at = digits(out, at, secs % 60, 2);
+    if us > 0 {
+        var places = 6;
+        while us % 10 == 0 {
+            us = us / 10;
+            places = places - 1;
+        }
+        at = put(out, at, '.');
+        at = digits(out, at, us, places);
+    }
+    if tz {
+        at = put(out, at, '+');
+        at = digits(out, at, 0, 2);
+        if json {
+            at = put(out, at, ':');
+            at = digits(out, at, 0, 2);
+        }
+    }
+    return at;
+}

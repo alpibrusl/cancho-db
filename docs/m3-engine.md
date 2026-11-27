@@ -2845,6 +2845,52 @@ a parameter, a negative number, the constant first, an empty range, one of exact
 one-sided and wide, texts beginning alike, the key bounding the scan, an `or`, what can raise), PostgreSQL holding every answer and the count of
 reads by an index exact. 14 mutants.
 
+**Slice 4, second part: `order by` an indexed column with a `limit`, the design.** `select ... from t order by c limit n` reads the whole table and
+sorts it to give `n` rows. With an index on `c` the first `n` entries are the answer.
+
+- *The tree is read backwards for `desc`.* `btree.prev_before`: the last entry before a key, as `next_after` is the first after one. It walks from
+  the root each time (no leaf is kept): a read of this kind is a few rows. Held, like `next_after`, to a model in `tests/btree_check.py`.
+- *When.* A `select` of one table, not grouped, not `distinct`, with no `where`, ordered by one item that is a column, the first of a built index
+  that is not partial, of an integer type, `asc` or `desc` with the nulls where PostgreSQL puts them by default (last for `asc`, first for `desc`),
+  and a `limit` (an `offset` may come with it). Then the rows are read by the index in that order, and the read ends when `offset + limit` rows are
+  had. They are sorted like any answer afterwards, which changes nothing: they come sorted.
+- *Not a text column*: an entry has only a text's first 24 bytes, and texts that begin alike are in the order of their keys, not their own.
+- *Not when an item of the select list can raise an error.* A row that is not read is a row whose error is not found (6g); PostgreSQL may compute
+  the list before it sorts, and the engine already refuses `select 10 / (k - 2) ... order by k limit 1` as depending on that order. So the list has
+  to be columns, constants and what cannot raise.
+- *Not with a `where`*, in this part: the rows that pass may be few and far along the index, and reading most of a table by an index costs four
+  times what reading the table does (the first part's measure). Without a count of what passes there is nothing to decide by.
+- *Rows that tie.* Where rows have the same value in `c`, which of them are within the limit is not said by the statement; PostgreSQL gives
+  whichever its plan meets. For `asc` the index gives those with the least keys, as the sort of the whole table did. **For `desc` it gives those with
+  the greatest keys, where the sort gave the least**: an answer PostgreSQL may give as well, and another than this engine gave before. The test
+  holds such answers by their number of rows, as it always has.
+- *At most 1,024 rows* (`offset + limit`). A row by the index is a lookup, and a `limit` as large as the table would read all of it that way, at
+  four times the table's cost. A thousand lookups are a few milliseconds whatever the table.
+
+**Built.** `btree.prev_before`; in `src/via.cho`, `ordered` (called by the plain `select` once it knows its `limit` and `offset`), and `step`, the
+one place the read moves, forwards or backwards. The read has two parts, the values and the nulls, in the order the direction asks.
+
+*What the mutants of `prev_before` showed*: it was written with a second way of walking, "the last leaf under the page to the left", for when a
+leaf has nothing before the key. Both mutants of it lived, and rightly: everything under that page is before the key, so the walk as it already was
+ends at the last entry there. The second way is gone.
+
+**Measured** (100,000 rows, by hand with the test program, each of 20 runs):
+
+| | sorting the table | by the index |
+|---|---|---|
+| `order by a limit 10` | 115 ms | 0.06 ms |
+| `order by a desc limit 10` | 114 ms | 0.12 ms |
+| `order by a desc limit 100 offset 900` | 91 ms | 9.1 ms |
+| `order by a limit 1025` (over the bound) | 99 ms | 98 ms (the table, as before) |
+
+Backwards costs about twice forwards a row: each step walks from the root.
+
+*Tested.* In the list of slice 2: 17 ordered reads that have to go by an index (both directions, an offset, past the values into the nulls and
+the other way, a limit of 0 and of 1,024, parameters, after writes and inside a transaction that is rolled back) and 11 that may not (1,025 rows, no
+limit, a text column, two items, an expression, `distinct`, a `where`, a partial index, an item that can raise). PostgreSQL holds the answers: in
+order where the order is total, by their number where rows tie at the edge. `first_rows` holds the number of rows the index gave to the number
+asked for, which no answer shows. The past is read without it (`past_by_value`). 19 mutants, and 5 of `prev_before` with the tree's model.
+
 **`unique` on a column of `create table` (after slice 3).** PostgreSQL makes of it a constraint named `<table>_<column>_key`, held by a unique index
 of that name. Here it is that index and a mark on it:
 
@@ -2876,6 +2922,51 @@ fault in that function is on both sides and is not seen. It will be seen in slic
 
 *Not in the plan.* An index on an expression; `include`; any index but the tree's own order; a planner that chooses between two indexes by anything
 but "the first that fits"; statistics.
+
+## 6bp. Times: `timestamp` and `timestamptz`
+
+The engine has integers, text and booleans. A table of anything that happens has a time in it, and today that column has to be a number or a text,
+which sorts and compares as the application means only if the application is careful. This is the plan for the two types, in slices as 6bo was.
+
+**What a time is here.**
+
+- *Two types*, as in PostgreSQL: `timestamp` (a date and a time of day, of no zone) and `timestamptz` (a moment). Both are the number of
+  microseconds since 2000-01-01 00:00:00, PostgreSQL's own measure, stored as an integer is stored. So a time is a key, an indexed value and an
+  ordered value with nothing new: it sorts as its number does.
+- *The zone of the session is UTC, and cannot be set.* PostgreSQL writes a `timestamptz` in the session's zone and reads one without an offset
+  in it; a client that sets the zone gets other text for the same moment. Here `set time zone` stays refused, a `timestamptz` is written with
+  `+00`, and one read without an offset is UTC. The differential runs PostgreSQL with `TimeZone = UTC` and `DateStyle = ISO`.
+- *What is read.* ISO 8601 as PostgreSQL writes it and as drivers send it: `YYYY-MM-DD`, then optionally a space or `T` and `HH:MM`, `:SS`, a
+  fraction of up to six digits, and an offset (`Z`, `+HH`, `+HH:MM`, `+HHMM`). For a `timestamp` an offset is read and dropped, as PostgreSQL
+  does. A year from 0001 to 9999. **Anything else PostgreSQL would read (`Nov 27 2026`, `infinity`, `now`, a time of `24:00`, a second of `60`,
+  `BC`, a named zone) is refused, `engine-unsupported`: not an error, because PostgreSQL has an answer.** A text of the form with a field out of
+  range (month 13, 30 February, hour 25) is PostgreSQL's error, `22008`; a text that is no date at all is `22007`.
+- *What is written.* `2026-11-27 10:00:00`, a fraction if there is one with its trailing zeros dropped, and `+00` for a `timestamptz`. In the row
+  image the log's facts are made of (`to_jsonb`): `"2026-11-27T10:00:00"` and `"2026-11-27T10:00:00+00:00"`. To a client the types are
+  PostgreSQL's (1114 and 1184), in text.
+
+**What can be done with one, in the first slice.** A column of either type, also in the key and in an index; a literal or a parameter where a
+time is expected; `=`, `<>`, `<`, `<=`, `>`, `>=`, `between`, `in`, `is null`, between two times or a time and such a text; `order by`,
+`distinct`, `group by`, `min`, `max`, `count`; `cast` between the two types, from text and to text. A `timestamp` beside a `timestamptz` is read
+as that moment in UTC, which is what PostgreSQL does in a session whose zone is UTC.
+
+**Refused in the first slice, and said:** `now()` and `current_timestamp` (the second slice: the time is the transaction's, which the log
+already records, so a statement that asks for it is still one the log can hold); arithmetic (`+ interval`, a difference); `extract`,
+`date_trunc`, `to_char`; `date`, `time` and `interval` as types; a precision (`timestamp(3)`); `at time zone`.
+
+**The slices.**
+
+1. *The types, stored and compared* (this one), with the test first: a list of statements over a table of both types, each held to PostgreSQL's
+   answer, the texts read and refused among them; the random history's tables get columns of the two types.
+2. *`now()`*, as the transaction's time.
+3. *Arithmetic with intervals*, if the first two say an application needs it here rather than in its own code.
+
+**What the first slice has to change**, read from the code and to be confirmed as it is built: the closed list of types in `src/row.cho` and what
+a stored value of each is; `src/eval.cho` (a text read as a time, a time written, the comparison, the casts, what unifies with what);
+`execw.column_defs` (the parser already knows the two names: the proxy passes them to PostgreSQL); `src/answer.cho` (the type a client is told and
+the text it is sent); the row image in `src/row.cho`; the key's bounds and the index's constant (`exec.bounds`, `via.part`), which take an
+integer constant and now have to take a time's; the schema text a commit's hash is of. The IR does not change: a `cast` carries its type's name
+already, and a column's type is not in it.
 
 ## 7. Taking over, safely
 
