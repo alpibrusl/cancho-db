@@ -101,6 +101,7 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f, &e, &d, &s](heap: &!h Heap,
     var arena = box_slice(heap, serve.arena_size() * nplaces, byte_of(0));
     var index = box_slice(heap, serve.index_size() * nplaces, 0);
     var raws = box_slice(heap, tlsio.raw_size() * nplaces, byte_of(0));
+    var draws = box_slice(heap, exec.seq_room() * nplaces, 0);
     var status = 0;
     borrow mut roots as &!rw in {
         borrow mut globals as &!gw in {
@@ -160,7 +161,9 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f, &e, &d, &s](heap: &!h Heap,
                                         borrow mut arena as &!ab in {
                                             borrow mut index as &!xb in {
                                                 borrow mut raws as &!wb in {
-                                                    status = serve.run(heap, lh, clk, revoked, pg, w, sub, contents(ib), contents(ob), rs, gs, contents(sw), contents(ab), contents(xb), eng, contents(wb), io, dir, seen);
+                                                    borrow mut draws as &!qb in {
+                                                        status = serve.run(heap, lh, clk, revoked, pg, w, sub, contents(ib), contents(ob), rs, gs, contents(sw), contents(ab), contents(xb), eng, contents(wb), io, dir, seen, contents(qb));
+                                                    }
                                                 }
                                             }
                                         }
@@ -185,6 +188,7 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f, &e, &d, &s](heap: &!h Heap,
     unbox_slice(heap, arena);
     unbox_slice(heap, index);
     unbox_slice(heap, raws);
+    unbox_slice(heap, draws);
     return status;
 }
 

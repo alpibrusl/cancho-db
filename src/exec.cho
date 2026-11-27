@@ -189,26 +189,40 @@ pub fn seq_note[&q](w: &!q Work, id: int, v: int) -> [] bool {
 }
 
 pub fn seq_forget[&q](w: &!q Work) -> [] int {
-    if w.held {
-        return 0;
-    }
     w.nsq = 0;
     return 0;
 }
 
-// The draws noted are another connection's (docs/m3-engine.md 6bs: its transaction is open, and this statement only reads beside it): while `on`, they are neither
-// forgotten nor written, whatever becomes of the statement.
-pub fn seq_hold[&q](w: &!q Work, on: bool) -> [] int {
-    w.held = on;
+// The draws noted are a connection's own (docs/m3-engine.md 6bv): `seq_give` puts the ones it keeps (`seq_room()` ints: how many, then a counter and a value for
+// each) into the working memory before its statement, and `seq_take` takes them out after, so that two transactions open at once each have their own.
+pub fn seq_room() -> [] int {
+    return 65;
+}
+
+pub fn seq_give[&q, &k](w: &!q Work, kept: &k [int]) -> [] int {
+    w.nsq = kept[0];
+    var i = 0;
+    while i < 2 * w.nsq {
+        contents(w.sq)[i] = kept[1 + i];
+        i = i + 1;
+    }
+    return 0;
+}
+
+pub fn seq_take[&q, &k](w: &!q Work, kept: &!k [int]) -> [] int {
+    kept[0] = w.nsq;
+    var i = 0;
+    while i < 2 * w.nsq {
+        kept[1 + i] = contents(w.sq)[i];
+        i = i + 1;
+    }
+    w.nsq = 0;
     return 0;
 }
 
 // Write the draws noted into the tree `root`, which did not get them (the statement failed, or its transaction was rolled back), and forget them: the new root, or an error. A counter that is not in
 // `root` (its table was made in the transaction that was rolled back) is left out.
 pub fn seq_replay[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_read, file_write] int {
-    if w.held {
-        return root;
-    }
     var nroot = root;
     var i = 0;
     while i < w.nsq {
@@ -472,7 +486,6 @@ pub res struct Work {
     pend: int,
     sq: Box[[int]],
     nsq: int,
-    held: bool,
     frow: int,
     ret: int,
     retn: int,
@@ -524,11 +537,11 @@ pub fn max_rows() -> [] int {
 }
 
 pub fn new_work[&h](heap: &!h Heap) -> [heap] Work {
-    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, held: false, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0, said: box_slice(heap, 110000, byte_of(0)), nsaid: 0, lsaid: 0, ix: box_slice(heap, 256, byte_of(0)), ixa: box_slice(heap, 256, byte_of(0)), ixb: box_slice(heap, 256, byte_of(0)), nix: 0, via: box_slice(heap, 512, byte_of(0)), vian: 0 - 1, vial: 0, viak: 0, viar: 0, viaf: 0, quiet: false, past: false, viac: 0, ua: box_slice(heap, 256, byte_of(0)), ub: box_slice(heap, 256, byte_of(0)), uv: box_slice(heap, 1100, byte_of(0)) };
+    return Work { sc: box_slice(heap, btree.scratch_size(), byte_of(0)), ws: box_slice(heap, eval.ws_size(), 0), ar: box_slice(heap, 262144, byte_of(0)), ctx: box_slice(heap, 16384, byte_of(0)), cx: box_slice(heap, 1024, 0), info: box_slice(heap, 4, 0), ent: box_slice(heap, 1024, byte_of(0)), key: box_slice(heap, 256, byte_of(0)), key2: box_slice(heap, 256, byte_of(0)), cur: box_slice(heap, 1024, byte_of(0)), nrow: box_slice(heap, 2048, byte_of(0)), tmp: box_slice(heap, 131072, byte_of(0)), pos: box_slice(heap, 4096, 0), rows: box_slice(heap, rows_size(), byte_of(0)), idx: box_slice(heap, max_rows(), 0), idx2: box_slice(heap, max_rows(), 0), gix: box_slice(heap, max_rows(), 0), jbuf: box_slice(heap, rows_size(), byte_of(0)), jix: box_slice(heap, max_rows(), 0), ukey: box_slice(heap, 256, byte_of(0)), uval: box_slice(heap, 1024, byte_of(0)), leaf: box_slice(heap, 4096, byte_of(0)), lst: box_slice(heap, 5, 0), chg: box_slice(heap, rows_size(), byte_of(0)), lit: box_slice(heap, 4096, byte_of(0)), lsc: box_slice(heap, 1024, 0), lrs: box_slice(heap, 512, 0), lo: box_slice(heap, 256, byte_of(0)), hi: box_slice(heap, 256, byte_of(0)), root: 0, count: 0, first: 0, code: 0, multi: false, orderdep: false, nitems: 0, norder: 0, nconj: 0, rfill: 0, nchg: 0, cfill: 0, tid: 0, nlen: 0, dlen: 0, elen: 0, klen: 0, lon: 0 - 1, hin: 0 - 1, fresh: false, ntab: 1, txn: 0, once: true, pend: 0, sq: box_slice(heap, 64, 0), nsq: 0, frow: 0, ret: 0, retn: 0, retfill: 0, retcur: 0, glen: 0, did: 0, dval: 0, salts: box_slice(heap, 32, byte_of(0)), nsalts: box_slice(heap, 32, byte_of(0)), full: box_slice(heap, 1024, byte_of(0)), ofull: box_slice(heap, 1024, byte_of(0)), seed: box_slice(heap, 40, byte_of(0)), seeded: false, scount: 0, said: box_slice(heap, 110000, byte_of(0)), nsaid: 0, lsaid: 0, ix: box_slice(heap, 256, byte_of(0)), ixa: box_slice(heap, 256, byte_of(0)), ixb: box_slice(heap, 256, byte_of(0)), nix: 0, via: box_slice(heap, 512, byte_of(0)), vian: 0 - 1, vial: 0, viak: 0, viar: 0, viaf: 0, quiet: false, past: false, viac: 0, ua: box_slice(heap, 256, byte_of(0)), ub: box_slice(heap, 256, byte_of(0)), uv: box_slice(heap, 1100, byte_of(0)) };
 }
 
 pub fn drop_work[&h](heap: &!h Heap, w: Work) -> [heap] int {
-    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, held, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount, said, nsaid, lsaid, ix, ixa, ixb, nix, via, vian, vial, viak, viar, viaf, quiet, past, viac, ua, ub, uv } = w;
+    let Work { sc, ws, ar, ctx, cx, info, ent, key, key2, cur, nrow, tmp, pos, rows, idx, idx2, gix, jbuf, jix, ukey, uval, leaf, lst, chg, lit, lsc, lrs, lo, hi, root, count, first, code, multi, orderdep, nitems, norder, nconj, rfill, nchg, cfill, tid, nlen, dlen, elen, klen, lon, hin, fresh, ntab, txn, once, pend, sq, nsq, frow, ret, retn, retfill, retcur, glen, did, dval, salts, nsalts, full, ofull, seed, seeded, scount, said, nsaid, lsaid, ix, ixa, ixb, nix, via, vian, vial, viak, viar, viaf, quiet, past, viac, ua, ub, uv } = w;
     unbox_slice(heap, ua);
     unbox_slice(heap, ub);
     unbox_slice(heap, uv);

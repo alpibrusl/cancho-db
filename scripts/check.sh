@@ -149,6 +149,8 @@ echo "== TLS on the engine's server (docs/m3-engine.md 6bq): the differential th
 for seed in 1 2 3; do quiet 2 python3 tests/engine_tls.py build/engine build/enginecheck 300 $seed; done
 echo "== reads beside a transaction (docs/m3-engine.md 6bs): a transaction with another connection reading between its statements answers and commits as alone; what waits, and the clock"
 for seed in 1 2 3; do quiet 2 python3 tests/engine_beside.py build/engine build/enginecheck 300 $seed; done
+echo "== transactions side by side (docs/m3-engine.md 6bv): four connections' transactions, run again by one client, get the same answers; who is refused; counters; the file is not swept under one"
+for seed in 1 2 3; do quiet 2 python3 tests/engine_sidebyside.py build/engine build/enginecheck 300 $seed; done
 echo "== cancho-hooks, the program, on the engine's server (docs/m3-engine.md 6an): skipped unless HOOKS_BIN names a hooks binary"
 quiet 2 python3 tests/hooks_server.py build/engine
 echo "== the commit path's cost: a smoke run of the measurement (it must run; the numbers are in docs/m1-commit-path.md section 5.11)"

@@ -61,6 +61,12 @@ pub fn sealed[&s](ss: &s [int]) -> [] int {
     return ss[7];
 }
 
+// Whether the transaction that is open has written: a row, a definition, a number drawn from a counter, anything that made its tree another than `base`, the tree
+// it began on.
+pub fn wrote[&s](ss: &s [int], base: int) -> [] bool {
+    return ss[1] != base;
+}
+
 // How the next statement is run: 0, or 3 in a transaction that has failed (it is refused unless it ends the transaction).
 pub fn mode[&s](ss: &s [int]) -> [] int {
     if ss[0] == failed() {

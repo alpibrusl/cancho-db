@@ -129,8 +129,13 @@ pub fn g_reload_code() -> [] int {
     return g_tls_on() + max_places() + 1;
 }
 
-pub fn globals() -> [] int {
+// How many transactions beside the others are open (6bv): while there is one, the file is not swept.
+pub fn g_sides() -> [] int {
     return g_tls_on() + max_places() + 2;
+}
+
+pub fn globals() -> [] int {
+    return g_tls_on() + max_places() + 3;
 }
 
 // Read the list of revoked tokens again if its file is not the size it was (it is added to, never rewritten: docs/spec/token.md section 3). A list that cannot be
@@ -257,7 +262,7 @@ pub fn reclaim[&h, &g, &z, &q, &r](heap: &!h Heap, gs: &!g [int], pg: &!z pager.
 // hold are still to be read past; 5 when it last did something; 6 how many requests for TLS it has made; 7 whether it has a statement that waits for another connection's
 // transaction; 8 to 15 its session (src/session.cho); 16 whether the client has closed its side; 17 whether the server is reading it;
 // 18 whether it is from another machine (6br); 19 how many bytes of its room for ciphertext are held (6bq); 20 its clock, the time of its transaction's beginning (6bs);
-// 21 and 22 the address of a client from another machine (6bt).
+// 21 and 22 the address of a client from another machine (6bt); 23 in a transaction beside the others (6bv), the tree it began on and one.
 pub fn stride() -> [] int {
     return 24;
 }
@@ -710,7 +715,7 @@ fn bind_message[&b, &a, &x, &o, &t](body: &b [byte], ar: &!a [byte], xi: &!x [in
 // Run one statement and write its answer into `out` from `at`, sending what does not fit: how much of `out` is still to send, or -1 if the connection is gone or the server
 // must stop (`st[1]`). `vals` are `nv` values to bind (as a Bind has them). `ext` 0: a simple query (a description before its rows, ReadyForQuery after); 1: an Execute whose
 // portal was described (a description, or NoData); 2: an Execute (the rows alone). An error or a refusal of an Execute sets `st[2]`: what follows is skipped up to the Sync.
-fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, sql: &s [byte], vals: &v [byte], nv: int, tk: &y [byte], ext: int, out: &!o [byte], at: int, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, poll, file_read, file_write] int {
+fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n, &j](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, sql: &s [byte], vals: &v [byte], nv: int, tk: &y [byte], ext: int, out: &!o [byte], at: int, roots: &!r [int], st: &!t [int], sq: &!j [int]) -> [heap, conn_write, poll, file_read, file_write] int {
     exec.params_clear(w);
     var va = 0;
     var i = 0;
@@ -726,6 +731,25 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
         }
         i = i + 1;
     }
+    // a transaction beside the others (6bv): whether the connection is in one (and the tree it began on), whether this statement begins one, or ends it
+    let side = st[23] != 0;
+    var starts = false;
+    var ends = 0;
+    if side {
+        ends = drive.ends_txn(sub, sql);
+    } else if session.state(st[8..16]) == session.idle() {
+        starts = drive.side_begin(sub, sql);
+    }
+    // (a statement inside one is given the branch's tree like any other and runs on the transaction's own, 6v; what it writes with are numbers after the branch's
+    // last, which are the ones its commit will have if it commits at all: it does only if the branch has not moved)
+    // it wrote and the branch has moved since it began: it has lost (first committer wins), and its commit is run as a rollback
+    // (a number drawn from a counter is written too: the counter is in the tree, so the transaction's tree is another than the one it began on)
+    let wrote = side && session.wrote(st[8..16], st[23] - 1);
+    let lost = side && ends == 1 && session.state(st[8..16]) == session.open_txn() && wrote && roots[0] != st[23] - 1;
+    // it wrote nothing: its commit is a rollback that says COMMIT (there is no tree to make the branch's, and the branch may have moved)
+    let nothing = side && ends == 1 && session.state(st[8..16]) == session.open_txn() && !wrote;
+    // the draws from counters this connection's transaction has made (6bv): its own, not whoever's ran last
+    exec.seq_give(w, sq);
     let wr = pager.begin(pg);
     let on = session.open(pg, w, st[8..16], roots[0]);
     if wr < 0 || on < 0 {
@@ -741,9 +765,7 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
     // the connection's own clock: a statement another connection ran since has not moved it (6bs)
     exec.clock(w, st[20]);
     // whether another connection is in a transaction: this statement was let through as one that only reads, and is held to it
-    let beside = gs[g_owner()] != 0 && gs[g_owner()] != slot + 1;
-    // (the draws from counters noted in the working memory are that transaction's: this statement leaves them)
-    exec.seq_hold(w, beside);
+    let beside = gs[g_owner()] != 0 && gs[g_owner()] != slot + 1 && !side && !starts;
     // an erase (6bf): `select cancho_erase('<table>', '<key>')`, a statement of its own, outside a transaction, for a token that may call it. `pre`: why it does
     // not run (1 in a transaction, 2 the token, 3 not a table and a key the engine erases by)
     var el = 0 - 1;
@@ -756,6 +778,9 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
             pre = 1;
         } else if el >= 0 && !drive.may_erase(tk) {
             pre = 2;
+        } else if el >= 0 && gs[g_sides()] > 0 {
+            // a transaction beside the others is open, and its tree is pages no committed tree names: nothing is purged under it (6bv)
+            pre = 6;
         }
     }
     var pl = 0 - 1;
@@ -775,6 +800,11 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
                 after = on;
                 pre = 3;
             }
+        } else if starts {
+            // the isolation level was read above; what is run is the BEGIN
+            after = drive.run(heap, pg, w, m, "begin", on, mode, false, tk);
+        } else if lost || nothing {
+            after = drive.run(heap, pg, w, m, "rollback", on, mode, false, tk);
         } else if pl >= 0 {
             after = drive.run(heap, pg, w, m, drive.text(sub)[0..pl], on, mode, true, tk);
         } else {
@@ -813,12 +843,20 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
             }
             nr = session.close(heap, pg, w, st[8..16], roots[0], after, !bound || pre != 0 || o != drive.o_ok() && o != drive.o_control(), key, who, rec);
         }
+        exec.seq_take(w, sq);
         if beside && nr >= 0 && nr != roots[0] {
             // (and nothing its ending wrote either)
             nr = roots[0];
             pre = 4;
         }
-        exec.seq_hold(w, false);
+        // a transaction beside the others begins on the branch's tree as it is, and is counted; when it ends, however it ends, it is one no more
+        if starts && session.state(st[8..16]) == session.open_txn() {
+            st[23] = roots[0] + 1;
+            gs[g_sides()] = gs[g_sides()] + 1;
+        } else if side && session.state(st[8..16]) == session.idle() {
+            st[23] = 0;
+            gs[g_sides()] = gs[g_sides()] - 1;
+        }
         if nr >= 0 && nr != roots[0] {
             // durable before it is acknowledged: the page file's commit comes before the answer
             roots[0] = nr;
@@ -826,7 +864,8 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
                 // what the commits before left behind is taken back when the file has grown enough (6aw); the commit before a sweep says so in the tree (6az)
                 // (and after an erase always, 6bf: what was erased is to be gone from the file when the client is answered, not when the file has next grown)
                 let erasing = el >= 0 && pre == 0 && o == drive.o_ok();
-                let due = sweep_due(gs, pg) || erasing;
+                // (not while a transaction beside the others is open, 6bv: its tree is pages no committed tree names, and a sweep would free them)
+                let due = (sweep_due(gs, pg) || erasing) && gs[g_sides()] == 0;
                 let told = announce(gs, pg, w, roots[0], due);
                 var seq = told;
                 if told >= 0 {
@@ -870,6 +909,11 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
                 p = wire.error(out, p, false, "54000", "cancho-db: refused ", "commit-too-large");
             } else if said == 4 {
                 p = wire.error(out, p, false, "25P02", "current transaction is aborted, commands ignored until end of transaction block", "");
+            } else if lost {
+                // PostgreSQL's code for a transaction that is to be run again
+                p = wire.error(out, p, false, "40001", "cancho-db: refused ", "serialization-failure");
+            } else if pre == 6 {
+                p = wire.error(out, p, false, "25001", "cancho-db: refused ", "erase-beside-transaction");
             } else if pre == 1 {
                 p = wire.error(out, p, false, "25001", "cancho-db: refused ", "erase-in-transaction");
             } else if pre == 2 {
@@ -914,7 +958,7 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
                 }
                 if said == 1 {
                     p = wire.complete_as(out, p, "BEGIN");
-                } else if said == 2 {
+                } else if said == 2 || said == 3 && nothing {
                     p = wire.complete_as(out, p, "COMMIT");
                 } else if said == 3 {
                     p = wire.complete_as(out, p, "ROLLBACK");
@@ -934,7 +978,7 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, ta
 }
 
 // Execute: the statement the portal is bound to is run with the values bound.
-fn execute_message[&h, &c, &g, &z, &q, &b, &i, &a, &x, &o, &r, &t, &n](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, body: &i [byte], ar: &a [byte], xi: &!x [int], out: &!o [byte], at: int, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, poll, file_read, file_write] int {
+fn execute_message[&h, &c, &g, &z, &q, &b, &i, &a, &x, &o, &r, &t, &n, &j](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, body: &i [byte], ar: &a [byte], xi: &!x [int], out: &!o [byte], at: int, roots: &!r [int], st: &!t [int], sq: &!j [int]) -> [heap, conn_write, poll, file_read, file_write] int {
     let pe = wire.string_end(body, 0);
     if pe < 0 || pe + 5 != len(body) {
         return broken(out, at, st);
@@ -972,7 +1016,7 @@ fn execute_message[&h, &c, &g, &z, &q, &b, &i, &a, &x, &o, &r, &t, &n](heap: &!h
         }
         return wire.empty_query(out, p);
     }
-    return answer(heap, tab, eng, slot, gs, pg, w, sub, ar[sa..sa + sl], ar[values_at()..values_at() + xi[7]], xi[6], ar[token_at()..token_at() + tl], ext, out, at, roots, st);
+    return answer(heap, tab, eng, slot, gs, pg, w, sub, ar[sa..sa + sl], ar[values_at()..values_at() + xi[7]], xi[6], ar[token_at()..token_at() + tl], ext, out, at, roots, st, sq);
 }
 
 // Describe and Close: a letter (`S` a statement, `P` a portal) and a name.
@@ -1025,6 +1069,30 @@ fn reads[&b, &i](sub: &!b drive.Sub, body: &i [byte]) -> [] bool {
     return e > 0 && drive.reads_only(sub, body[0..e]);
 }
 
+// Whether a statement touches nothing of the branch because it is of a transaction beside the others (6bv): one that begins such a transaction, or one inside it
+// that does not end it. (Its end waits like any write: it makes the branch's tree.)
+fn aside_text[&b, &t, &s](sub: &!b drive.Sub, st: &t [int], sql: &s [byte]) -> [] bool {
+    if st[23] != 0 {
+        return drive.ends_txn(sub, sql) == 0;
+    }
+    return session.state(st[8..16]) == session.idle() && drive.side_begin(sub, sql);
+}
+
+fn aside[&b, &t, &i](sub: &!b drive.Sub, st: &t [int], body: &i [byte]) -> [] bool {
+    let e = wire.query_end(body);
+    return e > 0 && aside_text(sub, st, body[0..e]);
+}
+
+fn aside_portal[&b, &t, &a, &x](sub: &!b drive.Sub, st: &t [int], ar: &a [byte], xi: &x [int]) -> [] bool {
+    var sa = 0;
+    var sl = xi[0];
+    if xi[3] >= 0 {
+        sa = xi[8 + 4 * xi[3] + 2];
+        sl = xi[8 + 4 * xi[3] + 3];
+    }
+    return sl > 0 && aside_text(sub, st, ar[sa..sa + sl]);
+}
+
 // Whether the statement the unnamed portal was bound to only reads (6bs): what an Execute would run.
 fn reads_portal[&b, &a, &x](sub: &!b drive.Sub, ar: &a [byte], xi: &x [int]) -> [] bool {
     // (with no portal it is the unnamed statement's text that is judged, and the Execute, let through or made to wait, is refused: nothing runs)
@@ -1040,7 +1108,7 @@ fn reads_portal[&b, &a, &x](sub: &!b drive.Sub, ar: &a [byte], xi: &x [int]) -> 
 // One unit of a connection's work: its messages up to the next that ends a batch (a Query, a Sync, a Flush, a Terminate), or as many as are whole. `free`: no other
 // connection is in a transaction, so a statement may run; if not, the connection's statement waits where it is (`st[7]`). 1 if anything was done, 0 if not. The answers are
 // written to the connection before this returns: `out` is everyone's.
-fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x, &n](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, buf: &!i [byte], out: &!o [byte], roots: &!r [int], st: &!t [int], ar: &!a [byte], xi: &!x [int], free: bool) -> [heap, conn_write, poll, file_read, file_write] int {
+fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x, &n, &j](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, buf: &!i [byte], out: &!o [byte], roots: &!r [int], st: &!t [int], ar: &!a [byte], xi: &!x [int], free: bool, sq: &!j [int]) -> [heap, conn_write, poll, file_read, file_write] int {
     var did = 0;
     var op = 0;
     var more = true;
@@ -1087,8 +1155,8 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x, &n](heap: &!h Heap, tab:
                     op = wire.error(out, op, true, "28P01", "cancho-db: refused ", "token-revoked");
                 }
                 st[3] = 1;
-            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free && !(t == 'Q' && reads(sub, buf[5..n])) && !(t == 'E' && reads_portal(sub, ar, xi)) {
-                // another connection is in a transaction: this statement waits for it to end (6aq), unless it only reads (6bs)
+            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free && !(t == 'Q' && (reads(sub, buf[5..n]) || aside(sub, st, buf[5..n]))) && !(t == 'E' && (reads_portal(sub, ar, xi) || aside_portal(sub, st, ar, xi))) {
+                // another connection is in a transaction: this statement waits for it to end (6aq), unless it only reads (6bs) or is of a transaction beside the others (6bv)
                 st[7] = 1;
                 more = false;
             } else {
@@ -1107,7 +1175,7 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x, &n](heap: &!h Heap, tab:
                     } else if e == 0 {
                         op = wire.ready(out, wire.empty_query(out, op), session.state(st[8..16]));
                     } else {
-                        op = answer(heap, tab, eng, slot, gs, pg, w, sub, buf[5..5 + e], buf[0..0], 0, ar[token_at()..token_at() + xi[token_len()]], 0, out, op, roots, st);
+                        op = answer(heap, tab, eng, slot, gs, pg, w, sub, buf[5..5 + e], buf[0..0], 0, ar[token_at()..token_at() + xi[token_len()]], 0, out, op, roots, st, sq);
                     }
                     more = false;
                 } else if t == 'S' {
@@ -1125,7 +1193,7 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x, &n](heap: &!h Heap, tab:
                         } else if t == 'D' {
                             op = describe_message(buf[5..n], xi, out, op, st);
                         } else if t == 'E' {
-                            op = execute_message(heap, tab, eng, slot, gs, pg, w, sub, buf[5..n], ar, xi, out, op, roots, st);
+                            op = execute_message(heap, tab, eng, slot, gs, pg, w, sub, buf[5..n], ar, xi, out, op, roots, st, sq);
                         } else if t == 'C' {
                             op = close_message(buf[5..n], ar, xi, out, op, st);
                         } else if t == 'H' {
@@ -1171,8 +1239,14 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x, &n](heap: &!h Heap, tab:
 
 // A connection ends: its transaction is rolled back (what it drew from counters stays drawn, 6y), the wait it caused ends, its place is free. If the rollback cannot be
 // done the server stops: it does not hand one client's transaction to the next.
-fn finish[&h, &c, &g, &z, &q, &r, &t, &n](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, file_read, file_write] int {
-    if st[0] == 2 && session.state(st[8..16]) != session.idle() && gs[g_stop()] == 0 {
+fn finish[&h, &c, &g, &z, &q, &r, &t, &n, &j](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, roots: &!r [int], st: &!t [int], sq: &!j [int]) -> [heap, conn_write, file_read, file_write] int {
+    if st[23] != 0 {
+        // a transaction beside the others ends with its connection (6bv)
+        gs[g_sides()] = gs[g_sides()] - 1;
+    }
+    if st[0] == 2 && session.state(st[8..16]) != session.idle() && gs[g_stop()] == 0 && (st[23] == 0 || gs[g_owner()] == 0) {
+        // (one beside the others, ending while another connection has the database to itself, writes nothing: what it drew from counters is lost, 6bv)
+        exec.seq_give(w, sq);
         pager.begin(pg);
         var nr = session.open(pg, w, st[8..16], roots[0]);
         if nr >= 0 {
@@ -1187,7 +1261,10 @@ fn finish[&h, &c, &g, &z, &q, &r, &t, &n](heap: &!h Heap, tab: &!c conns.Table, 
         } else {
             roots[0] = nr;
         }
+        exec.seq_take(w, sq);
     }
+    st[23] = 0;
+    sq[0] = 0;
     if gs[g_owner()] == slot + 1 {
         gs[g_owner()] = 0;
     }
@@ -1371,7 +1448,7 @@ fn receive[&c, &b, &t](tab: &!c conns.Table, slot: int, buf: &!b [byte], st: &!t
 // Serve every connection until the server must stop (docs/m3-engine.md 6aq): the status to stop with. `gs` is the server's (`globals()` ints, the limits set); `sts`, `ins`,
 // `ars` and `xis` hold, for each of the places' connections, its `stride()` ints, its buffer (`in_size()` bytes), and what the extended protocol keeps (`arena_size()`
 // bytes and `index_size()` ints). `out` is where an answer is built before it is written. `roots` are the page file's trees (the first is the branch's).
-pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w, &u, &d, &y](heap: &!h Heap, listener: &!l Listener, clk: &k Clock, revoked: &!f File, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, ins: &!i [byte], out: &!o [byte], roots: &!r [int], gs: &!g [int], sts: &!s [int], ars: &!a [byte], xis: &!x [int], eng: &!n tls.Engine, raws: &!w [byte], io: &!u Io, dir: &d Dir, seen: &!y [byte]) -> [heap, err_write, dir_read, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
+pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w, &u, &d, &y, &j](heap: &!h Heap, listener: &!l Listener, clk: &k Clock, revoked: &!f File, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, ins: &!i [byte], out: &!o [byte], roots: &!r [int], gs: &!g [int], sts: &!s [int], ars: &!a [byte], xis: &!x [int], eng: &!n tls.Engine, raws: &!w [byte], io: &!u Io, dir: &d Dir, seen: &!y [byte], sqs: &!j [int]) -> [heap, err_write, dir_read, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
     match poller_new() {
         Polling::Ok(p) => {
             var poller = p;
@@ -1438,10 +1515,11 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w, &u, &
                                         if st[3] == 0 && (st[0] == 1 || st[0] == 3) {
                                             did = startup_step(tw, eng, slot, gs, buf, out, st, ars[arena_size() * slot..arena_size() * slot + arena_size()], xis[index_size() * slot..index_size() * slot + index_size()]);
                                         } else if st[3] == 0 {
-                                            did = step(heap, tw, eng, slot, gs, pg, w, sub, buf, out, roots, st, ars[arena_size() * slot..arena_size() * slot + arena_size()], xis[index_size() * slot..index_size() * slot + index_size()], gs[g_owner()] == 0 || gs[g_owner()] == slot + 1);
+                                            did = step(heap, tw, eng, slot, gs, pg, w, sub, buf, out, roots, st, ars[arena_size() * slot..arena_size() * slot + arena_size()], xis[index_size() * slot..index_size() * slot + index_size()], gs[g_owner()] == 0 || gs[g_owner()] == slot + 1, sqs[exec.seq_room() * slot..exec.seq_room() * slot + exec.seq_room()]);
                                         }
                                         // a transaction has the database to itself
-                                        if st[0] == 2 && session.state(st[8..16]) != session.idle() {
+                                        if st[0] == 2 && session.state(st[8..16]) != session.idle() && st[23] == 0 {
+                                            // (one beside the others has only its own tree, 6bv)
                                             gs[g_owner()] = slot + 1;
                                         } else if gs[g_owner()] == slot + 1 {
                                             gs[g_owner()] = 0;
@@ -1451,7 +1529,7 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w, &u, &
                                         }
                                         if st[3] != 0 || st[16] != 0 && did == 0 {
                                             // it asked to end, cannot go on, or its client is gone and nothing whole is left of what it sent
-                                            finish(heap, tw, eng, slot, gs, pg, w, roots, st);
+                                            finish(heap, tw, eng, slot, gs, pg, w, roots, st, sqs[exec.seq_room() * slot..exec.seq_room() * slot + exec.seq_room()]);
                                             progressed = true;
                                         } else {
                                             // a buffer that is full is not read into (its connection waits, or is being read past)
@@ -1476,10 +1554,22 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w, &u, &
                             let ls = sts[stride() * late..stride() * late + stride()];
                             if (ls[0] == 1 || ls[0] == 3) && gs[g_now()] - ls[5] > gs[g_write_ms()] {
                                 borrow mut tab as &!tw in {
-                                    finish(heap, tw, eng, late, gs, pg, w, roots, ls);
+                                    finish(heap, tw, eng, late, gs, pg, w, roots, ls, sqs[exec.seq_room() * late..exec.seq_room() * late + exec.seq_room()]);
                                 }
                             }
                             late = late + 1;
+                        }
+                        // a transaction beside the others that idles while a sweep is due is ended (6bv): the file is not swept while it is open
+                        var idler = 0;
+                        while idler < gs[g_places()] && gs[g_stop()] == 0 {
+                            let ds = sts[stride() * idler..stride() * idler + stride()];
+                            if ds[0] == 2 && ds[23] != 0 && gs[g_now()] - ds[5] > gs[g_idle_ms()] && sweep_due(gs, pg) {
+                                borrow mut tab as &!tw in {
+                                    push(tw, eng, idler, gs, out[0..wire.error(out, 0, true, "25P03", "cancho-db: the transaction was idle while the file waited to be swept", "")]);
+                                    finish(heap, tw, eng, idler, gs, pg, w, roots, ds, sqs[exec.seq_room() * idler..exec.seq_room() * idler + exec.seq_room()]);
+                                }
+                            }
+                            idler = idler + 1;
                         }
                         // a transaction that idles while another connection waits for it is ended (6aq): `25P03`, as PostgreSQL's idle_in_transaction_session_timeout
                         if gs[g_owner()] != 0 && gs[g_stop()] == 0 {
@@ -1495,7 +1585,7 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w, &u, &
                             if waiting && gs[g_now()] - sts[stride() * owner + 5] > gs[g_idle_ms()] {
                                 borrow mut tab as &!tw in {
                                     push(tw, eng, owner, gs, out[0..wire.error(out, 0, true, "25P03", "cancho-db: the transaction was idle while another connection waited", "")]);
-                                    finish(heap, tw, eng, owner, gs, pg, w, roots, sts[stride() * owner..stride() * owner + stride()]);
+                                    finish(heap, tw, eng, owner, gs, pg, w, roots, sts[stride() * owner..stride() * owner + stride()], sqs[exec.seq_room() * owner..exec.seq_room() * owner + exec.seq_room()]);
                                 }
                                 // those who waited are served now
                                 wait = 0;
