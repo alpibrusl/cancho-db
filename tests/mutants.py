@@ -2269,8 +2269,8 @@ ENGINE = [
      '        if m / 2 % 2 == 1 {\n            at = at + stored_len(ent, at);\n        }\n        if m / 4 % 2 == 1 {\n            at = at + 16;\n        }\n        k = k + 1;',
      '        if false {\n            at = at + stored_len(ent, at);\n        }\n        if m / 4 % 2 == 1 {\n            at = at + 16;\n        }\n        k = k + 1;'),
     ('assign: an integer is not stored as text', 'src/eval.cho',
-     '    return from == to || from == 0 || is_int(from) && is_int(to) || to == 3;',
-     '    return from == to || from == 0 || is_int(from) && is_int(to);'),
+     '    return from == to || from == 0 || is_int(from) && is_int(to) || is_time(from) && is_time(to) || to == 3;',
+     '    return from == to || from == 0 || is_int(from) && is_int(to) || is_time(from) && is_time(to);'),
     ('params: the second parameter is read where the third is', 'src/eval.cho',
      '            set(ws, out, 0, 0, cx[params_at() + 2 * idx - 1], pn, constant);',
      '            set(ws, out, 0, 0, cx[params_at() + 2 * idx + 1], pn, constant);'),
@@ -3072,6 +3072,44 @@ ENGINE = [
     ("order: descending, the values are read from before them", 'src/via.cho', '            contents(w.via)[260] = byte_of(2);', '            contents(w.via)[260] = byte_of(1);'),
     ('order: descending, the read does not end at the least value', 'src/via.cho', '        if beside(w, nk, 128, w.vial) < 0 {\n            return 0 - 1;\n        }', '        if beside(w, nk, 128, w.vial) < 0 - 9 {\n            return 0 - 1;\n        }'),
     ('order: descending, the same entry is read again and again', 'src/via.cho', '    exec.copy(contents(w.key2), 0, nk, contents(w.via), 256);\n    w.viak = nk;\n    return r;', '    return r;'),
+    ('time: a year that divides by 100 is a leap year', 'src/time.cho', '        if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {', '        if y % 4 == 0 {'),
+    ('time: April has 31 days', 'src/time.cho', '    if m == 4 || m == 6 || m == 9 || m == 11 {', '    if m == 6 || m == 9 || m == 11 {'),
+    ('time: an offset to the west is read as one to the east', 'src/time.cho', '            if west {\n                off = 0 - off;\n            }\n', ''),
+    ('time: an offset moves a moment the wrong way', 'src/time.cho', '        v = v - off;', '        v = v + off;'),
+    ('time: an offset moves a time of no zone', 'src/time.cho', '    if tz {\n        v = v - off;', '    if true {\n        v = v - off;'),
+    ('time: a fraction of fewer than six digits is that many microseconds', 'src/time.cho', '                while places < 6 {\n                    us = us * 10;\n                    places = places + 1;\n                }\n', ''),
+    ('time: an hour of 24 and a second of 60 are read', 'src/time.cho', '    if h == 24 || sec == 60 {\n        return unread();\n    }\n', ''),
+    ('time: a month of 13 is read', 'src/time.cho', '    if mo < 1 || mo > 12 || d < 1', '    if mo < 1 || mo > 13 || d < 1'),
+    ('time: a day past the end of its month is read', 'src/time.cho', ' || d < 1 || d > days_in(y, mo) || h > 24', ' || d < 1 || d > 31 || h > 24'),
+    ('time: an offset of any number of hours is read', 'src/time.cho', '            if oh < 0 || om < 0 || oh > 15 || om > 59 {', '            if oh < 0 || om < 0 || oh > 99 || om > 59 {'),
+    ('time: seven digits of a fraction are read', 'src/time.cho', '                if places < 1 || places > 6 {', '                if places < 1 || places > 7 {'),
+    ('time: what follows a time is not looked at', 'src/time.cho', '        if at != end {\n            return unread();\n        }\n', ''),
+    ('time: the year 0 is read', 'src/time.cho', '    if y < 1 {\n        return unread();\n    }\n', ''),
+    ('time: a moment an offset puts outside the years held is read', 'src/time.cho', '        if v < 0 || v >= end_days() * day_us() {\n            return unread();\n        }\n', ''),
+    ('time: every day is counted from a day later', 'src/time.cho', '    return era * 146097 + doe - 306;', '    return era * 146097 + doe - 305;'),
+    ('time: the trailing zeros of a fraction are written', 'src/time.cho', '        while us % 10 == 0 {', '        while us % 10 == 99 {'),
+    ('time: jsonb has a space where it has a T', 'src/time.cho', "    if json {\n        at = put(out, at, 'T');", "    if !json {\n        at = put(out, at, 'T');"),
+    ("time: jsonb's zone is written as the text's", 'src/time.cho', "        if json {\n            at = put(out, at, ':');", "        if false {\n            at = put(out, at, ':');"),
+    ('time: January and February are of the year before', 'src/time.cho', '        m = mp - 9;\n        y = y + 1;', '        m = mp - 9;'),
+    ('time: a time of no zone is written with one', 'src/time.cho', "    if tz {\n        at = put(out, at, '+');", "    if true {\n        at = put(out, at, '+');"),
+    ('time: a time before the year 1 is written', 'src/time.cho', '    if abs < 0 || abs >= end_days() * day_us() {\n        return 0 - 1;\n    }\n    let days', '    if abs >= end_days() * day_us() {\n        return 0 - 1;\n    }\n    let days'),
+    ('times: a text with a field out of range is an integer out of range', 'src/eval.cho', '                return set(ws, v, to, 2, 21, 0, 0);', '                return set(ws, v, to, 2, 3, 0, 0);'),
+    ('times: a time of no zone and a moment are not compared', 'src/eval.cho', '    if is_time(tx) && is_time(ty) {\n        // a time of no zone beside a moment: read as that moment in UTC\n        return 8;\n    }\n', ''),
+    ('times: two times are compared as texts', 'src/eval.cho', '    if is_int(t) || t == 2 || is_time(t) {', '    if is_int(t) || t == 2 {'),
+    ('times: arithmetic on a time has no operator, where PostgreSQL has intervals', 'src/eval.cho', 'if tx == 0 && ty == 0 || is_time(tx) || is_time(ty) {', 'if tx == 0 && ty == 0 {'),
+    ('times: a moment is not stored in a column of no zone', 'src/eval.cho', '|| is_int(from) && is_int(to) || is_time(from) && is_time(to) || to == 3;', '|| is_int(from) && is_int(to) || to == 3;'),
+    ('times: a moment cast to text has no zone, and a time of no zone has one', 'src/eval.cho', '        let end = time.format(a, from == 8, false, ar, start);', '        let end = time.format(a, from == 7, false, ar, start);'),
+    ('times: a text read as a time of no zone is moved by its offset', 'src/eval.cho', '            let rc = time.parse(ar, a, b, to == 8, ws[v + 3..v + 4]);', '            let rc = time.parse(ar, a, b, to == 7, ws[v + 3..v + 4]);'),
+    ('times: a CASE of the two types is a mismatch', 'src/eval.cho', '                } else if is_time(t) && is_time(bt) && t != bt {\n                    return unsupported();\n', '                } else if false {\n                    return unsupported();\n'),
+    ('times: a COALESCE of the two types is a mismatch', 'src/eval.cho', '                } else if is_time(t) && is_time(mt) && t != mt {\n                    return unsupported();\n', '                } else if false {\n                    return unsupported();\n'),
+    ('times: timestamp names the type of moments', 'src/eval.cho', '    if name_is(e, at, n, "timestamp") {\n        return 7;', '    if name_is(e, at, n, "timestamp") {\n        return 8;'),
+    ("times: the row's image writes a moment with no zone", 'src/row.cho', 'ty == 8, true, out, w), \'"\');', 'ty == 7, true, out, w), \'"\');'),
+    ('times: a client is told a moment is a time of no zone', 'src/answer.cho', '    if ty == row.t_ts() {\n        return 1114;', '    if ty == row.t_ts() {\n        return 1184;'),
+    ('times: a client is sent a moment with no zone', 'src/answer.cho', 'ty == row.t_tstz(), false, out, oat);', 'ty == row.t_ts(), false, out, oat);'),
+    ('times: a field out of range has no SQLSTATE of its own', 'src/exec.cho', '    if code == 20 {\n        return "22008";\n    }\n', ''),
+    ('times: the least and the greatest of times are not computed', 'src/execs.cho', '|| ty == 3 || row.is_time(ty)) {', '|| ty == 3) {'),
+    ('times: an index is not read by a time', 'src/via.cho', '    if inty && (vt == 1 || vt == 5 || vt == 6 || row.is_time(vt)) {', '    if inty && (vt == 1 || vt == 5 || vt == 6) {'),
+    ('times: a column of moments is made one of no zone', 'src/execw.cho', '        } else if code == 10 {\n            ty = row.t_tstz();', '        } else if code == 10 {\n            ty = row.t_ts();'),
     ('log: a table as of a commit is read as it is now', 'src/drive.cho',
      '        } else if kind == 6 && view > 0 {',
      '        } else if kind == 6 && view < 0 {'),
@@ -3661,6 +3699,17 @@ def run_engine(cancho):
             b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/enginecheck.cho")] + [str(work / "src" / x) for x in srcs] + ["-o", str(exe)], capture_output=True, text=True)
             if b.returncode != 0:
                 return label, "BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]), True
+            if label.startswith("time: "):
+                # the two ways between a time and its text are judged on their own, against Python's datetime (tests/time_check.py)
+                tx = work / "timecheck"
+                tb = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/timecheck.cho"), str(work / "src" / "time.cho"), "-o", str(tx)], capture_output=True, text=True)
+                if tb.returncode != 0:
+                    return label, "BROKEN %-48s does not build: %s" % (label, (tb.stdout + tb.stderr).strip()[:160]), True
+                r = subprocess.run([sys.executable, str(ROOT / "tests/time_check.py"), str(tx)], capture_output=True, text=True, timeout=600)
+                if r.returncode != 0:
+                    first = [l for l in (r.stdout + r.stderr).splitlines() if l.startswith("FAIL")]
+                    return label, "killed   %-46s %s" % (label, (first[0] if first else "a crash")[:90]), False
+                return label, "SURVIVED %-46s every time is read and written as before" % label, True
             if label.startswith("scrub: "):
                 # what an erase leaves in the file is judged by the search of the whole file (tests/engine_erase.py), on two seeds
                 for seed in ("1", "2"):

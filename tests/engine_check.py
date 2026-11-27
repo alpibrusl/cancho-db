@@ -2038,6 +2038,22 @@ VIAFIXED = [
     ("select k, a from fvr order by a desc limit 2 offset 10", "order", True),
     ("rollback", "ddl", False),
     ("select k, a from fvr order by a limit 2", "order", True),
+    # an index on a time (6bp): a value, a small range, the first and the last rows
+    ("create table fvt (k integer primary key, at timestamptz, d timestamp)", "ddl", False),
+    ("insert into fvt values " + ", ".join("(%d, '2026-01-%02d %02d:00:00+00', '2025-%02d-01 00:00:00')" % (i, 1 + i % 28, i % 24, 1 + i % 12) for i in range(60)), "write", False),
+    ("insert into fvt values (60, null, null), (61, null, '2025-03-01')", "write", False),
+    ("create index fvtat on fvt (at)", "ddl", False),
+    ("create index fvtd on fvt (d)", "ddl", False),
+    ("select k from fvt where at = '2026-01-05 04:00:00+00'", "set", True),
+    ("select k from fvt where at = '2026-01-05 06:00:00+02'", "set", True),
+    ("select k from fvt where d = '2025-03-01'", "set", True),
+    (P("select k from fvt where at = $1", "2026-01-07T06:00:00Z"), "set", True),
+    ("select k from fvt where at >= '2026-01-10' and at < '2026-01-12'", "set", True),
+    ("select k from fvt where at > '2026-01-27 12:00:00+00'", "set", True),
+    ("select k from fvt where at > '2026-01-05'", "set", False),
+    ("select k, at from fvt order by at limit 3", "order", True),
+    ("select k from fvt order by at desc limit 3", "count", True),
+    ("select k, at from fvt order by at desc limit 3 offset 2", "order", True),
     ("truncate fvi", "ddl", False),
     ("select k from fvi where a = 5", "set", True),
     ("insert into fvi values (1, 5, 'x', 7, 3, true)", "write", False),
@@ -2689,7 +2705,7 @@ def main():
     ucounts, ufails, _, _ = compare(pg, [(sql, how, "fubr" if " fubr" in sql else "fub" if " fub" in sql else "fuh" if " fuh" in sql else "fui" if " fui" in sql else "fua") for sql, how in UNIQFIXED], ueng, True)
     fails += ufails
     print("engine_check: %d statements on a table with four unique indexes, none refused: %s" % (len(UNIQFIXED), ", ".join("%s=%d" % kv for kv in sorted(ucounts.items()))))
-    _, vfails, _, _ = compare(pg, [(sql, how, "fvj" if " fvj" in str(sql) else "fvl" if " fvl" in str(sql) else "fvr" if " fvr" in str(sql) else "fvi") for sql, how, _ in VIAFIXED], veng, True)
+    _, vfails, _, _ = compare(pg, [(sql, how, "fvj" if " fvj" in str(sql) else "fvl" if " fvl" in str(sql) else "fvr" if " fvr" in str(sql) else "fvt" if " fvt" in str(sql) else "fvi") for sql, how, _ in VIAFIXED], veng, True)
     fails += vfails
     print("engine_check: %d statements read by an index and %d beside them that may not be, each with PostgreSQL's answer" % (wanted, sum(1 for v in VIAFIXED if v[1] in ("set", "order") and not v[2])))
     print("engine_check: %d fixed statements, none refused: %s" % (len(FIXED), ", ".join("%s=%d" % kv for kv in sorted(fcounts.items()))))

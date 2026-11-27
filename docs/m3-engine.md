@@ -2961,7 +2961,27 @@ already records, so a statement that asks for it is still one the log can hold);
 2. *`now()`*, as the transaction's time.
 3. *Arithmetic with intervals*, if the first two say an application needs it here rather than in its own code.
 
-**What the first slice has to change**, read from the code and to be confirmed as it is built: the closed list of types in `src/row.cho` and what
+**Slice 1, built.** `src/time.cho` (a text read as a time, a time written: held to Python's `datetime` by `tests/time_check.py`, on their own);
+types 7 and 8 in `src/row.cho`, stored with the integers' tag, and the row image writing them as `to_jsonb` does; `src/eval.cho`: a text or a
+parameter beside a time is read as one, the two types compare as one number, the casts, and a refusal wherever a time meets arithmetic or a
+choice between the two types; `execw.column_defs`; `src/answer.cho` (what a client is told and sent, which now takes the column's type: a stored
+time does not say it is one); the constant of a key's bounds and of an index. `exec.bounds` moved to `via.cho` unchanged to make room.
+
+*Nothing else had to learn the types.* The three verifiers of the log read a row's image as bytes; the log of a run with times in it verifies
+with all three (`tests/engine_log.py`), and the server's test passes with them (`tests/engine_wire.py`).
+
+*What the first run by hand showed*: a time was stored as an empty text. The one place a value is written into a row (`exec.enc`) knew the
+integers by their three types and took everything else but a boolean for text. The row then failed its own check, and every read of the table was
+refused `engine-damaged`: nothing wrong was answered, and nothing was readable.
+
+*Tested.* 78 statements on three tables (`TIMEFIXED`), none refused, each answer PostgreSQL's in UTC: every way a time is written, the fields no
+date has (`22008`), a time where another type is wanted and the other way (`42804`, `42883`), each comparison, a parameter, `order by`, `group
+by`, `distinct`, `min` and `max`, the casts, `coalesce`, `case`, `greatest`, a time as a key and as half of one, an index and a unique index on
+one. 18 statements PostgreSQL answers and the engine refuses on purpose, each beside what PostgreSQL 16 does. 10 more in the list of reads by an
+index. **The random history's tables have columns of both types** (2 in 9), in keys too, with texts of times among their values and conditions:
+3 seeds of 3,000 statements agree. 21 mutants of `time.cho` judged by `time_check.py`, 17 of the rest judged by the differential.
+
+**What the first slice had to change**, as it was read from the code before (kept: it was right but for `exec.enc`): the closed list of types in `src/row.cho` and what
 a stored value of each is; `src/eval.cho` (a text read as a time, a time written, the comparison, the casts, what unifies with what);
 `execw.column_defs` (the parser already knows the two names: the proxy passes them to PostgreSQL); `src/answer.cho` (the type a client is told and
 the text it is sent); the row image in `src/row.cho`; the key's bounds and the index's constant (`exec.bounds`, `via.part`), which take an
