@@ -3493,6 +3493,102 @@ and write. That four connections and 300 transactions meet every interleaving: t
 Transactions beside the others with definitions in them (`create table` inside one) are not in the random history. A connection that
 ends inside one while a plain transaction is open loses what it drew from counters (said in the code; not tested).
 
+## 6bw. Transactions side by side: the second part, rows
+
+*Design, written before the code. The owner chose it (27 Nov 2026: "go with row level"), with `serializable` keeping the first part's rule
+and `repeatable read` taking this one. Who uses what was read first, at the owner's asking: neither sibling that speaks to a database
+names an isolation level (`cancho-hooks` at 40b2ce0, `src/roster.cho`: `begin`, `commit`; `cancho-ota` at feb14de, `src/store.cho`:
+`begin`, `commit`, and `select nextval('design_ids')` on its own), and neither handles `40001`. So nothing here changes what they see,
+and counters stay as 6bv left them.*
+
+**What is missing (6bv).** Of two transactions beside each other that write, one is refused, even if they touch different rows: the
+whole database is one thing. A transaction is refused for what it could not have been harmed by.
+
+**The rule, for `begin isolation level repeatable read`.** At its commit, if the branch has moved since it began:
+
+1. **A row it wrote that someone else wrote since** is a conflict: for each key the transaction wrote (stored, changed or removed), what
+   the branch holds at that key now must be exactly what it held when the transaction began. If not: `40001`, as before.
+2. **A counter it drew from that someone else drew from since** is a conflict (the same test, on the counter). Otherwise two
+   transactions that both commit could hold one number.
+3. **A definition** made by the transaction, or by anyone since it began (the schema's text differs, 6bc), is a conflict: tables are not
+   merged.
+4. Otherwise **its rows are put on the branch as it is now**, and that tree is what it commits. A row whose values are already in a
+   unique index of the branch (someone took them since) is a conflict too: `40001`, and when the transaction is run again the
+   statement itself says `23505`.
+
+That is snapshot isolation with the first writer of a row winning, which is what PostgreSQL calls `repeatable read`. It is **not**
+serializable: two transactions that each read what the other writes, and write different rows, both commit (write skew).
+`begin isolation level serializable` keeps the first part's rule, which refuses one of them.
+
+**How the rows are put.** Not by running the statements again: they were answered from the snapshot, and run now they might write
+other rows. And not from the facts (6af): those are hashes. So:
+
+- *Which rows.* While a transaction beside the others runs, every key a statement stores or removes is noted in a tree of the
+  transaction's own (the table's name and the key; `exec.row_put` and `exec.row_del` are the two places a row is written).
+  *Corrected: they are not the only two.* An `update` that moves rows to other keys writes them with `put_key` and `del_key`
+  (`execw.settle`). What every write of a key with a history goes through is `exec.remember`, and that is where a key is noted. The
+  transaction's tree holds what each of those keys holds at its end.
+- *The same bytes.* A stored row is its two salts and the row (6ag). The bytes are copied from the transaction's tree to the branch's,
+  salts and all. So the transaction's facts stay true without being made again: for each key, "what it held when the transaction first
+  touched it" is what the branch holds now (rule 1 says they are the same bytes), and "what it holds at the end" is the bytes copied.
+- *What a write does besides.* Each copy does what `row_put` does around the bytes: the record of what the key held before (6n), and
+  the entries of the table's indexes (6bo), taken out for the old row and put in for the new.
+- *The order* is the keys' order. A unique value handed from one row to another inside the transaction may be seen taken while the
+  rows are put, and the transaction refused though it need not be. Said, not solved.
+- *The counters* it drew from are written to the new tree (6y's replay), which rule 2 has shown nobody else moved.
+- Then the commit is an ordinary one: the tree made this way is the transaction's tree, and `session.close` does the rest (its number,
+  its record in the log with the schema it began with, its facts).
+
+**What the log says.** One commit, with the facts of the rows the transaction changed and the statements it ran. A verifier that
+replays the changes (L3a) reaches the state the file holds; nothing in a record says the transaction began on an older state, and
+nothing needs to: a commit's facts are against the commit before it, and they are.
+
+**The cost,** to be measured: a commit that finds the branch moved reads each key it wrote in two trees and writes it in one. A
+transaction that wrote ten thousand rows pays for ten thousand at its commit; one that finds the branch as it left it pays nothing new.
+
+*Not in this part:* a transaction that writes a table with an identity column and finds the branch moved is refused as in the first
+part, unless the test shows its counter is covered by rule 2; `serializable` by anything finer than the first part's rule
+(PostgreSQL's looks at what each transaction read); savepoints; `select ... for update`.
+
+**Test** (`tests/engine_sidebyside.py`, extended). The first part's oracle was "one client, in the right order". Snapshot isolation is
+not that: a transaction's reads are of when it began and its writes land when it commits. So the single client is made to do exactly
+that, on a fresh server kept in step with the first:
+
+1. In the order things happened: where a transaction **began**, the client begins one, runs its statements and checks each answer
+   against the answer it got, then reads the tables whole, **rolls back**, and keeps what changed (the transaction's effects: rows
+   stored, changed, removed). Where it **committed**, the client applies those effects with plain statements. Statements outside any
+   transaction are run where they ran.
+2. The tables at the end must be the same. So must the rule: a transaction of `repeatable read` that committed having written is one
+   whose keys nobody else changed while it was open, and one that was refused is one for which somebody did; for `serializable`, as
+   in the first part. Both are computed from the single client's own record, not asked of the server under test.
+3. Fixed cases: two that write different rows both commit, and both rows are there (the line 6bv said this part must change); the
+   same row, one is refused; write skew commits at `repeatable read` and is refused at `serializable`; a unique value taken meanwhile;
+   a counter both drew from; a definition on either side; indexes after a merge answer as a scan does; the history of a merged row
+   (`AS OF`) is what it was (*not done: nothing reads the past of a merged row in the test; the log's replay, L3a, is what holds the
+   records of the rows to what they were*); a large transaction merged whole.
+4. The log of the run verifies (L1 to L3a), with merged commits in it.
+
+**As built.** `src/merge.cho` (`onto`: the counters, then every key held to the rule, then every key put), `exec.track` and the note
+in `exec.remember`, `session.schema_same` and `retree`, and in `answer` the one place a `repeatable read` that has "lost" is tried
+(`src/serve.cho`); a connection's state has the tree of its keys and its level. The rule for the level is read with the `begin`
+(`drive.side_begin` answers 1 or 2).
+
+- *It ran the first time,* and the oracle agreed on three seeds (`python3 tests/engine_sidebyside.py build/engine build/enginecheck
+  300 <seed>`). At seed 1: 300 transactions and statements; at `repeatable read` 29 committed having written and 5 were refused; at
+  `serializable` 16 and 22; 683 answers the same, the tables the same, and nobody refused or let through against the rule of its
+  level. The log verified with 82 commits, the merged ones among them.
+- *Identity columns* needed nothing of their own (*read, `src/execw.cho`, `insert`: a table's counter is noted with `exec.seq_note`
+  under the table's number, as a sequence's draw is*), so rule 2 holds it. *Not tested by name: the fixed cases use a sequence.*
+- *Measured:* a transaction of 3,000 rows (with an index) put on a branch that had moved commits in 136 ms (one run, the server
+  with a key file, so the commit is signed and synced as any is).
+- **17 mutants, all killed** (`MUTANT_ONLY="side: rows" python3 tests/mutants.py wire`).
+
+**What this does not show.** Write skew is allowed at `repeatable read`, and the test shows it happening. A transaction refused for a
+unique value that it handed from one of its own rows to another (the order the rows are put in) is said and not tested. A row
+rewritten by someone else with the values it had is a conflict (its bytes differ); the oracle allows that and does not require it.
+Nothing is measured against the first part's rule for how many transactions it saves under a real load: the random history has 24
+keys on purpose, so that they meet.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

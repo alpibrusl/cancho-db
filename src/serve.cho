@@ -18,6 +18,7 @@ import cdb.tables;
 import cdb.revoke;
 import cdb.tlsio;
 import cdb.tlsid;
+import cdb.merge;
 import std.io;
 import tls;
 
@@ -262,9 +263,10 @@ pub fn reclaim[&h, &g, &z, &q, &r](heap: &!h Heap, gs: &!g [int], pg: &!z pager.
 // hold are still to be read past; 5 when it last did something; 6 how many requests for TLS it has made; 7 whether it has a statement that waits for another connection's
 // transaction; 8 to 15 its session (src/session.cho); 16 whether the client has closed its side; 17 whether the server is reading it;
 // 18 whether it is from another machine (6br); 19 how many bytes of its room for ciphertext are held (6bq); 20 its clock, the time of its transaction's beginning (6bs);
-// 21 and 22 the address of a client from another machine (6bt); 23 in a transaction beside the others (6bv), the tree it began on and one.
+// 21 and 22 the address of a client from another machine (6bt); 23 in a transaction beside the others (6bv), the tree it began on and one;
+// 24 the tree of the keys it has written, and 25 its level: 1 serializable, 2 repeatable read (6bw).
 pub fn stride() -> [] int {
-    return 24;
+    return 28;
 }
 
 // A connection's buffer: a message is at most this long.
@@ -733,25 +735,55 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n, &j](heap: &!h Heap
     }
     // a transaction beside the others (6bv): whether the connection is in one (and the tree it began on), whether this statement begins one, or ends it
     let side = st[23] != 0;
-    var starts = false;
+    var level = 0;
     var ends = 0;
     if side {
         ends = drive.ends_txn(sub, sql);
     } else if session.state(st[8..16]) == session.idle() {
-        starts = drive.side_begin(sub, sql);
+        level = drive.side_begin(sub, sql);
     }
+    let starts = level > 0;
     // (a statement inside one is given the branch's tree like any other and runs on the transaction's own, 6v; what it writes with are numbers after the branch's
     // last, which are the ones its commit will have if it commits at all: it does only if the branch has not moved)
     // it wrote and the branch has moved since it began: it has lost (first committer wins), and its commit is run as a rollback
     // (a number drawn from a counter is written too: the counter is in the tree, so the transaction's tree is another than the one it began on)
     let wrote = side && session.wrote(st[8..16], st[23] - 1);
-    let lost = side && ends == 1 && session.state(st[8..16]) == session.open_txn() && wrote && roots[0] != st[23] - 1;
+    var lost = side && ends == 1 && session.state(st[8..16]) == session.open_txn() && wrote && roots[0] != st[23] - 1;
     // it wrote nothing: its commit is a rollback that says COMMIT (there is no tree to make the branch's, and the branch may have moved)
     let nothing = side && ends == 1 && session.state(st[8..16]) == session.open_txn() && !wrote;
     // the draws from counters this connection's transaction has made (6bv): its own, not whoever's ran last
     exec.seq_give(w, sq);
+    // and the keys it writes are noted in a tree of its own (6bw); nobody else's are
+    if side {
+        exec.track(w, st[24]);
+    } else {
+        exec.track(w, 0 - 1);
+    }
     let wr = pager.begin(pg);
-    let on = session.open(pg, w, st[8..16], roots[0]);
+    var on = session.open(pg, w, st[8..16], roots[0]);
+    if lost && st[25] == 2 && wr >= 0 && on >= 0 {
+        // at `repeatable read` it has lost only if someone else wrote a row it wrote, drew from a counter it drew from, or defined something, or it did (6bw):
+        // otherwise its rows are put on the branch as it is now, and that tree is the one it commits
+        exec.track(w, 0 - 1);
+        var put = merge.conflict();
+        let s1 = session.schema_same(heap, pg, w, st[23] - 1, roots[0]);
+        let s2 = session.schema_same(heap, pg, w, st[23] - 1, session.tree(st[8..16]));
+        if s1 < 0 || s2 < 0 {
+            on = 0 - 1;
+        } else if s1 == 1 && s2 == 1 {
+            put = merge.onto(pg, w, st[23] - 1, session.tree(st[8..16]), roots[0], st[24], sq);
+            if put >= 0 {
+                put = exec.seq_replay(pg, w, put);
+            }
+        }
+        if put >= 0 {
+            session.retree(st[8..16], put);
+            on = put;
+            lost = false;
+        } else if put != merge.conflict() {
+            on = 0 - 1;
+        }
+    }
     if wr < 0 || on < 0 {
         gs[g_stop()] = 7;
         push(tab, eng, slot, gs, out[0..wire.error(out, at, true, "58030", "cancho-db: the page file cannot be read", "")]);
@@ -844,6 +876,10 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n, &j](heap: &!h Heap
             nr = session.close(heap, pg, w, st[8..16], roots[0], after, !bound || pre != 0 || o != drive.o_ok() && o != drive.o_control(), key, who, rec);
         }
         exec.seq_take(w, sq);
+        if side {
+            st[24] = exec.tracked(w);
+        }
+        exec.track(w, 0 - 1);
         if beside && nr >= 0 && nr != roots[0] {
             // (and nothing its ending wrote either)
             nr = roots[0];
@@ -852,6 +888,8 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n, &j](heap: &!h Heap
         // a transaction beside the others begins on the branch's tree as it is, and is counted; when it ends, however it ends, it is one no more
         if starts && session.state(st[8..16]) == session.open_txn() {
             st[23] = roots[0] + 1;
+            st[24] = 0;
+            st[25] = level;
             gs[g_sides()] = gs[g_sides()] + 1;
         } else if side && session.state(st[8..16]) == session.idle() {
             st[23] = 0;
@@ -1075,7 +1113,7 @@ fn aside_text[&b, &t, &s](sub: &!b drive.Sub, st: &t [int], sql: &s [byte]) -> [
     if st[23] != 0 {
         return drive.ends_txn(sub, sql) == 0;
     }
-    return session.state(st[8..16]) == session.idle() && drive.side_begin(sub, sql);
+    return session.state(st[8..16]) == session.idle() && drive.side_begin(sub, sql) > 0;
 }
 
 fn aside[&b, &t, &i](sub: &!b drive.Sub, st: &t [int], body: &i [byte]) -> [] bool {
