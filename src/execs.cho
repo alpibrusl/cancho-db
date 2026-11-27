@@ -1011,7 +1011,7 @@ fn grouped[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e: &
                 }
                 if kind == 2 && (ty == 5 || ty == 6) {
                     contents(w.pos)[ab + 4] = 1;
-                } else if kind >= 3 && (ty == 1 || ty == 5 || ty == 6 || ty == 3) {
+                } else if kind >= 3 && (ty == 1 || ty == 5 || ty == 6 || ty == 3 || row.is_time(ty)) {
                     contents(w.pos)[ab + 4] = ty;
                 } else {
                     // no such aggregate for this type

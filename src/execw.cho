@@ -1136,6 +1136,10 @@ fn column_defs[&q, &s, &t, &n, &k](w: &!q exec.Work, sql: &s [byte], toks: &t [i
             ty = row.t_text();
         } else if code == 5 {
             ty = row.t_bool();
+        } else if code == 9 {
+            ty = row.t_ts();
+        } else if code == 10 {
+            ty = row.t_tstz();
         } else {
             return exec.unsupported();
         }

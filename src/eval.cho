@@ -3,17 +3,20 @@ module cdb.eval;
 
 import cdb.commit;
 import cdb.row;
+import cdb.time;
 
 // The expression evaluator of the engine (docs/m3-engine.md, slice M3d): one IR expression (docs/spec/ir.md sections 2 and 6), with the literal kinds the lowering noted beside it (6e), over the rows that are
 // bound, to one typed value. What PostgreSQL would answer for the same expression is the oracle (tests/eval_check.py); where this file is not sure to answer as PostgreSQL does it REFUSES (`unsupported`): a
 // flag or a gap may change whether there is an answer, never what the answer is.
 //
-// Types: 0 unknown (a string literal that has not met a type yet), 1 bigint, 5 integer, 6 smallint, 2 boolean, 3 text, 4 bytea (the codes of src/row.cho).
+// Types: 0 unknown (a string literal that has not met a type yet), 1 bigint, 5 integer, 6 smallint, 2 boolean, 3 text, 4 bytea, 7 timestamp, 8 timestamptz (the codes of
+// src/row.cho). A time is in `a`, as an integer is: the microseconds since 2000-01-01 (docs/m3-engine.md 6bp).
 // A value is six ints: [type, state, a, b, constant, spare]. state 0 is a value, 1 null, 2 an error that happened while computing it (a is its code): an error value is only an error of the statement if it is
 // the value that is used, which is how CASE, AND and OR skip what PostgreSQL skips. An integer or boolean is in `a`; text and bytea are `b` bytes of the arena at `a`.
 //
 // Errors that do not depend on a row are answers of `eval` itself, negative: `unsupported()`, `no_operator()` (42883), `mismatch()` (42804), `no_cast()` (42846), `malformed()`.
-// Errors of a value (state 2): 2 division by zero (22012), 3 out of range (22003), 4 not a number or a boolean (22P02), 5 a LIKE pattern that ends in its escape (22025).
+// Errors of a value (state 2): 2 division by zero (22012), 3 out of range (22003), 4 not a number or a boolean (22P02), 5 a LIKE pattern that ends in its escape (22025),
+// 21 a text of the form of a time with a field out of range (22008).
 // An error computed from constants alone is refused as `unsupported`: PostgreSQL folds constants when it plans, and whether it then raises depends on where the constant sits.
 //
 // No recursion: the expression is in prefix order, so its nodes are listed once going forward and computed going backward, each node finding its operands on a stack (the first operand on top).
@@ -49,6 +52,10 @@ pub fn ws_size() -> [] int {
 
 fn is_int(ty: int) -> [] bool {
     return ty == 1 || ty == 5 || ty == 6;
+}
+
+fn is_time(ty: int) -> [] bool {
+    return ty == 7 || ty == 8;
 }
 
 fn width(ty: int) -> [] int {
@@ -221,6 +228,12 @@ fn type_of_name[&x](e: &x [byte], at: int, n: int) -> [] int {
     if name_is(e, at, n, "bytea") {
         return 4;
     }
+    if name_is(e, at, n, "timestamp") {
+        return 7;
+    }
+    if name_is(e, at, n, "timestamptz") {
+        return 8;
+    }
     return 0 - 1;
 }
 
@@ -381,6 +394,11 @@ fn convert[&w, &a, &i](ws: &!w [int], v: int, to: int, explicit: bool, ar: &!a [
         return 0;
     }
     met(ws, v, info);
+    if is_time(from) && is_time(to) {
+        // the two types of time are one number in a session whose zone is UTC (6bp)
+        ws[v] = to;
+        return 0;
+    }
     if explicit && (from == 4 && is_int(to) || is_int(from) && to == 4) {
         // PostgreSQL 16 has no cast between bytea and the integers (42846) and PostgreSQL 18 has one: where the versions differ, nothing is answered
         return unsupported();
@@ -388,7 +406,7 @@ fn convert[&w, &a, &i](ws: &!w [int], v: int, to: int, explicit: bool, ar: &!a [
     let state = ws[v + 1];
     if state != 0 {
         // a null or an error keeps its state and takes the type, if the conversion exists at all
-        if from == 0 || explicit && (is_int(from) && (is_int(to) || to == 3 || to == 2 && from == 5) || from == 2 && (to == 3 || to == 5) || from == 3 && (is_int(to) || to == 2) || from == 4 && to == 3) || is_int(from) && is_int(to) {
+        if from == 0 || explicit && (is_int(from) && (is_int(to) || to == 3 || to == 2 && from == 5) || from == 2 && (to == 3 || to == 5) || from == 3 && (is_int(to) || to == 2 || is_time(to)) || is_time(from) && to == 3 || from == 4 && to == 3) || is_int(from) && is_int(to) {
             ws[v] = to;
             return 0;
         }
@@ -400,10 +418,24 @@ fn convert[&w, &a, &i](ws: &!w [int], v: int, to: int, explicit: bool, ar: &!a [
     let a = ws[v + 2];
     let b = ws[v + 3];
     let constant = ws[v + 4] == 1;
-    if from == 0 || explicit && from == 3 && (is_int(to) || to == 2) {
+    if from == 0 || explicit && from == 3 && (is_int(to) || to == 2 || is_time(to)) {
         // from text: read it as the target type
         if to == 3 {
             ws[v] = 3;
+            return 0;
+        }
+        if is_time(to) {
+            // ISO 8601 and nothing else PostgreSQL would read (refused, not an error); a field out of range is its error
+            let rc = time.parse(ar, a, b, to == 8, ws[v + 3..v + 4]);
+            if rc == time.unread() || rc != 0 && constant {
+                return unsupported();
+            }
+            if rc != 0 {
+                return set(ws, v, to, 2, 21, 0, 0);
+            }
+            ws[v] = to;
+            ws[v + 2] = ws[v + 3];
+            ws[v + 3] = 0;
             return 0;
         }
         if is_int(to) {
@@ -464,6 +496,15 @@ fn convert[&w, &a, &i](ws: &!w [int], v: int, to: int, explicit: bool, ar: &!a [
     }
     if !explicit {
         return no_operator();
+    }
+    if is_time(from) && to == 3 {
+        let start = info[0];
+        let end = time.format(a, from == 8, false, ar, start);
+        if end < 0 {
+            return unsupported();
+        }
+        info[0] = end;
+        return set(ws, v, 3, 0, start, end - start, ws[v + 4]);
     }
     if is_int(from) && to == 3 {
         let (at, n) = int_text(a, ar, info);
@@ -533,7 +574,7 @@ fn convert[&w, &a, &i](ws: &!w [int], v: int, to: int, explicit: bool, ar: &!a [
 // Whether a value of type `from` may be stored in a column of type `to` (PostgreSQL's assignment conversions among these types: a literal into anything, an integer into another integer type, anything into
 // text).
 pub fn assignable(from: int, to: int) -> [] bool {
-    return from == to || from == 0 || is_int(from) && is_int(to) || to == 3;
+    return from == to || from == 0 || is_int(from) && is_int(to) || is_time(from) && is_time(to) || to == 3;
 }
 
 // Give the value at `v` the type `to` of the column it is to be stored in. 0, and the value may now be an error value (state 2: text that is not a number, an integer out of the column's range) even if it
@@ -590,6 +631,10 @@ fn unify[&w, &a, &i](ws: &!w [int], x: int, y: int, ar: &!a [byte], info: &!i [i
     if tx == ty {
         return tx;
     }
+    if is_time(tx) && is_time(ty) {
+        // a time of no zone beside a moment: read as that moment in UTC
+        return 8;
+    }
     return no_operator();
 }
 
@@ -618,7 +663,7 @@ fn cmp_bytes[&a](ar: &a [byte], xa: int, xn: int, ya: int, yn: int) -> [] int {
 // -1, 0 or 1: how the two values (not null, of one type or both integers) compare.
 fn compare[&w, &a](ws: &w [int], x: int, y: int, ar: &a [byte]) -> [] int {
     let t = ws[x];
-    if is_int(t) || t == 2 {
+    if is_int(t) || t == 2 || is_time(t) {
         if ws[x + 2] < ws[y + 2] {
             return 0 - 1;
         }
@@ -1010,7 +1055,8 @@ fn step[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], p: int, tag: int, ops: int, to
         } else if op >= 8 && op <= 11 || op == 17 {
             var tx = ws[x];
             var ty = ws[y];
-            if tx == 0 && ty == 0 {
+            if tx == 0 && ty == 0 || is_time(tx) || is_time(ty) {
+                // (arithmetic on times is PostgreSQL's, with intervals: not here, 6bp)
                 return unsupported();
             }
             if tx == 0 {
@@ -1318,6 +1364,8 @@ fn step[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], p: int, tag: int, ops: int, to
                     t = bt;
                 } else if is_int(t) && is_int(bt) {
                     t = wider(t, bt);
+                } else if is_time(t) && is_time(bt) && t != bt {
+                    return unsupported();
                 } else if t != bt {
                     return mismatch();
                 }
@@ -1428,6 +1476,8 @@ fn step[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], p: int, tag: int, ops: int, to
                     t = mt;
                 } else if is_int(t) && is_int(mt) {
                     t = wider(t, mt);
+                } else if is_time(t) && is_time(mt) && t != mt {
+                    return unsupported();
                 } else if t != mt {
                     return mismatch();
                 }

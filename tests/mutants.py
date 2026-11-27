@@ -1654,7 +1654,7 @@ def run_row(cancho):
                 continue
             f.write_text(text.replace(old, new))
             exe = work / "rowcheck"
-            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/rowcheck.cho")] + [str(work / "src" / x) for x in ("row.cho", "state.cho", "commit.cho", "build.cho")] + ["-o", str(exe)],
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/rowcheck.cho")] + [str(work / "src" / x) for x in ("time.cho", "row.cho", "state.cho", "commit.cho", "build.cho")] + ["-o", str(exe)],
                                capture_output=True, text=True)
             if b.returncode != 0:
                 print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
@@ -1716,7 +1716,7 @@ def run_eval(cancho):
                 continue
             f.write_text(text.replace(old, new))
             exe = work / "evalcheck"
-            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/evalcheck.cho")] + [str(work / "src" / x) for x in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho")] + ["-o", str(exe)],
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/evalcheck.cho")] + [str(work / "src" / x) for x in ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho")] + ["-o", str(exe)],
                                capture_output=True, text=True)
             if b.returncode != 0:
                 print("BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]))
@@ -3551,7 +3551,7 @@ def run_export(cancho):
     """Each mutant is an export tool of its own, held against what the test assembles from the test program's output (build/enginecheck, not mutated here)."""
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in EXPORT if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
             "execw.cho", "execd.cho", "facts.cho", "token.cho", "ir.cho")
     survivors = []
     for label, rel, old, new in table:
@@ -3600,7 +3600,7 @@ def run_wire(cancho):
             print("MUTANT_SLICE: %s is not K/N with 0 <= K < N" % part)
             return 1
         table = table[k::n]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
             "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
 
     def one(mutant):
@@ -3644,7 +3644,7 @@ def run_engine(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho", "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
 
     def one(mutant):
         label, rel, old, new = mutant

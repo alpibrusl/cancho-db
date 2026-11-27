@@ -31,7 +31,7 @@ fn part[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int], vat: int, c
             vt = contents(w.ws)[b];
         }
     }
-    if inty && (vt == 1 || vt == 5 || vt == 6) {
+    if inty && (vt == 1 || vt == 5 || vt == 6 || row.is_time(vt)) {
         contents(w.nrow)[0] = byte_of(1);
         exec.put_i64(contents(w.nrow), 1, contents(w.ws)[b + 2]);
     } else if ct == row.t_text() && (vt == 0 || vt == 3) {
@@ -454,7 +454,7 @@ pub fn bounds[&q, &x, &k](w: &!q exec.Work, e: &x [byte], kinds: &k [int]) -> []
                     // a parameter or a string: the integer the key's type reads it as
                     vt = contents(w.ws)[b];
                 }
-                if kt != row.t_text() && (vt == 1 || vt == 5 || vt == 6) {
+                if kt != row.t_text() && (vt == 1 || vt == 5 || vt == 6 || row.is_time(vt)) {
                     exec.put_i64(contents(w.nrow), 0, contents(w.ws)[b + 2]);
                     contents(w.nrow)[0] = byte_of((int_of(contents(w.nrow)[0]) + 128) % 256);
                     n = 8;

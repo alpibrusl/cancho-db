@@ -220,7 +220,7 @@ pub fn data_row[&o, &q](out: &!o [byte], at: int, w: &!q exec.Work, k: int) -> [
         if p < 0 || p + 4 > len(out) {
             return 0 - 1;
         }
-        let n = answer.text(exec.rows_of(w), ra, out, p + 4);
+        let n = answer.text(exec.type_of(w, c), exec.rows_of(w), ra, out, p + 4);
         if n == 0 - 1 {
             p = build.put_be(out, p, 4294967295, 4);
         } else if n < 0 {

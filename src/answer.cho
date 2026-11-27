@@ -3,11 +3,13 @@ module cdb.answer;
 
 import cdb.commit;
 import cdb.row;
+import cdb.time;
 
 // What a client is sent for an answer of the engine (docs/m3-engine.md 6s, J1), as PostgreSQL sends it in the text format: a column's type identifier, a value as text, a command's tag. Pure functions
 // on bytes: the proxy frames them, and tests/engine_check.py holds them against the bytes of PostgreSQL's own messages.
 
-// PostgreSQL's identifier of an engine type (src/row.cho): bigint 20, integer 23, smallint 21, boolean 16, text 25, bytea 17; anything else is `unknown`, 705.
+// PostgreSQL's identifier of an engine type (src/row.cho): bigint 20, integer 23, smallint 21, boolean 16, text 25, bytea 17, timestamp 1114, timestamptz 1184; anything
+// else is `unknown`, 705.
 pub fn oid(ty: int) -> [] int {
     if ty == row.t_int() {
         return 20;
@@ -26,6 +28,12 @@ pub fn oid(ty: int) -> [] int {
     }
     if ty == row.t_text() {
         return 25;
+    }
+    if ty == row.t_ts() {
+        return 1114;
+    }
+    if ty == row.t_tstz() {
+        return 1184;
     }
     // a literal that never met a type: PostgreSQL's `unknown`, which it does not send for a column (the executor makes it text first)
     return 705;
@@ -54,11 +62,19 @@ fn digit(v: int) -> [] int {
 }
 
 // The stored value at `at` of `rows` as text, into `out` from `oat`: its length; -1 if it is null (a client is sent a length of -1 and no bytes); -2 if `out` is too small. An integer in decimal, a
-// boolean `t` or `f`, text as it is, bytea as `\x` and two hexadecimal digits a byte.
-pub fn text[&r, &o](rows: &r [byte], at: int, out: &!o [byte], oat: int) -> [] int {
+// boolean `t` or `f`, text as it is, bytea as `\x` and two hexadecimal digits a byte, a time (`ty` 7 or 8) as `2026-11-27 10:00:00` and `+00` for a moment.
+pub fn text[&r, &o](ty: int, rows: &r [byte], at: int, out: &!o [byte], oat: int) -> [] int {
     let tag = int_of(rows[at]);
     if tag == 0 {
         return 0 - 1;
+    }
+    if tag == 1 && row.is_time(ty) {
+        // a time (`ty` is the column's type, which the stored value does not say): as PostgreSQL writes it in UTC
+        let end = time.format(row.int_at(rows, at + 1), ty == row.t_tstz(), false, out, oat);
+        if end < 0 {
+            return 0 - 2;
+        }
+        return end - oat;
     }
     if tag == 1 {
         let v = row.int_at(rows, at + 1);

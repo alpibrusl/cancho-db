@@ -273,3 +273,9 @@ pub fn format[&o](v: int, tz: bool, json: bool, out: &!o [byte], at0: int) -> []
     }
     return at;
 }
+
+// Whether `v` is a time this holds: of a year from 0001 to 9999.
+pub fn holds(v: int) -> [] bool {
+    let abs = v + epoch_days() * day_us();
+    return abs >= 0 && abs < end_days() * day_us();
+}

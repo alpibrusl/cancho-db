@@ -392,6 +392,9 @@ pub fn sqlstate(code: int) -> [] &static [byte] {
     if code == 18 {
         return "25P02";
     }
+    if code == 20 {
+        return "22008";
+    }
     return "XX000";
 }
 
@@ -1022,7 +1025,7 @@ pub fn enc[&o, &w, &a](out: &!o [byte], at: int, ws: &w [int], v: int, ar: &a [b
         out[at] = byte_of(0);
         return at + 1;
     }
-    if ty == 1 || ty == 5 || ty == 6 {
+    if ty == 1 || ty == 5 || ty == 6 || row.is_time(ty) {
         if at + 9 > len(out) {
             return 0 - 1;
         }

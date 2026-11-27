@@ -262,6 +262,10 @@ class Table:
 
 TEXTS = ["", "a", "b", "abc", "A", "12", " 7", "x%", "ñ", "a_c", "it's", "zz"]
 SMALL = [0, 1, 2, 3, 5, 7, 10, 12, 100, -1, -3]
+# times (docs/m3-engine.md 6bp): the two types, and texts of them in the ways the engine reads, one it leaves to PostgreSQL and one no date has
+TIMETYPES = ("timestamp", "timestamptz")
+TIMES = ["2026-11-27 10:00:00", "2026-11-27 10:00:00+02", "2026-11-27T08:00:00Z", "2025-01-01", "1999-12-31 23:59:59.999999", "2026-11-27 10:00:00.5-03:30", "2000-02-29 12:30",
+         "0001-01-01 00:00:00", "9999-12-31 23:59:59", "2026-11-27 10:00:01", "2026-02-30 10:00:00", "Nov 27 2026"]
 EDGE = [32767, -32768, 2147483647, -2147483648, 9223372036854775807, 3000000000, 65536, 46341]
 
 
@@ -326,6 +330,11 @@ class Gen:
             return self.pick(["true", "false"])
         if r < 0.15:
             return "coalesce(%s, %s)" % (self.bool_(d - 1), self.bool_(d - 1))
+        times = [c[0] for c in self.t.cols if c[1] in TIMETYPES]
+        if times and r < 0.25:
+            # a time beside a text of one, or another column of times
+            other = q(self.pick(TIMES)) if self.r.random() < 0.75 or len(times) < 2 else self.pick(times)
+            return "(%s %s %s)" % (self.pick(times), self.pick(["=", "<>", "<", "<=", ">", ">="]), other)
         if r < 0.45:
             return "(%s %s %s)" % (self.int_(d - 1), self.pick(["=", "<>", "<", "<=", ">", ">="]), self.int_(d - 1))
         if r < 0.58:
@@ -357,6 +366,8 @@ class Gen:
             return str(self.r.randrange(1, 25))
         if ty == "text":
             return q(self.pick(["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "a", "b", "", "ñ"]))
+        if ty in TIMETYPES:
+            return q(self.pick(TIMES[:6]))
         return self.pick(["true", "false"])
 
     def value(self, col, is_pk):
@@ -377,6 +388,8 @@ class Gen:
             return str(self.pick(SMALL))
         if ty == "text":
             return q(self.pick(TEXTS))
+        if ty in TIMETYPES:
+            return q(self.pick(TIMES))
         return self.pick(["true", "false"])
 
     def where(self):
@@ -405,7 +418,7 @@ class Gen:
         kt = self.pick(["integer", "integer", "bigint", "smallint", "text", "text"])
         cols = [("k", kt, False, None)]
         for cname in ["a", "b", "c", "d", "e", "ff"][:self.r.randrange(2, 7)]:
-            ty = self.pick(["smallint", "integer", "integer", "bigint", "text", "text", "boolean"])
+            ty = self.pick(["smallint", "integer", "integer", "bigint", "text", "text", "boolean", "timestamptz", "timestamp"])
             nn = self.r.random() < 0.2
             dflt = None
             if self.r.random() < 0.3:
@@ -415,6 +428,8 @@ class Gen:
                     dflt = self.pick(["0", "7", "- 1", "null", "'12'"])
                 elif ty == "text":
                     dflt = self.pick(["'x'", "''", "null"])
+                elif ty in TIMETYPES:
+                    dflt = self.pick(["'2020-01-01'", "null", "'2026-11-27 10:00:00+01'"])
                 else:
                     dflt = self.pick(["true", "false", "'t'"])
             cols.append((cname, ty, nn, dflt))
@@ -1657,7 +1672,8 @@ DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into 
              "create table fi (k integer primary key, c bigint generated always as identity)", "insert into fi (k) values (1)",
              "create table ft (k integer primary key, s text)", "insert into ft values (1, '3000000000 7abc')", "create sequence fzs",
              "create table fu (k integer primary key, u integer)", "insert into fu values (1, 1), (2, 2), (3, 3), (4, 40)", "create unique index fuu on fu (u)",
-             "create table fuc (k integer primary key, u integer unique)", "create sequence fue_u_key"]
+             "create table fuc (k integer primary key, u integer unique)", "create sequence fue_u_key",
+             "create table fts (k integer primary key, at timestamptz, d timestamp)", "insert into fts values (1, '2026-11-27 10:00:00+00', '2026-11-27 10:00:00')"]
 DEP = [
     # the cheaper condition is computed first, wherever it is written: the row with k = 2 never reaches the division
     ("select k from fz where k > 2 and 10 / (k - 2) > 0", None),
@@ -1709,6 +1725,25 @@ UNSUP = [
     ("select a1.k from fz a1 join fz a2 on a1.k = a2.k", None),          # a table joined to itself
     ("update fu set k = k + 10, u = u + 100", None),                      # a key that changes on a table with a unique index, and the indexed value with it (6bo)
     ("update fu set k = k + 10, u = 1 where k = 2", "23505"),
+    # times (6bp): what PostgreSQL reads or computes and the engine does not
+    ("insert into fts values (2, 'Nov 27 2026', null)", None),            # a date as it is said
+    ("insert into fts values (2, '2026-11-27 24:00:00', null)", None),    # midnight at the end of the day
+    ("insert into fts values (2, '2026-11-27 23:59:60', null)", None),    # a leap second
+    ("insert into fts values (2, 'infinity', null)", None),
+    ("insert into fts values (2, '2026-11-27 10:00:00 Europe/Madrid', null)", None),   # a zone by its name
+    ("insert into fts values (2, '2026-11-27 10:00:00.1234567', null)", None),          # more digits than are kept: PostgreSQL rounds
+    ("select k from fts where at = '2026-13-01'", "22008"),              # a constant that is no date: an error when PostgreSQL plans
+    ("select at - d from fts", None),                                    # an interval
+    ("select d - d from fts", None),
+    ("select at + 1 from fts", "42883"),
+    ("select at || 'x' from fts", None),
+    ("select case when k = 1 then at else d end from fts", None),         # the two types in one CASE: PostgreSQL makes them moments
+    ("select coalesce(d, at) from fts", None),
+    ("select cast(at as date) from fts", None),
+    ("select date_trunc('day', at) from fts", None),
+    ("create table ftq (k integer primary key, t date)", None),
+    ("select now() from fts", None),
+    ("insert into fts values (2, now(), null)", None),
     ("drop index fuc_u_key", "2BP01"),                                    # the index of a constraint: an error of its own, and another statement to drop it by
     ("alter table fuc add column v integer unique", None),               # a constraint added to a table that has rows
     ("create table fue (k integer primary key, u integer unique)", None), # the constraint's name is a sequence's: PostgreSQL takes another
@@ -2150,6 +2185,96 @@ UNIQFIXED = [
 ]
 
 
+# Times (docs/m3-engine.md 6bp, slice 1): every statement is answered, and as PostgreSQL answers it in a session whose zone is UTC.
+TIMEFIXED = [
+    ("create table ft1 (k integer primary key, at timestamptz not null, d timestamp, n text, e timestamptz default '2020-01-01 00:00:00+00')", "ddl"),
+    ("insert into ft1 values (1, '2026-11-27 10:00:00+02', '2026-11-27 10:00:00.5', 'a'), (2, '2025-01-01T00:00:00Z', null, 'b'), (3, '2026-11-27 08:00:00', '1999-12-31 23:59:59', 'c')", "write"),
+    ("insert into ft1 (k, at, d) values (4, '2026-11-27 10:00:00.123456-03:30', '2026-11-27 10:00:00+05'), (5, ' 2000-02-29 12:30 ', '0001-01-01'), (6, '9999-12-31 23:59:59.999999', '9999-12-31T23:59:59')", "write"),
+    ("insert into ft1 (k, at, d, e) values (7, '2026-01-01 00:00:00 +00', '2026-01-01 00:00:00.100000', null), (8, '2026-01-01 00:00:00-0030', '2026-01-01', '2026-01-01 00:00:00z')", "write"),
+    ("select * from ft1 order by k", "order"),
+    # a text of the form with a field no date has is an error; a null where none is taken; a time where a text is wanted and the other way
+    ("insert into ft1 (k, at) values (9, '2026-13-01')", "write"),
+    ("insert into ft1 (k, at) values (9, '2026-02-30 10:00:00')", "write"),
+    ("insert into ft1 (k, at) values (9, '2025-02-29')", "write"),
+    ("insert into ft1 (k, at) values (9, '2026-01-01 25:00:00')", "write"),
+    ("insert into ft1 (k, at) values (9, '2026-01-01 10:61:00')", "write"),
+    ("insert into ft1 (k, at) values (9, '2026-00-01')", "write"),
+    ("insert into ft1 (k, at) values (9, null)", "write"),
+    ("insert into ft1 (k, at) values (9, 5)", "write"),
+    ("insert into ft1 (k, at) values (9, true)", "write"),
+    ("insert into ft1 (k, at, n) values (9, '2024-02-29', '2024-02-29')", "write"),
+    ("update ft1 set n = at where k = 9", "write"),
+    ("update ft1 set at = n where k = 9", "write"),
+    ("update ft1 set d = at, e = d where k = 1", "write"),
+    ("select k, d, e from ft1 where k = 1", "order"),
+    # compared: with a text, the text first, one type with the other, each operator
+    ("select k from ft1 where at = '2026-11-27 08:00:00+00'", "set"),
+    ("select k from ft1 where '2026-11-27 10:00:00+02' = at", "set"),
+    ("select k from ft1 where at <> '2026-11-27 08:00:00'", "set"),
+    ("select k from ft1 where at > '2026-01-01' and at <= '2026-11-27 08:00:00'", "set"),
+    ("select k from ft1 where d < '2000-01-01'", "set"),
+    ("select k from ft1 where d >= '2026-11-27 10:00:00.5'", "set"),
+    ("select k from ft1 where at between '2025-01-01' and '2026-06-01'", "set"),
+    ("select k from ft1 where at in ('2025-01-01', '2000-02-29 12:30:00+00', '1990-01-01')", "set"),
+    ("select k from ft1 where d is null", "set"),
+    ("select k from ft1 where at = d", "set"),
+    ("select k from ft1 where d < at", "set"),
+    ("select k from ft1 where e is not null and e < at", "set"),
+    ("select k from ft1 where at = 5", "set"),
+    ("select k from ft1 where at = n", "set"),
+    ("select k from ft1 where at = true", "set"),
+    (P("select k from ft1 where at = $1", "2025-01-01 00:00:00+00"), "set"),
+    (P("select k from ft1 where d > $1 and at < $2", "2000-01-01", "2026-06-01T00:00:00Z"), "set"),
+    (P("insert into ft1 (k, at, d) values ($1, $2, $3)", "10", "2026-05-05 05:05:05+05", "2026-05-05 05:05:05"), "write"),
+    # ordered, grouped, the least and the greatest
+    ("select k, at from ft1 order by at, k", "order"),
+    ("select k, d from ft1 order by d desc, k", "order"),
+    ("select min(at), max(at), min(d), max(d), count(d), count(*) from ft1", "set"),
+    ("select at, count(*) from ft1 group by at", "set"),
+    ("select distinct d from ft1", "set"),
+    ("select sum(at) from ft1", "set"),
+    # cast: between the two, from a text, to a text
+    ("select k, cast(at as text), cast(d as text), cast(at as timestamp), cast(d as timestamptz) from ft1 order by k", "order"),
+    ("select cast('2026-01-02 03:04:05.6' as timestamp), cast('2026-01-02 03:04:05+01' as timestamptz), cast('2026-01-02 03:04:05+01' as timestamp) from ft1 where k = 1", "set"),
+    ("select k, cast(n as timestamp) from ft1 where k = 9", "set"),
+    ("select k from ft1 where cast(at as text) = '2025-01-01 00:00:00+00'", "set"),
+    ("select cast(at as integer) from ft1", "set"),
+    ("select cast(k as timestamp) from ft1", "set"),
+    # a choice among times
+    ("select k, coalesce(d, '2000-01-01') from ft1 order by k", "order"),
+    ("select k, case when d is null then '1970-01-01' else d end from ft1 order by k", "order"),
+    ("select k, greatest(at, e), least(at, e) from ft1 order by k", "order"),
+    ("select k, coalesce(d, n) from ft1", "set"),
+    # a time is a key, alone and with another column
+    ("create table ft2 (t timestamp primary key, v integer)", "ddl"),
+    ("insert into ft2 values ('2026-01-01 00:00:00', 1), ('2025-06-01', 2), ('1999-01-01 12:00:00', 3)", "write"),
+    ("insert into ft2 values ('2025-06-01 00:00:00.000', 4)", "write"),
+    ("insert into ft2 values (null, 4)", "write"),
+    ("select * from ft2 where t = '2025-06-01'", "set"),
+    ("select * from ft2 where t > '2000-01-01' and t < '2026-01-01'", "set"),
+    ("select * from ft2 order by t", "order"),
+    ("update ft2 set v = v + 1 where t = '1999-01-01 12:00:00'", "write"),
+    ("update ft2 set t = '2030-01-01' where v = 1", "write"),
+    ("delete from ft2 where t < '2000-01-01'", "write"),
+    ("select * from ft2 order by t desc", "order"),
+    ("create table ft3 (m timestamptz, k integer, v text, primary key (m, k))", "ddl"),
+    ("insert into ft3 values ('2026-01-01 00:00:00+00', 1, 'a'), ('2026-01-01 01:00:00+01', 2, 'b'), ('2025-12-31 23:00:00-01', 3, 'c'), ('2026-01-02', 1, 'd')", "write"),
+    ("insert into ft3 values ('2026-01-01 02:00:00+02', 1, 'dup')", "write"),
+    ("select * from ft3 order by m, k", "order"),
+    # an index on a time, a unique one, and what is read by them
+    ("create index ft1at on ft1 (at)", "ddl"),
+    ("create unique index ft1d on ft1 (d)", "ddl"),
+    ("select k from ft1 where at = '2025-01-01 00:00:00+00'", "set"),
+    ("select k from ft1 where at >= '2025-01-01' and at < '2025-01-02'", "set"),
+    ("select k, at from ft1 order by at limit 2", "order"),
+    ("select k, at from ft1 order by at desc limit 2", "order"),
+    ("insert into ft1 (k, at, d) values (11, '2026-01-01', '1999-12-31 23:59:59')", "write"),
+    ("insert into ft1 (k, at, d) values (11, '2026-01-01', '1999-12-31 23:59:59.000001')", "write"),
+    ("delete from ft1 where at < '2001-01-01'", "write"),
+    ("select * from ft1 order by k", "order"),
+]
+
+
 def order_dependent(pg):
     notes = []
     with tempfile.TemporaryDirectory() as d:
@@ -2515,6 +2640,8 @@ def main():
     r = admin("create database %s encoding 'UTF8' lc_collate 'C' lc_ctype 'C' template template0" % DB)
     if r.returncode != 0:
         raise SystemExit("engine_check: " + r.stderr)
+    # (times are written and read in the session's zone: the engine's is UTC, and so is PostgreSQL's here, 6bp)
+    admin("alter database %s set timezone to 'UTC'" % DB)
     pg = Pg(DB)
     version = pg.query("show server_version")[2][0][0].decode().split()[0]
     PGMAJOR[0] = int(version.split(".")[0])
@@ -2552,6 +2679,11 @@ def main():
     wanted = sum(1 for v in VIAFIXED if v[2])
     if VIA[0] != wanted:
         raise SystemExit("engine_check: %d statements read by an index, and %d should have" % (VIA[0], wanted))
+    with tempfile.TemporaryDirectory() as d:
+        teng = run_engine(os.path.join(d, "time.db"), lines(t[0] for t in TIMEFIXED))
+    tcounts, tfails, _, _ = compare(pg, [(sql, how, "ft3" if " ft3" in str(sql) else "ft2" if " ft2" in str(sql) else "ft1") for sql, how in TIMEFIXED], teng, True)
+    fails += tfails
+    print("engine_check: %d statements on tables with times, none refused: %s" % (len(TIMEFIXED), ", ".join("%s=%d" % kv for kv in sorted(tcounts.items()))))
     with tempfile.TemporaryDirectory() as d:
         ueng = run_engine(os.path.join(d, "uniq.db"), lines(u[0] for u in UNIQFIXED))
     ucounts, ufails, _, _ = compare(pg, [(sql, how, "fubr" if " fubr" in sql else "fub" if " fub" in sql else "fuh" if " fuh" in sql else "fui" if " fui" in sql else "fua") for sql, how in UNIQFIXED], ueng, True)

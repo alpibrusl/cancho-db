@@ -136,7 +136,7 @@ fn put_rows[&i, &q](io: &!i Io, w: &!q exec.Work) -> [io_write] int {
             while c < nc {
                 putchar(io, ' ');
                 // the value as a client is sent it (src/answer.cho); one longer than this buffer is not printed whole here
-                let n = answer.text(exec.rows_of(w), at, buf, 0);
+                let n = answer.text(exec.type_of(w, c), exec.rows_of(w), at, buf, 0);
                 if n == 0 - 1 {
                     putchar(io, '-');
                 } else if n == 0 {
