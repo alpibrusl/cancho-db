@@ -1150,7 +1150,7 @@ is listed below as what it is.
 
 - *Who may connect.* A client from this machine (the loopback addresses), as for the proxy; any other is closed unread. **There is no login**: a startup message is answered
   `AuthenticationOk` whatever user it names. The proxy's token login (`src/login.cho`) is the next part; until then the server is for a test and a developer's own machine.
-- *Startup.* An `SSLRequest` or `GSSENCRequest` is answered `N` (no TLS: loopback only). A startup of protocol 3.0 is answered `AuthenticationOk`, the parameters a client
+- *Startup.* An `SSLRequest` or `GSSENCRequest` is answered `N` (no TLS: loopback only; *since 6bq* a server given a certificate answers `S`). A startup of protocol 3.0 is answered `AuthenticationOk`, the parameters a client
   reads (`server_version`, `server_encoding` and `client_encoding` `UTF8`, `DateStyle`, `integer_datetimes`, `standard_conforming_strings`), `BackendKeyData` and
   `ReadyForQuery`. A cancel request is closed: nothing runs long enough to cancel.
 - *A query* (`Q`) is one statement. The server does what the test program does and nothing else: `session.open`, `drive.prepare`, `drive.run`, `session.close` (6ae, 6aj,
@@ -1526,7 +1526,7 @@ against the token; the token's id, its principal and the time in every commit, s
 
 *Not in this part:* **the statements** (a commit names none, so a verifier cannot recompute its effects from what was run: `--stmts` has nothing to read, and "what" is
 still the rows, not the SQL); revocation (the server reads no list of revoked tokens; a verifier can be given one); the schema hash; a commit for a statement that
-changes no row; TLS (the password travels in clear, on the loopback only).
+changes no row; TLS (the password travels in clear, on the loopback only; *built since, 6bq*).
 
 **Built.** `password_step` and the token's place with a connection (`src/serve.cho`); `permitted`, `permitted_name` and the outcome `o_denied` (`src/drive.cho`); `who`
 in `facts.seal`, the token kept under `0xFFFFFFFE 0x07`, `facts.next_token`; the root's key file as the server's fourth argument; `!tokens` in the test program.
@@ -2037,7 +2037,7 @@ the server did not. So a commit the server made under a revoked token was one a 
   `28P01 token-revoked` and the connection is ended; a transaction it had open is rolled back, as for any connection that ends.
 - The list is kept among the server's own numbers (ten for an entry), so every place that judges a statement has it without being handed it.
 
-*Not in this part:* TLS (the token still travels in clear: it is to be ended in front of the server, and until it is, a token read off the wire can be revoked
+*Not in this part:* TLS (the token still travels in clear: it is to be ended in front of the server (*corrected, 6bq: the server ends it itself*), and until it is, a token read off the wire can be revoked
 but not kept secret); a way to tell the server to look now (it looks within a second); a list larger than 256; the proxy, which still reads none.
 
 **Test.** `tests/engine_wire.py` (`revocations`), with `tools/mint.py revoke` (new) making entries. An empty list lets everyone in. A token made from one that
@@ -3038,8 +3038,8 @@ already, and a column's type is not in it.
 
 ## 6bq. TLS: the server ends it itself
 
-*Design, written before the code. Each statement here is a choice, a read (with the file), or to be measured; what building finds false is
-corrected here.*
+*Design, written before the code, then corrected by building it (the corrections are marked). Each statement here is a choice, a read (with
+the file), or measured with its command.*
 
 **What is missing.** The server answers `SSLRequest` with `N` (6al), so a password, a token and every row travel in clear, and the server
 serves this machine only for that reason (`from_here`). 6bd said TLS "is to be ended in front of the server". *Choice, overturning that:* the
@@ -3081,13 +3081,36 @@ byte, `S` or `N`; after `S` the client begins the TLS handshake, and the startup
 - *Writing.* `push` gives the answer to the package a piece at a time and writes what it makes, waiting for the socket as it does in clear,
   and for no longer (`g_write_ms`).
 - *Ending.* `close_notify` is queued and written if the socket takes it at once; then the slot is dropped, which overwrites its keys.
+- *As built:* the two pure pieces are `src/tlsio.cho` (`absorb`: the connection's ciphertext into the package, its clear bytes into the
+  buffer); what touches the socket stayed in `src/serve.cho` (`receive_tls`, `flush`, `push`), beside the code in clear it stands for. A
+  peer's `close_notify` is not a failure: what it sent before is still answered, as for a socket that ends. Each pass over the connections
+  moves what the package and the connection's room still hold, since a socket with nothing more to read would never say so.
 - A connection has the same slot in the package as in the server's table, so there is nothing to look up.
 
 **The random bytes** the package needs (its DRBG's seed, 32) are read from `/dev/urandom` at start, beside the salts' seed (6ag), and are
 not the same bytes.
 
-**Cost, to be measured:** a handshake (the package's own measure is a few milliseconds, most of it the P-256 signature); the statements a
-second on one connection with and without TLS; the size of the server's binary and of its memory with the package in it.
+**Cost, measured** (`python3 scripts/measure_tls.py build/engine build/enginecheck 2000`, medians, one server, the client on the same
+machine; two runs):
+
+| | in clear | through TLS |
+|---|---|---|
+| connect and startup, to `ReadyForQuery` | 0.05 to 0.06 ms | 1.07 to 1.10 ms |
+| a select by key | 71 to 86 µs | 78 to 88 µs |
+| an update, committed and synced | 540 to 624 µs | 571 to 660 µs |
+| 1,000 rows | 3.1 ms | 2.0 ms |
+
+A statement costs the same within the noise of the two runs; a connection costs a millisecond more. The server's binary is 1,267,200 bytes
+(739,080 before the package was in it), and its resident memory 14.5 MB with a certificate loaded.
+
+*Found by measuring:* the first run said 44 ms a connection. It was the test's client, not the server: Python's socket holds a small write
+for the acknowledgement of the one before it (Nagle), and the server has nothing to send after a client's Finished, so its acknowledgement
+waits 40 ms. libpq sets `TCP_NODELAY`, and now the test's client does. `TCP_NODELAY` on the server's side was tried and changed nothing
+(0.95 against 0.85 ms), so it is not set.
+
+*The build:* the package is 17 files of the compiler's repository, named on the command line of the one build that has the server in it
+(`scripts/check.sh`, `tests/mutants.py`); that build takes 24 s where it took 12. The verifier's build of "all of `src`" leaves the server
+out, and the test program never had it.
 
 **Test.** `tests/engine_tls.py`, with a P-256 certificate made by `openssl` for the run:
 
@@ -3096,11 +3119,26 @@ second on one connection with and without TLS; the size of the server's binary a
 - Python's `ssl` over the same socket: the differential of 6al (random statements against PostgreSQL) run through TLS, answers of more than
   one record (a large select), and many small messages in one record.
 - Bytes after `SSLRequest` in the same packet: ended, nothing answered after `S`.
-- A handshake that is garbage, one that stops half way (the idle rules still end it), a client that closes without `close_notify`, a second
-  `SSLRequest` inside TLS.
-- A login by token through TLS (6at), and a revoked token's connection ended through TLS (6bd).
+- A handshake that is garbage, one that stops half way, a client that closes without `close_notify`, a second `SSLRequest` inside TLS.
+  *Corrected:* this said "the idle rules still end" a handshake that stops half way. There is no such rule: a client that connects and
+  sends nothing holds one of the sixteen places until it goes, in clear as through TLS. What is tested is a client that stops and closes.
+  **A time limit for a startup is not built.**
+- A login by token through TLS (6at). *Not done:* a revoked token's connection ended through TLS (6bd is tested in clear; the code that
+  ends it is the same `finish`).
 - The start refused: no `key.pem`, a key that is another certificate's, an RSA key, an expired certificate.
-- Mutants of `src/tlsio.cho` and of the startup's new lines, each killed.
+- Mutants of `src/tlsio.cho` and of the server's new lines, each killed.
+
+*As built, the test (three seeds in the gate):* the differential of 6al through TLS (929 statements at seed 1, the page file and the log
+as in clear); psql 16 with `verify-full`, and refusing a server it does not trust; a row of 24,000 bytes; sixty queries in one record; a
+query a byte a record; 45,000 queries sent at once (more than the connection's buffer); `close_notify` sent, answered, and after a query in
+the same packet; a record that is no handshake; 24 handshakes of random bytes, cut short or with a byte changed; six certificates and keys
+that stop the server from starting. **19 mutants, all killed** (`MUTANT_ONLY=tls python3 tests/mutants.py wire`). One line has none: a
+failure the package would say only when read from, which no test reaches (it says it when fed). Nor has the rule that stops the socket
+being asked while the connection's room is full: without it the server would spin, and answer the same.
+
+**What this does not show.** That the package's cryptography is right: that is its own tests' claim and nobody outside has reviewed it.
+That a server is safe to put on a network: it still serves this machine only. Certificates other than ECDSA P-256; a certificate renewed
+without a restart; client certificates.
 
 ## 7. Taking over, safely
 

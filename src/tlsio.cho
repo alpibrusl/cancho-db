@@ -60,6 +60,7 @@ pub fn absorb[&e, &r, &b, &t](eng: &!e tls.Engine, slot: int, raw: &!r [byte], b
             } else if n == 0 {
                 return closed();
             } else {
+                // (the package says a failure when it is fed, above; this is for one it would say only here, and no test reaches it)
                 return failed();
             }
         }

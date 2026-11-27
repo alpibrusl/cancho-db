@@ -148,6 +148,8 @@ class Client:
         if rcvbuf:
             self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
         self.s.settimeout(20)
+        # as libpq does: a small write is not held for the acknowledgement of the one before it
+        self.s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.s.connect(("127.0.0.1", port))
         self.buf, self.status, self.names, self.params = b"", "?", [], {}
         if ssl_first:
