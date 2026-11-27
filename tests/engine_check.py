@@ -219,6 +219,7 @@ class Table:
         self.key2 = None     # a second column of the key: then the key is written for the table, `primary key (k, c)` or `(c, k)`
         self.key2_first = False
         self.checks = {}     # column -> (low, high): `check (c between low and high)`
+        self.exprs = []      # checks that are expressions (docs/m3-engine.md 6bz): (the column it is written on or None for the table, its name or None, the expression)
         self.spoil = ""      # a table key that PostgreSQL refuses, now and then
         self.identity = None # a column whose values the table's counter gives (`generated always as identity`)
 
@@ -249,7 +250,13 @@ class Table:
                 s += " default " + dflt
             if name in self.checks and i % 2 == 1:
                 s += " check (%s between %d and %d)" % ((name,) + self.checks[name])
+            for on, cname, expr in self.exprs:
+                if on == name:
+                    s += "%s check (%s)" % (" constraint " + cname if cname else "", expr)
             parts.append(s)
+        for on, cname, expr in self.exprs:
+            if on is None:
+                parts.append("%scheck (%s)" % ("constraint " + cname + " " if cname else "", expr))
         if self.key2 is not None:
             keys = self.key_cols()
             if self.spoil == "twice":
@@ -273,6 +280,38 @@ class Gen:
     def __init__(self, rng):
         self.r = rng
         self.t = None
+        # the checks are drawn apart, so that the histories of the seeds are the statements they were before there were any
+        self.rc = random.Random(SEED * 131 + 7)
+        self.spoil_checks = True   # (the history's tables must be made: none of its checks is one PostgreSQL refuses)
+
+    def check_expr(self, t):
+        """A check over the columns of `t` (docs/m3-engine.md 6bz): comparisons, arithmetic that can raise, patterns, lengths; now and then one PostgreSQL refuses."""
+        rc = self.rc
+        ints, texts, bools = t.of("int"), t.of("text"), t.of("boolean")
+        if rc.random() < 0.04 and self.spoil_checks:
+            return rc.choice(["nope > 1", "%s + 1" % (ints or ["k"])[0], "1", "'abc'", "%s > 'x'" % (bools or ["k"])[0]])
+        parts = []
+        for _ in range(rc.choice([1, 1, 1, 2, 2, 3])):
+            kind = rc.choice((["int"] * 3 if ints else []) + (["text"] * 3 if texts else []) + (["bool"] if bools else []) or ["const"])
+            if kind == "int":
+                c, d = rc.choice(ints), rc.choice(ints)
+                n = rc.choice([0, 1, 2, 5, 10, -1, 100])
+                parts.append(rc.choice(["C > N", "C >= N", "C <> D", "C <= D", "C between N and 100", "C not between 3 and 5", "(C % 2) = 0", "N / C > 1", "10 / (C - D) <> 3", "C is null or C > N",
+                                        "C in (0, 1, 2, 3, 5, 7)", "not (C < N)", "C is not null", "C + D < 20", "C * C <= 100", "coalesce(C, 0) >= 0", "C not in (7, 10)"])
+                             .replace("C", c).replace("D", d).replace("N", str(n) if n >= 0 else "- %d" % -n))
+            elif kind == "text":
+                c = rc.choice(texts)
+                parts.append(rc.choice(["C ~ '^[a-z]*$'", "C !~ '[0-9]'", "length(C) <= 2", "char_length(C) between 1 and 3", "octet_length(C) < 3", "C <> ''", "C in ('a', 'b', 'abc', 'zz')",
+                                        "C like 'a%'", "C ~ '^.{0,2}$'", "C !~ '^[[:space:]]'", "C ~ '[a-zñ_]+'", "C is null or length(C) > 0", "C > 'a'", "C || 'x' <> 'ax'"]).replace("C", c))
+            elif kind == "bool":
+                c = rc.choice(bools)
+                parts.append(rc.choice(["C", "not C", "C is not null", "C is null or C"]).replace("C", c))
+            else:
+                parts.append(rc.choice(["1 = 1", "2 > 1"]))
+        out = parts[0]
+        for more in parts[1:]:
+            out = "%s %s %s" % (out, rc.choice(["and", "and", "or"]), more)
+        return out
 
     def pick(self, xs):
         return xs[self.r.randrange(len(xs))]
@@ -453,6 +492,15 @@ class Gen:
         for cname, ty, _, _ in cols:
             if ty in INTS and self.r.random() < 0.15:
                 t.checks[cname] = self.pick([(0, 10), (-5, 100), (1, 65535), (0, 0), (5, 1)])
+        if self.rc.random() < 0.3:
+            # checks that are expressions (docs/m3-engine.md 6bz): on a column or on the table, named or not, one or several
+            for _ in range(self.rc.choice([1, 1, 2, 3])):
+                on = self.rc.choice([c[0] for c in cols] + [None, None])
+                # (a name given may be one PostgreSQL made for an earlier check, or one given before: the table is then not made, which is a case too)
+                cname = self.rc.choice([None, None, None, "chk_%s" % name, "%s_check" % name, "aa", "zz"])
+                if not self.spoil_checks and (cname == "%s_check" % name or any(x[1] == cname for x in t.exprs)):
+                    cname = None
+                t.exprs.append((on, cname, self.check_expr(t)))
         if self.r.random() < 0.3:
             # an identity column (docs/m3-engine.md 6y): its values show what every insert drew, the failed and the rolled back too
             t.identity = "idn"
@@ -1693,7 +1741,8 @@ DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into 
              "create table fu (k integer primary key, u integer)", "insert into fu values (1, 1), (2, 2), (3, 3), (4, 40)", "create unique index fuu on fu (u)",
              "create table fuc (k integer primary key, u integer unique)", "create sequence fue_u_key",
              "create table fts (k integer primary key, at timestamptz, d timestamp)", "insert into fts values (1, '2026-11-27 10:00:00+00', '2026-11-27 10:00:00')",
-             "create table fsr (id bigserial primary key, e text)", "insert into fsr (e) values ('a')"]
+             "create table fsr (id bigserial primary key, e text)", "insert into fsr (e) values ('a')",
+             "create table fzk (k integer primary key, n integer check (n between 0 and 9) check (n <> 5), m integer check (10 / m > 0))", "insert into fzk values (1, 1, 1)"]
 DEP = [
     # the cheaper condition is computed first, wherever it is written: the row with k = 2 never reaches the division
     ("select k from fz where k > 2 and 10 / (k - 2) > 0", None),
@@ -1725,6 +1774,99 @@ DEP = [
 
 # Statements the engine REFUSES as `engine-unsupported` on purpose, and what PostgreSQL 16 does with each: answers PostgreSQL has rules for that the engine does not reproduce. A change that starts
 # answering one of them has to show that the answer is PostgreSQL's.
+# a check that is an expression (docs/m3-engine.md 6bz)
+FIXED += [
+    ("create table fc1 (k integer primary key, a integer check (10 / a > 1), b integer check (b > 0), s text check (s ~ '^[a-z]+$' and length(s) <= 5), check (a is null or b is null or a <> b), "
+     "constraint named check (k > 0))", "ddl"),
+    ("insert into fc1 values (1, 2, 3, 'abc')", "write"),
+    ("insert into fc1 values (2, 0, 0, 'abc')", "write"),               # fc1_a_check raises before fc1_b_check is false: the order of the names
+    ("insert into fc1 values (3, 2, 0, 'abc')", "write"),
+    ("insert into fc1 values (4, 2, 3, 'ABC')", "write"),
+    ("insert into fc1 values (5, 2, 3, 'abcdef')", "write"),
+    ("insert into fc1 values (6, 2, 2, 'abc')", "write"),               # the check of the table
+    ("insert into fc1 values (7, null, null, null)", "write"),          # a check that is null passes
+    ("insert into fc1 values (0, 2, 3, 'abc')", "write"),               # the one with a name
+    ("insert into fc1 values (1, 2, 0, 'abc')", "write"),               # the check before the key
+    ("insert into fc1 values (8, 2, 3, 'ok'), (9, 2, 0, 'ok'), (10, 2, 3, 'ok')", "write"),
+    ("insert into fc1 values (1, 2, 0, 'abc') on conflict do nothing", "write"),
+    ("insert into fc1 values (1, 2, 3, 'abc') on conflict do nothing", "write"),
+    ("insert into fc1 (k, s) values (11, 'q')", "write"),
+    ("update fc1 set b = 0 where k = 1", "write"),
+    ("update fc1 set a = 0 where k = 1", "write"),
+    ("update fc1 set s = 'zz', b = 9 where k = 1", "write"),
+    ("update fc1 set b = b - 9", "write"),
+    ("update fc1 set k = k - 1 where k = 1", "write"),
+    ("update fc1 set a = 5 where k = 7 returning k, a, b", "write"),
+    ("update fc1 set a = 4, b = 4 where k = 7", "write"),
+    ("update fc1 set s = s || 'x' where k < 8", "write"),
+    ("update fc1 set k = 7, b = 0 where k = 8", "write"),              # a key that is taken and a check that fails: the check is the error
+    ("update fc1 set k = 7 where k = 8", "write"),
+    ("select k, a, b, s from fc1 order by k", "order"),
+    ("begin", "t"), ("insert into fc1 values (20, 2, 3, 'ok')", "write"), ("insert into fc1 values (21, 2, 0, 'ok')", "write"), ("rollback", "t"),
+    ("select count(*) from fc1", "order"),
+    # the names in the other order: the check that is false comes before the one that would raise
+    ("create table fc2 (k integer primary key, b integer check (10 / b > 1), a integer check (a > 0))", "ddl"),
+    ("insert into fc2 values (1, 0, 0)", "write"),
+    ("insert into fc2 values (1, 0, 5)", "write"),
+    ("insert into fc2 values (1, 5, 5)", "write"),
+    # a check is named for the column it names, not the one it is written on: fc3_a_check is `10 / a > 5`, and comes first
+    ("create table fc3 (k integer primary key, a integer check (10 / b > 1), b integer check (10 / a > 5))", "ddl"),
+    ("insert into fc3 values (1, 5, 0)", "write"),
+    ("insert into fc3 values (2, 0, 20)", "write"),
+    ("insert into fc3 values (3, 1, 5)", "write"),
+    # five checks that would have one name: each is kept (the second has a 1, the third a 2 ...; the last was given the name the fourth would have had next)
+    ("create table fc4 (k integer primary key, a integer check (b <> 7), b integer check (b <> 8) check (b <> 9), check (b <> 10), constraint fc4_b_check4 check (b <> 11), check (b <> 12))", "ddl"),
+    ("insert into fc4 values (7, 1, 7)", "write"), ("insert into fc4 values (8, 1, 8)", "write"), ("insert into fc4 values (9, 1, 9)", "write"), ("insert into fc4 values (10, 1, 10)", "write"),
+    ("insert into fc4 values (11, 1, 11)", "write"), ("insert into fc4 values (12, 1, 12)", "write"), ("insert into fc4 values (13, 1, 13)", "write"),
+    ("select k from fc4 order by k", "order"),
+    # names that are given, in each order
+    ("create table fc5 (k integer primary key, a integer constraint zz check (10 / a > 1), b integer constraint aa check (b > 0))", "ddl"),
+    ("insert into fc5 values (1, 0, 0)", "write"),
+    ("create table fc6 (k integer primary key, a integer constraint aa check (10 / a > 1), b integer constraint zz check (b > 0))", "ddl"),
+    ("insert into fc6 values (1, 0, 0)", "write"),
+    # a name is compared as bytes: an upper-case letter in quotes comes before the lower-case ones
+    ("create table fc7 (k integer primary key, a integer constraint \"Zz\" check (10 / a > 1), b integer constraint aa check (b > 0))", "ddl"),
+    ("insert into fc7 values (1, 0, 0)", "write"),
+    # a range beside a check: each is held
+    ("create table fc8 (k integer primary key, n integer check (n between 0 and 9) check (n <> 5), m integer check (10 / m > 0))", "ddl"),
+    ("insert into fc8 values (1, 5, 1)", "write"), ("insert into fc8 values (2, 20, 1)", "write"), ("insert into fc8 values (3, 4, 0)", "write"), ("insert into fc8 values (4, 4, 4)", "write"),
+    ("update fc8 set n = n + 1", "write"), ("update fc8 set n = 30", "write"), ("update fc8 set m = 0", "write"),
+    # what looks like a range and is none: of another column, and `not between`
+    ("create table fc12 (k integer primary key, n integer check (n not between 0 and 3), m integer check (n between 5 and 9))", "ddl"),
+    ("insert into fc12 values (1, 1, 1)", "write"), ("insert into fc12 values (2, 4, 6)", "write"), ("insert into fc12 values (3, 6, 1)", "write"), ("insert into fc12 values (4, 6, 100)", "write"),
+    ("select k from fc12 order by k", "order"),
+    # what PostgreSQL refuses when the table is made
+    ("create table fc9 (k integer primary key, a integer check (zz > 1))", "ddl"),
+    ("create table fc9 (k integer primary key, a integer check (a + 1))", "ddl"),
+    ("create table fc9 (k integer primary key, a text check (a))", "ddl"),
+    ("create table fc9 (k integer primary key, s text check (s between 1 and 2))", "ddl"),          # (no range: a range is of an integer column)
+    # checks of every operator the sibling's have
+    ("create table fc9 (k integer primary key, a text check (char_length(a) between 1 and 6 and a !~ '[\"[:cntrl:]]'), n integer check (n % 2 = 0 or n in (1, 3)), b boolean, c boolean, "
+     "constraint fc9_owner check ((b and c is null) or (not b and (c is null) <> (n is null))), check (octet_length(a) <= 5))", "ddl"),
+    ("insert into fc9 values (1, 'abc', 2, true, null)", "write"),
+    ("insert into fc9 values (2, 'ab\"c', 2, true, null)", "write"),
+    ("insert into fc9 values (3, 'ñandú', 2, true, null)", "write"),
+    ("insert into fc9 values (4, 'ñand', 5, true, null)", "write"),
+    ("insert into fc9 values (5, 'x', 3, true, false)", "write"),
+    ("insert into fc9 values (6, 'x', 3, false, false)", "write"),
+    ("insert into fc9 values (7, 'x', null, false, null)", "write"),
+    ("insert into fc9 values (8, '', 1, false, null)", "write"),
+    ("select k, a, n, b, c from fc9 order by k", "order"),
+    # a check of two columns is named for neither (fc10_check, which comes after fc10_b_check); a name given to a check of the table is its name
+    ("create table fc10 (k integer primary key, a integer, b integer check (10 / b > 1), check (a <> b))", "ddl"),
+    ("insert into fc10 values (1, 0, 0)", "write"),
+    ("create table fc11 (k integer primary key, a integer check (10 / a > 1), constraint aa check (k > 0))", "ddl"),
+    ("insert into fc11 values (0, 0)", "write"),
+    ("insert into fc11 values (1, 5) returning k", "write"),
+    # a table that is dropped takes its checks with it: one made again under the name has none of them
+    ("drop table fc2", "ddl"),
+    ("create table fc2 (k integer primary key, b integer, a integer)", "ddl"),
+    ("insert into fc2 values (1, 0, 0)", "write"),
+    ("alter table fc3 add column c integer", "ddl"),
+    ("insert into fc3 values (4, 1, 5, 9)", "write"),
+    ("insert into fc3 values (5, 0, 5, 9)", "write"),
+]
+
 UNSUP = [
     ("insert into fsr (id, e) values (9, 'z')", None),                   # a value given to a serial column: PostgreSQL takes it (and its counter does not move); the engine's is an identity column
     ("create table fsr2 (a serial, b bigserial, k integer primary key)", None),   # two counters in a table
@@ -1783,10 +1925,28 @@ UNSUP = [
     ("select max(1 / (k - 1)) - null from fz", None),
     ("select count(*) from fz having max(1 / (k - 1)) > null", None),
     # the schema's forms (6x)
-    ("create table fzc (k integer primary key, n integer check (n > 0))", None),                     # a check that is no range
-    ("create table fzc (k integer primary key, n integer check (n not between 0 and 3))", None),
-    ("create table fzc (k integer primary key, n integer, m integer check (n between 0 and 3))", None),   # of another column
-    ("create table fzc (k integer primary key, s text check (s between 'a' and 'b'))", None),
+    # a check that is an expression (6bz): what the engine does not keep, PostgreSQL's outcome beside it
+    ("create table fzc (k integer primary key, n integer check (1 / 0 > 0))", None),                 # a constant that raises: PostgreSQL keeps it, and raises at each row
+    ("create table fzc (k integer primary key, n integer check (null))", None),
+    ("create table fzc (k integer primary key, n integer check ('true'))", None),
+    ("create table fzc (k integer primary key, t timestamptz check (t < now()))", None),
+    ("create table fzc (k integer primary key, n integer check (n > (select 1)))", "0A000"),
+    ("create table fzc (k integer primary key, n integer check (count(*) > 0))", "42803"),
+    ("create table fzc (k integer primary key, n integer constraint x check (n > 0), constraint x check (k > 0))", "42710"),   # a name given twice
+    ("create table fzc (k integer primary key, n integer check (n > 0), constraint fzc_n_check check (k > 0))", "42710"),     # a name given that was made already
+    ("create table fzc_a_name_of_fifty_five_bytes_which_is_long_but_is_a_name (k integer primary key, nnnnnnnn integer check (nnnnnnnn > 0))", None),   # PostgreSQL cuts the check's name
+    ("create table fzc (k integer primary key, n integer check (fz.k > 0))", "42P01"),
+    ("alter table fz add column q integer check (q > 0)", None),                                      # each row there would have to be held to it
+    ("alter table fz add column q integer check (q between 0 and 9) check (q <> 5)", None),
+    ("alter table fz add column q integer constraint qq check (q between 0 and 9)", None),
+    ("truncate fzs", "42809"), ("truncate fuu", "42809"),                                             # a name that is a sequence's, an index's: not a table for PostgreSQL either,
+    ("alter table fuu rename to fuu2", None), ("alter table fzs rename to fzs2", None),               # which says so (42809) or renames the thing: neither is here
+    ("alter table fzk rename to fzk2", None),                                                         # the expression names its table
+    ("insert into fzk values (5, 20, 0)", "22012"),                                                   # outside its range, and a check raises: fzk_m_check is first for PostgreSQL
+    ("update fzk set n = 20, m = 0", "22012"),
+    ("create table fzc (k integer primary key, a integer check (a > 'x'))", "22P02"),                 # errors of a constant in the expression, and of a type the pattern operator has not
+    ("create table fzc (k integer primary key, a text, check (length(a) > 'x'))", "22P02"),
+    ("create table fzc (k integer primary key, a integer, check (a ~ 'x'))", "42883"),
     ("create table fzc (k integer primary key, a bigint generated always as identity, b bigint generated always as identity)", None),   # two identity columns
     ("create table fzc (k integer primary key, a text generated always as identity)", "22023"),
     ("alter table fz add column idn bigint generated always as identity", None),                     # the rows there would each draw a value
@@ -2362,7 +2522,7 @@ def order_dependent(pg):
         pg.query("begin")
         err, _, _, _ = pg.query(sql)
         pg.query("rollback")
-        if ans[:1] not in (["refused engine-unsupported"], ["refused subquery"], ["refused insert-select"], ["refused nondeterministic"], ["refused unsupported-statement"], ["refused syntax"]):
+        if ans[:1] not in (["refused engine-unsupported"], ["refused subquery"], ["refused insert-select"], ["refused nondeterministic"], ["refused unsupported-statement"], ["refused syntax"], ["refused engine-ambiguous-error"]):
             raise SystemExit("engine_check: %s: the engine says %s, and this is one it does not answer" % (sql, ans))
         if err != want:
             if PGMAJOR[0] == 16:
@@ -2381,6 +2541,7 @@ def history(seed):
     and on a fork that has gone its own way; and the branch that was forked from is as it was."""
     rng = random.Random(seed * 7919 + 5)
     g = Gen(rng)
+    g.spoil_checks = False
     names = ["ta", "tb", "tc"]
     added = [0]
     dumps = ["select * from %s order by k" % n for n in names + ["th"]]

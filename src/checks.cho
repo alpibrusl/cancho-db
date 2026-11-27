@@ -1,0 +1,403 @@
+edition 9;
+module cdb.checks;
+
+import cdb.commit;
+import cdb.build;
+import cdb.row;
+import cdb.eval;
+import cdb.btree;
+import cdb.pager;
+import cdb.tables;
+import cdb.parse;
+import cdb.stmt;
+import cdb.lower;
+import cdb.exec;
+
+// A check that is an expression (docs/m3-engine.md 6bz). When a table is made, its checks are read from the parser's tree in the order they were written, lowered,
+// typed and named as PostgreSQL names them (`prepare`), and kept under the catalog by the table's number and their names (`store`). A statement that writes rows of
+// the table reads them once (`load`) and holds each row to them in the order of their names (`hold`).
+
+// How many checks a table may have, and how many bytes a check's value may be.
+pub fn max_checks() -> [] int {
+    return 64;
+}
+
+pub fn max_value() -> [] int {
+    return 700;
+}
+
+// Where the staged checks of a statement that defines are counted and end, in `pos` (they are in `rows`: for each a `u8` and its name, a `u16` and its value; a
+// value of no bytes is a range, 6x, which has a name and nothing kept).
+fn p_count() -> [] int {
+    return exec.p_ddl() + 3;
+}
+
+fn p_fill() -> [] int {
+    return exec.p_ddl() + 4;
+}
+
+// Where the checks a statement loaded are listed, in `cki`: how many, then where each value starts in `ck` and how long it is. Below it `cki` is the notes of the
+// constants of the one being evaluated, as the lowering leaves them (`lower.kinds_at`).
+fn k_count() -> [] int {
+    return 1024;
+}
+
+fn name_char(c: int, first: bool) -> [] bool {
+    let letter = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_';
+    return letter || !first && c >= '0' && c <= '9';
+}
+
+// Whether a staged check has the name `nm[0..nl]` of `rows` from `at`.
+fn taken[&q](w: &!q exec.Work, at: int, nl: int) -> [] bool {
+    let n = contents(w.pos)[p_count()];
+    var a = 0;
+    var i = 0;
+    while i < n {
+        let l = int_of(contents(w.rows)[a]);
+        if exec.same(contents(w.rows), a + 1, l, contents(w.rows), at, nl) {
+            return true;
+        }
+        a = a + 1 + l;
+        a = a + 2 + commit.be(contents(w.rows), a, 2);
+        i = i + 1;
+    }
+    return false;
+}
+
+// The checks of the statement `stmt` (a CREATE TABLE's node), for the table `name` whose entry is built in `ent` (`total` bytes, `nc` columns): each lowered over the
+// table's columns, its type learnt, its name made, and staged. Errors are noted (a column that is not the table's, an expression that is no boolean); 0, or a refusal.
+pub fn prepare[&q, &s, &t, &n, &k, &m](w: &!q exec.Work, sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], stmt: int, name: &m [byte], nc: int, total: int) -> [] int {
+    contents(w.pos)[p_count()] = 0;
+    contents(w.pos)[p_fill()] = 0;
+    var node = nodes[6 * stmt + 5];
+    if node < 0 {
+        return 0;
+    }
+    let nl = len(name);
+    let dl = tables.def_len(contents(w.ent));
+    if dl > 800 || nl > tables.max_name() {
+        return exec.too_big();
+    }
+    // the table is bound as a statement binds it, with no row: what the types of the expressions are learnt with
+    exec.copy(name, 0, nl, contents(w.ctx), 0);
+    exec.copy(contents(w.ent), 6, dl, contents(w.ctx), 64);
+    contents(w.cx)[0] = 0;
+    contents(w.cx)[1] = nl;
+    contents(w.cx)[2] = 64;
+    contents(w.cx)[3] = dl;
+    contents(w.cx)[4] = 1024;
+    contents(w.cx)[5] = 0 - 1;
+    var status = 0;
+    region g {
+        // the table's line of the snapshot the lowering reads: `name: column column ...`
+        let line = alloc_slice[g](nl + 2 + nc * (tables.max_name() + 1) + 1, byte_of(0));
+        var ll = exec.copy(name, 0, nl, line, 0);
+        line[ll] = byte_of(':');
+        ll = ll + 1;
+        var c = 0;
+        while c < nc {
+            line[ll] = byte_of(' ');
+            let cn = row.col_name(contents(w.ent)[6..6 + dl], c);
+            ll = exec.copy(cn, 0, len(cn), line, ll + 1);
+            c = c + 1;
+        }
+        line[ll] = byte_of('\n');
+        ll = ll + 1;
+        while node >= 0 && status == 0 {
+            if nodes[6 * node] != stmt.n_check() || nodes[6 * node + 3] != 1 {
+                status = exec.malformed();
+            } else {
+                status = one(w, sql, toks, nodes, kids, node, nodes[6 * stmt + 1], line[0..ll], name, nc, total);
+                node = nodes[6 * node + 4];
+            }
+        }
+    }
+    return status;
+}
+
+// One check of `prepare`: staged, or an error noted, or a refusal.
+fn one[&q, &s, &t, &n, &k, &l, &m](w: &!q exec.Work, sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], node: int, tab: int, line: &l [byte], name: &m [byte], nc: int, total: int) -> [] int {
+    let b = eval.max_nodes();
+    let dl = tables.def_len(contents(w.ent));
+    let count = contents(w.pos)[p_count()];
+    let fill = contents(w.pos)[p_fill()];
+    if count >= max_checks() || fill + 1 + tables.max_name() + 2 + max_value() > len(contents(w.rows)) {
+        return exec.too_big();
+    }
+    let given = nodes[6 * node + 1];
+    let on = nodes[6 * node + 5];
+    // the column it was written on, if that column was given a range for it (src/execc.cho): then nothing is kept but its name
+    var ranged = false;
+    var c = 0;
+    if given == 0 - 2 {
+        let cl = lower.name_text(sql, toks, on, contents(w.nrow)[0..256], 0);
+        while c < nc {
+            let cn = row.col_name(contents(w.ent)[6..6 + dl], c);
+            if cl == len(cn) && exec.same(contents(w.nrow), 0, cl, cn, 0, cl) && tables.range_at(contents(w.ent)[0..total], c) >= 0 {
+                ranged = true;
+            }
+            c = c + 1;
+        }
+    }
+    var ln = 0;
+    // the column the name is made of: the one the expression names, if it names one (a range names its own)
+    var col = on;
+    if !ranged {
+        ln = lower.check(sql, toks, nodes, kids, kids[nodes[6 * node + 2]], tab, line, contents(w.lrs), contents(w.lit), contents(w.lsc));
+        if ln == 0 - lower.e_unknown_column() {
+            exec.note(w, exec.e_no_column());
+            return 0;
+        }
+        if ln < 1 {
+            return exec.unsupported();
+        }
+        col = 0 - 1;
+        if contents(w.lsc)[11] == 0 {
+            col = contents(w.lsc)[10];
+        }
+        contents(w.info)[0] = exec.arena_start(w);
+        let r = eval.eval(contents(w.lit)[0..ln], 0, contents(w.lsc), contents(w.ctx), contents(w.cx), 1, contents(w.ws), contents(w.ar), contents(w.info));
+        if r > 0 {
+            // a parameter: PostgreSQL takes none in a definition
+            return exec.unsupported();
+        }
+        if r < 0 {
+            return exec.stat(w, r);
+        }
+        if contents(w.ws)[b] == 0 {
+            // a literal alone, which PostgreSQL reads as a boolean: not here (nor is a constant that raises, which the evaluator has refused above)
+            return exec.unsupported();
+        }
+        if contents(w.ws)[b] != 2 {
+            exec.note(w, 6);
+            return 0;
+        }
+    }
+    // its name, in `rows` after a byte for its length: the one given, or the table's, the column's and `check`, with the first number that makes it another's
+    let at = fill + 1;
+    var nl = 0;
+    if given >= 0 {
+        nl = lower.name_text(sql, toks, given, contents(w.rows)[at..at + tables.max_name()], 0);
+        if nl < 1 {
+            return exec.unsupported();
+        }
+        var i = 0;
+        while i < nl {
+            if !name_char(int_of(contents(w.rows)[at + i]), i == 0) {
+                return exec.unsupported();
+            }
+            i = i + 1;
+        }
+        if taken(w, at, nl) {
+            // PostgreSQL's 42710: not an error the engine has
+            return exec.unsupported();
+        }
+    } else {
+        var base = exec.copy(name, 0, len(name), contents(w.rows), at);
+        if col >= 0 {
+            contents(w.rows)[base] = byte_of('_');
+            let cl = lower.name_text(sql, toks, col, contents(w.rows)[base + 1..base + 1 + tables.max_name()], 0);
+            if cl < 1 {
+                return exec.unsupported();
+            }
+            base = base + 1 + cl;
+        }
+        base = exec.copy("_check", 0, 6, contents(w.rows), base);
+        nl = base - at;
+        var k = 0;
+        while nl <= tables.max_name() && taken(w, at, nl) {
+            k = k + 1;
+            var e = base;
+            if k >= 10 {
+                contents(w.rows)[e] = byte_of('0' + k / 10);
+                e = e + 1;
+            }
+            contents(w.rows)[e] = byte_of('0' + k % 10);
+            nl = e + 1 - at;
+        }
+        if nl > tables.max_name() {
+            // (PostgreSQL cuts a name that is too long: not reproduced)
+            return exec.unsupported();
+        }
+    }
+    contents(w.rows)[fill] = byte_of(nl);
+    var va = at + nl + 2;
+    if !ranged {
+        let nk = contents(w.lsc)[8];
+        if nk < 0 || nk > 255 || 1 + 3 * nk + ln > max_value() {
+            return exec.too_big();
+        }
+        contents(w.rows)[va] = byte_of(nk);
+        var i = 0;
+        while i < nk {
+            build.put_be(contents(w.rows), va + 1 + 3 * i, contents(w.lsc)[lower.kinds_at() + 2 * i], 2);
+            contents(w.rows)[va + 3 + 3 * i] = byte_of(contents(w.lsc)[lower.kinds_at() + 2 * i + 1]);
+            i = i + 1;
+        }
+        va = exec.copy(contents(w.lit), 0, ln, contents(w.rows), va + 1 + 3 * nk);
+    }
+    build.put_be(contents(w.rows), at + nl, va - (at + nl + 2), 2);
+    contents(w.pos)[p_count()] = count + 1;
+    contents(w.pos)[p_fill()] = va;
+    return 0;
+}
+
+// Keep the staged checks for the table numbered `id` in the tree `root`: the new tree, or a refusal.
+pub fn store[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, id: int) -> [file_read, file_write] int {
+    let n = contents(w.pos)[p_count()];
+    var nroot = root;
+    var a = 0;
+    var i = 0;
+    while i < n {
+        let nl = int_of(contents(w.rows)[a]);
+        let vl = commit.be(contents(w.rows), a + 1 + nl, 2);
+        if vl > 0 {
+            let kl = tables.check_key(id, contents(w.rows)[a + 1..a + 1 + nl], contents(w.key));
+            if kl < 0 {
+                return exec.too_big();
+            }
+            let nw = exec.put_key(p, w, nroot, contents(w.key), kl, contents(w.rows)[a + 3 + nl..a + 3 + nl + vl]);
+            if nw < 0 {
+                return nw;
+            }
+            nroot = nw;
+        }
+        a = a + 3 + nl + vl;
+        i = i + 1;
+    }
+    return nroot;
+}
+
+// Remove the checks of the table numbered `id` from the tree `root` (the table is dropped): the new tree, or a refusal.
+pub fn forget[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, id: int) -> [file_read, file_write] int {
+    var nroot = root;
+    var more = true;
+    while more {
+        let kl = tables.check_key(id, "", contents(w.key));
+        let r = btree.next_after(p, contents(w.sc), nroot, contents(w.key)[0..kl], false, contents(w.key2), contents(w.cur));
+        if r == btree.not_found() {
+            more = false;
+        } else if r < 0 {
+            return exec.tree_err(r);
+        } else {
+            let nk = r / 1024;
+            if nk < 10 || !exec.same(contents(w.key2), 0, 9, contents(w.key), 0, 9) {
+                more = false;
+            } else {
+                let nw = exec.del_key(p, w, nroot, contents(w.key2), nk);
+                if nw < 0 {
+                    return nw;
+                }
+                nroot = nw;
+            }
+        }
+    }
+    return nroot;
+}
+
+// Read the checks of the bound table from the tree `root`, for the statement: how many, or a refusal.
+pub fn load[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int) -> [file_read] int {
+    var n = 0;
+    var fill = 0;
+    var status = 0;
+    let id = w.tid;
+    region g {
+        let key = alloc_slice[g](256, byte_of(0));
+        let next = alloc_slice[g](256, byte_of(0));
+        var kl = tables.check_key(id, "", key);
+        var more = root != 0;
+        while more {
+            if n >= max_checks() || fill + 1024 > len(contents(w.ck)) {
+                status = exec.too_big();
+                more = false;
+            } else {
+                let r = btree.next_after(p, contents(w.sc), root, key[0..kl], false, next, contents(w.ck)[fill..fill + 1024]);
+                if r == btree.not_found() {
+                    more = false;
+                } else if r < 0 {
+                    status = exec.tree_err(r);
+                    more = false;
+                } else {
+                    let nk = r / 1024;
+                    let nv = r % 1024;
+                    if nk < 10 || commit.be(next, 0, 4) != 0 || int_of(next[4]) != 9 || commit.be(next, 5, 4) != id {
+                        more = false;
+                    } else if !tables.check_ok(contents(w.ck)[fill..fill + nv]) {
+                        status = exec.damaged();
+                        more = false;
+                    } else {
+                        contents(w.cki)[k_count() + 1 + 2 * n] = fill;
+                        contents(w.cki)[k_count() + 2 + 2 * n] = nv;
+                        n = n + 1;
+                        fill = fill + nv;
+                        kl = exec.copy(next, 0, nk, key, 0);
+                    }
+                }
+            }
+        }
+    }
+    contents(w.cki)[k_count()] = n;
+    if status < 0 {
+        contents(w.cki)[k_count()] = 0;
+        return status;
+    }
+    return n;
+}
+
+// Bind `r` as the row of the statement's table: what its expressions read.
+pub fn bind_row[&q, &r](w: &!q exec.Work, r: &r [byte]) -> [] int {
+    exec.copy(r, 0, len(r), contents(w.ctx), 1024);
+    contents(w.cx)[5] = len(r);
+    return 0;
+}
+
+// Hold the row `r` to the checks loaded, in the order of their names: 0 if it passes them all (each is true or null), the error of the first that does not (23514, or
+// what its expression raised), or a refusal. The row is left bound.
+pub fn hold[&q, &r](w: &!q exec.Work, r: &r [byte]) -> [] int {
+    let n = contents(w.cki)[k_count()];
+    if n == 0 {
+        return 0;
+    }
+    let b = eval.max_nodes();
+    bind_row(w, r);
+    var i = 0;
+    while i < n {
+        let a = contents(w.cki)[k_count() + 1 + 2 * i];
+        let l = contents(w.cki)[k_count() + 2 + 2 * i];
+        let nk = int_of(contents(w.ck)[a]);
+        contents(w.cki)[8] = nk;
+        var j = 0;
+        while j < nk {
+            contents(w.cki)[lower.kinds_at() + 2 * j] = commit.be(contents(w.ck), a + 1 + 3 * j, 2);
+            contents(w.cki)[lower.kinds_at() + 2 * j + 1] = int_of(contents(w.ck)[a + 3 + 3 * j]);
+            j = j + 1;
+        }
+        contents(w.info)[0] = exec.arena_start(w);
+        let got = eval.eval(contents(w.ck)[a + 1 + 3 * nk..a + l], 0, contents(w.cki), contents(w.ctx), contents(w.cx), 1, contents(w.ws), contents(w.ar), contents(w.info));
+        if got != 0 {
+            // its types were learnt when the table was made
+            return exec.unsupported();
+        }
+        if contents(w.ws)[b + 1] == 2 {
+            return contents(w.ws)[b + 2] - 1;
+        }
+        if contents(w.ws)[b + 1] == 0 && contents(w.ws)[b + 2] == 0 {
+            return exec.e_check();
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// What a row is refused for, after its nulls and before its key: 0, an error, or a refusal. `ranged`: it is outside a range (6x), which is 23514 too but has no
+// place among the names, so another error beside it is one of two the engine cannot order.
+pub fn verdict[&q, &r](w: &!q exec.Work, r: &r [byte], ranged: bool) -> [] int {
+    let h = hold(w, r);
+    if h < 0 || !ranged {
+        return h;
+    }
+    if h != 0 && h != exec.e_check() {
+        return exec.ambiguous();
+    }
+    return exec.e_check();
+}

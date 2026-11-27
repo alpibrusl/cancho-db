@@ -6,6 +6,7 @@ import cdb.build;
 import cdb.row;
 import cdb.btree;
 import cdb.pager;
+import std.crypto;
 
 // The tables of a branch, inside the branch's one tree (docs/m3-engine.md D-M3-8). A key of the tree is a table's number (`u32`) and then a row's stored key (src/row.cho); the number 0 is the catalog:
 //
@@ -15,6 +16,7 @@ import cdb.pager;
 //     0x00000000 0x02 then a table's number -> the value its identity column is given next (8 bytes; `counter_key`). Written when the table is made; never part of the history
 //     0x00000000 0x03 then a name -> the sequence of that name (`sequence_key`): its number (`u32`, from the tables' numbers; its counter is `counter_key` of it) and its least value (8 bytes)
 //     0x00000000 0x04            -> the head of the log (`head_key`, docs/m3-engine.md 6ah): the number of the branch's last commit (8 bytes), its id and its `state` (32 bytes each)
+//     0x00000000 0x09 then a table's number and a name -> the check of that name on that table (`check_key`, docs/m3-engine.md 6bz): an expression every row of the table is held to
 //
 // and under the number 0xFFFFFFFE, which is no table's, the log (docs/m3-engine.md 6as):
 //
@@ -415,6 +417,48 @@ fn small[&o](out: &!o [byte], at: int, v: int) -> [] int {
     return n + 1;
 }
 
+// The key of the check `name` of the table numbered `id`, into `out`: its length, or -1. With an empty name: what the keys of all the table's checks begin with. A table's checks are
+// so read in the order of their names, which is the order PostgreSQL tests them in (docs/m3-engine.md 6bz).
+pub fn check_key[&n, &o](id: int, name: &n [byte], out: &!o [byte]) -> [] int {
+    if len(name) > max_name() || len(out) < 9 + len(name) {
+        return 0 - 1;
+    }
+    build.put_be(out, 0, 0, 4);
+    out[4] = byte_of(9);
+    build.put_be(out, 5, id, 4);
+    var i = 0;
+    while i < len(name) {
+        out[9 + i] = name[i];
+        i = i + 1;
+    }
+    return 9 + len(name);
+}
+
+// What a check's value is: how many notes of its constants there are (`u8`), each three bytes (where the constant is in the expression, `u16`, and its kind: src/lower.cho,
+// `kinds_at`), then the expression (an `Expr` of the IR, at least one byte). Whether `v` is one, as far as its lengths say.
+pub fn check_ok[&v](v: &v [byte]) -> [] bool {
+    if len(v) < 2 {
+        return false;
+    }
+    let n = int_of(v[0]);
+    if 1 + 3 * n >= len(v) {
+        return false;
+    }
+    var i = 0;
+    while i < n {
+        if commit.be(v, 1 + 3 * i, 2) >= len(v) - 1 - 3 * n {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Where the expression of the check `v` begins.
+pub fn check_expr[&v](v: &v [byte]) -> [] int {
+    return 1 + 3 * int_of(v[0]);
+}
+
 // The key of the index `name` in the catalog, into `out`: its length, or -1. An index is a name and the table it is on (the key's value): 0x00000000, 0x01, the name. A table's name does not begin
 // with the byte 1, so the two kinds of key are apart.
 pub fn index_key[&n, &o](name: &n [byte], out: &!o [byte]) -> [] int {
@@ -458,6 +502,56 @@ pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], r
                 while i < nk {
                     key[i] = key2[i];
                     i = i + 1;
+                }
+                kl = nk;
+            } else if int_of(key2[4]) == 9 {
+                // a check (`check_key`): for the schema that is hashed, a line `check NUMBER NAME HASH` (the table's number in hex, the SHA-256 of the check's value: 6bz)
+                if nk < 10 || !check_ok(ent[0..nv]) {
+                    return btree.err_bad();
+                }
+                if typed {
+                    if at + 6 + 9 + (nk - 9) + 1 + 64 + 1 > len(out) {
+                        return btree.err_big();
+                    }
+                    at = lit(out, at, "check ");
+                    var i = 5;
+                    while i < 9 {
+                        out[at] = byte_of(hexd(int_of(key2[i]) / 16));
+                        out[at + 1] = byte_of(hexd(int_of(key2[i]) % 16));
+                        at = at + 2;
+                        i = i + 1;
+                    }
+                    out[at] = byte_of(' ');
+                    at = at + 1;
+                    while i < nk {
+                        out[at] = key2[i];
+                        at = at + 1;
+                        i = i + 1;
+                    }
+                    out[at] = byte_of(' ');
+                    at = at + 1;
+                    // (the hash is made where the key just read was: the key is copied to `key` first)
+                    i = 0;
+                    while i < nk {
+                        key[i] = key2[i];
+                        i = i + 1;
+                    }
+                    crypto.sha256(ent[0..nv], key2[0..32]);
+                    i = 0;
+                    while i < 32 {
+                        out[at] = byte_of(hexd(int_of(key2[i]) / 16));
+                        out[at + 1] = byte_of(hexd(int_of(key2[i]) % 16));
+                        at = at + 2;
+                        i = i + 1;
+                    }
+                    out[at] = byte_of('\n');
+                    at = at + 1;
+                } else {
+                    var i = 0;
+                    while i < nk {
+                        key[i] = key2[i];
+                        i = i + 1;
+                    }
                 }
                 kl = nk;
             } else if int_of(key2[4]) == 1 {

@@ -4,6 +4,7 @@ module cdb.eval;
 import cdb.commit;
 import cdb.row;
 import cdb.time;
+import cdb.regex;
 
 // The expression evaluator of the engine (docs/m3-engine.md, slice M3d): one IR expression (docs/spec/ir.md sections 2 and 6), with the literal kinds the lowering noted beside it (6e), over the rows that are
 // bound, to one typed value. What PostgreSQL would answer for the same expression is the oracle (tests/eval_check.py); where this file is not sure to answer as PostgreSQL does it REFUSES (`unsupported`): a
@@ -903,6 +904,93 @@ fn bool3[&w](ws: &!w [int], v: int, state: int, value: int, constant: int) -> []
     return set(ws, v, 2, state, value, 0, constant);
 }
 
+// `~`, `!~`, `length`, `char_length`, `octet_length` (docs/m3-engine.md 6by): `which` as `scalar_fn` numbers them, the operands at `top` and below.
+fn text_fn[&w, &a, &n](which: int, ops: int, top: int, out: int, all_const: int, ws: &!w [int], ar: &!a [byte], info: &!n [int]) -> [] int {
+    var want = 1;
+    if which <= 5 {
+        want = 2;
+    }
+    if ops != want {
+        return unsupported();
+    }
+    var m = 0;
+    while m < ops {
+        let v = top - 6 * m;
+        if ws[v] == 0 {
+            let r = convert(ws, v, 3, false, ar, info);
+            if r < 0 {
+                return r;
+            }
+        }
+        if ws[v] != 3 {
+            // (PostgreSQL has these for other types, a bytea's length among them: not here)
+            return unsupported();
+        }
+        m = m + 1;
+    }
+    var failed = 0;
+    var null = false;
+    m = 0;
+    while m < ops {
+        let v = top - 6 * m;
+        if ws[v + 1] == 2 && failed == 0 {
+            failed = ws[v + 2];
+        } else if ws[v + 1] == 1 {
+            null = true;
+        }
+        m = m + 1;
+    }
+    var ty = 2;
+    if which >= 6 {
+        ty = 5;
+    }
+    if failed != 0 {
+        if all_const == 1 {
+            return unsupported();
+        }
+        return set(ws, out, ty, 2, failed, 0, 0);
+    }
+    if null {
+        return set(ws, out, ty, 1, 0, 0, all_const);
+    }
+    let sa = ws[top + 2];
+    let sn = ws[top + 3];
+    if which == 7 {
+        return set(ws, out, ty, 0, sn, 0, all_const);
+    }
+    if which == 6 {
+        // characters: the bytes that begin one
+        var chars = 0;
+        var k = 0;
+        while k < sn {
+            let c = int_of(ar[sa + k]);
+            if c < 128 || c >= 192 {
+                chars = chars + 1;
+            }
+            k = k + 1;
+        }
+        return set(ws, out, ty, 0, chars, 0, all_const);
+    }
+    let pa = ws[top - 6 + 2];
+    let pn = ws[top - 6 + 3];
+    var found = 0;
+    region g {
+        let prog = alloc_slice[g](regex.room(), 0);
+        found = regex.compile(ar[pa..pa + pn], prog);
+        if found >= 0 {
+            found = regex.matches(ar[pa..pa + pn], prog, ar[sa..sa + sn]);
+        }
+    }
+    if found < 0 {
+        // a pattern outside the subset: refused, whatever the rows
+        return unsupported();
+    }
+    if which == 5 {
+        found = 1 - found;
+    }
+    return set(ws, out, ty, 0, found, 0, all_const);
+}
+
 // Compute the node at `p` (tag `tag`, `ops` operands, the first at `top` and the next ones below it) into `out`: 0, or a negative answer.
 fn step[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], p: int, tag: int, ops: int, top: int, out: int, all_const: int, kinds: &k [int], ctx: &c [byte], cx: &i [int], ntab: int, ws: &!w [int], ar: &!a [byte], info: &!n [int]) -> [] int {
     if tag == 0 {
@@ -1461,6 +1549,9 @@ fn step[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], p: int, tag: int, ops: int, to
         if which == 0 || ops < 1 {
             return unsupported();
         }
+        if which >= 4 {
+            return text_fn(which, ops, top, out, all_const, ws, ar, info);
+        }
         // the type of the result: the one type of the arguments, as for the branches of a CASE
         var t = 0;
         var m = 0;
@@ -1566,6 +1657,19 @@ pub fn scalar_fn[&x](e: &x [byte], at: int) -> [] int {
     }
     if name_is(e, at + 3, nl, "least") {
         return 3;
+    }
+    // the pattern operators and the lengths of a text (docs/m3-engine.md 6by)
+    if name_is(e, at + 3, nl, "textregexeq") {
+        return 4;
+    }
+    if name_is(e, at + 3, nl, "textregexne") {
+        return 5;
+    }
+    if name_is(e, at + 3, nl, "length") || name_is(e, at + 3, nl, "char_length") {
+        return 6;
+    }
+    if name_is(e, at + 3, nl, "octet_length") {
+        return 7;
     }
     return 0;
 }

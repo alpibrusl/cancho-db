@@ -523,6 +523,20 @@ def definitions(work):
         out = run(path, WHO + ["create table d7 (k integer primary key, v integer)", made, "!schema", "drop table d7"])
         ix += [[l for l in bytes.fromhex(m.split()[1]).decode().split("\n") if l.startswith("index d7v")] for m in out if m.startswith("M ")]
     check("an index and a unique index of the same name on the same column are two schemas", ix == [["index d7v on d7"], ["index d7v on d7 unique"]], ix)
+    # and a check that is an expression (6bz): a line for each, by its name, with the hash of what is kept for it; the lowering's snapshot has none of them
+    ck = []
+    for made in ("v integer", "v integer check (v > 0)", "v integer check (v > 1)", "v integer check (v > 1)", "v integer constraint c1 check (v > 1)", "v integer check (v > 1), check (k > v)",
+                 "v integer check (v between 1 and 9)"):
+        out = run(path, WHO + ["create table d8 (k integer primary key, %s)" % made, "!schema", "select 1 from d8 where d8.v > 0", "drop table d8", "!schema"])
+        ms = [bytes.fromhex(l.split()[1]).decode() for l in out if l.startswith("M ")]
+        ck.append([" ".join(l.split()[2:]) for l in ms[0].split("\n") if l.startswith("check ")])
+        check("a table dropped takes its checks out of the schema, and a statement over a table with checks is lowered as over any other (%s)" % made,
+              len(ms) == 2 and "check " not in ms[1] and not [l for l in out if l.startswith(("refused", "err"))], out[-12:])
+    hashes = [[c.split()[1] for c in x] for x in ck]
+    check("a table with no check, or with a range, has no such line; a check is a line by its name; another expression is another line, the same one the same; "
+          "a name given is the line's; two checks are two lines, in the order of their names",
+          ck[0] == [] and ck[6] == [] and [[c.split()[0] for c in x] for x in ck[1:6]] == [["d8_v_check"], ["d8_v_check"], ["d8_v_check"], ["c1"], ["d8_check", "d8_v_check"]]
+          and hashes[1] != hashes[2] and hashes[2] == hashes[3] == hashes[4] and hashes[5][1] == hashes[2][0] and all(len(h) == 64 for x in hashes for h in x), ck)
 
 
 def archiving(work, path):

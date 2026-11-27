@@ -512,6 +512,15 @@ fn o_nbetween() -> [] int {
 }
 
 // The brackets, which sit on the operator stack with precedence -1 so that no reduction reaches past them.
+// `~` and `!~` (docs/m3-engine.md 6by): a text and a pattern
+fn o_rematch() -> [] int {
+    return 25;
+}
+
+fn o_nrematch() -> [] int {
+    return 26;
+}
+
 fn f_paren() -> [] int {
     return 30;
 }
@@ -551,7 +560,7 @@ fn prec_of(code: int) -> [] int {
     if code >= o_like() && code <= o_nin() || code == o_between() || code == o_nbetween() {
         return 6;
     }
-    if code == o_concat() {
+    if code == o_concat() || code == o_rematch() || code == o_nrematch() {
         return 7;
     }
     if code == o_add() || code == o_sub() {
@@ -624,6 +633,12 @@ fn op_text(code: int) -> [] &static [byte] {
     }
     if code == 19 {
         return "in";
+    }
+    if code == 25 {
+        return "~";
+    }
+    if code == 26 {
+        return "!~";
     }
     return "not in";
 }
@@ -778,6 +793,12 @@ fn infix_code[&s, &t](sql: &s [byte], toks: &t [int], i: int) -> [] int {
     }
     if word_is(sql, a, n, "||") {
         return o_concat();
+    }
+    if word_is(sql, a, n, "~") {
+        return o_rematch();
+    }
+    if word_is(sql, a, n, "!~") {
+        return o_nrematch();
     }
     return 0;
 }
