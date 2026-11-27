@@ -128,12 +128,13 @@ def shapes(d, ident, ctx):
     for b in ew.message(b"Q", b"select max(k) from big\0"):
         c.s.sendall(bytes([b]))
     check("a query sent a byte a record is answered", c.answer(c.until_ready())[4] == [[b"2999"]])
-    # more than the connection's buffer holds (1 MiB), sent while the server cannot run any of it (another connection is in a transaction, and these are writes): the
-    # buffer and the connection's room for ciphertext are both full and the socket is no longer read. When the transaction ends, what waits in the room and in the
-    # package is moved as the buffer empties; nothing but that can, since the socket is not being asked. (Sent while the server could run them, the buffer never
-    # filled on a fast machine: the mutant this is for survived in CI, having been killed here.)
+    # a little more than the connection's buffer holds (1 MiB), sent while the server cannot run any of it (another connection is in a transaction, and these are
+    # writes): the buffer fills, and the last few thousand bytes are left in the package, with nothing more to come on the socket. When the transaction ends, only the
+    # pass over the connections can move them: the socket will never say there is more. (Two tests before this one depended on how fast the server read against how
+    # fast the client sent, and the mutant this is for survived in CI both times, having been killed here: with much more than the buffer, the socket still has some,
+    # and reading it moves what waits.)
     import threading
-    n = 40000
+    n = (1048576 + 3000) // 39 + 1
     owner = Client(srv.port)
     owner.query("begin")
     owner.query("insert into wide values (7, 'held')")
@@ -151,7 +152,7 @@ def shapes(d, ident, ctx):
         pass
     sender.join()
     owner.close()
-    check("%d writes (%d bytes, more than the connection's buffer) sent while another connection's transaction makes them wait: none is answered before it ends, all after" % (n, n * 39),
+    check("%d writes (%d bytes, a little more than the connection's buffer) sent while another connection's transaction makes them wait: none is answered before it ends, all after" % (n, n * 39),
           sent and early is None and got == n, (sent, early, got))
     # the server ends a connection with close_notify, and answers one
     c.s.sendall(ew.message(b"X", b""))
