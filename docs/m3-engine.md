@@ -3136,6 +3136,9 @@ that stop the server from starting. **19 mutants, all killed** (`MUTANT_ONLY=tls
 failure the package would say only when read from, which no test reaches (it says it when fed). Nor has the rule that stops the socket
 being asked while the connection's room is full: without it the server would spin, and answer the same.
 
+*Found by CI:* the test read psql 16's sentence for `\conninfo` ("protocol: TLSv1.3"); CI's psql is newer and prints a table ("SSL
+Protocol | TLSv1.3"), so the first run there failed on a connection that was TLS 1.3. The test reads either.
+
 *Found by the gate:* the seventeenth connection, which is told `53300` before it has a place, went through the new `push`, which asks
 whether its place is inside TLS: a place past the last, so the server stopped on an index out of range. `tests/engine_wire.py` (`several`)
 failed on it. That one answer is written in clear, with `put`, and never asks.

@@ -260,6 +260,12 @@ def shapes(d, ident, ctx):
     srv.stop()
 
 
+def through_tls(conninfo):
+    """Whether psql's `\\conninfo` says the connection is TLS 1.3: a sentence in psql 16, a table from 18 (found by CI, whose psql is newer than the one this was written with)."""
+    import re
+    return "protocol: TLSv1.3" in conninfo or re.search(r"SSL Protocol\s*\|\s*TLSv1\.3", conninfo) is not None
+
+
 def with_psql(d, ident):
     if shutil.which("psql") is None:
         print("skip psql through TLS: no psql")
@@ -268,18 +274,18 @@ def with_psql(d, ident):
     base = "host=localhost port=%d dbname=x user=u " % srv.port
     r = subprocess.run(["psql", base + "sslmode=verify-full sslrootcert=%s" % os.path.join(ident, "chain.pem"), "-X", "-c", "create table p (k integer primary key, v text)",
                         "-c", "insert into p values (1, 'a'), (2, 'b')", "-c", "select * from p order by k", "-c", "\\conninfo"], capture_output=True, text=True)
-    check("psql with sslmode=verify-full runs statements, and says the connection is TLS 1.3", r.returncode == 0 and "(2 rows)" in r.stdout and "protocol: TLSv1.3" in r.stdout, r.stdout + r.stderr)
+    check("psql with sslmode=verify-full runs statements, and says the connection is TLS 1.3", r.returncode == 0 and "(2 rows)" in r.stdout and through_tls(r.stdout), r.stdout + r.stderr)
     r = subprocess.run(["psql", base + "sslmode=verify-full sslrootcert=%s" % os.path.join(d, "other", "chain.pem"), "-X", "-c", "select * from p"], capture_output=True, text=True)
     check("psql that trusts another certificate does not go on", r.returncode != 0 and "certificate verify failed" in r.stderr, r.stdout + r.stderr)
     r = subprocess.run(["psql", base + "sslmode=disable", "-X", "-c", "select count(*) from p", "-c", "\\conninfo"], capture_output=True, text=True)
-    check("psql with sslmode=disable is served in clear", r.returncode == 0 and "(1 row)" in r.stdout and "SSL connection" not in r.stdout, r.stdout + r.stderr)
+    check("psql with sslmode=disable is served in clear", r.returncode == 0 and "(1 row)" in r.stdout and "TLSv1" not in r.stdout, r.stdout + r.stderr)
     srv.stop()
     srv = Server(os.path.join(d, "psql.db"))
     base = "host=localhost port=%d dbname=x user=u " % srv.port
     r = subprocess.run(["psql", base + "sslmode=require", "-X", "-c", "select count(*) from p"], capture_output=True, text=True)
     check("a server with no certificate: psql with sslmode=require is told there is no TLS", r.returncode != 0 and "does not support SSL" in r.stderr, r.stdout + r.stderr)
     r = subprocess.run(["psql", base + "sslmode=prefer", "-X", "-c", "select count(*) from p", "-c", "\\conninfo"], capture_output=True, text=True)
-    check("and with sslmode=prefer goes on in clear", r.returncode == 0 and "(1 row)" in r.stdout and "SSL connection" not in r.stdout, r.stdout + r.stderr)
+    check("and with sslmode=prefer goes on in clear", r.returncode == 0 and "(1 row)" in r.stdout and "TLSv1" not in r.stdout, r.stdout + r.stderr)
     srv.stop()
 
 
