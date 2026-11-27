@@ -3181,6 +3181,12 @@ clear is answered `28000` and no password is asked for, a token through TLS is l
 limit: a socket that says nothing, one that stops after the `SSLRequest`, and one that stops before its password are each ended at the
 limit and not before; a connection that has logged in and then idles is not. Mutants, each killed.
 
+*As built:* the place's mark is one int of the connection's (`st[18]`), set at `accept`; the limit is looked for once a turn, before the
+idle transaction's. The test runs from 192.0.2.2 in the sandbox it was written in. **10 mutants, all killed**
+(`MUTANT_ONLY="tls: far"` and `"tls: limit"`, `python3 tests/mutants.py wire`), and the older mutant that serves a client from anywhere is
+still killed by `tests/engine_wire.py`. *Found while testing, and not a fault:* a token of `r:*` is refused `select count(*)`; a function
+is an effect of its own (`n:`), as 6at says.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

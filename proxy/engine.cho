@@ -21,10 +21,10 @@ import tls;
 //
 // REVOKEDFILE: the root's list of revoked tokens (docs/spec/token.md section 3), read again whenever it has grown (docs/m3-engine.md 6bd); a token on it, or made from one
 // on it, is not let in and runs nothing more.
-// Up to 16 connections, from this machine only. ROOTFILE: 64 hexadecimal digits, the public key of the root that signs capability tokens; with it a client logs in with a
+// Up to 16 connections: from this machine, and with both `tls=` and ROOTFILE from any other too, through TLS only (docs/m3-engine.md 6br). ROOTFILE: 64 hexadecimal digits, the public key of the root that signs capability tokens; with it a client logs in with a
 // token as its password (docs/m3-engine.md 6at); `-` or nothing: no login. KEYFILE: 64 hexadecimal digits, the seed of the key that signs the log; with it every commit that changed rows is
 // recorded in the page file with what it wrote (docs/m3-engine.md 6as), without it nothing is recorded. IDLE_MS: how long a transaction may idle while another connection waits for it (default 30000); WRITE_MS:
-// how long a client may take none of its answer (default 10000). It writes `listening` to standard error when it is, and ends when the listener fails or the page
+// how long a client may take none of its answer, or not finish its startup (default 10000). It writes `listening` to standard error when it is, and ends when the listener fails or the page
 // file cannot be committed. Status 2: usage; 3: the file or the port cannot be opened; 5: the page file is not a database; 7: a commit of the page file failed.
 
 fn hexval(c: int) -> [] int {
