@@ -372,8 +372,9 @@ def verified(d, path, history, what, login=False):
     return len(ids)
 
 
-def differential(d, tls=None):
-    """`tls`: None, or the directory of the server's certificate and the client's ssl.SSLContext (6bq, tests/engine_tls.py): the same history through TLS."""
+def differential(d, tls=None, between=None):
+    """`tls`: None, or the directory of the server's certificate and the client's ssl.SSLContext (6bq, tests/engine_tls.py): the same history through TLS.
+    `between`: None, or what is called after every statement with the server and the connection (6bs, tests/engine_beside.py): what another connection does meanwhile."""
     # the statements with parameters go as cancho-pg sends them (the extended protocol), the others as simple queries
     fixed = [sql for sql, _ in ec.FIXED]
     rnd = [st[0] for st in ec.generate(random.Random(SEED), COUNT)]
@@ -406,6 +407,8 @@ def differential(d, tls=None):
             bad += 1
             if bad <= 5:
                 print("FAIL %d: %s\n     server:       %s\n     test program: %s" % (i, sql[:200], str(got)[:500], str(want)[:500]))
+        if between is not None:
+            between(srv, c)
     check("%d statements, %d of them with parameters by the extended protocol: the server answers as the test program does (%s)" % (len(history), sent, ", ".join("%s %d" % kv for kv in sorted(kinds.items()))), bad == 0 and sent > 50, "%d differ" % bad)
     c.close()
     srv.stop()
@@ -742,12 +745,12 @@ def several(d):
     early = b.answered(0.4)
     c = Client(srv.port)                                           # a third connects meanwhile, and is answered its startup
     c.ask("select count(*) from sv")
-    early_c = c.answered(0.3)
+    early_c = c.answered(3)                                        # a read does not wait (6bs): it is answered with what is committed
     done = a.query("commit")
-    late, late_c = b.answered(5), c.answered(5)
+    late, late_c = b.answered(5), c.query("select count(*) from sv")
     order = a.query("select k from sv where k >= 100 order by k")[4]
-    check("a statement of another connection waits for a transaction to commit, reads too, and is answered then; both writes are there",
-          early is None and early_c is None and done[5] == "COMMIT" and late is not None and late[5] == "INSERT 0 1" and late_c is not None and late_c[4] == [[b"42"]] and order == [[b"100"], [b"101"]], (early, early_c, late, late_c, order))
+    check("a write of another connection waits for a transaction to commit and is answered then, a read is answered at once with what is committed; both writes are there",
+          early is None and early_c is not None and early_c[4] == [[b"40"]] and done[5] == "COMMIT" and late is not None and late[5] == "INSERT 0 1" and late_c is not None and late_c[4] == [[b"42"]] and order == [[b"100"], [b"101"]], (early, early_c, late, late_c, order))
     a.query("begin")
     a.query("insert into sv values (200, 'undone')")
     # the one that waits is sent by the extended protocol this time: its Parse and Bind are answered, its Execute waits
@@ -759,11 +762,12 @@ def several(d):
     check("the same with a rollback: the waiting insert of the same key succeeds", early is None and late is not None and late[5] == "INSERT 0 1" and who == [[b"mine"]], (early, late, who))
     a.query("begin")
     a.query("delete from sv")
-    b.ask("select count(*) from sv")
+    b.ask("update sv set who = who where k < 0")                   # (a write: a read would not wait, 6bs)
     early = b.answered(0.4)
     a.close(False)                                                 # the one in the transaction goes away
     late = b.answered(5)
-    check("the same when the connection in the transaction is closed: it is rolled back and the other is answered", early is None and late is not None and late[4] == [[b"43"]], (early, late))
+    left = b.query("select count(*) from sv")[4]
+    check("the same when the connection in the transaction is closed: it is rolled back and the other is answered", early is None and late is not None and late[5] == "UPDATE 0" and left == [[b"43"]], (early, late, left))
     # a transaction that idles while another waits is ended; one that idles with nobody waiting is not
     a = Client(srv.port)
     a.query("begin")
@@ -774,9 +778,10 @@ def several(d):
     a.query("begin")
     a.query("insert into sv values (302, 'ended')")
     t0 = time.time()
-    b.ask("select count(*) from sv")
+    b.ask("update sv set who = who where k < 0")
     late = b.answered(6)
     took = time.time() - t0
+    left = b.query("select count(*) from sv")[4]
     a.s.settimeout(3)
     msgs = []
     try:
@@ -786,7 +791,7 @@ def several(d):
         pass                                                       # the server closed it after the error
     fatal = a.answer(msgs) if msgs else None
     check("a transaction idle for the limit while another waits is ended with 25P03 and the other is answered; idle with nobody waiting, it is left alone",
-          still[5] == "INSERT 0 1" and late is not None and late[4] == [[b"45"]] and 1.2 < took < 4 and fatal is not None and fatal[0] == "25P03", (still, late, took, fatal))
+          still[5] == "INSERT 0 1" and late is not None and late[5] == "UPDATE 0" and left == [[b"45"]] and 1.2 < took < 4 and fatal is not None and fatal[0] == "25P03", (still, late, left, took, fatal))
     b.close()
     c.close()
     # the 17th connection

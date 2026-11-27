@@ -3150,6 +3150,43 @@ ENGINE = [
 
 # The engine's server (docs/m3-engine.md 6al): the messages and one connection. Judged by tests/engine_wire.py, which holds the server against the test program.
 WIRE = [
+    # reads beside a transaction (docs/m3-engine.md 6bs): held to tests/engine_beside.py
+    ('beside: nothing waits for a transaction', 'src/serve.cho',
+     "&& !free && !(t == 'Q' && reads(sub, buf[5..n])) {",
+     "&& !free && !(t == 'Q') {"),
+    ('beside: a statement that is no select reads', 'src/drive.cho',
+     '    if n < 1 || !parse.kw(sql, toks, 0, n, "select") {\n        return false;\n    }\n    var i = 1;',
+     '    if n < 1 {\n        return false;\n    }\n    var i = 1;'),
+    ('beside: two statements in a query read', 'src/drive.cho',
+     '        if parse.tkind(toks, i) == lex.t_semicolon() {\n            return false;\n        }\n',
+     ''),
+    ('beside: a select that draws from a sequence reads', 'src/drive.cho',
+     'if parse.kw(sql, toks, i, n, "nextval") || parse.kw(sql, toks, i, n, "setval") || parse.kw(sql, toks, i, n, "into") {',
+     'if parse.kw(sql, toks, i, n, "setval") || parse.kw(sql, toks, i, n, "into") {'),
+    ('beside: a select that sets a sequence reads', 'src/drive.cho',
+     'if parse.kw(sql, toks, i, n, "nextval") || parse.kw(sql, toks, i, n, "setval") || parse.kw(sql, toks, i, n, "into") {',
+     'if parse.kw(sql, toks, i, n, "nextval") || parse.kw(sql, toks, i, n, "into") {'),
+    ('beside: a select into a table reads', 'src/drive.cho',
+     'if parse.kw(sql, toks, i, n, "nextval") || parse.kw(sql, toks, i, n, "setval") || parse.kw(sql, toks, i, n, "into") {',
+     'if parse.kw(sql, toks, i, n, "nextval") || parse.kw(sql, toks, i, n, "setval") {'),
+    ("beside: a select of the engine's own functions reads", 'src/drive.cho',
+     'parse.tlen(toks, i) >= 7 && parse.word_is(sql, parse.tstart(toks, i), 7, "cancho_") {',
+     'parse.tlen(toks, i) >= 7 && false {'),
+    ('beside: a name that only begins like a word of the rule waits', 'src/drive.cho',
+     'parse.tlen(toks, i) >= 7 && parse.word_is(sql, parse.tstart(toks, i), 7, "cancho_") {',
+     'parse.tlen(toks, i) >= 4 && parse.word_is(sql, parse.tstart(toks, i), 4, "into") {'),
+    ("beside: a transaction's clock is the last statement's of anyone", 'src/serve.cho',
+     '    exec.clock(w, st[20]);',
+     '    if session.state(st[8..16]) == session.idle() {\n        exec.clock(w, st[20]);\n    }'),
+    ('beside: a read forgets what the transaction drew from counters', 'src/serve.cho',
+     '    exec.seq_hold(w, beside);',
+     '    exec.seq_hold(w, false);'),
+    ('beside: a failed read writes what the transaction drew from counters', 'src/exec.cho',
+     'pub fn seq_replay[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_read, file_write] int {\n    if w.held {\n        return root;\n    }',
+     'pub fn seq_replay[&q, &z](p: &!z pager.Pager, w: &!q Work, root: int) -> [file_read, file_write] int {'),
+    ("beside: a transaction's own statements are held to reading", 'src/serve.cho',
+     'let beside = gs[g_owner()] != 0 && gs[g_owner()] != slot + 1;',
+     'let beside = gs[g_owner()] != 0;'),
     # clients from other machines, and the time limit of a startup (6br): held to tests/engine_tls.py
     ('tls: far: a server with no certificate has a place for a client from elsewhere', 'src/serve.cho',
      'if !here && (gs[g_tls()] == 0 || gs[g_login()] == 0) {',
@@ -3241,7 +3278,7 @@ WIRE = [
      '            if k < 0 {\n                return 0;'),
     ('wire: now: the clock is read at every statement of a transaction', 'src/serve.cho', '    if session.state(st[8..16]) == session.idle() {\n        // now() is the time a transaction began', '    if true {\n        // now() is the time a transaction began'),
     ('wire: now: the server has no clock for now()', 'src/serve.cho', '    if session.state(st[8..16]) == session.idle() {\n        // now() is the time a transaction began', '    if false {\n        // now() is the time a transaction began'),
-    ('wire: now: the clock counts from 1970', 'src/serve.cho', '        exec.clock(w, (gs[g_now()] - 946684800000) * 1000);', '        exec.clock(w, gs[g_now()] * 1000);'),
+    ('wire: now: the clock counts from 1970', 'src/serve.cho', '        st[20] = (gs[g_now()] - 946684800000) * 1000;', '        st[20] = gs[g_now()] * 1000;'),
     ('wire: the startup is answered with a request for a password', 'src/wire.cho',
      "return shut(out, at, be(out, open(out, at, 'R'), 0, 4));",
      "return shut(out, at, be(out, open(out, at, 'R'), 3, 4));"),
@@ -3420,8 +3457,8 @@ WIRE = [
      '                                        } else if gs[g_owner()] == slot + 1 {\n                                            gs[g_owner()] = 0;',
      '                                        } else if gs[g_owner()] == slot + 1 {\n                                            gs[g_owner()] = slot + 1;'),
     ("serve: an Execute does not wait for another's transaction", 'src/serve.cho',
-     "            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free {",
-     "            } else if t == 'Q' && !free {"),
+     "            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free && !(t == 'Q' && reads(sub, buf[5..n])) {",
+     "            } else if t == 'Q' && !free && !(t == 'Q' && reads(sub, buf[5..n])) {"),
     ('serve: a connection that ends keeps the database', 'src/serve.cho',
      '    if gs[g_owner()] == slot + 1 {\n        gs[g_owner()] = 0;\n    }\n    if gs[g_tls_on() + slot] == 1 {',
      '    if gs[g_tls_on() + slot] == 1 {'),
@@ -3763,7 +3800,7 @@ def run_wire(cancho):
             if b.returncode != 0:
                 return label, "BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]), True
             try:
-                test = "tests/engine_tls.py" if label.startswith("tls") else "tests/engine_wire.py"
+                test = "tests/engine_tls.py" if label.startswith("tls") else "tests/engine_beside.py" if label.startswith("beside") else "tests/engine_wire.py"
                 r = subprocess.run([sys.executable, str(ROOT / test), str(exe), str(ROOT / "build/enginecheck"), "300", "1"], capture_output=True, text=True, timeout=600, env=dict(os.environ, E2E_DB=db))
                 rc, out = r.returncode, r.stdout + r.stderr
             except subprocess.TimeoutExpired:

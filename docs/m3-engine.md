@@ -1355,7 +1355,7 @@ client. It waits on all of them (a poller over the listener and every connection
   - The cost is the obvious one, and it is stated as a limit: a client that says `begin` and goes quiet stops everyone. So a transaction that has been idle for 30 s while
     another connection waits is ended by the server: its connection is told `25P03` (PostgreSQL's code for exactly this, `idle_in_transaction_session_timeout`) and
     closed, its transaction rolled back. With nobody waiting, a transaction may idle as long as it likes.
-  - Reads by the others wait too. They could be answered from the branch's tree as it stands (it is what is committed), and are not, yet: one rule first.
+  - Reads by the others wait too (*no longer: 6bs answers them*). They could be answered from the branch's tree as it stands (it is what is committed), and are not, yet: one rule first.
 - *Fairness:* each pass over the connections runs at most one statement of each, in turn, starting after the one that was first the pass before.
 - *Writing an answer* is the one place the server still waits on a single client: an answer is written to its connection before the next statement of anyone runs, and a
   client that does not take it stops the others while it does not. After 10 s of a client taking nothing, its connection is closed. An answer of any size to a client
@@ -3130,7 +3130,8 @@ out, and the test program never had it.
 
 *As built, the test (three seeds in the gate):* the differential of 6al through TLS (929 statements at seed 1, the page file and the log
 as in clear); psql 16 with `verify-full`, and refusing a server it does not trust; a row of 24,000 bytes; sixty queries in one record; a
-query a byte a record; 45,000 queries sent at once (more than the connection's buffer); `close_notify` sent, answered, and after a query in
+query a byte a record; 26,964 writes sent while another connection's transaction makes them wait (a little more than the connection's
+buffer; *corrected twice, below*); `close_notify` sent, answered, and after a query in
 the same packet; a record that is no handshake; 24 handshakes of random bytes, cut short or with a byte changed; six certificates and keys
 that stop the server from starting. **19 mutants, all killed** (`MUTANT_ONLY=tls python3 tests/mutants.py wire`). One line has none: a
 failure the package would say only when read from, which no test reaches (it says it when fed). Nor has the rule that stops the socket
@@ -3138,6 +3139,21 @@ being asked while the connection's room is full: without it the server would spi
 
 *Found by CI:* the test read psql 16's sentence for `\conninfo` ("protocol: TLSv1.3"); CI's psql is newer and prints a table ("SSL
 Protocol | TLSv1.3"), so the first run there failed on a connection that was TLS 1.3. The test reads either.
+
+*Found by CI, a PR later, and then by slowing the client down:* the mutant "what waits in the package is read only when the socket has
+more" was killed here and in one run of CI, and survived in the next two. Its tests, in order, and why each was a matter of speed:
+
+1. 45,000 queries sent at once: it relied on the buffer filling, which depends on how fast the server empties it.
+2. The statements made to wait (writes, beside another connection's transaction), half as much again as the buffer holds: with that
+   much left over the socket has more to give, and reading it moves what waits, so the pass is not needed.
+3. 3,020 bytes more than the buffer holds: killed here, but run with the client slowed by hand (16 KiB every half millisecond) the
+   mutant answered everything. A slow client's last bytes arrive after the buffer is full, stay **in the socket**, and are read when the
+   buffer empties.
+
+What the pass is for is bytes left **in the package** with the socket empty. The test now sends the bytes that cross the buffer's end
+as one record: the package opens it whole, the buffer takes 2,000 bytes of it, and 3,020 are left where only the pass reaches them. Run
+by hand at five speeds of the client (all at once; 16 KiB, 4 KiB and 64 KiB at a time with pauses; 1,000 bytes at a time), the mutant
+stops at statement 26,886 of 26,964 every time, and the server as it is answers all of them.
 
 *Found by the gate:* the seventeenth connection, which is told `53300` before it has a place, went through the new `push`, which asks
 whether its place is inside TLS: a place past the last, so the server stopped on an index out of range. `tests/engine_wire.py` (`several`)
@@ -3189,6 +3205,90 @@ idle transaction's. The test runs from 192.0.2.2 in the sandbox it was written i
 (`MUTANT_ONLY="tls: far"` and `"tls: limit"`, `python3 tests/mutants.py wire`), and the older mutant that serves a client from anywhere is
 still killed by `tests/engine_wire.py`. *Found while testing, and not a fault:* a token of `r:*` is refused `select count(*)`; a call
 is an effect of its own (kind 3, `c:` in `tools/mint.py`; `docs/spec/ir.md`), so the token needs `c:count` too.
+
+## 6bs. Reads beside a transaction
+
+*Design, written before the code. The first part of more than one session at work at a time; the second (two transactions that write) is
+sketched at the end and is not built here.*
+
+**What there is (6aq).** While a connection is in a transaction, everything the others send waits, reads too. 6aq said why reads could be
+answered and were not: "one rule first". A dashboard that reads while a batch job holds a transaction for a minute waits a minute.
+
+**Why a read can be answered.** The tree is copy-on-write (D-M3-1): a transaction builds a tree of its own and the branch's root does not
+move until its `commit`. So the branch's tree, read while a transaction is open, is exactly what is committed: a read on it sees none of
+the transaction's writes, never half of them, and is the read PostgreSQL would give at `read committed` for a statement that began before
+the commit.
+
+**The rule.** While another connection is in a transaction, a connection that is in none has its statement run on the branch's tree if
+the statement **only reads**; any other statement waits, as before. A statement only reads when all of this holds, decided from its tokens
+before it runs (`drive.reads_only`):
+
+- its first word is `select`, and it is one statement (no `;` before its end);
+- it has none of the words `nextval`, `setval`, `into`, and no word that begins `cancho_` (the engine's own functions: an erase, a trim
+  of the history). A sequence is drawn from, and written, by a `select`; so those wait.
+
+Everything else waits: `insert`, `update`, `delete`, any definition, `begin` (a second transaction beside the first is the second part).
+The rule errs on the side of waiting: a `select` over a column named `into_x` reads, one with a string `'nextval'` reads (a string is not
+a word), and a `select` with the word `into` waits though PostgreSQL's `select ... into` is refused by the engine anyway.
+
+**A net under the rule.** If a statement that the rule let through turns out to have written (the tree it leaves is not the tree it was
+given), it is not committed: what it did is discarded as a failed statement's is, and the client is told `0A000`,
+`cancho-db: refused read-beside-wrote`. No statement is known to reach it; it is there so that a hole in the rule is a refusal and not a
+lost update.
+
+**What the transaction must not notice** (read: `src/serve.cho`, `src/session.cho`, `src/exec.cho`). One thread still runs one statement
+at a time; a read beside a transaction runs *between* two of the transaction's statements, and uses the same working memory.
+
+- *The clock.* `now()` is the time a transaction began (6bp), kept in the working memory and set whenever a statement runs with no
+  transaction open. A read beside would set it, and the transaction's next `now()` would move. So the clock becomes each connection's own
+  (one more int of its state), set when it is in no transaction and given to the working memory before every statement.
+- *The numbers a statement writes with* (`set_txn`, `set_once`, the draws) are set by `session.open` before every statement already.
+- *The pages.* A statement's window (6p) is flushed when the next begins; a read hands back the pages it took (6be). The transaction's
+  tree is in the file, named by its session.
+- Whatever else there is, the test below is what finds it: a transaction interleaved with reads must answer and commit exactly as alone.
+
+**What a reader sees, said plainly.** The committed state, statement by statement: two reads beside one transaction see the same rows; a
+read after its commit sees all of it. A reader that needs two statements to agree with each other across someone else's commit has
+`begin`, which waits.
+
+*Not in this part:* a statement of the extended protocol that reads (it waits as before: the rule is applied to a simple query's text
+first, and the Execute path has its own skipping rules; next); two transactions at once.
+
+**Test** (`tests/engine_wire.py`, `beside_reads`). A history from the differential's generator is run by one connection in transactions
+of a few statements each, some rolled back, while a second connection reads between every two statements. (1) The first connection's
+answers, the page file at the end and the log are what the test program gives for the same history alone. (2) Every read of the second
+connection inside a transaction's span equals the read it made just before the `begin`, and after a `commit` equals what the first
+connection reads. (3) `now()` in a transaction is the same before and after a read beside it that comes a second later. (4) Beside a
+transaction, each of these waits until it ends: an `insert`, a `select nextval(...)`, a `select cancho_...`, a `begin`, two statements in
+one query. (5) The 30-second rule of 6aq is unchanged for those that wait. Mutants of the rule and of the clock, each killed.
+
+**As built, and what building it found.** `drive.reads_only` (the rule), `reads` and the one condition in `step`, the connection's
+clock (`st[20]`), `exec.seq_hold` (`src/serve.cho`, `src/drive.cho`, `src/exec.cho`).
+
+- *Found by the test, on its first run:* the transaction did notice. Statement 416 of the history, a `rollback`, answered
+  `engine-damaged`, and everything after it. The draws a transaction has made from counters are noted in the working memory until it ends
+  (6y), and a statement that runs with no transaction open forgets them when it ends, or, **if it failed, writes them into the branch's
+  tree**: a read of a table that is not there, beside a transaction that had drawn from a sequence, committed a tree beside the
+  transaction's. The design's list had "the draws" as set before every statement; that was false. A statement beside a transaction now
+  leaves the draws alone (`seq_hold`), and the net was widened: whatever its ending would write is not committed either.
+- *The rule's `;`:* the lexer gives no token for a `;` that ends the text, so "no `;` before its end" is "no `;` token"; the mutant
+  written for the difference survived, and the condition it stood on was removed.
+- *Three older tests said reads wait* (`tests/engine_wire.py`, `several`): they used a `select` as the statement that waits. They use a
+  write that changes nothing, and one now says a read is answered at once with what is committed.
+- *The test, as run* (three seeds in the gate; at seed 1): 107 times the second connection read three tables inside a transaction of the
+  first, each answered at once and equal to its read before the `begin`; 929 statements of the first answered as the test program, the
+  page file and the log the same. Nine statements that wait, four that read. **12 mutants, all killed**
+  (`MUTANT_ONLY=beside python3 tests/mutants.py wire`).
+- *Not tested:* the net (`read-beside-wrote`): no statement is known to reach it, which is what it is for. That a read beside a
+  transaction costs the transaction nothing in time is not measured.
+
+**The second part, sketched: two transactions that write.** Each on a tree of its own from the root it began with. At `commit`, if the
+branch has not moved, as now. If it has: the transaction's facts (6as: every row it wrote, with what the row held before) are held
+against the facts committed since it began; if no row is in both, they are applied to the branch's tree as it is now, and if one is,
+the commit is refused `40001` (PostgreSQL's serialization failure, which clients already retry). That is snapshot isolation with the
+first committer winning. Open, and the owner's to decide before it is built: whether a unique index or a sequence makes two
+transactions conflict, and whether `read committed` is to be claimed (it cannot be, as designed: a statement would see its own
+transaction's snapshot, not each statement's).
 
 ## 7. Taking over, safely
 

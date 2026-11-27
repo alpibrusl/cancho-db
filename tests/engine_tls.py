@@ -128,19 +128,39 @@ def shapes(d, ident, ctx):
     for b in ew.message(b"Q", b"select max(k) from big\0"):
         c.s.sendall(bytes([b]))
     check("a query sent a byte a record is answered", c.answer(c.until_ready())[4] == [[b"2999"]])
-    # more than the connection's buffer holds (1 MiB), sent at once: what waits in the package and in the connection's room is read when there is room for it
+    # a little more than the connection's buffer holds (1 MiB), sent while the server cannot run any of it (another connection is in a transaction, and these are
+    # writes), and **the bytes that cross the buffer's end sent as one record**: the package opens the record whole, the buffer takes the part there is room for, and
+    # the rest (3,020 bytes) is left in the package with nothing more to come on the socket. When the transaction ends, only the pass over the connections can move
+    # it: the socket will never say there is more. (Three tests before this one depended on how fast the server read against how fast the client sent; the mutant
+    # this is for survived in CI twice, and with a client slowed by hand a third time. Left in the socket, what waits is read when the buffer empties; it has to be
+    # left in the package. scratch runs at five speeds of the client: the mutant stops at statement 26,886 of 26,964 at each.)
     import threading
-    n = 45000
-    sender = threading.Thread(target=lambda: c.s.sendall(ew.message(b"Q", b"select count(*) from wide\0") * n))
+    n = (1048576 + 3000) // 39 + 1
+    owner = Client(srv.port)
+    owner.query("begin")
+    owner.query("insert into wide values (7, 'held')")
+    data = ew.message(b"Q", b"update wide set v = v where k < 0\0") * n
+    cut = 1048576 - 2000                                           # the last call is one record of 5,020 bytes, 2,000 of them the buffer's last
+
+    def send():
+        c.s.sendall(data[:cut])
+        c.s.sendall(data[cut:])
+    sender = threading.Thread(target=send)
     sender.start()
+    sender.join(30)
+    sent = not sender.is_alive()
+    early = c.answered(0.5)
+    owner.query("commit")
     got = 0
     try:
-        while got < n and c.answer(c.until_ready())[4] == [[b"1"]]:
+        while got < n and c.answer(c.until_ready())[5] == "UPDATE 0":
             got += 1
     except (OSError, EOFError, ssl.SSLError):
         pass
     sender.join()
-    check("%d queries sent at once (%d bytes, more than the connection's buffer) are all answered" % (n, n * 31), got == n, got)
+    owner.close()
+    check("%d writes (%d bytes, a little more than the connection's buffer) sent while another connection's transaction makes them wait: none is answered before it ends, all after" % (n, n * 39),
+          sent and early is None and got == n, (sent, early, got))
     # the server ends a connection with close_notify, and answers one
     c.s.sendall(ew.message(b"X", b""))
     try:
