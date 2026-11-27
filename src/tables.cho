@@ -282,6 +282,11 @@ pub fn default_at[&e](ent: &e [byte], i: int) -> [] int {
     return 0 - 1;
 }
 
+// Whether column `i` of the entry takes the time of the transaction when a row gives it no value (`default now()`, docs/m3-engine.md 6bp).
+pub fn default_now[&e](ent: &e [byte], i: int) -> [] bool {
+    return int_of(ent[marks_at(ent, i)]) / 16 % 2 == 1;
+}
+
 // Whether `ent` is an entry: a number above 0, a definition that is one, marks of 0 to 15 for each column with a default and a range where they say so, and no bytes over.
 pub fn entry_ok[&e](ent: &e [byte]) -> [] bool {
     if len(ent) < 8 || id_of(ent) < 1 {
@@ -302,7 +307,8 @@ pub fn entry_ok[&e](ent: &e [byte]) -> [] bool {
             return false;
         }
         let m = int_of(ent[at]);
-        if m > 15 {
+        // (16: the default is the time of the insert, 6bp; not beside a default that is kept)
+        if m > 31 || m / 16 == 1 && m / 2 % 2 == 1 {
             return false;
         }
         at = at + 1;

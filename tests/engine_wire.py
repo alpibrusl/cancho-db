@@ -1749,6 +1749,39 @@ def copying(d):
           not bad and not st["odd"] and easy.count("whole") >= 4 and checked_log[0], (bad[:2], st["odd"][:2], hard, easy))
 
 
+def clock(d):
+    """now() through the server (docs/m3-engine.md 6bp): the server's clock when the transaction began, the same for every statement of it, and later for the next."""
+    import datetime
+    srv = Server(os.path.join(d, "clock.db"))
+    c = Client(srv.port)
+
+    def now():
+        g = c.query("select now() from one")
+        return datetime.datetime.strptime(g[4][0][0].decode()[:19], "%Y-%m-%d %H:%M:%S"), g[4][0][0]
+    c.query("create table ev (k integer primary key, at timestamptz not null default now())")
+    c.query("create table one (k integer primary key)")
+    c.query("insert into one values (1)")
+    wall = datetime.datetime.utcnow()
+    first = now()
+    c.query("begin")
+    a = now()
+    c.query("insert into ev (k) values (1)")
+    time.sleep(1.1)
+    c.query("insert into ev (k) values (2)")
+    b = now()
+    inside = c.query("select count(*) from ev where at = now()")[4]
+    c.query("commit")
+    time.sleep(0.01)
+    after = now()
+    rows = c.query("select k from ev where at < now() order by k")[4]
+    c.close()
+    srv.stop()
+    check("now() through the server is the server's clock (within 5 s of the test's, in UTC), one time for the statements of a transaction more than a second apart and for the "
+          "rows it inserts by default, and a later one for the statement after it",
+          abs((first[0] - wall).total_seconds()) < 5 and a[1] == b[1] and inside == [[b"2"]] and after[1] > b[1] and (after[0] - a[0]).total_seconds() >= 1 and rows == [[b"1"], [b"2"]],
+          (wall, first, a, b, inside, after, rows))
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         differential(d)
@@ -1768,6 +1801,7 @@ def main():
         erasing_after_the_past(d)
         sync_failing(d)
         copying(d)
+        clock(d)
         with_psql(d)
         with_cancho_pg(d)
     if FAILED:

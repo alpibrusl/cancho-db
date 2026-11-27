@@ -558,6 +558,10 @@ fn run[&h, &i, &z, &q, &b, &a](heap: &!h Heap, io: &!i Io, pg: &!z pager.Pager, 
                     put_str(io, "via ");
                     put_int(io, w.viac);
                     putchar(io, '\n');
+                } else if begins(all, ls, le, "!clock ") {
+                    // the time now() answers from here on (6bp): microseconds since 2000-01-01
+                    exec.clock(w, number(all, ls + 7, le));
+                    put_str(io, "clock\n");
                 } else if starts(all, ls, le, "!viarows") {
                     // and how many rows those statements were given by an index (slice 4)
                     put_str(io, "viarows ");

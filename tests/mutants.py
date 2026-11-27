@@ -3110,6 +3110,14 @@ ENGINE = [
     ('times: the least and the greatest of times are not computed', 'src/execs.cho', '|| ty == 3 || row.is_time(ty)) {', '|| ty == 3) {'),
     ('times: an index is not read by a time', 'src/via.cho', '    if inty && (vt == 1 || vt == 5 || vt == 6 || row.is_time(vt)) {', '    if inty && (vt == 1 || vt == 5 || vt == 6) {'),
     ('times: a column of moments is made one of no zone', 'src/execw.cho', '        } else if code == 10 {\n            ty = row.t_tstz();', '        } else if code == 10 {\n            ty = row.t_ts();'),
+    ('now: with no clock now() is the year 2000', 'src/eval.cho', ' && len(cx) > now_at() + 1 && cx[now_at() + 1] == 1 {', ' && len(cx) > now_at() + 1 {'),
+    ('now: now() is a time of no zone', 'src/eval.cho', '        set(ws, out, 8, 0, cx[now_at()], 0, 0);', '        set(ws, out, 7, 0, cx[now_at()], 0, 0);'),
+    ('now: a row takes its default now() with no clock to say it', 'src/execw.cho', '                        if !exec.clock_set(w) || ra + 9 > exec.max_stored_row() {', '                        if ra + 9 > exec.max_stored_row() {'),
+    ('now: a column that is no time takes DEFAULT now()', 'src/execw.cho', '            if !row.is_time(ty) || c0 != 0 {\n                return exec.unsupported();\n            }\n            marks = marks + 16;', '            if c0 != 0 {\n                return exec.unsupported();\n            }\n            marks = marks + 16;'),
+    ('now: a column added to a table takes DEFAULT now(), and its rows nothing', 'src/execw.cho', '            if !row.is_time(ty) || c0 != 0 {\n                return exec.unsupported();\n            }\n            marks = marks + 16;', '            if !row.is_time(ty) {\n                return exec.unsupported();\n            }\n            marks = marks + 16;'),
+    ('now: DEFAULT now() is no default', 'src/execw.cho', '            marks = marks + 16;\n            literal = false;', '            literal = false;'),
+    ('now: an entry with a column of DEFAULT now() is not one', 'src/tables.cho', '        if m > 31 || m / 16 == 1 && m / 2 % 2 == 1 {', '        if m > 15 || m / 16 == 1 && m / 2 % 2 == 1 {'),
+    ('now: any call is a default, and is now()', 'src/stmt.cho', ' && nodes[6 * root + 3] == 0 && parse.word_is(sql, parse.tstart(toks, nodes[6 * root + 1]), parse.tlen(toks, nodes[6 * root + 1]), "now") {', ' && nodes[6 * root + 3] == 0 {'),
     ('log: a table as of a commit is read as it is now', 'src/drive.cho',
      '        } else if kind == 6 && view > 0 {',
      '        } else if kind == 6 && view < 0 {'),
@@ -3138,6 +3146,9 @@ ENGINE = [
 
 # The engine's server (docs/m3-engine.md 6al): the messages and one connection. Judged by tests/engine_wire.py, which holds the server against the test program.
 WIRE = [
+    ('wire: now: the clock is read at every statement of a transaction', 'src/serve.cho', '    if session.state(st[8..16]) == session.idle() {\n        // now() is the time a transaction began', '    if true {\n        // now() is the time a transaction began'),
+    ('wire: now: the server has no clock for now()', 'src/serve.cho', '    if session.state(st[8..16]) == session.idle() {\n        // now() is the time a transaction began', '    if false {\n        // now() is the time a transaction began'),
+    ('wire: now: the clock counts from 1970', 'src/serve.cho', '        exec.clock(w, (gs[g_now()] - 946684800000) * 1000);', '        exec.clock(w, gs[g_now()] * 1000);'),
     ('wire: the startup is answered with a request for a password', 'src/wire.cho',
      "return shut(out, at, be(out, open(out, at, 'R'), 0, 4));",
      "return shut(out, at, be(out, open(out, at, 'R'), 3, 4));"),

@@ -2498,6 +2498,56 @@ def first_rows():
             raise SystemExit("engine_check: rows read by an index for %r: %r" % (asks, got))
 
 
+def clocked(pg):
+    """now() (docs/m3-engine.md 6bp, slice 2): with the test program's clock set, what the clock says; and what no clock changes, held to PostgreSQL."""
+    def run(script):
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run([EXE, os.path.join(d, "clock.db")], input="\n".join(script) + "\n", capture_output=True, text=True)
+        blocks, cur = [], None
+        for l in r.stdout.split("\n"):
+            if l.startswith(("ok ", "refused ", "error ")):
+                cur = [l]
+                blocks.append(cur)
+            elif cur is not None and l.startswith(("R ", "T ")):
+                cur.append(l[0] + " " + " ".join("-" if x == "-" else "" if x == "." else bytes.fromhex(x).decode() if l[0] == "R" else x for x in l.split()[1:]))
+        return r.returncode, blocks
+    make = "create table fn1 (k integer primary key, at timestamptz not null default now(), d timestamp default now(), n text)"
+    t1, t2 = 849088800123000, 849088801999000        # 2026-11-27 10:00:00.123 and 10:00:01.999
+    s1, s2 = "2026-11-27 10:00:00.123", "2026-11-27 10:00:01.999"
+    script = [make, "insert into fn1 (k) values (0)", "select now() from fn1", "!clock %d" % t1,
+              "insert into fn1 (k, n) values (1, 'a')", "insert into fn1 values (2, '2020-01-01', null, 'b')", "select k, at, d from fn1 order by k",
+              "select now(), cast(now() as text), cast(now() as timestamp) from fn1 where k = 1", "select k from fn1 where at = now()", "select k from fn1 where at < now() and d is null",
+              "begin", "insert into fn1 (k) values (3)", "select count(*) from fn1 where at = now() and d = now()", "commit",
+              "!clock %d" % t2, "insert into fn1 (k, d) values (4, '2000-01-01')", "select k, at, d from fn1 order by at desc, k limit 2", "select k from fn1 where at = now()",
+              "update fn1 set d = now() where k = 2", "select k, d from fn1 where k = 2", "delete from fn1 where at < now()", "select k from fn1 order by k",
+              "create table fn2 (k integer primary key, n integer default now())", "create table fn2 (k integer primary key, n text default now())",
+              "alter table fn1 add column x timestamptz default now()", "create table fn3 (k integer primary key, d timestamp default random())", "!indexes"]
+    rc, got = run(script)
+    want = [["ok CREATE 0"], ["refused engine-unsupported"], ["refused engine-unsupported"],
+            ["ok INSERT 1"], ["ok INSERT 1"], ["ok SELECT 2", "T 23 1184 1114", "R 1 %s+00 %s" % (s1, s1), "R 2 2020-01-01 00:00:00+00 -"],
+            ["ok SELECT 1", "T 1184 25 1114", "R %s+00 %s+00 %s" % (s1, s1, s1)], ["ok SELECT 1", "T 23", "R 1"], ["ok SELECT 1", "T 23", "R 2"],
+            ["ok BEGIN 0"], ["ok INSERT 1"], ["ok SELECT 1", "T 20", "R 2"], ["ok COMMIT 0"],
+            ["ok INSERT 1"], ["ok SELECT 2", "T 23 1184 1114", "R 4 %s+00 2000-01-01 00:00:00" % s2, "R 1 %s+00 %s" % (s1, s1)], ["ok SELECT 1", "T 23", "R 4"],
+            ["ok UPDATE 1"], ["ok SELECT 1", "T 23 1114", "R 2 %s" % s2], ["ok DELETE 3"], ["ok SELECT 1", "T 23", "R 4"],
+            ["refused engine-unsupported"], ["refused engine-unsupported"], ["refused engine-unsupported"], ["refused unknown-construct"]]
+    if rc != 0 or got != want:
+        diff = [(i, g, w2) for i, (g, w2) in enumerate(zip(got, want)) if g != w2][:2]
+        raise SystemExit("engine_check: now() with the clock set: %r (%d answers for %d)" % (diff, len(got), len(want)))
+    # what no clock changes: the same on PostgreSQL, whose clock is its own
+    same = [make, "begin", "insert into fn1 (k, n) values (1, 'a')", "insert into fn1 (k) values (2)", "select count(*) from fn1 where at = now() and d = now()",
+            "select now() = now(), now() > '2020-01-01', now() < '9000-01-01', now() is null, cast(now() as text) = cast(at as text) from fn1 where k = 1",
+            "select k from fn1 where at <= now() order by k", "update fn1 set d = null where at = now()", "select count(*) from fn1 where d is null", "commit",
+            "select count(*), min(at) = max(at), min(at) <= now() from fn1", "select k from fn1 where at > now()", "drop table fn1"]
+    rc, got = run(["!clock %d" % t1] + same)
+    for sql, ans in zip(same, got):
+        err, oids, rows, tag = pg.query(sql)
+        mine = [l[2:].split(" ") for l in ans if l.startswith("R ")]
+        types = [[int(x) for x in l[2:].split()] for l in ans if l.startswith("T ")]
+        theirs = [["-" if v is None else v.decode() for v in r] for r in rows]
+        if err is not None or not ans[0].startswith("ok ") or mine != theirs or (types and types[0] != oids):
+            raise SystemExit("engine_check: now(), %s: the engine says %r, PostgreSQL %r %r %r" % (sql, ans, err, oids, theirs))
+
+
 def erasure():
     """A DELETE keeps the row in the history (it is read AS OF before it); an erase of its key removes the row and its past, and two commits and a sweep later no byte of the page file holds it
     (docs/m3-engine.md 6c, 6n, D-M3-2). What was not erased is still there."""
@@ -2718,6 +2768,8 @@ def main():
     print("engine_check: AS OF %d points of a history reads what was there, from another process, after a sweep and more writes, and on a fork (%d points); the branch is untouched by its fork" % (npoints, nforked))
     past_by_value()
     first_rows()
+    clocked(pg)
+    print("engine_check: now() is what the clock says, the same through a transaction; a column's default now() is taken at each insert; what no clock changes is PostgreSQL's answer")
     print("engine_check: ORDER BY an indexed column with a LIMIT reads the rows it gives and no more")
     print("engine_check: a read of the past by an indexed column's value reads the table as it was, and no index")
     erasure()

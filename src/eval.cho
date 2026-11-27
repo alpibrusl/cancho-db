@@ -1545,8 +1545,11 @@ fn step[&x, &k, &c, &i, &w, &a, &n](e: &x [byte], p: int, tag: int, ops: int, to
             let s3 = ws[chosen + 3];
             set(ws, out, t, 0, s2, s3, folded);
         }
+    } else if tag == 3 && name_is(e, p + 3, commit.be(e, p + 1, 2), "now") && len(cx) > now_at() + 1 && cx[now_at() + 1] == 1 {
+        // now(): the time the transaction began, which the caller's clock gave (docs/m3-engine.md 6bp); not a constant
+        set(ws, out, 8, 0, cx[now_at()], 0, 0);
     } else {
-        // a parameter, a value the server chooses, the star of count(*): not here
+        // a parameter, a value the server chooses with no clock to choose it by, the star of count(*): not here
         return unsupported();
     }
     return 0;
@@ -1583,6 +1586,11 @@ pub fn params_at() -> [] int {
 // `cx[inner_at()]` is the number of the first parameter that the engine bound itself, for the value of a subquery (0: none): such a parameter is no constant.
 pub fn inner_at() -> [] int {
     return 962;
+}
+
+// The clock: `cx[now_at()]` is the time the transaction began (microseconds since 2000-01-01), if `cx[now_at() + 1]` is 1.
+pub fn now_at() -> [] int {
+    return 1000;
 }
 
 // The slot whose expression starts at `p`: its index; -2 if `p` is inside a slot's expression, after its start; -1 otherwise.

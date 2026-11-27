@@ -2954,6 +2954,37 @@ as that moment in UTC, which is what PostgreSQL does in a session whose zone is 
 already records, so a statement that asks for it is still one the log can hold); arithmetic (`+ interval`, a difference); `extract`,
 `date_trunc`, `to_char`; `date`, `time` and `interval` as types; a precision (`timestamp(3)`); `at time zone`.
 
+**Slice 2: `now()`, the design.**
+
+- *What it is.* The time the transaction began, a `timestamptz`, as in PostgreSQL: the same for every statement of a transaction, and for a
+  statement outside one the time it began. From the server's clock, which counts milliseconds: a `now()` has no finer part.
+- *Where the clock is.* The server sets it before a statement when no transaction is open (`exec.clock`), so `begin` takes it and the statements
+  after it keep it. The test program has no clock of its own: `!clock MICROSECONDS` sets one, and without it `now()` is refused as before.
+- *`default now()`* on a column of either type of time: a mark of the column, and the time is taken when a row is inserted that gives the column
+  no value. Not a value kept in the entry: that would be the time the table was made.
+- *What it is not.* A constant for a key's bounds or an index (a `where` with `now()` reads the table); `current_timestamp`, which the parser
+  does not read as an expression; `clock_timestamp()` and `statement_timestamp()`, which differ within a transaction; a default of a column added
+  to a table that has rows.
+- *The log.* The statement's IR already says `nondet now` (docs/spec/ir.md): the log holds the statement, and the rows it wrote hold the time.
+  Nothing replays a statement to find its values.
+- *The test cannot be the differential alone*: PostgreSQL's clock is not the engine's. With the test program's clock set, the answers are held
+  to what that clock says; the statements whose answers no clock changes (`now() = now()`, a row inserted by default equal to `now()` within one
+  transaction, the type a client is told) are held to PostgreSQL's too; and through the server, to the test's own clock within a few seconds.
+
+**Slice 2, built.** `exec.clock` and a place for it beside the evaluator's parameters; `eval`'s answer to the IR's `nondet now`; a mark of the
+column (16) in the table's entry for `default now()`, read by the insert; the server reads its clock before a statement when no transaction is
+open; `!clock` in the test program.
+
+*Tested.* `clocked` in `tests/engine_check.py`: with the clock set, 22 answers held to what the clock says (no clock: refused; the same time
+through a transaction; another after the clock moves; `update` and `delete` by it; a default on a column that is no time, on a column added
+later, and a call that is not `now()`, each refused), and 13 statements whose answers no clock changes held to PostgreSQL's. `clock` in
+`tests/engine_wire.py`: through the server, the test's own time within 5 s, one time for statements of a transaction 1.1 s apart and for the rows
+they insert, a later one after it. `clocked` in `tests/engine_log.py`: the log of such commits verifies with each verifier. 8 mutants and 3 of
+the server.
+
+*Found on the way*: `select now()` with no table is refused, as every `select` without a `from` is. A client that asks the time that way gets
+no answer; `select now() from <a table of one row>` does.
+
 **The slices.**
 
 1. *The types, stored and compared* (this one), with the test first: a list of statements over a table of both types, each held to PostgreSQL's

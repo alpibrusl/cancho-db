@@ -924,6 +924,22 @@ pub fn ev_open[&q, &x, &k](w: &!q Work, e: &x [byte], at: int, kinds: &k [int], 
     return eval.eval(e, at, kinds, contents(w.ctx), contents(w.cx), n, contents(w.ws), contents(w.ar), contents(w.info));
 }
 
+// The time `now()` answers until it is set again: the time a transaction began (docs/m3-engine.md 6bp), in microseconds since 2000-01-01.
+pub fn clock[&q](w: &!q Work, us: int) -> [] int {
+    contents(w.cx)[eval.now_at()] = us;
+    contents(w.cx)[eval.now_at() + 1] = 1;
+    return 0;
+}
+
+// Whether there is a clock, and what it says.
+pub fn clock_set[&q](w: &q Work) -> [] bool {
+    return contents(w.cx)[eval.now_at() + 1] == 1;
+}
+
+pub fn clock_of[&q](w: &q Work) -> [] int {
+    return contents(w.cx)[eval.now_at()];
+}
+
 // How many parameters are bound for the statement.
 pub fn params_bound[&q](w: &q Work) -> [] int {
     return contents(w.cx)[eval.params_at()];
