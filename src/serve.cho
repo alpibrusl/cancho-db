@@ -17,6 +17,8 @@ import cdb.wire;
 import cdb.tables;
 import cdb.revoke;
 import cdb.tlsio;
+import cdb.tlsid;
+import std.io;
 import tls;
 
 // One connection of the engine's server (docs/m3-engine.md 6al): the startup, then a statement at a time, each answered after what it committed is on the disk.
@@ -109,8 +111,26 @@ pub fn g_tls_on() -> [] int {
     return 80 + revoke.stride() * revoke.max();
 }
 
+// How many places there are (6bt): what the command line asked for, at most `max_places()`.
+pub fn g_places() -> [] int {
+    return 79;
+}
+
+pub fn max_places() -> [] int {
+    return 128;
+}
+
+// When the certificate's files were last looked at (6bu), and what came of it when they were not taken.
+pub fn g_reload_at() -> [] int {
+    return g_tls_on() + max_places();
+}
+
+pub fn g_reload_code() -> [] int {
+    return g_tls_on() + max_places() + 1;
+}
+
 pub fn globals() -> [] int {
-    return g_tls_on() + max_clients();
+    return g_tls_on() + max_places() + 2;
 }
 
 // Read the list of revoked tokens again if its file is not the size it was (it is added to, never rewritten: docs/spec/token.md section 3). A list that cannot be
@@ -236,13 +256,10 @@ pub fn reclaim[&h, &g, &z, &q, &r](heap: &!h Heap, gs: &!g [int], pg: &!z pager.
 // held; 2 whether its messages are skipped up to the next Sync (an error of the extended protocol); 3 whether it is to be closed; 4 how many bytes of a message too long to
 // hold are still to be read past; 5 when it last did something; 6 how many requests for TLS it has made; 7 whether it has a statement that waits for another connection's
 // transaction; 8 to 15 its session (src/session.cho); 16 whether the client has closed its side; 17 whether the server is reading it;
-// 18 whether it is from another machine (6br); 19 how many bytes of its room for ciphertext are held (6bq); 20 its clock, the time of its transaction's beginning (6bs).
+// 18 whether it is from another machine (6br); 19 how many bytes of its room for ciphertext are held (6bq); 20 its clock, the time of its transaction's beginning (6bs);
+// 21 and 22 the address of a client from another machine (6bt).
 pub fn stride() -> [] int {
     return 24;
-}
-
-pub fn max_clients() -> [] int {
-    return 16;
 }
 
 // A connection's buffer: a message is at most this long.
@@ -1008,6 +1025,18 @@ fn reads[&b, &i](sub: &!b drive.Sub, body: &i [byte]) -> [] bool {
     return e > 0 && drive.reads_only(sub, body[0..e]);
 }
 
+// Whether the statement the unnamed portal was bound to only reads (6bs): what an Execute would run.
+fn reads_portal[&b, &a, &x](sub: &!b drive.Sub, ar: &a [byte], xi: &x [int]) -> [] bool {
+    // (with no portal it is the unnamed statement's text that is judged, and the Execute, let through or made to wait, is refused: nothing runs)
+    var sa = 0;
+    var sl = xi[0];
+    if xi[3] >= 0 {
+        sa = xi[8 + 4 * xi[3] + 2];
+        sl = xi[8 + 4 * xi[3] + 3];
+    }
+    return sl > 0 && drive.reads_only(sub, ar[sa..sa + sl]);
+}
+
 // One unit of a connection's work: its messages up to the next that ends a batch (a Query, a Sync, a Flush, a Terminate), or as many as are whole. `free`: no other
 // connection is in a transaction, so a statement may run; if not, the connection's statement waits where it is (`st[7]`). 1 if anything was done, 0 if not. The answers are
 // written to the connection before this returns: `out` is everyone's.
@@ -1058,7 +1087,7 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x, &n](heap: &!h Heap, tab:
                     op = wire.error(out, op, true, "28P01", "cancho-db: refused ", "token-revoked");
                 }
                 st[3] = 1;
-            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free && !(t == 'Q' && reads(sub, buf[5..n])) {
+            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free && !(t == 'Q' && reads(sub, buf[5..n])) && !(t == 'E' && reads_portal(sub, ar, xi)) {
                 // another connection is in a transaction: this statement waits for it to end (6aq), unless it only reads (6bs)
                 st[7] = 1;
                 more = false;
@@ -1200,11 +1229,43 @@ fn accept_all[&h, &l, &p, &g, &s, &x, &o](heap: &!h Heap, table: conns.Table, li
                 if a >= 0 {
                     borrow mut tab as &!tw in {
                         let here = from_here(tw, a);
+                        // whose it is (6bt): its address, and how many places that address holds
+                        var w0 = 0;
+                        var w1 = 0;
+                        match conns.peer(tw, a) {
+                            conns.Peered::Known(who) => {
+                                if addr.family(who) == 4 {
+                                    w0 = addr.word(who, 3);
+                                    w1 = 4;
+                                } else {
+                                    w0 = addr.word(who, 0);
+                                    w1 = addr.word(who, 1) + 6;
+                                }
+                            }
+                            conns.Peered::Unavailable(e) => {
+                            }
+                        }
+                        var held = 0;
+                        var q = 0;
+                        while q < gs[g_places()] {
+                            if q != a && sts[stride() * q] != 0 && sts[stride() * q + 18] == 1 && sts[stride() * q + 21] == w0 && sts[stride() * q + 22] == w1 {
+                                held = held + 1;
+                            }
+                            q = q + 1;
+                        }
+                        var quarter = gs[g_places()] / 4;
+                        if quarter < 1 {
+                            quarter = 1;
+                        }
                         if !here && (gs[g_tls()] == 0 || gs[g_login()] == 0) {
                             // from another machine (6br): only a server with a certificate and a login has a place for it
                             conns.close(tw, a);
-                        } else if a >= max_clients() {
+                        } else if a >= gs[g_places()] {
                             put(tw, a, gs, out[0..wire.error(out, 0, true, "53300", "cancho-db: too many connections", "")]);
+                            conns.close(tw, a);
+                        } else if !here && held >= quarter {
+                            // an address that is not this machine's holds at most a quarter of the places (6bt)
+                            put(tw, a, gs, out[0..wire.error(out, 0, true, "53300", "cancho-db: too many connections from this address", "")]);
                             conns.close(tw, a);
                         } else {
                             conns.nonblocking(tw, a);
@@ -1222,6 +1283,8 @@ fn accept_all[&h, &l, &p, &g, &s, &x, &o](heap: &!h Heap, table: conns.Table, li
                                 st[17] = 1;
                                 if !here {
                                     st[18] = 1;
+                                    st[21] = w0;
+                                    st[22] = w1;
                                 }
                             } else {
                                 conns.close(tw, a);
@@ -1306,9 +1369,9 @@ fn receive[&c, &b, &t](tab: &!c conns.Table, slot: int, buf: &!b [byte], st: &!t
 }
 
 // Serve every connection until the server must stop (docs/m3-engine.md 6aq): the status to stop with. `gs` is the server's (`globals()` ints, the limits set); `sts`, `ins`,
-// `ars` and `xis` hold, for each of `max_clients()` connections, its `stride()` ints, its buffer (`in_size()` bytes), and what the extended protocol keeps (`arena_size()`
+// `ars` and `xis` hold, for each of the places' connections, its `stride()` ints, its buffer (`in_size()` bytes), and what the extended protocol keeps (`arena_size()`
 // bytes and `index_size()` ints). `out` is where an answer is built before it is written. `roots` are the page file's trees (the first is the branch's).
-pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w](heap: &!h Heap, listener: &!l Listener, clk: &k Clock, revoked: &!f File, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, ins: &!i [byte], out: &!o [byte], roots: &!r [int], gs: &!g [int], sts: &!s [int], ars: &!a [byte], xis: &!x [int], eng: &!n tls.Engine, raws: &!w [byte]) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
+pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w, &u, &d, &y](heap: &!h Heap, listener: &!l Listener, clk: &k Clock, revoked: &!f File, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, ins: &!i [byte], out: &!o [byte], roots: &!r [int], gs: &!g [int], sts: &!s [int], ars: &!a [byte], xis: &!x [int], eng: &!n tls.Engine, raws: &!w [byte], io: &!u Io, dir: &d Dir, seen: &!y [byte]) -> [heap, err_write, dir_read, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
     match poller_new() {
         Polling::Ok(p) => {
             var poller = p;
@@ -1324,12 +1387,28 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w](heap:
                         gs[g_now()] = clock_unix_ms(clk);
                         // the list of revoked tokens, if its file has grown (6bd): at every turn, which is at least once a second
                         revocations(heap, gs, revoked);
+                        // the certificate, if its files have changed (6bu): looked at every two seconds; one that is not taken leaves the one there is
+                        if gs[g_tls()] == 1 && gs[g_now()] - gs[g_reload_at()] >= 2000 {
+                            gs[g_reload_at()] = gs[g_now()];
+                            let code = tlsid.load(heap, dir, eng, false, gs[g_now()], seen);
+                            if code == 0 {
+                                io.error_all(io, "engine: tls: the certificate was read again\n");
+                            } else if code < 0 && code != gs[g_reload_code()] {
+                                // said once, not every two seconds
+                                io.error_all(io, "engine: tls: the certificate was not taken: ");
+                                io.error_all(io, tlsid.reason(code));
+                                io.error_all(io, "\n");
+                            }
+                            if code != tlsid.unchanged() {
+                                gs[g_reload_code()] = code;
+                            }
+                        }
                         var j = 0;
                         while j < ready {
                             let token = ev[2 * j];
                             if token == 0 {
                                 tab = accept_all(heap, tab, listener, pw, gs, sts, xis, out);
-                            } else if token <= max_clients() && sts[stride() * (token - 1)] != 0 {
+                            } else if token <= gs[g_places()] && sts[stride() * (token - 1)] != 0 {
                                 borrow mut tab as &!tw in {
                                     if gs[g_tls_on() + token - 1] == 1 {
                                         receive_tls(tw, eng, token - 1, gs, raws[tlsio.raw_size() * (token - 1)..tlsio.raw_size() * token], ins[in_size() * (token - 1)..in_size() * token], sts[stride() * (token - 1)..stride() * token], true);
@@ -1345,8 +1424,8 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w](heap:
                         while progressed && gs[g_stop()] == 0 {
                             progressed = false;
                             var c = 0;
-                            while c < max_clients() {
-                                let slot = (gs[g_turn()] + c) % max_clients();
+                            while c < gs[g_places()] {
+                                let slot = (gs[g_turn()] + c) % gs[g_places()];
                                 let st = sts[stride() * slot..stride() * slot + stride()];
                                 if st[0] != 0 {
                                     let buf = ins[in_size() * slot..in_size() * slot + in_size()];
@@ -1389,11 +1468,11 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w](heap:
                                 }
                                 c = c + 1;
                             }
-                            gs[g_turn()] = (gs[g_turn()] + 1) % max_clients();
+                            gs[g_turn()] = (gs[g_turn()] + 1) % gs[g_places()];
                         }
                         // a connection that has not finished its startup within the limit is ended (6br): a place is not held by saying nothing
                         var late = 0;
-                        while late < max_clients() && gs[g_stop()] == 0 {
+                        while late < gs[g_places()] && gs[g_stop()] == 0 {
                             let ls = sts[stride() * late..stride() * late + stride()];
                             if (ls[0] == 1 || ls[0] == 3) && gs[g_now()] - ls[5] > gs[g_write_ms()] {
                                 borrow mut tab as &!tw in {
@@ -1407,7 +1486,7 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w](heap:
                             let owner = gs[g_owner()] - 1;
                             var waiting = false;
                             var c = 0;
-                            while c < max_clients() {
+                            while c < gs[g_places()] {
                                 if sts[stride() * c] == 2 && sts[stride() * c + 7] == 1 {
                                     waiting = true;
                                 }

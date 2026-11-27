@@ -8,11 +8,12 @@ import cdb.drive;
 import cdb.wire;
 import cdb.serve;
 import cdb.tlsio;
+import cdb.tlsid;
 import tls;
 
 // The engine's server (docs/m3-engine.md 6al): PostgreSQL's protocol in front of the engine, with no PostgreSQL behind it.
 //
-//     engine PAGEFILE PORT [KEYFILE [ROOTFILE [IDLE_MS WRITE_MS [REVOKEDFILE]]]] [tls=DIRECTORY] [check-purge]
+//     engine PAGEFILE PORT [KEYFILE [ROOTFILE [IDLE_MS WRITE_MS [REVOKEDFILE]]]] [tls=DIRECTORY] [places=N] [check-purge]
 //
 // `tls=DIRECTORY` (docs/m3-engine.md 6bq): the directory holds `chain.pem` and `key.pem` (ECDSA P-256), and a client that asks for TLS is given it. A directory whose
 // files cannot be read or are refused is a refusal to start (status 2), with the reason on standard error.
@@ -21,7 +22,8 @@ import tls;
 //
 // REVOKEDFILE: the root's list of revoked tokens (docs/spec/token.md section 3), read again whenever it has grown (docs/m3-engine.md 6bd); a token on it, or made from one
 // on it, is not let in and runs nothing more.
-// Up to 16 connections: from this machine, and with both `tls=` and ROOTFILE from any other too, through TLS only (docs/m3-engine.md 6br). ROOTFILE: 64 hexadecimal digits, the public key of the root that signs capability tokens; with it a client logs in with a
+// `places=N` (6bt): how many connections at once, 1 to 128 (16 without it); an address that is not this machine's holds at most a quarter of them.
+// Up to that many connections: from this machine, and with both `tls=` and ROOTFILE from any other too, through TLS only (docs/m3-engine.md 6br). ROOTFILE: 64 hexadecimal digits, the public key of the root that signs capability tokens; with it a client logs in with a
 // token as its password (docs/m3-engine.md 6at); `-` or nothing: no login. KEYFILE: 64 hexadecimal digits, the seed of the key that signs the log; with it every commit that changed rows is
 // recorded in the page file with what it wrote (docs/m3-engine.md 6as), without it nothing is recorded. IDLE_MS: how long a transaction may idle while another connection waits for it (default 30000); WRITE_MS:
 // how long a client may take none of its answer, or not finish its startup (default 10000). It writes `listening` to standard error when it is, and ends when the listener fails or the page
@@ -90,15 +92,15 @@ fn number_of[&t](text: &t [byte]) -> [] int {
     return v;
 }
 
-fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f, &e](heap: &!h Heap, io: &!o Io, net: &n Net(""), clk: &k Clock, port: int, idle_ms: int, write_ms: int, checks: int, key: &y [byte], rootkey: &j [byte], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, revoked: &!f File, eng: &!e tls.Engine, secure: bool) -> [heap, err_write, net_in(""), conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
+fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f, &e, &d, &s](heap: &!h Heap, io: &!o Io, net: &n Net(""), clk: &k Clock, port: int, idle_ms: int, write_ms: int, checks: int, key: &y [byte], rootkey: &j [byte], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, revoked: &!f File, eng: &!e tls.Engine, secure: bool, nplaces: int, dir: &d Dir, seen: &!s [byte]) -> [heap, err_write, dir_read, net_in(""), conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
     var roots = box_slice(heap, 16, 0);
     var globals = box_slice(heap, serve.globals(), 0);
-    var states = box_slice(heap, serve.stride() * serve.max_clients(), 0);
-    var inb = box_slice(heap, serve.in_size() * serve.max_clients(), byte_of(0));
+    var states = box_slice(heap, serve.stride() * nplaces, 0);
+    var inb = box_slice(heap, serve.in_size() * nplaces, byte_of(0));
     var outb = box_slice(heap, 1048576, byte_of(0));
-    var arena = box_slice(heap, serve.arena_size() * serve.max_clients(), byte_of(0));
-    var index = box_slice(heap, serve.index_size() * serve.max_clients(), 0);
-    var raws = box_slice(heap, tlsio.raw_size() * serve.max_clients(), byte_of(0));
+    var arena = box_slice(heap, serve.arena_size() * nplaces, byte_of(0));
+    var index = box_slice(heap, serve.index_size() * nplaces, 0);
+    var raws = box_slice(heap, tlsio.raw_size() * nplaces, byte_of(0));
     var status = 0;
     borrow mut roots as &!rw in {
         borrow mut globals as &!gw in {
@@ -120,6 +122,7 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f, &e](heap: &!h Heap, io: &!o
                 gs[serve.g_idle_ms()] = idle_ms;
                 gs[serve.g_write_ms()] = write_ms;
                 gs[serve.g_check()] = checks;
+                gs[serve.g_places()] = nplaces;
                 if secure {
                     gs[serve.g_tls()] = 1;
                 }
@@ -157,7 +160,7 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f, &e](heap: &!h Heap, io: &!o
                                         borrow mut arena as &!ab in {
                                             borrow mut index as &!xb in {
                                                 borrow mut raws as &!wb in {
-                                                    status = serve.run(heap, lh, clk, revoked, pg, w, sub, contents(ib), contents(ob), rs, gs, contents(sw), contents(ab), contents(xb), eng, contents(wb));
+                                                    status = serve.run(heap, lh, clk, revoked, pg, w, sub, contents(ib), contents(ob), rs, gs, contents(sw), contents(ab), contents(xb), eng, contents(wb), io, dir, seen);
                                                 }
                                             }
                                         }
@@ -206,83 +209,67 @@ fn checking[&a](args: &a Args) -> [args] bool {
     return true;
 }
 
-// Where the command line's `tls=DIRECTORY` is (6bq): its last word, or the one before `check-purge`. -1 if there is none.
-fn tls_word[&a](args: &a Args) -> [args] int {
+fn begins[&w](word: &w [byte], lit: &static [byte]) -> [] bool {
+    if len(word) < len(lit) {
+        return false;
+    }
+    var i = 0;
+    while i < len(lit) {
+        if int_of(word[i]) != int_of(lit[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Whether a word is one of the options that come after the words that have a place: `tls=DIRECTORY` (6bq), `places=N` (6bt).
+fn is_option[&w](word: &w [byte]) -> [] bool {
+    return begins(word, "tls=") || begins(word, "places=");
+}
+
+// Where the option that begins `lit` is on the command line: among its last words, before `check-purge`, in any order. -1 if there is none.
+fn option_at[&a](args: &a Args, lit: &static [byte]) -> [args] int {
     var at = arg_count(args) - 1;
     if checking(args) {
         at = at - 1;
     }
-    if at < 3 {
-        return 0 - 1;
-    }
-    let word = arg(args, at);
-    if len(word) > 4 && int_of(word[0]) == 't' && int_of(word[1]) == 'l' && int_of(word[2]) == 's' && int_of(word[3]) == '=' {
-        return at;
+    while at >= 3 && is_option(arg(args, at)) {
+        if begins(arg(args, at), lit) {
+            return at;
+        }
+        at = at - 1;
     }
     return 0 - 1;
 }
 
-// How many words the command line has, without those two.
+fn tls_word[&a](args: &a Args) -> [args] int {
+    return option_at(args, "tls=");
+}
+
+// How many places the command line asks for (6bt): 16 with no `places=N`, N from 1 to `serve.max_places()`, or -1 for anything else.
+fn places[&a](args: &a Args) -> [args] int {
+    let at = option_at(args, "places=");
+    if at < 0 {
+        return 16;
+    }
+    let n = number_of(arg(args, at)[7..len(arg(args, at))]);
+    if n < 1 || n > serve.max_places() {
+        return 0 - 1;
+    }
+    return n;
+}
+
+// How many words the command line has, without the options and `check-purge`.
 fn words[&a](args: &a Args) -> [args] int {
     var n = arg_count(args);
     if checking(args) {
         n = n - 1;
     }
-    if tls_word(args) >= 0 {
+    while n - 1 >= 3 && is_option(arg(args, n - 1)) {
         n = n - 1;
     }
     return n;
-}
-
-// The file `leaf` of the directory `dir`, read whole into `into`: how many bytes, or -1 if it cannot be read or does not fit.
-fn read_whole[&f, &d, &l, &o](fs: &f Fs(""), dir: &d [byte], leaf: &l [byte], into: &!o [byte]) -> [fs_read(""), file_read] int {
-    var at = 0 - 1;
-    region r {
-        let path = alloc_slice[r](len(dir) + 1 + len(leaf), byte_of(0));
-        var i = 0;
-        while i < len(dir) {
-            path[i] = dir[i];
-            i = i + 1;
-        }
-        path[i] = byte_of('/');
-        var j = 0;
-        while j < len(leaf) {
-            path[i + 1 + j] = leaf[j];
-            j = j + 1;
-        }
-        match open_read(fs, path) {
-            Opened::Ok(of) => {
-                var file = of;
-                at = 0;
-                var going = true;
-                borrow mut file as &!fw in {
-                    while going {
-                        if at == len(into) {
-                            at = 0 - 1;
-                            going = false;
-                        } else {
-                            match file_read(fw, into[at..len(into)]) {
-                                Read::Got(n) => {
-                                    at = at + n;
-                                }
-                                Read::End => {
-                                    going = false;
-                                }
-                                Read::Failed(e) => {
-                                    at = 0 - 1;
-                                    going = false;
-                                }
-                            }
-                        }
-                    }
-                }
-                file_close(file);
-            }
-            Opened::Failed(e) => {
-            }
-        }
-    }
-    return at;
 }
 
 // 32 bytes from the system into `out`: whether there were.
@@ -310,44 +297,38 @@ fn random[&f, &o](fs: &f Fs(""), out: &!o [byte]) -> [fs_read(""), file_read] bo
     return ok;
 }
 
-// The server's certificate and key given to the package (6bq): whether it took them. What it refuses is said on standard error, with the package's tag.
-fn identity[&h, &o, &f, &d, &e](heap: &!h Heap, io: &!o Io, fs: &f Fs(""), dir: &d [byte], eng: &!e tls.Engine, now_ms: int) -> [heap, err_write, fs_read(""), file_read] bool {
+// The directory of the certificate (6bq), opened once: the server reads beneath it and holds no path (6bu). With no `tls=` it is the directory the server was
+// started in, and is never read.
+fn cert_dir[&f, &a](fs: &f Fs(""), args: &a Args) -> [fs_read(""), args] DirOpened {
+    let tw = tls_word(args);
+    if tw >= 0 {
+        return open_dir(fs, arg(args, tw)[4..len(arg(args, tw))]);
+    }
+    return open_dir(fs, ".");
+}
+
+// The server's certificate and key given to the package when it starts (6bq): whether it took them. What it refuses is said on standard error, with the package's tag.
+fn identity[&h, &o, &f, &d, &e, &s](heap: &!h Heap, io: &!o Io, fs: &f Fs(""), dir: &d Dir, eng: &!e tls.Engine, now_ms: int, seen: &!s [byte]) -> [heap, err_write, fs_read(""), dir_read, file_read] bool {
     var ok = false;
-    let chain = box_slice(heap, 65536, byte_of(0));
-    let key = box_slice(heap, 8192, byte_of(0));
-    borrow mut chain as &!cw in {
-        borrow mut key as &!kw in {
-            region r {
-                let seed = alloc_slice[r](32, byte_of(0));
-                let cn = read_whole(fs, dir, "chain.pem", contents(cw));
-                let kn = read_whole(fs, dir, "key.pem", contents(kw));
-                if cn < 0 {
-                    io.error_all(io, "engine: tls: chain.pem cannot be read\n");
-                } else if kn < 0 {
-                    io.error_all(io, "engine: tls: key.pem cannot be read\n");
-                } else if !random(fs, seed) || tls.seed(eng, seed) != 0 {
-                    io.error_all(io, "engine: tls: no random bytes\n");
-                } else {
-                    let code = tls.add_identity(eng, contents(cw)[0..cn], contents(kw)[0..kn], "localhost", now_ms);
-                    if code < 0 {
-                        io.error_all(io, "engine: tls: refused ");
-                        io.error_all(io, tls.refusal_tag(code));
-                        io.error_all(io, "\n");
-                    } else {
-                        ok = true;
-                    }
-                }
-            }
-            // the key's copy is overwritten
-            var z = 0;
-            while z < len(contents(kw)) {
-                contents(kw)[z] = byte_of(0);
-                z = z + 1;
+    region r {
+        let seed = alloc_slice[r](32, byte_of(0));
+        if !random(fs, seed) || tls.seed(eng, seed) != 0 {
+            io.error_all(io, "engine: tls: no random bytes\n");
+        } else {
+            let code = tlsid.load(heap, dir, eng, true, now_ms, seen);
+            if code == tlsid.no_chain() || code == tlsid.no_key() {
+                io.error_all(io, "engine: tls: ");
+                io.error_all(io, tlsid.reason(code));
+                io.error_all(io, "\n");
+            } else if code != 0 {
+                io.error_all(io, "engine: tls: refused ");
+                io.error_all(io, tlsid.reason(code));
+                io.error_all(io, "\n");
+            } else {
+                ok = true;
             }
         }
     }
-    unbox_slice(heap, chain);
-    unbox_slice(heap, key);
     return ok;
 }
 
@@ -397,7 +378,7 @@ fn main(world: World) -> [] int {
                         rooted = 1;
                     }
                 }
-                if (words(g) == 3 || words(g) == 4 || words(g) == 5 || words(g) == 7 || words(g) == 8 && rooted == 1) && number_of(arg(g, 2)) > 0 && number_of(arg(g, 2)) < 65536 && idle_ms > 0 && write_ms > 0 && keyed >= 0 && rooted >= 0 {
+                if (words(g) == 3 || words(g) == 4 || words(g) == 5 || words(g) == 7 || words(g) == 8 && rooted == 1) && number_of(arg(g, 2)) > 0 && number_of(arg(g, 2)) < 65536 && idle_ms > 0 && write_ms > 0 && keyed >= 0 && rooted >= 0 && places(g) > 0 {
                     status = 3;
                     match open_new(fsr, arg(g, 1)) {
                         Opened::Ok(nf) => {
@@ -462,19 +443,33 @@ fn main(world: World) -> [] int {
                                                                     var rv = rf;
                                                                     borrow mut rv as &!rw in {
                                                                         // the certificate (6bq): one named and not taken is no server
-                                                                        var engine = tls.open_server(hh, serve.max_clients());
-                                                                        var secure = false;
-                                                                        var refused = false;
+                                                                        var engine = tls.open_server(hh, places(g));
                                                                         borrow mut engine as &!ee in {
-                                                                            let tw = tls_word(g);
-                                                                            if tw >= 0 {
-                                                                                secure = identity(hh, oo, fsr, arg(g, tw)[4..len(arg(g, tw))], ee, clock_unix_ms(kk));
-                                                                                refused = !secure;
-                                                                            }
-                                                                            if refused {
-                                                                                status = 2;
-                                                                            } else {
-                                                                                status = listen_on(hh, oo, nn, kk, number_of(arg(g, 2)), idle_ms, write_ms, checks, keyseed[0..32 * keyed], rootkey[0..32 * rooted], pp, ww, sb, rw, ee, secure);
+                                                                            match cert_dir(fsr, g) {
+                                                                                DirOpened::Ok(dh) => {
+                                                                                    let cdir = dh;
+                                                                                    region cr {
+                                                                                        let seen = alloc_slice[cr](64, byte_of(0));
+                                                                                        var secure = false;
+                                                                                        var refused = false;
+                                                                                        borrow cdir as &dd in {
+                                                                                            if tls_word(g) >= 0 {
+                                                                                                secure = identity(hh, oo, fsr, dd, ee, clock_unix_ms(kk), seen);
+                                                                                                refused = !secure;
+                                                                                            }
+                                                                                            if refused {
+                                                                                                status = 2;
+                                                                                            } else {
+                                                                                                status = listen_on(hh, oo, nn, kk, number_of(arg(g, 2)), idle_ms, write_ms, checks, keyseed[0..32 * keyed], rootkey[0..32 * rooted], pp, ww, sb, rw, ee, secure, places(g), dd, seen);
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                    dir_close(cdir);
+                                                                                }
+                                                                                DirOpened::Failed(e) => {
+                                                                                    io.error_all(oo, "engine: tls: the directory cannot be opened\n");
+                                                                                    status = 2;
+                                                                                }
                                                                             }
                                                                         }
                                                                         tls.close(hh, engine);

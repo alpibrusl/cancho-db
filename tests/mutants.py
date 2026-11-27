@@ -3150,10 +3150,54 @@ ENGINE = [
 
 # The engine's server (docs/m3-engine.md 6al): the messages and one connection. Judged by tests/engine_wire.py, which holds the server against the test program.
 WIRE = [
+    # a certificate renewed while the server runs (docs/m3-engine.md 6bu): held to tests/engine_tls.py
+    ('tls: renew: the certificate is never looked at again', 'src/serve.cho',
+     'if gs[g_tls()] == 1 && gs[g_now()] - gs[g_reload_at()] >= 2000 {',
+     'if false {'),
+    ('tls: renew: a certificate that is not taken is said every two seconds', 'src/serve.cho',
+     '} else if code < 0 && code != gs[g_reload_code()] {',
+     '} else if code < 0 {'),
+    ('tls: renew: files that have not changed are given to the package again', 'src/tlsid.cho',
+     '                    var same = !first;',
+     '                    var same = false;'),
+    ('tls: renew: a key that changed under the same certificate is not seen', 'src/tlsid.cho',
+     '                    crypto.sha256(contents(kw)[0..kn], now[32..64]);\n',
+     ''),
+    ('tls: renew: files that were refused are remembered as taken', 'src/tlsid.cho',
+     '                    if answer >= 0 && !same {',
+     '                    if !same {'),
+    ('tls: renew: a renewed certificate is added beside the old and never served', 'src/tlsid.cho',
+     '                    } else if first {',
+     '                    } else if true {'),
+    # more places and a bound for an address (docs/m3-engine.md 6bt): held to tests/engine_tls.py
+    ('tls: places: an address holds as many places as it likes', 'src/serve.cho',
+     '                        } else if !here && held >= quarter {',
+     '                        } else if false {'),
+    ('tls: places: an address holds half the places', 'src/serve.cho',
+     '                        var quarter = gs[g_places()] / 4;',
+     '                        var quarter = gs[g_places()] / 2;'),
+    ('tls: places: with fewer than four places no other machine has one', 'src/serve.cho',
+     '                        if quarter < 1 {\n                            quarter = 1;\n                        }\n',
+     ''),
+    ('tls: places: a place that was given back still counts for its address', 'src/serve.cho',
+     'if q != a && sts[stride() * q] != 0 && sts[stride() * q + 18] == 1 &&',
+     'if q != a && sts[stride() * q + 18] == 1 &&'),
+    ("tls: places: a connection's address is not kept", 'src/serve.cho',
+     '                                    st[21] = w0;\n                                    st[22] = w1;\n',
+     ''),
     # reads beside a transaction (docs/m3-engine.md 6bs): held to tests/engine_beside.py
     ('beside: nothing waits for a transaction', 'src/serve.cho',
-     "&& !free && !(t == 'Q' && reads(sub, buf[5..n])) {",
-     "&& !free && !(t == 'Q') {"),
+     "&& !free && !(t == 'Q' && reads(sub, buf[5..n])) && !(t == 'E' && reads_portal(sub, ar, xi)) {",
+     "&& !free && !(t == 'Q') && !(t == 'E' && reads_portal(sub, ar, xi)) {"),
+    ('beside: an Execute waits for a transaction whatever it runs', 'src/serve.cho',
+     " && !(t == 'E' && reads_portal(sub, ar, xi)) {",
+     " {"),
+    ('beside: no Execute waits for a transaction', 'src/serve.cho',
+     " && !(t == 'E' && reads_portal(sub, ar, xi)) {",
+     " && !(t == 'E') {"),
+    ('beside: an Execute of a named statement is judged by the unnamed one', 'src/serve.cho',
+     '    return sl > 0 && drive.reads_only(sub, ar[sa..sa + sl]);',
+     '    return sl > 0 && drive.reads_only(sub, ar[0..xi[0]]);'),
     ('beside: a statement that is no select reads', 'src/drive.cho',
      '    if n < 1 || !parse.kw(sql, toks, 0, n, "select") {\n        return false;\n    }\n    var i = 1;',
      '    if n < 1 {\n        return false;\n    }\n    var i = 1;'),
@@ -3195,7 +3239,7 @@ WIRE = [
      'if !here && (gs[g_tls()] == 0 || gs[g_login()] == 0) {',
      'if !here && gs[g_tls()] == 0 {'),
     ('tls: far: a client from elsewhere is taken to be of this machine', 'src/serve.cho',
-     '                                if !here {\n                                    st[18] = 1;\n                                }\n',
+     '                                    st[18] = 1;\n',
      ''),
     ('tls: far: a client from elsewhere is told to use TLS when it does', 'src/serve.cho',
      '} else if kind == login.kind_startup() && st[18] == 1 && gs[g_tls_on() + slot] == 0 {',
@@ -3457,8 +3501,8 @@ WIRE = [
      '                                        } else if gs[g_owner()] == slot + 1 {\n                                            gs[g_owner()] = 0;',
      '                                        } else if gs[g_owner()] == slot + 1 {\n                                            gs[g_owner()] = slot + 1;'),
     ("serve: an Execute does not wait for another's transaction", 'src/serve.cho',
-     "            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free && !(t == 'Q' && reads(sub, buf[5..n])) {",
-     "            } else if t == 'Q' && !free && !(t == 'Q' && reads(sub, buf[5..n])) {"),
+     "            } else if (t == 'Q' || t == 'E' && st[2] == 0) && !free && !(t == 'Q' && reads(sub, buf[5..n])) && !(t == 'E' && reads_portal(sub, ar, xi)) {",
+     "            } else if t == 'Q' && !free && !(t == 'Q' && reads(sub, buf[5..n])) && !(t == 'E' && reads_portal(sub, ar, xi)) {"),
     ('serve: a connection that ends keeps the database', 'src/serve.cho',
      '    if gs[g_owner()] == slot + 1 {\n        gs[g_owner()] = 0;\n    }\n    if gs[g_tls_on() + slot] == 1 {',
      '    if gs[g_tls_on() + slot] == 1 {'),
@@ -3469,7 +3513,7 @@ WIRE = [
      '                            if waiting && gs[g_now()] - sts[stride() * owner + 5] > gs[g_idle_ms()] {',
      '                            if gs[g_now()] - sts[stride() * owner + 5] > gs[g_idle_ms()] {'),
     ('serve: a connection beyond the places is served', 'src/serve.cho',
-     '                        } else if a >= max_clients() {',
+     '                        } else if a >= gs[g_places()] {',
      '                        } else if false {'),
     ('serve: a message too long to hold is waited for', 'src/serve.cho',
      '            } else if n > len(buf) {',
@@ -3782,7 +3826,7 @@ def run_wire(cancho):
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
             "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
     # the server and what only it needs: TLS (docs/m3-engine.md 6bq), which is a package of the compiler's repository
-    served = ("serve.cho", "tlsio.cho")
+    served = ("serve.cho", "tlsio.cho", "tlsid.cho")
 
     def one(mutant):
         label, rel, old, new = mutant
@@ -3961,7 +4005,7 @@ def run(kind, cancho):
             else:
                 exe = work / "verify"
                 # all of src but the server, which is built with a package (docs/m3-engine.md 6bq) and by the engine's own mutants
-                sources = sorted(str(p) for p in (work / "src").glob("*.cho") if p.name not in ("serve.cho", "tlsio.cho"))
+                sources = sorted(str(p) for p in (work / "src").glob("*.cho") if p.name not in ("serve.cho", "tlsio.cho", "tlsid.cho"))
                 b = subprocess.run([cancho, "build", "--std"] + sources + ["-o", str(exe)],
                                    capture_output=True, text=True)
                 if b.returncode != 0:

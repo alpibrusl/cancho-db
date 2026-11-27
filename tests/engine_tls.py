@@ -15,6 +15,8 @@ A P-256 certificate is made for the run. Then:
   * a login by token through TLS, and a wrong one refused through it;
   * clients from another address of this host (6br): closed unread unless the server has a certificate and a login, then told `tls-required` in clear and served through
     TLS; and the time limit of a startup;
+  * a certificate renewed while the server runs (6bu): served within seconds, half a renewal and an unusable one not taken;
+  * more places and a bound for an address (6bt): forty clients at once, and from another address a quarter of the places and no more;
   * a server that is not started: no key, a key that is not the certificate's, an RSA key, an expired certificate, each with its reason.
 """
 import datetime
@@ -432,17 +434,170 @@ def limit(d, ident, ctx):
     srv.stop()
 
 
+def told(host, port):
+    """What a server says, in clear and unasked, to a connection it has no place for: the SQLSTATE and the message, or None if it says nothing within a second."""
+    s = socket.create_connection((host, port), timeout=5)
+    s.settimeout(1)
+    got = b""
+    try:
+        while True:
+            more = s.recv(4096)
+            if not more:
+                break
+            got += more
+    except OSError:
+        pass
+    s.close()
+    if got[:1] != b"E":
+        return None
+    fields = {f[:1]: f[1:].decode() for f in got[5:].split(b"\0") if f}
+    return fields.get(b"C"), fields.get(b"M")
+
+
+def places(d, ident, ctx):
+    """More places, and a bound for an address (6bt)."""
+    import time
+    full = ew.mint("password", "--effects", ew.ALL)
+    srv = Server(os.path.join(d, "many.db"), places=40)
+    held = [Client(srv.port) for _ in range(40)]
+    held[0].query("create table pl (k integer primary key)")
+    for i, c in enumerate(held):
+        c.query("insert into pl values (%d)" % i)
+    over = told("127.0.0.1", srv.port)
+    seen = [c.query("select count(*) from pl")[4] for c in held]
+    check("a server with places=40 serves forty clients at once, and the forty-first is told 53300", seen == [[[b"40"]]] * 40 and over == ("53300", "cancho-db: too many connections"), (over, seen[:2]))
+    for c in held:
+        c.close()
+    srv.stop()
+    out = outside_address()
+    if out is None:
+        print("skip the bound for an address: this host has no IPv4 address that is not loopback")
+    else:
+        srv = Server(os.path.join(d, "bound.db"), login=True, tls=ident, places=8)
+        # two of this machine first, so that the two from the other address are not in the first places: when they end and one of this machine's does, the next
+        # from there is given the first place, and the two it left are free places that held its address
+        near = [Client(srv.port, password=full, database="main") for _ in range(2)]
+        far = [Client(srv.port, password=full, database="main", tls=ctx, host=out) for _ in range(2)]
+        third = told(out, srv.port)
+        near += [Client(srv.port, password=full, database="main") for _ in range(4)]
+        full_up = told("127.0.0.1", srv.port)
+        ok = all(c.status == "I" for c in far + near)
+        # (this machine's last: whether a place given back is the next given out, or the lowest is, the next client takes this one, and the other two are free)
+        far[0].close()
+        far[1].close()
+        time.sleep(0.2)
+        near[0].close()
+        time.sleep(0.3)
+        again = [Client(srv.port, password=full, database="main", tls=ctx, host=out) for _ in range(2)]
+        fourth = told(out, srv.port)
+        check("with places=8, an address that is not this machine's holds two: the third from it is told 53300 and closed; clients of this machine take the other six, and the ninth is told the places are full",
+              ok and third == ("53300", "cancho-db: too many connections from this address") and full_up == ("53300", "cancho-db: too many connections"), (ok, third, full_up))
+        check("when the two end, two more from that address are let in (a place given back does not count), and the next is told again",
+              all(c.status == "I" for c in again) and fourth == ("53300", "cancho-db: too many connections from this address"), ([c.status for c in again], fourth))
+        for c in near[1:] + again:
+            c.close()
+        srv.stop()
+        srv = Server(os.path.join(d, "two.db"), login=True, tls=ident, places=2)
+        one = Client(srv.port, password=full, database="main", tls=ctx, host=out)
+        two = told(out, srv.port)
+        check("with places=2 the quarter is one: an address that is not this machine's has a place, and not a second", one.status == "I" and two == ("53300", "cancho-db: too many connections from this address"), (one.status, two))
+        one.close()
+        srv.stop()
+    bad = []
+    for word in ("places=0", "places=129", "places=x", "places="):
+        r = subprocess.run([ew.SERVER, os.path.join(d, "np.db"), str(ew.free_port()), word], capture_output=True, timeout=30)
+        if r.returncode != 2 or b"listening" in r.stderr:
+            bad.append((word, r.returncode))
+    check("places=0, places=129, places=x and places= with nothing do not start", not bad, bad)
+
+
+def renewed(d):
+    """A certificate that changes while the server runs (6bu): read again within seconds, and one that cannot be used leaves the one there is."""
+    import time
+    k1, k2, k3 = (curves.generate_private_key(curves.SECP256R1()) for _ in range(3))
+    c1, c2, c3 = certificate(k1), certificate(k2), certificate(k3)
+    live = identity(d, "live", k1, c1)
+    trust = []
+    for i, c in enumerate((c1, c2, c3)):
+        path = os.path.join(d, "trust%d.pem" % i)
+        with open(path, "wb") as f:
+            f.write(c.public_bytes(serialization.Encoding.PEM))
+        ctx = ssl.create_default_context(cafile=path)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        trust.append(ctx)
+
+    def put(name, data):
+        # as a renewal does it: written beside, then moved over
+        with open(os.path.join(live, name + ".new"), "wb") as f:
+            f.write(data)
+        os.replace(os.path.join(live, name + ".new"), os.path.join(live, name))
+
+    def pem(key):
+        return key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+
+    def serves(ctx):
+        try:
+            c = Client(srv.port, tls=ctx)
+            ok = c.status == "I"
+            c.close()
+            return ok
+        except (OSError, EOFError, ssl.SSLError):
+            return False
+
+    def until(ctx, seconds=8):
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            if serves(ctx):
+                return time.time() - t0
+            time.sleep(0.25)
+        return None
+
+    srv = Server(os.path.join(d, "renew.db"), tls=live)
+    old = Client(srv.port, tls=trust[0])
+    old.query("create table rn (k integer primary key)")
+    first = serves(trust[0]) and not serves(trust[1])
+    # half a renewal: the new key, with the old certificate still there. It is not taken, and the old one goes on being served
+    put("key.pem", pem(k2))
+    time.sleep(4.5)
+    half = serves(trust[0]) and not serves(trust[1])
+    put("chain.pem", c2.public_bytes(serialization.Encoding.PEM))
+    took = until(trust[1])
+    after = not serves(trust[0])
+    still = old.query("insert into rn values (1)")[5]
+    check("a certificate renewed while the server runs is the one served within seconds (%s s), half a renewal is not taken, and a connection made before goes on"
+          % ("%.1f" % took if took else "never"), first and half and took is not None and after and still == "INSERT 0 1", (first, half, took, after, still))
+    # one that cannot be used: an RSA key and certificate. The one there is stays; then a good one is taken
+    r = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    put("key.pem", pem(r))
+    put("chain.pem", certificate(r).public_bytes(serialization.Encoding.PEM))
+    time.sleep(4.5)
+    kept = serves(trust[1])
+    put("key.pem", pem(k3))
+    put("chain.pem", c3.public_bytes(serialization.Encoding.PEM))
+    took3 = until(trust[2])
+    old.close()
+    srv.p.terminate()
+    said = srv.p.stderr.read().decode()
+    srv.p.wait()
+    srv.p.stderr.close()
+    check("a certificate that cannot be used leaves the one there is, and the server says so once; the next good one is taken",
+          kept and took3 is not None and said.count("the certificate was not taken: tls-server-key-type") == 1 and said.count("the certificate was not taken: tls-server-key-mismatch") >= 1
+          and said.count("the certificate was read again") == 2, (kept, took3, said))
+
+
 def not_started(d, p256, cert):
     other = curves.generate_private_key(curves.SECP256R1())
     r2048 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     cases = [("no key.pem", identity(d, "nokey", None, cert), b"key.pem cannot be read"),
-             ("no such directory", os.path.join(d, "nowhere"), b"chain.pem cannot be read"),
+             ("no such directory", os.path.join(d, "nowhere"), b"the directory cannot be opened"),
+             ("no chain.pem", identity(d, "nochainfile", p256, cert), b"chain.pem cannot be read"),
              ("a key that is not the certificate's", identity(d, "mismatch", p256, cert, key_of=other), b"refused tls-server-key-mismatch"),
              ("an RSA key and certificate", identity(d, "rsa", r2048, certificate(r2048)), b"refused tls-server-key-type"),
              ("a certificate that has expired", identity(d, "expired", p256, certificate(p256, -10, -1)), b"refused tls-server-cert-expired"),
              ("a chain that is no certificate", identity(d, "nochain", p256, cert), b"refused tls-server-chain")]
     with open(os.path.join(d, "nochain", "chain.pem"), "w") as f:
         f.write("not a certificate\n")
+    os.remove(os.path.join(d, "nochainfile", "chain.pem"))
     bad = []
     for name, path, reason in cases:
         r = subprocess.run([ew.SERVER, os.path.join(d, "ns.db"), str(ew.free_port()), "tls=" + path], capture_output=True, timeout=30)
@@ -466,6 +621,8 @@ def main():
         logins(d, ident, ctx)
         far(d, ident, ctx)
         limit(d, ident, ctx)
+        places(d, ident, ctx)
+        renewed(d)
         not_started(d, p256, cert)
     if ew.FAILED:
         print("FAIL engine tls: %d failed" % len(ew.FAILED))

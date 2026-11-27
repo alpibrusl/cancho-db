@@ -30,8 +30,13 @@ def interleaved(d):
             state["b"] = Client(srv.port)
         b = state["b"]
         seen = []
+        state["n"] = state.get("n", 0) + 1
         for q in PROBES:
-            b.ask(q)
+            if state["n"] % 2 == 0:
+                # every other time by the extended protocol, as a driver that prepares its statements sends it
+                b.s.sendall(ew.message(b"P", b"\0" + q.encode() + b"\0\0\0") + b.bind(b"", []) + ew.message(b"D", b"P\0") + ew.message(b"E", b"\0\0\0\0\0") + ew.message(b"S", b""))
+            else:
+                b.ask(q)
             got = b.answered(5)
             if got is None:
                 # it waits for the transaction: the test is over for this connection, and says so
@@ -54,6 +59,11 @@ def interleaved(d):
           % (state["beside"], state["waited"], state["moved"]), state["beside"] > 50 and state["waited"] == 0 and state["moved"] == 0, state["first"])
     if state["b"] is not None:
         state["b"].close()
+
+
+def ext(c, name, sql, params):
+    """Parse, Bind, Execute, Sync, and no wait for the answer."""
+    c.s.sendall(ew.message(b"P", name + b"\0" + sql.encode() + b"\0\0\0") + c.bind(name, params) + ew.message(b"E", b"\0\0\0\0\0") + ew.message(b"S", b""))
 
 
 def rules(d):
@@ -80,7 +90,10 @@ def rules(d):
              ("a select of one of the engine's own functions", lambda c: c.ask("select cancho_erase('one', '9')")),
              ("a begin", lambda c: c.ask("begin")),
              ("a read and a write in one query", lambda c: c.ask("select k from one; delete from one")),
-             ("a read by the extended protocol", lambda c: c.s.sendall(ew.message(b"P", b"\0select k from one\0\0\0") + c.bind(b"", []) + ew.message(b"E", b"\0\0\0\0\0") + ew.message(b"S", b"")))]
+             ("a write by the extended protocol", lambda c: ext(c, b"", "insert into one values ($1, 'x')", ["3"])),
+             ("a select that draws from a sequence, by the extended protocol", lambda c: ext(c, b"", "select nextval('sq') from one where k = $1", ["1"])),
+             ("a write prepared under a name, when the unnamed statement is a read",
+              lambda c: (c.prepare(b"w", "delete from one where k = $1"), c.prepare(b"", "select k from one"), c.s.sendall(c.bind(b"w", ["1"]) + ew.message(b"E", b"\0\0\0\0\0") + ew.message(b"S", b""))))]
     bad = []
     for name, send in waits:
         c = Client(srv.port)
@@ -92,7 +105,17 @@ def rules(d):
     # and what reads does not, whatever its strings and names say
     reads = ["select v from one where v <> 'nextval' and v <> 'into'", "SELECT count(*) FROM one", "select k as into_x from one", "select k from one;"]
     slow = [q for q in reads if (b.ask(q), b.answered(3))[1] is None]
-    check("and each of these is answered (%d selects, with the words of the rule in a string, in a name, and a semicolon at the end)" % len(reads), not slow, slow)
+    # and by the extended protocol: with a parameter, and prepared under a name
+    ext(b, b"", "select v from one where k = $1", ["1"])
+    by_param = b.answered(3)
+    b.prepare(b"r", "select k from one where k >= $1")
+    b.s.sendall(b.bind(b"r", ["0"]) + ew.message(b"E", b"\0\0\0\0\0") + ew.message(b"S", b""))
+    by_name = b.answered(3)
+    if by_param is None or by_param[4] != [[b"a"]]:
+        slow.append("by the extended protocol, with a parameter: %r" % (by_param,))
+    if by_name is None or by_name[4] != [[b"1"]]:
+        slow.append("by the extended protocol, prepared under a name: %r" % (by_name,))
+    check("and each of these is answered (%d selects, with the words of the rule in a string, in a name, and a semicolon at the end; and two by the extended protocol)" % len(reads), not slow, slow)
     a.query("commit")
     after = b.query("select v from one")[4]
     b2 = Client(srv.port)
