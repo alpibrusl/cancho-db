@@ -3654,7 +3654,9 @@ def run_wire(cancho):
             return 1
         table = table[k::n]
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
-            "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "serve.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
+            "execw.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
+    # the server and what only it needs: TLS (docs/m3-engine.md 6bq), which is a package of the compiler's repository
+    served = ("serve.cho", "tlsio.cho")
 
     def one(mutant):
         label, rel, old, new = mutant
@@ -3668,7 +3670,7 @@ def run_wire(cancho):
                 return label, "STALE  %-48s original text occurs %d times" % (label, text.count(old)), True
             f.write_text(text.replace(old, new))
             exe = work / "engine"
-            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/engine.cho")] + [str(work / "src" / x) for x in srcs] + ["-o", str(exe)], capture_output=True, text=True)
+            b = subprocess.run([cancho, "build", "--std", str(ROOT / "proxy/engine.cho")] + [str(work / "src" / x) for x in srcs + served] + tls_package(cancho) + ["-o", str(exe)], capture_output=True, text=True)
             if b.returncode != 0:
                 return label, "BROKEN %-48s does not build: %s" % (label, (b.stdout + b.stderr).strip()[:160]), True
             try:
@@ -3689,6 +3691,13 @@ def run_wire(cancho):
                 survivors.append(label)
     print("%d mutants, %d not killed" % (len(table), len(survivors)))
     return 1 if survivors else 0
+
+
+def tls_package(cancho):
+    """The files of the compiler's TLS package (docs/m3-engine.md 6bq): in the compiler's repository, which the compiler was built in."""
+    root = Path(shutil.which(cancho) or cancho).resolve().parents[2]
+    return [str(root / "packages/tls" / (n + ".cho")) for n in ("tls", "record", "message", "slot", "cident", "client12", "client", "hello", "identity", "clientauth", "ticket", "server", "saved")] + \
+           [str(root / "packages/x509" / (n + ".cho")) for n in ("verify", "names", "x509", "key")]
 
 
 def run_engine(cancho):
@@ -3824,7 +3833,8 @@ def run(kind, cancho):
                 cmd = [sys.executable, str(work / "tools/verify.py")]
             else:
                 exe = work / "verify"
-                sources = sorted(str(p) for p in (work / "src").glob("*.cho"))
+                # all of src but the server, which is built with a package (docs/m3-engine.md 6bq) and by the engine's own mutants
+                sources = sorted(str(p) for p in (work / "src").glob("*.cho") if p.name not in ("serve.cho", "tlsio.cho"))
                 b = subprocess.run([cancho, "build", "--std"] + sources + ["-o", str(exe)],
                                    capture_output=True, text=True)
                 if b.returncode != 0:

@@ -3036,6 +3036,72 @@ the text it is sent); the row image in `src/row.cho`; the key's bounds and the i
 integer constant and now have to take a time's; the schema text a commit's hash is of. The IR does not change: a `cast` carries its type's name
 already, and a column's type is not in it.
 
+## 6bq. TLS: the server ends it itself
+
+*Design, written before the code. Each statement here is a choice, a read (with the file), or to be measured; what building finds false is
+corrected here.*
+
+**What is missing.** The server answers `SSLRequest` with `N` (6al), so a password, a token and every row travel in clear, and the server
+serves this machine only for that reason (`from_here`). 6bd said TLS "is to be ended in front of the server". *Choice, overturning that:* the
+server ends TLS itself. A proxy in front would see the token and every row in clear, and it would be a second program to run and to trust.
+
+**What there is to build on (read: `packages/tls` of the compiler's repository, at the revision `cancho.toml` names).** A TLS 1.3 server
+written in cancho: `tls.open_server`, `tls.add_identity(chain_pem, key_pem, names, now)`, `tls.serve(slot, now)`, and then bytes in and out
+(`feed`, `take`, `send`, `recv`, `finish`, `drop`). It holds no socket and no capability: the program moves the bytes. Its own documents
+(`docs/tls-server.md` there) say what it is checked against (OpenSSL, Go, wolfSSL, browsers; a lying client; a fuzzer; its mutants), and say
+**it has not been reviewed by anyone outside** (its issue 209). This server inherits that: TLS here is not a claim that the cryptography was
+reviewed. TLS 1.3 only; the key is ECDSA P-256 only (`tls-server-key-type` for any other).
+
+**The command line (choice).** One more word, `tls=<directory>`, last or before `check-purge`: the directory holds `chain.pem` (the
+certificates, the server's first) and `key.pem` (PKCS#8 or SEC 1, not encrypted). A directory named whose files cannot be read, or that the
+package refuses (a key that is not the certificate's, an expired certificate, an RSA key), is a refusal to start (status 2, and the package's
+tag on the error stream), not a server without TLS. The files are read once, at start: a renewed certificate needs a restart (*not in this
+part:* a reload).
+
+**The protocol (read: PostgreSQL's `protocol-flow`, "SSL Session Encryption").** A client sends `SSLRequest` in clear; the server answers one
+byte, `S` or `N`; after `S` the client begins the TLS handshake, and the startup message comes inside.
+
+- With no `tls=`, `N`, as before. With it, `S`, and the connection is TLS from the next byte.
+- **Bytes that came with the `SSLRequest` are a refusal** (the connection is ended): what a client sent before the handshake is not to be
+  read as if it had come inside it (PostgreSQL's CVE-2021-23214 is this).
+- An `SSLRequest` inside TLS ends the connection. `GSSENCRequest` is answered `N` as before.
+- A handshake that fails ends the connection; the package's alert is sent first when it has one.
+- *Choice:* a connection may still begin in clear when `tls=` is given. The server serves this machine only, as before, and a client on it
+  chooses (`sslmode`). **Clients from other machines are the next part**, and there a startup in clear will be ended.
+- *Not in this part:* client certificates; ALPN (`postgresql`, which PostgreSQL 17's direct TLS needs); direct TLS without `SSLRequest`;
+  channel binding (there is no SCRAM here: the login is a token, 6at).
+
+**How the bytes move.** The server reads a connection in one place (`receive`) and writes in one (`push`). Both go through a new module,
+`src/tlsio.cho`:
+
+- *Reading.* What the socket gives is kept in the connection's own room for ciphertext (17 KiB: one record and its header fit) and fed to
+  the package; what the package then has in clear is moved into the connection's buffer, where a message is parsed as it always was. The
+  package takes nothing when its own room is full, so what it has not taken stays in the connection's room, and the socket is not read until
+  it is taken. Whatever the package wants sent (its flight, an alert, a key update) is written at once.
+- *Writing.* `push` gives the answer to the package a piece at a time and writes what it makes, waiting for the socket as it does in clear,
+  and for no longer (`g_write_ms`).
+- *Ending.* `close_notify` is queued and written if the socket takes it at once; then the slot is dropped, which overwrites its keys.
+- A connection has the same slot in the package as in the server's table, so there is nothing to look up.
+
+**The random bytes** the package needs (its DRBG's seed, 32) are read from `/dev/urandom` at start, beside the salts' seed (6ag), and are
+not the same bytes.
+
+**Cost, to be measured:** a handshake (the package's own measure is a few milliseconds, most of it the P-256 signature); the statements a
+second on one connection with and without TLS; the size of the server's binary and of its memory with the package in it.
+
+**Test.** `tests/engine_tls.py`, with a P-256 certificate made by `openssl` for the run:
+
+- `psql "sslmode=verify-full sslrootcert=..."` runs statements and reports `TLSv1.3`; `sslmode=disable` still works; with no `tls=`,
+  `sslmode=require` is refused by psql and `sslmode=prefer` goes on in clear.
+- Python's `ssl` over the same socket: the differential of 6al (random statements against PostgreSQL) run through TLS, answers of more than
+  one record (a large select), and many small messages in one record.
+- Bytes after `SSLRequest` in the same packet: ended, nothing answered after `S`.
+- A handshake that is garbage, one that stops half way (the idle rules still end it), a client that closes without `close_notify`, a second
+  `SSLRequest` inside TLS.
+- A login by token through TLS (6at), and a revoked token's connection ended through TLS (6bd).
+- The start refused: no `key.pem`, a key that is another certificate's, an RSA key, an expired certificate.
+- Mutants of `src/tlsio.cho` and of the startup's new lines, each killed.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

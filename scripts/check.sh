@@ -4,6 +4,12 @@ set -eu
 cd "$(dirname "$0")/.."
 CANCHO=${CANCHO:-cancho}
 export CANCHO
+# The compiler's TLS package (docs/m3-engine.md 6bq), which the server is built with: in the compiler's repository, where the compiler was built
+# (target/release/cancho). `cancho.toml` names the revision of both.
+CANCHO_REPO=${CANCHO_REPO:-$(cd "$(dirname "$(command -v "$CANCHO")")/../.." && pwd)}
+TLS_PKG=""
+for f in tls record message slot cident client12 client hello identity clientauth ticket server saved; do TLS_PKG="$TLS_PKG $CANCHO_REPO/packages/tls/$f.cho"; done
+for f in verify names x509 key; do TLS_PKG="$TLS_PKG $CANCHO_REPO/packages/x509/$f.cho"; done
 mkdir -p build
 
 # What to run: `all` (the default: everything, as before), `checks` (everything but the mutants), or one shard of the mutants, `mutants-a` to `mutants-f`
@@ -54,7 +60,7 @@ echo "== parser cases are reproducible"; python3 tools/gen_parse.py --check
 echo "== parser tests (from bytes)"; quiet 2 "$CANCHO" test tests/parse_test.cho tests/parse_cases.cho src/lex.cho src/parse.cho --std
 echo "== statement cases are reproducible"; python3 tools/gen_stmt.py --check
 echo "== statement tests (from bytes)"; quiet 2 "$CANCHO" test tests/stmt_test.cho tests/stmt_cases.cho src/lex.cho src/parse.cho src/stmt.cho --std
-echo "== build";                     "$CANCHO" build --std src/*.cho -o build/verify
+echo "== build";                     "$CANCHO" build --std $(ls src/*.cho | grep -v -e /serve.cho -e /tlsio.cho) -o build/verify
 echo "== go verifier";               (cd verifiers/go && gofmt -l . | (! grep .) && go vet ./... && go build -o ../../build/verify-go .)
 export FUZZ_EXTRA="build/verify-go"
 echo "== authority";                 sh tests/authority.sh
@@ -133,7 +139,7 @@ quiet 3 python3 tests/erase_l3a_e2e.py build/proxy "python3 tools/l3a.py" build/
 echo "== a log the engine made, read by the three L3a verifiers (docs/m3-engine.md 6ah): 3 seeds of 2,000 statements over two processes, and what must not pass"
 for seed in 1 2 3; do quiet 2 python3 tests/engine_log.py build/enginecheck 2000 $seed "python3 tools/l3a.py" build/l3averify "python3 tests/third/l3a_third.py"; done
 echo "== the engine's server (docs/m3-engine.md 6al): PostgreSQL's protocol over a socket, held against the test program; kill, dropped connections, garbage, psql"
-"$CANCHO" build --std proxy/engine.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/execw.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/wire.cho src/serve.cho src/login.cho src/token.cho src/revoke.cho src/ir.cho -o build/engine
+"$CANCHO" build --std proxy/engine.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/execw.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/wire.cho src/serve.cho src/login.cho src/token.cho src/revoke.cho src/ir.cho src/tlsio.cho $TLS_PKG -o build/engine
 for seed in 1 2 3; do quiet 2 python3 tests/engine_wire.py build/engine build/enginecheck 1500 $seed "python3 tools/l3a.py" build/l3averify "python3 tests/third/l3a_third.py"; done
 echo "== the engine's server under load for a minute (docs/m3-engine.md 6az): money never made or lost, the journal, a copy of the log kept up beside it, kills;"
 echo "   and beside those (6bg) definitions, erases and reads as of a commit, with the log archived and the history trimmed"

@@ -16,6 +16,8 @@ import cdb.build;
 import cdb.wire;
 import cdb.tables;
 import cdb.revoke;
+import cdb.tlsio;
+import tls;
 
 // One connection of the engine's server (docs/m3-engine.md 6al): the startup, then a statement at a time, each answered after what it committed is on the disk.
 
@@ -98,8 +100,17 @@ pub fn g_revoked_at() -> [] int {
     return 80;
 }
 
-pub fn globals() -> [] int {
+// Whether the server has a certificate (docs/m3-engine.md 6bq), and from `g_tls_on()` whether each connection is inside TLS.
+pub fn g_tls() -> [] int {
+    return 78;
+}
+
+pub fn g_tls_on() -> [] int {
     return 80 + revoke.stride() * revoke.max();
+}
+
+pub fn globals() -> [] int {
+    return g_tls_on() + max_clients();
 }
 
 // Read the list of revoked tokens again if its file is not the size it was (it is added to, never rewritten: docs/spec/token.md section 3). A list that cannot be
@@ -262,7 +273,7 @@ fn writable[&t](tab: &!t conns.Table, slot: int, ms: int) -> [poll] bool {
 
 // All of `data` to the client: false if the connection is gone, or the client takes nothing of it for the server's limit (it is then closed: one client that does not read
 // may not stop the others for longer).
-fn push[&t, &g, &d](tab: &!t conns.Table, slot: int, gs: &g [int], data: &d [byte]) -> [conn_write, poll] bool {
+fn put[&t, &g, &d](tab: &!t conns.Table, slot: int, gs: &g [int], data: &d [byte]) -> [conn_write, poll] bool {
     var sent = 0;
     while sent < len(data) {
         match conns.write(tab, slot, data[sent..len(data)]) {
@@ -277,6 +288,51 @@ fn push[&t, &g, &d](tab: &!t conns.Table, slot: int, gs: &g [int], data: &d [byt
             Sent::Failed(e) => {
                 return false;
             }
+        }
+    }
+    return true;
+}
+
+// What the package wants written on a connection inside TLS (6bq), all of it: false as `put` is.
+fn flush[&t, &n, &g](tab: &!t conns.Table, eng: &!n tls.Engine, slot: int, gs: &g [int]) -> [conn_write, poll] bool {
+    var ok = true;
+    region r {
+        let rec = alloc_slice[r](tlsio.out_size(), byte_of(0));
+        var more = true;
+        while more {
+            let n = tls.take(eng, slot, rec);
+            if n <= 0 {
+                more = false;
+            } else if !put(tab, slot, gs, rec[0..n]) {
+                ok = false;
+                more = false;
+            }
+        }
+    }
+    return ok;
+}
+
+// All of `data` to the client, in clear or, for a connection inside TLS, through the package: false as `put` is, or if the package takes none of it.
+fn push[&t, &n, &g, &d](tab: &!t conns.Table, eng: &!n tls.Engine, slot: int, gs: &g [int], data: &d [byte]) -> [conn_write, poll] bool {
+    if gs[g_tls_on() + slot] == 0 {
+        return put(tab, slot, gs, data);
+    }
+    var sent = 0;
+    var stalled = 0;
+    while sent < len(data) {
+        let k = tls.send(eng, slot, data[sent..len(data)]);
+        if k < 0 || !flush(tab, eng, slot, gs) {
+            return false;
+        }
+        if k == 0 {
+            // its queue was emptied: it takes some now, or the connection cannot be written to
+            stalled = stalled + 1;
+            if stalled > 1 {
+                return false;
+            }
+        } else {
+            stalled = 0;
+            sent = sent + k;
         }
     }
     return true;
@@ -307,11 +363,11 @@ fn shift[&b](buf: &!b [byte], n: int, fill: int) -> [] int {
     return fill - n;
 }
 
-// The first packets of a connection, one at a time, until a startup is answered: 1 if one was read, 0 if it is not whole yet. A request for TLS is answered `N` (there is
-// none: the client goes on in clear, or goes away); anything else that is no startup of protocol 3.0 ends the connection.
-fn startup_step[&t, &g, &b, &o, &s, &a, &x](tab: &!t conns.Table, slot: int, gs: &g [int], buf: &!b [byte], out: &!o [byte], st: &!s [int], ar: &!a [byte], xi: &!x [int]) -> [conn_write, poll] int {
+// The first packets of a connection, one at a time, until a startup is answered: 1 if one was read, 0 if it is not whole yet. A request for TLS is answered `S` by a
+// server that has a certificate (6bq), and `N` by one that has none (the client goes on in clear, or goes away); anything else that is no startup of protocol 3.0 ends the connection.
+fn startup_step[&t, &g, &b, &o, &s, &a, &x, &n](tab: &!t conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], buf: &!b [byte], out: &!o [byte], st: &!s [int], ar: &!a [byte], xi: &!x [int]) -> [conn_write, poll] int {
     if st[0] == 3 {
-        return password_step(tab, slot, gs, buf, out, st, ar, xi);
+        return password_step(tab, eng, slot, gs, buf, out, st, ar, xi);
     }
     if st[1] < 4 {
         return 0;
@@ -338,23 +394,31 @@ fn startup_step[&t, &g, &b, &o, &s, &a, &x](tab: &!t conns.Table, slot: int, gs:
     }
     // what a client sent after this packet without waiting for the answer is the start of what follows
     st[1] = shift(buf, 4 + n, st[1]);
-    if kind == login.kind_ssl() || kind == login.kind_gss() {
+    if kind == login.kind_ssl() && gs[g_tls()] == 1 {
+        // TLS from the next byte (6bq). What came with the request was sent before the handshake and is not read as if it had come inside it; nor is TLS asked for twice
+        out[0] = byte_of('S');
+        if st[1] > 0 || gs[g_tls_on() + slot] == 1 || !push(tab, eng, slot, gs, out[0..1]) || tls.serve(eng, slot, gs[g_now()]) != 0 {
+            st[3] = 1;
+        } else {
+            gs[g_tls_on() + slot] = 1;
+        }
+    } else if kind == login.kind_ssl() || kind == login.kind_gss() {
         st[6] = st[6] + 1;
         out[0] = byte_of('N');
-        if st[6] > 3 || !push(tab, slot, gs, out[0..1]) {
+        if st[6] > 3 || !push(tab, eng, slot, gs, out[0..1]) {
             st[3] = 1;
         }
     } else if kind == login.kind_startup() && gs[g_login()] == 1 {
         // a login: the password is asked for, and nothing is served before it is right
         let n9 = login.auth_cleartext(out);
-        if !push(tab, slot, gs, out[0..n9]) {
+        if !push(tab, eng, slot, gs, out[0..n9]) {
             st[3] = 1;
         }
         st[0] = 3;
     } else if kind == login.kind_startup() {
         var p = wire.auth_ok(out, 0);
         p = welcome(out, p);
-        if p < 0 || !push(tab, slot, gs, out[0..p]) {
+        if p < 0 || !push(tab, eng, slot, gs, out[0..p]) {
             st[3] = 1;
         }
         st[0] = 2;
@@ -378,13 +442,13 @@ fn welcome[&o](out: &!o [byte], at: int) -> [] int {
 
 // The password of a login (6at): `base64url(token || seed of the token's last key)`, as for the proxy, judged by the proxy's `login.check` against the root's key, the
 // server's clock and the one branch there is. Right: the token stays with the connection, and it is served. Wrong: it is told why (the proxy's SQLSTATE and rule) and closed.
-fn password_step[&t, &g, &b, &o, &s, &a, &x](tab: &!t conns.Table, slot: int, gs: &g [int], buf: &!b [byte], out: &!o [byte], st: &!s [int], ar: &!a [byte], xi: &!x [int]) -> [conn_write, poll] int {
+fn password_step[&t, &g, &b, &o, &s, &a, &x, &n](tab: &!t conns.Table, eng: &!n tls.Engine, slot: int, gs: &g [int], buf: &!b [byte], out: &!o [byte], st: &!s [int], ar: &!a [byte], xi: &!x [int]) -> [conn_write, poll] int {
     if st[1] < 5 {
         return 0;
     }
     let n = 1 + commit.be(buf, 1, 4);
     if int_of(buf[0]) != 'p' || n < 6 || n > len(buf) {
-        push(tab, slot, gs, out[0..wire.error(out, 0, true, wire.violation_state(), "cancho-db: a password was asked for", "")]);
+        push(tab, eng, slot, gs, out[0..wire.error(out, 0, true, wire.violation_state(), "cancho-db: a password was asked for", "")]);
         st[3] = 1;
         return 1;
     }
@@ -421,22 +485,22 @@ fn password_step[&t, &g, &b, &o, &s, &a, &x](tab: &!t conns.Table, slot: int, gs
         // the root has revoked the token, or one it was made from (6bd)
         xi[token_len()] = 0;
         if gs[g_revoked()] < 0 {
-            push(tab, slot, gs, out[0..wire.error(out, 0, true, "28P01", "cancho-db: refused ", "login-revocations-unreadable")]);
+            push(tab, eng, slot, gs, out[0..wire.error(out, 0, true, "28P01", "cancho-db: refused ", "login-revocations-unreadable")]);
         } else {
-            push(tab, slot, gs, out[0..wire.error(out, 0, true, "28P01", "cancho-db: refused ", "login-revoked")]);
+            push(tab, eng, slot, gs, out[0..wire.error(out, 0, true, "28P01", "cancho-db: refused ", "login-revoked")]);
         }
         st[3] = 1;
         return 1;
     }
     if rule != login.login_ok() {
         xi[token_len()] = 0;
-        push(tab, slot, gs, out[0..wire.error(out, 0, true, login.sqlstate(rule), "cancho-db: refused ", login.rule_name(rule))]);
+        push(tab, eng, slot, gs, out[0..wire.error(out, 0, true, login.sqlstate(rule), "cancho-db: refused ", login.rule_name(rule))]);
         st[3] = 1;
         return 1;
     }
     xi[token_len()] = tl;
     let p = welcome(out, wire.auth_ok(out, 0));
-    if p < 0 || !push(tab, slot, gs, out[0..p]) {
+    if p < 0 || !push(tab, eng, slot, gs, out[0..p]) {
         st[3] = 1;
     }
     st[0] = 2;
@@ -624,7 +688,7 @@ fn bind_message[&b, &a, &x, &o, &t](body: &b [byte], ar: &!a [byte], xi: &!x [in
 // Run one statement and write its answer into `out` from `at`, sending what does not fit: how much of `out` is still to send, or -1 if the connection is gone or the server
 // must stop (`st[1]`). `vals` are `nv` values to bind (as a Bind has them). `ext` 0: a simple query (a description before its rows, ReadyForQuery after); 1: an Execute whose
 // portal was described (a description, or NoData); 2: an Execute (the rows alone). An error or a refusal of an Execute sets `st[2]`: what follows is skipped up to the Sync.
-fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &!c conns.Table, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, sql: &s [byte], vals: &v [byte], nv: int, tk: &y [byte], ext: int, out: &!o [byte], at: int, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, poll, file_read, file_write] int {
+fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t, &n](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, sql: &s [byte], vals: &v [byte], nv: int, tk: &y [byte], ext: int, out: &!o [byte], at: int, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, poll, file_read, file_write] int {
     exec.params_clear(w);
     var va = 0;
     var i = 0;
@@ -644,7 +708,7 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
     let on = session.open(pg, w, st[8..16], roots[0]);
     if wr < 0 || on < 0 {
         gs[g_stop()] = 7;
-        push(tab, slot, gs, out[0..wire.error(out, at, true, "58030", "cancho-db: the page file cannot be read", "")]);
+        push(tab, eng, slot, gs, out[0..wire.error(out, at, true, "58030", "cancho-db: the page file cannot be read", "")]);
         return 0 - 1;
     }
     let mode = session.mode(st[8..16]);
@@ -758,7 +822,7 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
         }
         if nr < 0 {
             gs[g_stop()] = 7;
-            push(tab, slot, gs, out[0..wire.error(out, p, true, "58030", "cancho-db: the page file cannot be written", "")]);
+            push(tab, eng, slot, gs, out[0..wire.error(out, p, true, "58030", "cancho-db: the page file cannot be written", "")]);
             p = 0 - 1;
         } else {
             let said = session.said(st[8..16]);
@@ -795,7 +859,7 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
                         // acknowledgement of the one before
                         var next = wire.data_row(out, p, w, k);
                         if next < 0 && p > 0 {
-                            if !push(tab, slot, gs, out[0..p]) {
+                            if !push(tab, eng, slot, gs, out[0..p]) {
                                 next = 0 - 1;
                                 k = exec.count_of(w);
                             } else {
@@ -830,7 +894,7 @@ fn answer[&h, &c, &g, &z, &q, &b, &s, &v, &y, &o, &r, &t](heap: &!h Heap, tab: &
 }
 
 // Execute: the statement the portal is bound to is run with the values bound.
-fn execute_message[&h, &c, &g, &z, &q, &b, &i, &a, &x, &o, &r, &t](heap: &!h Heap, tab: &!c conns.Table, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, body: &i [byte], ar: &a [byte], xi: &!x [int], out: &!o [byte], at: int, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, poll, file_read, file_write] int {
+fn execute_message[&h, &c, &g, &z, &q, &b, &i, &a, &x, &o, &r, &t, &n](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, body: &i [byte], ar: &a [byte], xi: &!x [int], out: &!o [byte], at: int, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, poll, file_read, file_write] int {
     let pe = wire.string_end(body, 0);
     if pe < 0 || pe + 5 != len(body) {
         return broken(out, at, st);
@@ -868,7 +932,7 @@ fn execute_message[&h, &c, &g, &z, &q, &b, &i, &a, &x, &o, &r, &t](heap: &!h Hea
         }
         return wire.empty_query(out, p);
     }
-    return answer(heap, tab, slot, gs, pg, w, sub, ar[sa..sa + sl], ar[values_at()..values_at() + xi[7]], xi[6], ar[token_at()..token_at() + tl], ext, out, at, roots, st);
+    return answer(heap, tab, eng, slot, gs, pg, w, sub, ar[sa..sa + sl], ar[values_at()..values_at() + xi[7]], xi[6], ar[token_at()..token_at() + tl], ext, out, at, roots, st);
 }
 
 // Describe and Close: a letter (`S` a statement, `P` a portal) and a name.
@@ -918,7 +982,7 @@ fn close_message[&b, &a, &x, &o, &t](body: &b [byte], ar: &a [byte], xi: &!x [in
 // One unit of a connection's work: its messages up to the next that ends a batch (a Query, a Sync, a Flush, a Terminate), or as many as are whole. `free`: no other
 // connection is in a transaction, so a statement may run; if not, the connection's statement waits where it is (`st[7]`). 1 if anything was done, 0 if not. The answers are
 // written to the connection before this returns: `out` is everyone's.
-fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x](heap: &!h Heap, tab: &!c conns.Table, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, buf: &!i [byte], out: &!o [byte], roots: &!r [int], st: &!t [int], ar: &!a [byte], xi: &!x [int], free: bool) -> [heap, conn_write, poll, file_read, file_write] int {
+fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x, &n](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, buf: &!i [byte], out: &!o [byte], roots: &!r [int], st: &!t [int], ar: &!a [byte], xi: &!x [int], free: bool) -> [heap, conn_write, poll, file_read, file_write] int {
     var did = 0;
     var op = 0;
     var more = true;
@@ -985,7 +1049,7 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x](heap: &!h Heap, tab: &!c
                     } else if e == 0 {
                         op = wire.ready(out, wire.empty_query(out, op), session.state(st[8..16]));
                     } else {
-                        op = answer(heap, tab, slot, gs, pg, w, sub, buf[5..5 + e], buf[0..0], 0, ar[token_at()..token_at() + xi[token_len()]], 0, out, op, roots, st);
+                        op = answer(heap, tab, eng, slot, gs, pg, w, sub, buf[5..5 + e], buf[0..0], 0, ar[token_at()..token_at() + xi[token_len()]], 0, out, op, roots, st);
                     }
                     more = false;
                 } else if t == 'S' {
@@ -1003,7 +1067,7 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x](heap: &!h Heap, tab: &!c
                         } else if t == 'D' {
                             op = describe_message(buf[5..n], xi, out, op, st);
                         } else if t == 'E' {
-                            op = execute_message(heap, tab, slot, gs, pg, w, sub, buf[5..n], ar, xi, out, op, roots, st);
+                            op = execute_message(heap, tab, eng, slot, gs, pg, w, sub, buf[5..n], ar, xi, out, op, roots, st);
                         } else if t == 'C' {
                             op = close_message(buf[5..n], ar, xi, out, op, st);
                         } else if t == 'H' {
@@ -1026,7 +1090,7 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x](heap: &!h Heap, tab: &!c
         }
         if op >= 0 && len(out) - op < 65536 {
             // room for an answer that is not rows
-            if !push(tab, slot, gs, out[0..op]) {
+            if !push(tab, eng, slot, gs, out[0..op]) {
                 st[3] = 1;
             }
             op = 0;
@@ -1037,7 +1101,7 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x](heap: &!h Heap, tab: &!c
         st[3] = 1;
     } else if op > 0 {
         // the connection gets what was answered before anyone else's statement runs
-        if !push(tab, slot, gs, out[0..op]) {
+        if !push(tab, eng, slot, gs, out[0..op]) {
             st[3] = 1;
         }
     }
@@ -1049,7 +1113,7 @@ fn step[&h, &c, &g, &z, &q, &b, &i, &o, &r, &t, &a, &x](heap: &!h Heap, tab: &!c
 
 // A connection ends: its transaction is rolled back (what it drew from counters stays drawn, 6y), the wait it caused ends, its place is free. If the rollback cannot be
 // done the server stops: it does not hand one client's transaction to the next.
-fn finish[&h, &c, &g, &z, &q, &r, &t](heap: &!h Heap, tab: &!c conns.Table, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, roots: &!r [int], st: &!t [int]) -> [heap, file_read, file_write] int {
+fn finish[&h, &c, &g, &z, &q, &r, &t, &n](heap: &!h Heap, tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &!g [int], pg: &!z pager.Pager, w: &!q exec.Work, roots: &!r [int], st: &!t [int]) -> [heap, conn_write, file_read, file_write] int {
     if st[0] == 2 && session.state(st[8..16]) != session.idle() && gs[g_stop()] == 0 {
         pager.begin(pg);
         var nr = session.open(pg, w, st[8..16], roots[0]);
@@ -1069,13 +1133,34 @@ fn finish[&h, &c, &g, &z, &q, &r, &t](heap: &!h Heap, tab: &!c conns.Table, slot
     if gs[g_owner()] == slot + 1 {
         gs[g_owner()] = 0;
     }
+    if gs[g_tls_on() + slot] == 1 {
+        // close_notify, if the socket takes it; then the slot's keys are overwritten (6bq)
+        tls.finish(eng, slot);
+        region fr {
+            let rec = alloc_slice[fr](tlsio.out_size(), byte_of(0));
+            let n = tls.take(eng, slot, rec);
+            if n > 0 {
+                // once, and not waited for: a client that has gone, or takes nothing, is not owed it
+                match conns.write(tab, slot, rec[0..n]) {
+                    Sent::Wrote(x) => {
+                    }
+                    Sent::Again => {
+                    }
+                    Sent::Failed(e) => {
+                    }
+                }
+            }
+        }
+        tls.drop(eng, slot);
+        gs[g_tls_on() + slot] = 0;
+    }
     conns.close(tab, slot);
     st[0] = 0;
     return 0;
 }
 
 // Take every client waiting on the listener. One from this machine gets a place; any other is closed unread; one more than the places is told so (`53300`).
-fn accept_all[&h, &l, &p, &g, &s, &x, &o](heap: &!h Heap, table: conns.Table, listener: &!l Listener, poller: &!p Poller, gs: &g [int], sts: &!s [int], xis: &!x [int], out: &!o [byte]) -> [heap, conn_accept, conn_write, poll] conns.Table {
+fn accept_all[&h, &l, &p, &g, &s, &x, &o, &n](heap: &!h Heap, table: conns.Table, eng: &!n tls.Engine, listener: &!l Listener, poller: &!p Poller, gs: &g [int], sts: &!s [int], xis: &!x [int], out: &!o [byte]) -> [heap, conn_accept, conn_write, poll] conns.Table {
     var tab = table;
     var more = true;
     while more {
@@ -1088,7 +1173,7 @@ fn accept_all[&h, &l, &p, &g, &s, &x, &o](heap: &!h Heap, table: conns.Table, li
                         if !from_here(tw, a) {
                             conns.close(tw, a);
                         } else if a >= max_clients() {
-                            push(tw, a, gs, out[0..wire.error(out, 0, true, "53300", "cancho-db: too many connections", "")]);
+                            push(tw, eng, a, gs, out[0..wire.error(out, 0, true, "53300", "cancho-db: too many connections", "")]);
                             conns.close(tw, a);
                         } else {
                             conns.nonblocking(tw, a);
@@ -1123,6 +1208,46 @@ fn accept_all[&h, &l, &p, &g, &s, &x, &o](heap: &!h Heap, table: conns.Table, li
 }
 
 // Read what a connection has sent, as much as its buffer holds.
+// Read what a connection inside TLS has sent (6bq): the socket's bytes into `raw`, through the package, into its buffer; what the package wants written is. `read` is
+// false for a turn that must not read the socket (the pass over the connections, which only moves what is already here): 1 if anything moved.
+fn receive_tls[&c, &n, &g, &w, &b, &t](tab: &!c conns.Table, eng: &!n tls.Engine, slot: int, gs: &g [int], raw: &!w [byte], buf: &!b [byte], st: &!t [int], read: bool) -> [conn_read, conn_write, poll] int {
+    var moved = 0;
+    var more = true;
+    while more {
+        more = false;
+        let a = tlsio.absorb(eng, slot, raw, buf, st);
+        // its flight, an alert, a key update: before the connection is ended for what it was an answer to
+        let wrote = flush(tab, eng, slot, gs);
+        if a == tlsio.failed() || !wrote {
+            st[3] = 1;
+            return 1;
+        }
+        if a == tlsio.closed() {
+            st[16] = 1;
+        }
+        if a > 0 {
+            moved = 1;
+        }
+        if read && st[16] == 0 && st[19] < len(raw) {
+            match conns.read(tab, slot, raw[st[19]..len(raw)]) {
+                Received::Data(g) => {
+                    st[19] = st[19] + g;
+                    more = true;
+                }
+                Received::End => {
+                    st[16] = 1;
+                }
+                Received::Again => {
+                }
+                Received::Failed(e) => {
+                    st[16] = 1;
+                }
+            }
+        }
+    }
+    return moved;
+}
+
 fn receive[&c, &b, &t](tab: &!c conns.Table, slot: int, buf: &!b [byte], st: &!t [int]) -> [conn_read] int {
     var more = true;
     while more && st[1] < len(buf) {
@@ -1149,7 +1274,7 @@ fn receive[&c, &b, &t](tab: &!c conns.Table, slot: int, buf: &!b [byte], st: &!t
 // Serve every connection until the server must stop (docs/m3-engine.md 6aq): the status to stop with. `gs` is the server's (`globals()` ints, the limits set); `sts`, `ins`,
 // `ars` and `xis` hold, for each of `max_clients()` connections, its `stride()` ints, its buffer (`in_size()` bytes), and what the extended protocol keeps (`arena_size()`
 // bytes and `index_size()` ints). `out` is where an answer is built before it is written. `roots` are the page file's trees (the first is the branch's).
-pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f](heap: &!h Heap, listener: &!l Listener, clk: &k Clock, revoked: &!f File, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, ins: &!i [byte], out: &!o [byte], roots: &!r [int], gs: &!g [int], sts: &!s [int], ars: &!a [byte], xis: &!x [int]) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
+pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f, &n, &w](heap: &!h Heap, listener: &!l Listener, clk: &k Clock, revoked: &!f File, pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, ins: &!i [byte], out: &!o [byte], roots: &!r [int], gs: &!g [int], sts: &!s [int], ars: &!a [byte], xis: &!x [int], eng: &!n tls.Engine, raws: &!w [byte]) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
     match poller_new() {
         Polling::Ok(p) => {
             var poller = p;
@@ -1169,10 +1294,14 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f](heap: &!h Hea
                         while j < ready {
                             let token = ev[2 * j];
                             if token == 0 {
-                                tab = accept_all(heap, tab, listener, pw, gs, sts, xis, out);
+                                tab = accept_all(heap, tab, eng, listener, pw, gs, sts, xis, out);
                             } else if token <= max_clients() && sts[stride() * (token - 1)] != 0 {
                                 borrow mut tab as &!tw in {
-                                    receive(tw, token - 1, ins[in_size() * (token - 1)..in_size() * token], sts[stride() * (token - 1)..stride() * token]);
+                                    if gs[g_tls_on() + token - 1] == 1 {
+                                        receive_tls(tw, eng, token - 1, gs, raws[tlsio.raw_size() * (token - 1)..tlsio.raw_size() * token], ins[in_size() * (token - 1)..in_size() * token], sts[stride() * (token - 1)..stride() * token], true);
+                                    } else {
+                                        receive(tw, token - 1, ins[in_size() * (token - 1)..in_size() * token], sts[stride() * (token - 1)..stride() * token]);
+                                    }
                                 }
                             }
                             j = j + 1;
@@ -1189,10 +1318,14 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f](heap: &!h Hea
                                     let buf = ins[in_size() * slot..in_size() * slot + in_size()];
                                     var did = 0;
                                     borrow mut tab as &!tw in {
-                                        if st[0] == 1 || st[0] == 3 {
-                                            did = startup_step(tw, slot, gs, buf, out, st, ars[arena_size() * slot..arena_size() * slot + arena_size()], xis[index_size() * slot..index_size() * slot + index_size()]);
-                                        } else {
-                                            did = step(heap, tw, slot, gs, pg, w, sub, buf, out, roots, st, ars[arena_size() * slot..arena_size() * slot + arena_size()], xis[index_size() * slot..index_size() * slot + index_size()], gs[g_owner()] == 0 || gs[g_owner()] == slot + 1);
+                                        if gs[g_tls_on() + slot] == 1 {
+                                            // what the package or the connection's room still holds, now that the buffer may have room for it
+                                            did = receive_tls(tw, eng, slot, gs, raws[tlsio.raw_size() * slot..tlsio.raw_size() * slot + tlsio.raw_size()], buf, st, false);
+                                        }
+                                        if st[3] == 0 && (st[0] == 1 || st[0] == 3) {
+                                            did = startup_step(tw, eng, slot, gs, buf, out, st, ars[arena_size() * slot..arena_size() * slot + arena_size()], xis[index_size() * slot..index_size() * slot + index_size()]);
+                                        } else if st[3] == 0 {
+                                            did = step(heap, tw, eng, slot, gs, pg, w, sub, buf, out, roots, st, ars[arena_size() * slot..arena_size() * slot + arena_size()], xis[index_size() * slot..index_size() * slot + index_size()], gs[g_owner()] == 0 || gs[g_owner()] == slot + 1);
                                         }
                                         // a transaction has the database to itself
                                         if st[0] == 2 && session.state(st[8..16]) != session.idle() {
@@ -1200,17 +1333,17 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f](heap: &!h Hea
                                         } else if gs[g_owner()] == slot + 1 {
                                             gs[g_owner()] = 0;
                                         }
-                                        if did == 1 {
+                                        if did >= 1 {
                                             progressed = true;
                                         }
                                         if st[3] != 0 || st[16] != 0 && did == 0 {
                                             // it asked to end, cannot go on, or its client is gone and nothing whole is left of what it sent
-                                            finish(heap, tw, slot, gs, pg, w, roots, st);
+                                            finish(heap, tw, eng, slot, gs, pg, w, roots, st);
                                             progressed = true;
                                         } else {
                                             // a buffer that is full is not read into (its connection waits, or is being read past)
                                             var want = 1;
-                                            if st[1] >= len(buf) {
+                                            if st[1] >= len(buf) || st[19] >= tlsio.raw_size() {
                                                 want = 0;
                                             }
                                             if want != st[17] {
@@ -1237,8 +1370,8 @@ pub fn run[&h, &l, &k, &z, &q, &b, &i, &o, &r, &g, &s, &a, &x, &f](heap: &!h Hea
                             }
                             if waiting && gs[g_now()] - sts[stride() * owner + 5] > gs[g_idle_ms()] {
                                 borrow mut tab as &!tw in {
-                                    push(tw, owner, gs, out[0..wire.error(out, 0, true, "25P03", "cancho-db: the transaction was idle while another connection waited", "")]);
-                                    finish(heap, tw, owner, gs, pg, w, roots, sts[stride() * owner..stride() * owner + stride()]);
+                                    push(tw, eng, owner, gs, out[0..wire.error(out, 0, true, "25P03", "cancho-db: the transaction was idle while another connection waited", "")]);
+                                    finish(heap, tw, eng, owner, gs, pg, w, roots, sts[stride() * owner..stride() * owner + stride()]);
                                 }
                                 // those who waited are served now
                                 wait = 0;

@@ -86,7 +86,7 @@ def die_with_parent():
 
 
 class Server:
-    def __init__(self, path, *limits, key=True, login=False, fsize=None, revoked=None):
+    def __init__(self, path, *limits, key=True, login=False, fsize=None, revoked=None, tls=None):
         self.path, self.port = path, free_port()
         args = [SERVER, path, str(self.port)]
         if key:
@@ -107,6 +107,9 @@ class Server:
             if revoked is not None:
                 # the root's list of revoked tokens (6bd)
                 args += [revoked]
+        if tls is not None:
+            # the directory of the server's certificate and key (6bq)
+            args += ["tls=" + tls]
         if key and os.environ.get("PURGE_CHECK", "1") != "0":
             # every erase's garbage is held to the sweep's walk before it is zeroed, and the server stops if they differ (6bh). (PURGE_CHECK=0: as a server is run, to measure it)
             args += ["check-purge"]
@@ -140,7 +143,7 @@ def message(t, body):
 class Client:
     """The simple query protocol, and the bytes of anything else."""
 
-    def __init__(self, port, ssl_first=False, rcvbuf=None, password=None, database="anything"):
+    def __init__(self, port, ssl_first=False, rcvbuf=None, password=None, database="anything", tls=None):
         self.s = socket.socket()
         if rcvbuf:
             self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
@@ -150,6 +153,13 @@ class Client:
         if ssl_first:
             self.s.sendall(struct.pack(">II", 8, 80877103))
             self.ssl_answer = self.s.recv(1)
+        if tls is not None:
+            # TLS (6bq): asked for in clear, and everything after the server's `S` inside it. `tls` is an ssl.SSLContext
+            self.s.sendall(struct.pack(">II", 8, 80877103))
+            self.ssl_answer = self.s.recv(1)
+            if self.ssl_answer != b"S":
+                raise SystemExit("engine_wire: TLS was asked for and the server answered %r" % self.ssl_answer)
+            self.s = tls.wrap_socket(self.s, server_hostname="localhost")
         body = struct.pack(">I", 196608) + b"user\0tester\0database\0" + database.encode() + b"\0\0"
         self.s.sendall(struct.pack(">I", len(body) + 4) + body)
         self.asked = None
@@ -360,7 +370,8 @@ def verified(d, path, history, what, login=False):
     return len(ids)
 
 
-def differential(d):
+def differential(d, tls=None):
+    """`tls`: None, or the directory of the server's certificate and the client's ssl.SSLContext (6bq, tests/engine_tls.py): the same history through TLS."""
     # the statements with parameters go as cancho-pg sends them (the extended protocol), the others as simple queries
     fixed = [sql for sql, _ in ec.FIXED]
     rnd = [st[0] for st in ec.generate(random.Random(SEED), COUNT)]
@@ -368,8 +379,8 @@ def differential(d):
     blocks = ec.run_engine(os.path.join(d, "harness.db"), ec.lines(history) + ["!commit"])
     if len(blocks) != len(history):
         raise SystemExit("engine_wire: %d answers of the test program for %d statements" % (len(blocks), len(history)))
-    srv = Server(os.path.join(d, "server.db"))
-    c = Client(srv.port)
+    srv = Server(os.path.join(d, "server.db"), tls=tls[0] if tls else None)
+    c = Client(srv.port, tls=tls[1] if tls else None)
     check("the startup is answered: AuthenticationOk, the parameters, a key, ReadyForQuery", b"".join(t for t, _ in c.first) == b"RSSSSSSKZ" and c.status == "I" and c.params.get("client_encoding") == "UTF8"
           and c.params.get("server_version", "").startswith("16."), (c.first, c.params))
     kinds, bad, sent = {}, 0, 0

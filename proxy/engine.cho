@@ -7,10 +7,15 @@ import cdb.exec;
 import cdb.drive;
 import cdb.wire;
 import cdb.serve;
+import cdb.tlsio;
+import tls;
 
 // The engine's server (docs/m3-engine.md 6al): PostgreSQL's protocol in front of the engine, with no PostgreSQL behind it.
 //
-//     engine PAGEFILE PORT [KEYFILE [ROOTFILE [IDLE_MS WRITE_MS [REVOKEDFILE]]]] [check-purge]
+//     engine PAGEFILE PORT [KEYFILE [ROOTFILE [IDLE_MS WRITE_MS [REVOKEDFILE]]]] [tls=DIRECTORY] [check-purge]
+//
+// `tls=DIRECTORY` (docs/m3-engine.md 6bq): the directory holds `chain.pem` and `key.pem` (ECDSA P-256), and a client that asks for TLS is given it. A directory whose
+// files cannot be read or are refused is a refusal to start (status 2), with the reason on standard error.
 //
 // `check-purge` as the last word (docs/m3-engine.md 6bh): the garbage an erase finds is held to the sweep's walk before it is zeroed, and the server stops if they differ. For the tests.
 //
@@ -85,7 +90,7 @@ fn number_of[&t](text: &t [byte]) -> [] int {
     return v;
 }
 
-fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f](heap: &!h Heap, io: &!o Io, net: &n Net(""), clk: &k Clock, port: int, idle_ms: int, write_ms: int, checks: int, key: &y [byte], rootkey: &j [byte], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, revoked: &!f File) -> [heap, err_write, net_in(""), conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
+fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f, &e](heap: &!h Heap, io: &!o Io, net: &n Net(""), clk: &k Clock, port: int, idle_ms: int, write_ms: int, checks: int, key: &y [byte], rootkey: &j [byte], pg: &!z pager.Pager, w: &!q exec.Work, sub: &!b drive.Sub, revoked: &!f File, eng: &!e tls.Engine, secure: bool) -> [heap, err_write, net_in(""), conn_accept, conn_read, conn_write, poll, clock, file_read, file_write] int {
     var roots = box_slice(heap, 16, 0);
     var globals = box_slice(heap, serve.globals(), 0);
     var states = box_slice(heap, serve.stride() * serve.max_clients(), 0);
@@ -93,6 +98,7 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f](heap: &!h Heap, io: &!o Io,
     var outb = box_slice(heap, 1048576, byte_of(0));
     var arena = box_slice(heap, serve.arena_size() * serve.max_clients(), byte_of(0));
     var index = box_slice(heap, serve.index_size() * serve.max_clients(), 0);
+    var raws = box_slice(heap, tlsio.raw_size() * serve.max_clients(), byte_of(0));
     var status = 0;
     borrow mut roots as &!rw in {
         borrow mut globals as &!gw in {
@@ -114,6 +120,9 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f](heap: &!h Heap, io: &!o Io,
                 gs[serve.g_idle_ms()] = idle_ms;
                 gs[serve.g_write_ms()] = write_ms;
                 gs[serve.g_check()] = checks;
+                if secure {
+                    gs[serve.g_tls()] = 1;
+                }
                 if len(rootkey) == 32 {
                     gs[serve.g_login()] = 1;
                     var rk = 0;
@@ -147,7 +156,9 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f](heap: &!h Heap, io: &!o Io,
                                     borrow mut outb as &!ob in {
                                         borrow mut arena as &!ab in {
                                             borrow mut index as &!xb in {
-                                                status = serve.run(heap, lh, clk, revoked, pg, w, sub, contents(ib), contents(ob), rs, gs, contents(sw), contents(ab), contents(xb));
+                                                borrow mut raws as &!wb in {
+                                                    status = serve.run(heap, lh, clk, revoked, pg, w, sub, contents(ib), contents(ob), rs, gs, contents(sw), contents(ab), contents(xb), eng, contents(wb));
+                                                }
                                             }
                                         }
                                     }
@@ -170,6 +181,7 @@ fn listen_on[&h, &n, &o, &k, &z, &q, &b, &y, &j, &f](heap: &!h Heap, io: &!o Io,
     unbox_slice(heap, outb);
     unbox_slice(heap, arena);
     unbox_slice(heap, index);
+    unbox_slice(heap, raws);
     return status;
 }
 
@@ -194,12 +206,149 @@ fn checking[&a](args: &a Args) -> [args] bool {
     return true;
 }
 
-// How many words the command line has, without that one.
-fn words[&a](args: &a Args) -> [args] int {
+// Where the command line's `tls=DIRECTORY` is (6bq): its last word, or the one before `check-purge`. -1 if there is none.
+fn tls_word[&a](args: &a Args) -> [args] int {
+    var at = arg_count(args) - 1;
     if checking(args) {
-        return arg_count(args) - 1;
+        at = at - 1;
     }
-    return arg_count(args);
+    if at < 3 {
+        return 0 - 1;
+    }
+    let word = arg(args, at);
+    if len(word) > 4 && int_of(word[0]) == 't' && int_of(word[1]) == 'l' && int_of(word[2]) == 's' && int_of(word[3]) == '=' {
+        return at;
+    }
+    return 0 - 1;
+}
+
+// How many words the command line has, without those two.
+fn words[&a](args: &a Args) -> [args] int {
+    var n = arg_count(args);
+    if checking(args) {
+        n = n - 1;
+    }
+    if tls_word(args) >= 0 {
+        n = n - 1;
+    }
+    return n;
+}
+
+// The file `leaf` of the directory `dir`, read whole into `into`: how many bytes, or -1 if it cannot be read or does not fit.
+fn read_whole[&f, &d, &l, &o](fs: &f Fs(""), dir: &d [byte], leaf: &l [byte], into: &!o [byte]) -> [fs_read(""), file_read] int {
+    var at = 0 - 1;
+    region r {
+        let path = alloc_slice[r](len(dir) + 1 + len(leaf), byte_of(0));
+        var i = 0;
+        while i < len(dir) {
+            path[i] = dir[i];
+            i = i + 1;
+        }
+        path[i] = byte_of('/');
+        var j = 0;
+        while j < len(leaf) {
+            path[i + 1 + j] = leaf[j];
+            j = j + 1;
+        }
+        match open_read(fs, path) {
+            Opened::Ok(of) => {
+                var file = of;
+                at = 0;
+                var going = true;
+                borrow mut file as &!fw in {
+                    while going {
+                        if at == len(into) {
+                            at = 0 - 1;
+                            going = false;
+                        } else {
+                            match file_read(fw, into[at..len(into)]) {
+                                Read::Got(n) => {
+                                    at = at + n;
+                                }
+                                Read::End => {
+                                    going = false;
+                                }
+                                Read::Failed(e) => {
+                                    at = 0 - 1;
+                                    going = false;
+                                }
+                            }
+                        }
+                    }
+                }
+                file_close(file);
+            }
+            Opened::Failed(e) => {
+            }
+        }
+    }
+    return at;
+}
+
+// 32 bytes from the system into `out`: whether there were.
+fn random[&f, &o](fs: &f Fs(""), out: &!o [byte]) -> [fs_read(""), file_read] bool {
+    var ok = false;
+    match open_read(fs, "/dev/urandom") {
+        Opened::Ok(uf) => {
+            var u = uf;
+            borrow mut u as &!uw in {
+                match file_read(uw, out) {
+                    Read::Got(n) => {
+                        ok = n == len(out);
+                    }
+                    Read::End => {
+                    }
+                    Read::Failed(e) => {
+                    }
+                }
+            }
+            file_close(u);
+        }
+        Opened::Failed(e) => {
+        }
+    }
+    return ok;
+}
+
+// The server's certificate and key given to the package (6bq): whether it took them. What it refuses is said on standard error, with the package's tag.
+fn identity[&h, &o, &f, &d, &e](heap: &!h Heap, io: &!o Io, fs: &f Fs(""), dir: &d [byte], eng: &!e tls.Engine, now_ms: int) -> [heap, err_write, fs_read(""), file_read] bool {
+    var ok = false;
+    let chain = box_slice(heap, 65536, byte_of(0));
+    let key = box_slice(heap, 8192, byte_of(0));
+    borrow mut chain as &!cw in {
+        borrow mut key as &!kw in {
+            region r {
+                let seed = alloc_slice[r](32, byte_of(0));
+                let cn = read_whole(fs, dir, "chain.pem", contents(cw));
+                let kn = read_whole(fs, dir, "key.pem", contents(kw));
+                if cn < 0 {
+                    io.error_all(io, "engine: tls: chain.pem cannot be read\n");
+                } else if kn < 0 {
+                    io.error_all(io, "engine: tls: key.pem cannot be read\n");
+                } else if !random(fs, seed) || tls.seed(eng, seed) != 0 {
+                    io.error_all(io, "engine: tls: no random bytes\n");
+                } else {
+                    let code = tls.add_identity(eng, contents(cw)[0..cn], contents(kw)[0..kn], "localhost", now_ms);
+                    if code < 0 {
+                        io.error_all(io, "engine: tls: refused ");
+                        io.error_all(io, tls.refusal_tag(code));
+                        io.error_all(io, "\n");
+                    } else {
+                        ok = true;
+                    }
+                }
+            }
+            // the key's copy is overwritten
+            var z = 0;
+            while z < len(contents(kw)) {
+                contents(kw)[z] = byte_of(0);
+                z = z + 1;
+            }
+        }
+    }
+    unbox_slice(heap, chain);
+    unbox_slice(heap, key);
+    return ok;
 }
 
 // The file of revoked tokens the command line names (its eighth word), or one that is always empty.
@@ -312,7 +461,23 @@ fn main(world: World) -> [] int {
                                                                 Opened::Ok(rf) => {
                                                                     var rv = rf;
                                                                     borrow mut rv as &!rw in {
-                                                                        status = listen_on(hh, oo, nn, kk, number_of(arg(g, 2)), idle_ms, write_ms, checks, keyseed[0..32 * keyed], rootkey[0..32 * rooted], pp, ww, sb, rw);
+                                                                        // the certificate (6bq): one named and not taken is no server
+                                                                        var engine = tls.open_server(hh, serve.max_clients());
+                                                                        var secure = false;
+                                                                        var refused = false;
+                                                                        borrow mut engine as &!ee in {
+                                                                            let tw = tls_word(g);
+                                                                            if tw >= 0 {
+                                                                                secure = identity(hh, oo, fsr, arg(g, tw)[4..len(arg(g, tw))], ee, clock_unix_ms(kk));
+                                                                                refused = !secure;
+                                                                            }
+                                                                            if refused {
+                                                                                status = 2;
+                                                                            } else {
+                                                                                status = listen_on(hh, oo, nn, kk, number_of(arg(g, 2)), idle_ms, write_ms, checks, keyseed[0..32 * keyed], rootkey[0..32 * rooted], pp, ww, sb, rw, ee, secure);
+                                                                            }
+                                                                        }
+                                                                        tls.close(hh, engine);
                                                                     }
                                                                     file_close(rv);
                                                                 }

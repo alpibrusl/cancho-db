@@ -1,5 +1,7 @@
 # cancho-db's project file. The compiler these sources are written for is the one CI builds (CANCHO_REV in
-# .github/workflows/ci.yml; one is checked against the other there). No dependencies: M0 uses only `std`.
+# .github/workflows/ci.yml; one is checked against the other there). The server is built with the compiler's own TLS package (`packages/tls`
+# and `packages/x509` of the compiler's repository at the same revision; docs/m3-engine.md 6bq), named on the command line (scripts/check.sh). Everything else
+# uses only `std`.
 
 [package]
 name = "cancho-db"
