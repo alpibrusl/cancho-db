@@ -3382,6 +3382,117 @@ opened, and one with no `chain.pem`, do not start. **6 mutants, all killed** (`M
 
 *Not built:* a chain that changes its names (the identity keeps the one name it was given); more than one certificate (SNI).
 
+## 6bv. Transactions side by side: the first part
+
+*Design, written before the code. The owner chose "concurrent" over one writer at a time (27 Nov 2026) and left the particulars; each
+is marked a choice here, and is the owner's to overturn.*
+
+**What there is.** A transaction has the database to itself (6aq): what the others send waits, but for reads (6bs). A job that holds a
+transaction for a minute stops every writer for a minute.
+
+**Who asks for it (choice): a transaction that names its isolation level.** `begin isolation level serializable` (or `repeatable read`;
+`start transaction ...` and `begin transaction ...` too) begins a transaction **beside** the others. A plain `begin` is as before:
+it has the database to itself, waits for nobody's permission to commit, and is never refused for what another connection did. So a
+client that was written for the server as it is sees nothing change, and a client that asks for one of these levels is one PostgreSQL
+already tells to be ready for `40001` and to run its transaction again. (`read committed` and `read uncommitted` named in a `begin` are
+refused as every option was: a plain `begin` is the server's default, and is stronger than both.)
+
+**What a transaction beside the others is.** It runs on the tree that was the branch's when it began (its *snapshot*), and builds a
+tree of its own from it, as every transaction does (6v). It sees its own writes and nothing anyone commits after it began. Nobody waits
+for it, and it waits for nobody, until it ends.
+
+**The rule at its end (choice): first committer wins, the whole database being one thing.**
+
+- A transaction that **wrote nothing** commits, whatever happened meanwhile: its reads were all of one committed state.
+- A transaction that wrote commits **if the branch has not moved since it began**: its tree becomes the branch's, exactly as a
+  transaction's does today.
+- If the branch has moved, it is refused: `40001`, `cancho-db: refused serialization-failure`, and what it did is rolled back.
+
+That is serializable, not only snapshot isolation: a transaction that commits having written saw the state its commit is made on, so it
+is as if it ran whole at that moment; one that only read is as if it ran whole when it began. No two transactions' reads and writes
+can cross (write skew), because of two that wrote and overlapped only one commits. The price is plain: **of two transactions that
+write at the same time one is refused even if they touch different rows.** Applying the second's rows to the first's tree when no row
+is in both (snapshot isolation, for `repeatable read`) is the second part, and is not built here.
+
+**How it lives with the others.**
+
+- A plain transaction still has the database to itself: while one is open, a transaction beside it goes on reading and writing its own
+  tree (it touches nothing of the branch), but its `commit` or `rollback` waits for the plain one to end, like any write.
+- A statement outside a transaction beside an open one runs and commits at once, as if the open one were not there; if that one has
+  written, it has then lost.
+- A read beside is as 6bs.
+
+**What they must not notice of each other** (6bs found one such thing by testing; this part has more of them at once).
+
+- *The draws from counters* (6y) are noted in the working memory until a transaction ends. With two transactions open they are two
+  lists. They become each connection's own, put into the working memory before its statement and taken out after; 6bs's `seq_hold` goes.
+  A counter drawn from in a transaction stays drawn if it is rolled back or refused (6y), written to the branch as it then is.
+  *Corrected by the test (below): that is not enough. A draw has to count as a write.*
+- *The clock* is each connection's already (6bs).
+- *The numbers a statement writes with* come from the transaction's snapshot, not from the branch as it is now. *Corrected: they need not.
+  The code that gave a statement its transaction's first tree for this had a mutant that changed nothing, and was removed: a statement
+  takes the numbers after the branch's last, and those are the right ones whenever its transaction commits at all, since it commits only
+  if the branch has not moved.*
+- *The pages.* **A sweep frees the pages no committed tree names (6aw), and an open transaction's tree is such pages.** Today no commit
+  happens while a transaction is open, so no sweep does. Now one can. So: no sweep, and no purge after an erase, while a transaction
+  beside the others is open; an erase asked for then is refused, `25001`, `cancho-db: refused erase-beside-transaction`. A transaction
+  that stays open keeps the file from being swept; one that has been idle for the idle limit (30 s) while a sweep is due is ended,
+  `25P03`, as an idle plain transaction is when someone waits for it.
+- Whatever else there is, the test finds or it is not known.
+
+**The log** is unchanged: a transaction that commits beside the others commits on the tree it began with, so its commit is the one a
+plain transaction would have made.
+
+*Not in this part:* the second part above; a transaction that is `read only` or `deferrable`; savepoints; `set transaction`;
+PostgreSQL's own rule for `serializable` (it refuses fewer transactions than this does: it looks at what each read).
+
+**Test** (`tests/engine_sidebyside.py`). The oracle is the server itself, one client at a time: *every history must be one a single
+client could have produced.*
+
+1. Several connections each run random transactions beside the others (statements from the differential's generator over shared
+   tables, with counters), with plain statements and plain transactions among them, interleaved by a seeded schedule. Then the
+   transactions that committed, in the order they committed (those that wrote nothing where they began), are run again by one
+   connection on a fresh server: every statement must get the answer it got, and the tables at the end must be the same. Of two that
+   wrote and overlapped at most one committed; every refusal is `40001`.
+2. Fixed cases: two that write different rows (one is refused: the price above, asserted so that the second part must change the
+   test); one that only reads commits after others wrote, and read one state throughout; a plain transaction is never refused and makes
+   one beside it wait at its `commit`; a counter drawn from in a refused transaction stays drawn; `now()` is each one's own.
+3. A sweep that is due while one is open does not happen until it ends (the file is read afterwards by the test program, whole); an
+   erase then is refused; one idle past the limit while a sweep is due is ended.
+4. The log of the whole run verifies (L1 to L3a).
+
+**As built, and what building it found.** `drive.side_begin` and `drive.ends_txn` (what a statement is, from its words), the rule in
+`answer` (`lost`, `nothing`), `aside` in `step` (who waits), a count of the open ones (`g_sides`), the connection's own draws
+(`exec.seq_give`, `seq_take`) and the tree it began on (`st[23]`) (`src/serve.cho`, `src/drive.cho`, `src/exec.cho`,
+`src/session.cho`). The parser is not touched: a `begin` with a level is read by the server and run as `begin`, so the proxy and the
+test program refuse it as they did.
+
+- **Counters are not PostgreSQL's.** A transaction beside the others draws from the counter as it was when the transaction began, so
+  two of them can draw the same number (101 and 101, in the test). No number ends with two holders, because **a draw is a write**: the
+  counter is in the tree, a transaction that drew has a tree of its own, and it commits only if nobody committed since it began; the
+  other is refused and its number is void, as everything a refused transaction was told is. In PostgreSQL a counter is outside every
+  transaction and two never draw the same number, even if both are rolled back. *Corrected twice here.* The design said "stays drawn"
+  and no more. Then a rule was added that counted a connection's noted draws as a write, on the argument that one that only drew
+  "wrote nothing"; its mutant survived, because it never wrote nothing: the draw had changed its tree. The rule was removed, and so was
+  half of `session.wrote` (a transaction with facts and its first tree does not exist). *Read (`src/drive.cho`): `select nextval(...)`
+  is refused by the engine (`nondeterministic`), so a draw is in a statement that writes or would have (`insert ... on conflict do
+  nothing`).*
+- *What a rolled-back one drew stays drawn* (6y), with other connections' statements in between: tested, since two mutants of the
+  connection's own draws (`seq_give`, `seq_take`) survived until it was.
+- *The test, as run* (`python3 tests/engine_sidebyside.py build/engine build/enginecheck 300 1`; three seeds in the gate): 300
+  transactions and statements of four connections; 26 committed having written, 36 having only read, 42 refused, 18 rolled back, 73
+  failed (a statement of theirs met an error), 105 statements outside any; run again by one client, each of the 683 statements got the
+  answer it had got and the tables ended the same; the log verified with 72 commits. The fixed cases are in the test's own words.
+- *The pages:* with a transaction beside the others holding a thousand rows of its own while another connection rewrote 2,000 rows
+  twelve times, its rows were whole; the mutant that lets the sweep run then is among those below.
+- **Mutants: 15** (`MUTANT_ONLY="side: " python3 tests/mutants.py wire`, which runs the 15 of `beside` with them), and eleven older ones
+  whose lines these changes moved. Three written at first were of code that was then removed (above).
+
+**What this does not show.** That it is fast: nothing here is measured for speed, and the rule refuses one of every two that overlap
+and write. That four connections and 300 transactions meet every interleaving: the schedule is random and seeded, not exhaustive.
+Transactions beside the others with definitions in them (`create table` inside one) are not in the random history. A connection that
+ends inside one while a plain transaction is open loses what it drew from counters (said in the code; not tested).
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

@@ -356,6 +356,53 @@ pub fn reads_only[&b, &s](b: &!b Sub, sql: &s [byte]) -> [] bool {
     return true;
 }
 
+// Whether the statement `sql` begins a transaction beside the others (docs/m3-engine.md 6bv): `begin` (or `begin work`, `begin transaction`, `start
+// transaction`) with `isolation level serializable` or `isolation level repeatable read`, and nothing more.
+pub fn side_begin[&b, &s](b: &!b Sub, sql: &s [byte]) -> [] bool {
+    if 4 * (len(sql) + 4) > 32768 {
+        return false;
+    }
+    let toks = contents(b.t2);
+    let n = lex.tokenize(sql, toks);
+    var i = 1;
+    if n < 4 {
+        return false;
+    }
+    if parse.kw(sql, toks, 0, n, "start") {
+        if !parse.kw(sql, toks, 1, n, "transaction") {
+            return false;
+        }
+        i = 2;
+    } else if !parse.kw(sql, toks, 0, n, "begin") {
+        return false;
+    } else if parse.kw(sql, toks, 1, n, "work") || parse.kw(sql, toks, 1, n, "transaction") {
+        i = 2;
+    }
+    if !parse.kw(sql, toks, i, n, "isolation") || !parse.kw(sql, toks, i + 1, n, "level") {
+        return false;
+    }
+    if parse.kw(sql, toks, i + 2, n, "serializable") {
+        return i + 3 == n;
+    }
+    return parse.kw(sql, toks, i + 2, n, "repeatable") && parse.kw(sql, toks, i + 3, n, "read") && i + 4 == n;
+}
+
+// Whether the statement `sql` ends a transaction: 1 for a commit (`commit`, `end`), 2 for a rollback (`rollback`, `abort`), 0 for anything else.
+pub fn ends_txn[&b, &s](b: &!b Sub, sql: &s [byte]) -> [] int {
+    if 4 * (len(sql) + 4) > 32768 {
+        return 0;
+    }
+    let toks = contents(b.t2);
+    let n = lex.tokenize(sql, toks);
+    if parse.kw(sql, toks, 0, n, "commit") || parse.kw(sql, toks, 0, n, "end") {
+        return 1;
+    }
+    if parse.kw(sql, toks, 0, n, "rollback") || parse.kw(sql, toks, 0, n, "abort") {
+        return 2;
+    }
+    return 0;
+}
+
 pub fn erase_malformed() -> [] int {
     return 0 - 3;
 }
