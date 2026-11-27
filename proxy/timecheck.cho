@@ -1,0 +1,131 @@
+edition 9;
+
+import std.buffer;
+import std.io;
+import cdb.time;
+
+// `timecheck`: the two ways between a time and its text (src/time.cho) on their own, for tests/time_check.py. Standard input, a line each:
+//     p TZ TEXTHEX       read the text as a time (TZ 1: a moment)   -> `ok MICROSECONDS`, `unread` or `range`
+//     f TZ JSON NUMBER   write the time                             -> its text, or `none`
+
+fn put_str[&i, &s](io: &!i Io, text: &s [byte]) -> [io_write] int {
+    var j = 0;
+    while j < len(text) {
+        putchar(io, int_of(text[j]));
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn put_int[&i](io: &!i Io, v0: int) -> [io_write] int {
+    var v = v0;
+    if v < 0 {
+        putchar(io, '-');
+        v = 0 - v;
+    }
+    var div = 1;
+    while v / div >= 10 {
+        div = div * 10;
+    }
+    while div > 0 {
+        putchar(io, '0' + v / div % 10);
+        div = div / 10;
+    }
+    return 0;
+}
+
+fn hexval(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    return c - 'a' + 10;
+}
+
+fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, text: buffer.Buffer) -> [heap, io_read] buffer.Buffer {
+    var out = text;
+    var c = getchar(io);
+    while c >= 0 {
+        out = buffer.push(heap, out, byte_of(c));
+        c = getchar(io);
+    }
+    return out;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
+    release(tty);
+    release(ffi);
+    release(net);
+    release(clock);
+    release(signals);
+    release(exec);
+    release(fs);
+    release(args);
+    borrow mut heap as &!h in {
+        var text = buffer.empty(h, 4096);
+        borrow mut io as &!i0 in {
+            text = read_stdin(h, i0, text);
+        }
+        borrow text as &t in {
+            let all = buffer.bytes(t);
+            var ls = 0;
+            while ls < len(all) {
+                var le = ls;
+                while le < len(all) && int_of(all[le]) != '\n' {
+                    le = le + 1;
+                }
+                borrow mut io as &!i in {
+                    region r {
+                        let buf = alloc_slice[r](512, byte_of(0));
+                        let one = alloc_slice[r](1, 0);
+                        if le >= ls + 4 && int_of(all[ls]) == 'p' {
+                            var n = 0;
+                            var at = ls + 4;
+                            while at + 1 < le && n < 512 {
+                                buf[n] = byte_of(hexval(int_of(all[at])) * 16 + hexval(int_of(all[at + 1])));
+                                n = n + 1;
+                                at = at + 2;
+                            }
+                            let rc = time.parse(buf, 0, n, int_of(all[ls + 2]) == '1', one);
+                            if rc == 0 {
+                                put_str(i, "ok ");
+                                put_int(i, one[0]);
+                            } else if rc == time.unread() {
+                                put_str(i, "unread");
+                            } else {
+                                put_str(i, "range");
+                            }
+                        } else if le > ls + 6 && int_of(all[ls]) == 'f' {
+                            var at = ls + 6;
+                            var neg = false;
+                            if int_of(all[at]) == '-' {
+                                neg = true;
+                                at = at + 1;
+                            }
+                            var v = 0;
+                            while at < le {
+                                v = v * 10 + int_of(all[at]) - '0';
+                                at = at + 1;
+                            }
+                            if neg {
+                                v = 0 - v;
+                            }
+                            let e = time.format(v, int_of(all[ls + 2]) == '1', int_of(all[ls + 4]) == '1', buf, 0);
+                            if e < 0 {
+                                put_str(i, "none");
+                            } else {
+                                put_str(i, buf[0..e]);
+                            }
+                        }
+                        putchar(i, '\n');
+                    }
+                }
+                ls = le + 1;
+            }
+        }
+        buffer.drop(h, text);
+    }
+    release(io);
+    release(heap);
+    return 0;
+}

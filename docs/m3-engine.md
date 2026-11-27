@@ -2923,6 +2923,51 @@ fault in that function is on both sides and is not seen. It will be seen in slic
 *Not in the plan.* An index on an expression; `include`; any index but the tree's own order; a planner that chooses between two indexes by anything
 but "the first that fits"; statistics.
 
+## 6bp. Times: `timestamp` and `timestamptz`
+
+The engine has integers, text and booleans. A table of anything that happens has a time in it, and today that column has to be a number or a text,
+which sorts and compares as the application means only if the application is careful. This is the plan for the two types, in slices as 6bo was.
+
+**What a time is here.**
+
+- *Two types*, as in PostgreSQL: `timestamp` (a date and a time of day, of no zone) and `timestamptz` (a moment). Both are the number of
+  microseconds since 2000-01-01 00:00:00, PostgreSQL's own measure, stored as an integer is stored. So a time is a key, an indexed value and an
+  ordered value with nothing new: it sorts as its number does.
+- *The zone of the session is UTC, and cannot be set.* PostgreSQL writes a `timestamptz` in the session's zone and reads one without an offset
+  in it; a client that sets the zone gets other text for the same moment. Here `set time zone` stays refused, a `timestamptz` is written with
+  `+00`, and one read without an offset is UTC. The differential runs PostgreSQL with `TimeZone = UTC` and `DateStyle = ISO`.
+- *What is read.* ISO 8601 as PostgreSQL writes it and as drivers send it: `YYYY-MM-DD`, then optionally a space or `T` and `HH:MM`, `:SS`, a
+  fraction of up to six digits, and an offset (`Z`, `+HH`, `+HH:MM`, `+HHMM`). For a `timestamp` an offset is read and dropped, as PostgreSQL
+  does. A year from 0001 to 9999. **Anything else PostgreSQL would read (`Nov 27 2026`, `infinity`, `now`, a time of `24:00`, a second of `60`,
+  `BC`, a named zone) is refused, `engine-unsupported`: not an error, because PostgreSQL has an answer.** A text of the form with a field out of
+  range (month 13, 30 February, hour 25) is PostgreSQL's error, `22008`; a text that is no date at all is `22007`.
+- *What is written.* `2026-11-27 10:00:00`, a fraction if there is one with its trailing zeros dropped, and `+00` for a `timestamptz`. In the row
+  image the log's facts are made of (`to_jsonb`): `"2026-11-27T10:00:00"` and `"2026-11-27T10:00:00+00:00"`. To a client the types are
+  PostgreSQL's (1114 and 1184), in text.
+
+**What can be done with one, in the first slice.** A column of either type, also in the key and in an index; a literal or a parameter where a
+time is expected; `=`, `<>`, `<`, `<=`, `>`, `>=`, `between`, `in`, `is null`, between two times or a time and such a text; `order by`,
+`distinct`, `group by`, `min`, `max`, `count`; `cast` between the two types, from text and to text. A `timestamp` beside a `timestamptz` is read
+as that moment in UTC, which is what PostgreSQL does in a session whose zone is UTC.
+
+**Refused in the first slice, and said:** `now()` and `current_timestamp` (the second slice: the time is the transaction's, which the log
+already records, so a statement that asks for it is still one the log can hold); arithmetic (`+ interval`, a difference); `extract`,
+`date_trunc`, `to_char`; `date`, `time` and `interval` as types; a precision (`timestamp(3)`); `at time zone`.
+
+**The slices.**
+
+1. *The types, stored and compared* (this one), with the test first: a list of statements over a table of both types, each held to PostgreSQL's
+   answer, the texts read and refused among them; the random history's tables get columns of the two types.
+2. *`now()`*, as the transaction's time.
+3. *Arithmetic with intervals*, if the first two say an application needs it here rather than in its own code.
+
+**What the first slice has to change**, read from the code and to be confirmed as it is built: the closed list of types in `src/row.cho` and what
+a stored value of each is; `src/eval.cho` (a text read as a time, a time written, the comparison, the casts, what unifies with what);
+`execw.column_defs` (the parser already knows the two names: the proxy passes them to PostgreSQL); `src/answer.cho` (the type a client is told and
+the text it is sent); the row image in `src/row.cho`; the key's bounds and the index's constant (`exec.bounds`, `via.part`), which take an
+integer constant and now have to take a time's; the schema text a commit's hash is of. The IR does not change: a `cast` carries its type's name
+already, and a column's type is not in it.
+
 ## 7. Taking over, safely
 
 The risk table of `design.md` says the largest risk is losing data, and the mitigation is staying on PostgreSQL storage until the crash tests pass. So:

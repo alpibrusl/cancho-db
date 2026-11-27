@@ -2983,7 +2983,7 @@ ENGINE = [
     ('via: a string or a parameter is not read as the integer the column has', 'src/via.cho', '    if inty && vt == 0 {', '    if inty && vt == 99 {'),
     ('via: a parameter is not a constant', 'src/via.cho', 'if exec.ev_open(w, e, vat, kinds, 0) < 0 || contents(w.ws)[b + 1] != 0 {', 'if exec.ev(w, e, vat, kinds, 0) != 0 || contents(w.ws)[b + 1] != 0 {'),
     ('via: a text is read by the entries of its first byte', 'src/via.cho', '        contents(w.nrow)[2] = byte_of(vn);\n        exec.copy(contents(w.ar), va, vn, contents(w.nrow), 3);', '        contents(w.nrow)[2] = byte_of(1);\n        exec.copy(contents(w.ar), va, vn, contents(w.nrow), 3);'),
-    ("via: the row read is the one of the entry's first bytes", 'src/via.cho', '    exec.copy(contents(w.key2), off, nk - off, contents(w.key), 4);\n    let rk = 4 + nk - off;', '    exec.copy(contents(w.key2), pl, nk - pl, contents(w.key), 4);\n    let rk = 4 + nk - pl;'),
+    ("via: the row read is the one of the entry's first bytes", 'src/via.cho', '    exec.copy(contents(w.key2), off, nk - off, contents(w.key), 4);\n    let rk = 4 + nk - off;', '    exec.copy(contents(w.key2), 5, nk - 5, contents(w.key), 4);\n    let rk = 4 + nk - 5;'),
     ("via: the row's salts are left in front of it", 'src/via.cho', '        let c = contents(w.cur)[32 + i];', '        let c = contents(w.cur)[i];'),
     ('via: an entry written with a row does not say where its key begins', 'src/index.cho', '                a[0] = byte_of(nl - len(pk));', '                a[0] = byte_of(1);'),
     ('via: an entry made with the index does not say where its key begins', 'src/execd.cho', 'contents(w.ixb)[0] = byte_of(xl - (w.klen - 4));', 'contents(w.ixb)[0] = byte_of(1);'),
