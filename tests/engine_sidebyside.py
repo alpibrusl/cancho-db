@@ -385,6 +385,28 @@ def rows(d):
     c.query("insert into other values (1)")
     d2 = a.query("commit")
     check("a definition by anyone since it began, or one of its own with the branch moved: refused", d1[0] == "40001" and d2[0] == "40001", (d1[:2], d2[:2]))
+    # a reference (6ca): one that stores it counts on a row it did not write, so it is held to the rule of serializable, and so is one that takes a row out of a
+    # table that is referenced: whichever of the two commits second is refused, and no row is left that references nothing
+    c.query("create table par (id integer primary key)")
+    c.query("create table kid (k integer primary key, r integer references par (id))")
+    c.query("insert into par values (1), (2), (3), (4)")
+    a.query(rr), b.query(rr)
+    a.query("insert into kid values (1, 1)"), b.query("delete from par where id = 1")
+    f1, f2 = a.query("commit"), b.query("commit")
+    a.query(rr), b.query(rr)
+    a.query("insert into kid values (2, 2)"), b.query("delete from par where id = 2")
+    g2, g1 = b.query("commit"), a.query("commit")
+    a.query(rr)
+    a.query("insert into kid values (3, 3)")
+    h1 = a.query("commit")
+    a.query(rr), b.query(rr)
+    a.query("update kid set r = 4 where k = 3"), b.query("update t set v = 77 where k = 14")
+    i2, i1 = b.query("commit"), a.query("commit")
+    left = (c.query("select k, r from kid order by k")[4], c.query("select id from par order by id")[4])
+    check("a reference stored while the row it references is deleted beside it: the second to commit is refused, in either order, and every row references a row; "
+          "with nobody committing meanwhile it commits; with anyone committing meanwhile, whatever they wrote, it is refused (stated: PostgreSQL would let it through)",
+          f1[5] == "COMMIT" and f2[0] == "40001" and g2[5] == "COMMIT" and g1[0] == "40001" and h1[5] == "COMMIT" and h1[0] is None and i2[5] == "COMMIT" and i1[0] == "40001"
+          and left == ([[b"1", b"1"], [b"3", b"3"]], [[b"1"], [b"3"], [b"4"]]), (f1[:2], f2[:2], g1[:2], g2[:2], h1[:2], i1[:2], i2[:2], left))
     # a large one, put whole
     c.query("create table big (k integer primary key, v text)")
     c.query("create index bigv on big (v)")
@@ -404,7 +426,7 @@ def rows(d):
     dump = ec.run_engine(path, ["select * from t order by k", "select count(*) from big"])
     mine = [[v for v in r] for r in final]
     check("and the page file, read by the test program, holds what the server answered (%d rows)" % len(final), dump[0][0] == "ok SELECT %d" % len(final) and dump[1][0] == "ok SELECT 1", [b[:2] for b in dump])
-    ew.verified(d, path, ["create table t (k integer)", "create table other (k integer)", "create table big (k integer)", "create table mine2 (k integer)"], "rows put on a branch that moved")
+    ew.verified(d, path, ["create table t (k integer)", "create table other (k integer)", "create table big (k integer)", "create table mine2 (k integer)", "create table par (k integer)", "create table kid (k integer)"], "rows put on a branch that moved")
 
 
 def pages(d):

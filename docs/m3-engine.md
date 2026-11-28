@@ -3636,6 +3636,10 @@ at most 34, all three 45. **They are needed together.** What they are, counted i
   migrations are written (from 2), and none of the 50 checks is refused; what is left is 15 `syntax` (the references), 13 for a table one
   of those did not make, 2 `reserved-word`, 1 `unsupported-statement`. 25 of the 134 queries run on that schema.
 
+- *A column that references another table's key* (6ca, the first piece). *Measured after it:* **45 of 49** as the migrations are
+  written: the softened measure's number, on the real schema. 55 of the 134 queries run and 9 more are answered with an error of a
+  check or a reference (the measure sends `1` for every parameter); the refusals are the list above, to be read next.
+
 *What is not planned:* its advisory lock is one statement; the engine has no lock to give, and a plain transaction already has the
 database to itself, so what it is for is to be read before anything is built.
 
@@ -3762,6 +3766,94 @@ row (`src/execw.cho`); `drop table` removes them; `rename` and `add column` refu
 - *Found on the way, older than this:* `truncate` and `rename` of a name that is a sequence's or an index's said 42P01; PostgreSQL
   says 42809 or does it. Seen once a table could fail to be made for its check and leave its name to something else. Refused now.
 - *The sibling's schema:* none of its 50 checks is refused (6bx).
+
+## 6ca. A column that references another table's key
+
+*The last of the three of 6bx: 19 references in the sibling's schema. Every one is written on a column and names one column, which is
+the whole primary key of the other table; 11 say `on delete cascade`, 1 `on delete set null`, 7 nothing; 6 of the columns are their
+own table's key. None is of two columns, none names its own table, none says `on update`.*
+
+**What PostgreSQL does** (each line run on PostgreSQL 16.15 before it was written here; held by the differential).
+
+- When the table is made: the other table must be there (42P01), the column must be its (42703) and be all of a key or of a unique
+  constraint (42830), and the two types must compare (42804; `bigint` to `integer` does). With no column named, it is the primary key.
+- A row stored with a value in the column must find a row of the other table with that key, **at the end of the statement**: a null
+  finds nothing and passes; a statement whose second row has a key that is taken is 23505 even if its first row's reference is to
+  nothing. Missing: 23503.
+- A row of the other table that is deleted, or whose key changes, while rows reference it: 23503 with no `on delete`; with `cascade`
+  those rows are deleted (and what references them in turn); with `set null` their column is made null. All of it is one statement:
+  if anything in it is refused, nothing was done. `delete` of every row is 23503 if one reference says nothing, whatever the others say.
+- The table referenced cannot be dropped (2BP01) or truncated (0A000) while it is referenced.
+
+**Design.**
+
+- *Kept* under the catalog twice, so each side finds it in one walk: by the referencing table (`0x0a`, its number, the column:
+  the table referenced, by number and by name, and what `on delete` says) and by the table referenced (`0x0b`, its number, the
+  referencing table's number, the column: the referencing table's name). A line of the schema that is hashed for each of the first.
+- *The row that references.* The table referenced is another table, which the statement does not write, so whether the key is
+  there is the same when the row is stored as at the end of the statement: it is looked up when the row is stored (one `get` by
+  key), and only the **error** waits: 23503 is the statement's error if nothing else was. So the 23505 of a later row comes first, as
+  in PostgreSQL.
+- *The row that is referenced.* After a `delete`, or an `update` that changed a key, of a table that is referenced: each
+  referencing table is walked, and a row whose reference finds no key in the tree the statement leaves is the violation. One
+  walk a referencing table a statement, however many rows went. *(A cost stated, not hidden: the walk is of the whole referencing
+  table. An index on the referencing column would make it a lookup for each row that went; that is the second piece's.)* With a
+  reference that says nothing: 23503. With `cascade` or `set null`: done, by the second piece below. *(Corrected in place: the
+  first piece refused these; the second does them.)*
+- *Side by side* (6bw): a transaction that stores a reference has counted on a row it did not write, and one that takes a row out
+  of a table that is referenced has taken what others may count on. Either is held to the rule of `serializable` whatever its
+  level: put on the branch only if nobody committed meanwhile, else 40001. *(Corrected in place: the design first had the row
+  referenced noted as a key the transaction wrote. That catches the deletion committed first; committed second it does not, since
+  the row is the same bytes on the branch as when the transaction began. A key of no table among the keys noted says "alone"
+  instead, `src/merge.cho`.)* It refuses more than PostgreSQL, whose lock is on the one row: two transactions that reference the
+  same row, or any commit beside one that stores a reference. Stated.
+- *Second piece:* `cascade` and `set null` done: the rows of the other tables are changes of the same statement (a change says its
+  table, so the log has nothing new to learn), found table by table with a list in place of recursion: a table rows went from is
+  walked for the tables that reference it, and a table that lost rows is put on the list in its turn. A row made null for `set
+  null` is held to its nulls and its checks (23502, 23514). After the list, each table on it is walked once more, and a row that
+  references nothing with a reference that says nothing is 23503. *A row held by one of its references and taken by another*
+  (PostgreSQL's answer is by the order it comes to them, which is no order it promises): **refused**.
+- *Refused:* a reference of several columns; one to a column that is not the whole primary key (PostgreSQL also takes a unique
+  one); one to the table itself; a second reference on a column; `on update` other than nothing; `restrict`, on delete or on
+  update (*corrected in place:* it was read as nothing, which is PostgreSQL 16's answer, 23503; CI's PostgreSQL 18.7 says 23001
+  of the same statement, so which is right is a version's); types that are not the same
+  (PostgreSQL takes what compares); a reference on a column added to a table; renaming either table; `drop table` and `truncate` of
+  a table that is referenced (PostgreSQL's 2BP01 and 0A000).
+
+**Built.** The parser reads `references` on a column (`src/stmt.cho`; a node in the chain the checks are in).
+`src/refs.cho`: `prepare` and `store` when the table is made, `load`, `row_stored` and `failed` for the rows that reference, `gone`
+for the rows referenced (with `child_pass` for `cascade` and `set null`, and `scan` for what is left), `forget` and `any` for `drop`, `truncate`, `rename` and the erase. Two keys of the catalog a reference
+(`tables.ref_key`, `tables.refd_key`) and a line of the schema. 23503 is an error the engine has.
+
+**Measured.**
+
+- *Against PostgreSQL 16.15* (`tests/engine_check.py`): 63 fixed statements: the errors of the definition; a reference that finds
+  its key, finds none, is null; the key that is taken coming first whichever row it is; `on conflict do nothing`; updates of the
+  column; a row and a key that are referenced, and are not; inside a transaction; the tables dropped in the order that is allowed. No
+  disagreement. 16 statements refused on purpose, PostgreSQL's outcome beside each (a unique column that is not the key, two types
+  that compare, a table that references itself, `on update cascade`, a row held by one reference and taken by another, `drop` and
+  `truncate` of a table that is referenced, the renamings, an erase).
+- *`cascade` and `set null`* (the second piece; `tests/engine_check.py`, 46 more fixed statements, and the test now compares the
+  changes of every table a statement may write, not only its own): a delete takes the rows that reference it and the rows that
+  reference those; a column is made null; a row made null that fails its check, a key, a column that may not be null, a unique
+  column; a delete still held by a reference that says nothing; inside a transaction rolled back; a delete of every row. No
+  disagreement.
+- *Side by side* (`tests/engine_sidebyside.py`): a reference stored while the row it references is deleted beside it: the second
+  to commit is 40001, in either order, and no row is left that references nothing.
+- *The schema* (`tests/engine_log.py`): a line for a reference, another when it says `cascade`, none once the table is dropped.
+- *43 mutants* (37 of the rules, 3 of the rule side by side, 2 of the parser's mark, 1 of the schema's line), all killed.
+- *The sibling's schema:* **45 of 49** statements as its migrations are written (6bx), from 18: every reference is taken. What is
+  left is the four of 6bx's list.
+- *Not measured:* the walk's cost on a large referencing table, and a random history with references (the fixed statements are all
+  there is; the generator's tables do not reference each other).
+
+*Found on the way:* the fixed statements of the differential are held to a table whose name a pattern reads from the statement;
+names it did not read (`fc10` and on, of 6bz) were held to another table's rows, so their changes were compared with nothing. The
+pattern reads them now, and they agree.
+
+*Two mutants that cannot be told:* a delete that takes rows of other tables leaves its tree in `w.root`, and the statement takes it;
+not taking it, or binding the statement's own table again after, changes nothing anyone sees, because the rows of a statement are
+written in place on the pages it already wrote. They are not in the list; the code keeps the tree it means.
 
 ## 7. Taking over, safely
 

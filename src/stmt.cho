@@ -916,6 +916,79 @@ fn check_link[&n, &k, &g, &x](nodes: &!n [int], kids: &!k [int], tmp: &!g [int],
     return 0;
 }
 
+// A reference of a column to another table's key (docs/m3-engine.md 6ca), in the chain of the statement's checks (`check_link`'s): a node of this file's own kind
+// whose data is the token of the table referenced, `ey` the token of the column that references, and whose two "children" are no nodes: the token of the column
+// referenced (-1: none was named) and what `on delete` says (0 nothing, 1 `cascade`, 2 `set null`).
+pub fn n_ref() -> [] int {
+    return 55;
+}
+
+// `REFERENCES table [(column)] [ON DELETE CASCADE | SET NULL | NO ACTION | RESTRICT] [ON UPDATE NO ACTION | RESTRICT]` from `pos` (after the word), for the
+// column `col`: linked, and the position after it; or a refusal.
+fn reference[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, nodes: &!n [int], kids: &!k [int], tmp: &!g [int], st: &!x [int], col: int) -> [] int {
+    var p = plain_name(sql, toks, pos, end, st);
+    if p < 0 {
+        return p;
+    }
+    let table = st[9];
+    var target = 0 - 1;
+    if parse.punct(sql, toks, p, end, '(') {
+        p = plain_name(sql, toks, p + 1, end, st);
+        if p < 0 {
+            return p;
+        }
+        target = st[9];
+        if !parse.punct(sql, toks, p, end, ')') {
+            // (a reference of several columns is written on the table: not this)
+            return parse.fail(st, p, parse.e_syntax());
+        }
+        p = p + 1;
+    }
+    var action = 0;
+    var more = true;
+    while more {
+        if parse.kw(sql, toks, p, end, "on") && parse.kw(sql, toks, p + 1, end, "delete") {
+            if parse.kw(sql, toks, p + 2, end, "cascade") {
+                action = 1;
+                p = p + 3;
+            } else if parse.kw(sql, toks, p + 2, end, "set") && parse.kw(sql, toks, p + 3, end, "null") {
+                action = 2;
+                p = p + 4;
+            } else if parse.kw(sql, toks, p + 2, end, "no") && parse.kw(sql, toks, p + 3, end, "action") {
+                p = p + 4;
+            } else {
+                // (`restrict` among them: PostgreSQL 16 says 23503 of the row it holds and 18 says 23001, so which is the answer is a version's, docs/m3-engine.md 6ca)
+                return parse.fail(st, p + 2, parse.e_unsupported_statement());
+            }
+        } else if parse.kw(sql, toks, p, end, "on") && parse.kw(sql, toks, p + 1, end, "update") {
+            if parse.kw(sql, toks, p + 2, end, "no") && parse.kw(sql, toks, p + 3, end, "action") {
+                p = p + 4;
+            } else {
+                return parse.fail(st, p + 2, parse.e_unsupported_statement());
+            }
+        } else {
+            more = false;
+        }
+    }
+    if st[10] + 2 > len(tmp) {
+        return parse.fail(st, pos, parse.e_too_big());
+    }
+    tmp[st[10]] = target;
+    tmp[st[10] + 1] = action;
+    let id = parse.mk(nodes, kids, st, n_ref(), table, tmp[st[10]..st[10] + 2], 2, 0 - 1, col);
+    if id < 0 {
+        return parse.fail(st, pos, 0 - id);
+    }
+    if st[13] >= 0 {
+        nodes[6 * st[13] + 4] = id;
+    } else {
+        st[11] = id;
+    }
+    st[13] = id;
+    engine_form(st, parse.e_unsupported_statement());
+    return p;
+}
+
 // `[CONSTRAINT name] CHECK (` at `pos`: how many tokens come before the parenthesis (1 or 3; the name's token is then in `st[9]`), 0 if that is not what is there, or a refusal.
 fn check_at[&s, &t, &x](sql: &s [byte], toks: &t [int], pos: int, end: int, st: &!x [int]) -> [] int {
     if parse.kw(sql, toks, pos, end, "check") && parse.punct(sql, toks, pos + 1, end, '(') {
@@ -974,6 +1047,7 @@ fn coldef[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: i
     if serial > 0 {
         flags = 32;
     }
+    var refd = false;
     var more = true;
     while more {
         var bit = 0;
@@ -1013,6 +1087,17 @@ fn coldef[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], pos: i
                 p = q;
                 bit = 128;
             }
+        } else if parse.kw(sql, toks, p, end, "references") {
+            if refd {
+                // (PostgreSQL takes several references on a column: not here)
+                return parse.fail(st, p, parse.e_unsupported_statement());
+            }
+            refd = true;
+            p = reference(sql, toks, p + 1, end, nodes, kids, tmp, st, col);
+            if p < 0 {
+                return p;
+            }
+            bit = 128;
         } else if parse.kw(sql, toks, p, end, "generated") && parse.kw(sql, toks, p + 1, end, "always") && parse.kw(sql, toks, p + 2, end, "as") && parse.kw(sql, toks, p + 3, end, "identity") {
             bit = 32;
             p = p + 4;
@@ -1169,6 +1254,9 @@ fn create_table[&s, &t, &n, &k, &v, &o, &g, &x](sql: &s [byte], toks: &t [int], 
             if r < 0 {
                 return parse.fail(st, at, 0 - r);
             }
+        } else if parse.kw(sql, toks, pos, end, "foreign") && parse.kw(sql, toks, pos + 1, end, "key") {
+            // (a reference written on the table, which may be of several columns: not built, 6ca)
+            return parse.fail(st, pos, parse.e_unsupported_statement());
         } else if parse.kw(sql, toks, pos, end, "primary") && parse.kw(sql, toks, pos + 1, end, "key") && parse.punct(sql, toks, pos + 2, end, '(') {
             // PRIMARY KEY (column, ...): a COLS among the column definitions, once
             if keyed {

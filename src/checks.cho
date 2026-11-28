@@ -104,7 +104,10 @@ pub fn prepare[&q, &s, &t, &n, &k, &m](w: &!q exec.Work, sql: &s [byte], toks: &
         line[ll] = byte_of('\n');
         ll = ll + 1;
         while node >= 0 && status == 0 {
-            if nodes[6 * node] != stmt.n_check() || nodes[6 * node + 3] != 1 {
+            if nodes[6 * node] == stmt.n_ref() {
+                // (a reference, which is in the same chain: src/refs.cho)
+                node = nodes[6 * node + 4];
+            } else if nodes[6 * node] != stmt.n_check() || nodes[6 * node + 3] != 1 {
                 status = exec.malformed();
             } else {
                 status = one(w, sql, toks, nodes, kids, node, nodes[6 * stmt + 1], line[0..ll], name, nc, total);

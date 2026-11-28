@@ -451,8 +451,8 @@ fn put_live[&i, &z, &q](io: &!i Io, pg: &!z pager.Pager, w: &!q exec.Work, root:
                     status = damaged();
                 } else {
                     al = exec.copy(next, 0, nk, at, 0);
-                    if int_of(at[4]) > 4 && int_of(at[4]) != 9 {
-                        // a table (an index, a counter, a sequence and the head of the log are under 1 to 4, a check under 9: `src/tables.cho`)
+                    if int_of(at[4]) > 11 {
+                        // a table (an index, a counter, a sequence and the head of the log are under 1 to 4, a check and a reference under 9 to 11: `src/tables.cho`)
                         status = put_table(io, pg, w, root, at[4..al]);
                     }
                 }

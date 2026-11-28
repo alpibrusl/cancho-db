@@ -870,6 +870,8 @@ STMT = [
     ("stmt: a check with a name on a column is the proxy's too", 'src/stmt.cho', '                engine_form(st, parse.e_unsupported_statement());\n                p = q;\n                bit = 128;', '                p = q;\n                bit = 128;'),
     ("stmt: a check on the table is the proxy's too", 'src/stmt.cho', '            engine_form(st, parse.e_unsupported_statement());\n            let at = pos;', '            let at = pos;'),
     ("stmt: a check's name may be a reserved word", 'src/stmt.cho', '        let r = plain_name(sql, toks, pos + 1, end, st);\n        if r < 0 {\n            return r;\n        }\n        return 3;', '        st[9] = pos + 1;\n        return 3;'),
+    ("stmt: a reference is the proxy's too", 'src/stmt.cho', '    st[13] = id;\n    engine_form(st, parse.e_unsupported_statement());\n    return p;', '    st[13] = id;\n    return p;'),
+    ('stmt: a reference written on the table is a column named foreign', 'src/stmt.cho', '        } else if parse.kw(sql, toks, pos, end, "foreign") && parse.kw(sql, toks, pos + 1, end, "key") {', '        } else if false {'),
     ("stmt: a select alias is not rendered", "src/parse.cho", "        if data >= 0 {\n            p = put_lit(out, p, \" as \");\n            return put_name(out, p, sql, toks, data);\n        }\n        return p;\n    }\n    if kind == n_order()", "        return p;\n    }\n    if kind == n_order()"),
     ("stmt: t.* renders without its table", "src/parse.cho", "        p = put_name(out, p, sql, toks, data);\n        return put_lit(out, p, \".*\");", "        return put_lit(out, p, \"*\");"),
     ("stmt: clauses are not separated", "src/parse.cho", "    if kind == n_select() || kind == n_insert() || kind == n_update() || kind == n_delete() {\n        return put_byte(out, p, ' ');\n    }", "    if kind == n_insert() || kind == n_update() || kind == n_delete() {\n        return put_byte(out, p, ' ');\n    }"),
@@ -1760,6 +1762,45 @@ def run_eval(cancho):
 # The engine's statements (src/exec.cho, src/execw.cho, src/tables.cho, and the assignment of src/eval.cho), judged by tests/engine_check.py: the random history against PostgreSQL, the fixed statements that
 # must be answered, and the page file after a delete and a drop.
 ENGINE = [
+    ('ref: a row whose reference says cascade stays', 'src/refs.cho', '                        } else if f == 0 && act == 1 {\n                            del = true;', '                        } else if f == 0 && act == 1 {\n                            del = false;'),
+    ('ref: a row whose reference says set null goes', 'src/refs.cho', '                        } else if f == 0 {\n                            marks[col] = 1;\n                            nulls = nulls + 1;', '                        } else if f == 0 {\n                            del = true;'),
+    ('ref: the rows that reference a row that went with another are left', 'src/refs.cho', '                        if status == 0 && contents(w.cki)[k_failed() + 3] > 0 {', '                        if false {'),
+    ('ref: a column that may not be null is made null', 'src/refs.cho', 'if tables.not_null(contents(w.ent)[0..el], c) || row.col_pk(contents(w.ctx)[64..64 + dl], c) != 0 {', 'if row.col_pk(contents(w.ctx)[64..64 + dl], c) != 0 {'),
+    ('ref: a column of the key is made null', 'src/refs.cho', 'if tables.not_null(contents(w.ent)[0..el], c) || row.col_pk(contents(w.ctx)[64..64 + dl], c) != 0 {', 'if tables.not_null(contents(w.ent)[0..el], c) {'),
+    ('ref: a row with a column made null is not held to its checks', 'src/refs.cho', '                        status = checks.hold(w, contents(w.nrow)[0..ra]);', '                        status = 0;'),
+    ("ref: the bounds of the statement's WHERE are the other table's too", 'src/refs.cho', '        w.lon = 0 - 1;\n        w.hin = 0 - 1;\n', ''),
+    ('ref: what is left that references nothing is no error', 'src/refs.cho', '        if status == 0 && left == 1 {\n            status = exec.e_ref();', '        if status == 0 && left == 1 {\n            status = 0;'),
+    ('ref: a row held by one reference goes with another', 'src/refs.cho', '        } else if status == 0 && first % 2 == 1 {', '        } else if false {'),
+    ('ref: a row that went with another is no change', 'src/refs.cho', '                        status = exec.change(w, contents(w.cur)[0..rl], true, contents(w.cur)[0..0], false);\n                        went = went + 1;', '                        went = went + 1;'),
+    ('ref: a column made null is no change', 'src/refs.cho', '                            status = exec.change(w, contents(w.cur)[0..rl], true, contents(w.nrow)[0..ra], true);', '                            status = 0;'),
+    ('ref: a second reference of a column is read', 'src/stmt.cho', '            if refd {', '            if false {'),
+    ('ref: `on delete restrict` is read as nothing', 'src/stmt.cho', '            } else {\n                // (`restrict` among them', '            } else if parse.kw(sql, toks, p + 2, end, "restrict") {\n                p = p + 3;\n            } else {\n                // (`restrict` among them'),
+    # ---- a column that references another table's key (docs/m3-engine.md 6ca), judged by tests/engine_check.py against PostgreSQL
+    ('ref: a reference that finds nothing is no error', 'src/refs.cho', '            if f == 0 {\n                contents(w.cki)[k_failed()] = 1;', '            if f == 0 {\n                contents(w.cki)[k_failed()] = 0;'),
+    ('ref: a null references a row', 'src/refs.cho', '        if int_of(r[va]) != 0 {', '        if true {'),
+    ('ref: a row that is referenced may go', 'src/refs.cho', '                                    strict = true;', '                                    soft = true;'),
+    ('ref: a key that changes is a row deleted, for what references it', 'src/refs.cho', '(int_of(act[0]) == 0 || !deleted)', 'int_of(act[0]) == 0'),
+    ('ref: only the first table that references is walked', 'src/refs.cho', '                kl = exec.copy(next, 0, 14, key, 0);\n                let child = commit.be(next, 9, 4);\n                let col = int_of(next[13]);', '                kl = exec.copy(next, 0, 14, key, 0);\n                more = false;\n                let child = commit.be(next, 9, 4);\n                let col = int_of(next[13]);'),
+    ('ref: only the first reference of a table is held', 'src/refs.cho', '                n = n + 1;\n                kl = exec.copy(next, 0, 11, key, 0);', '                n = n + 1;\n                kl = exec.copy(next, 0, 11, key, 0);\n                more = false;'),
+    ('ref: a table may reference itself', 'src/refs.cho', '            if tl == len(name) && exec.same(contents(w.rows), fill + 7, tl, name, 0, tl) {', '            if false {'),
+    ('ref: two types that are not the same', 'src/refs.cho', '                } else if row.col_type(contents(w.cur)[6..6 + tdl], tc) != ty {', '                } else if false {'),
+    ('ref: a column that is not the key', 'src/refs.cho', 'row.key_columns(contents(w.cur)[6..6 + tdl]) != 1 || row.col_pk(contents(w.cur)[6..6 + tdl], tc) != 1 {', 'false {'),
+    ('ref: a table that is not there is a refusal', 'src/refs.cho', '                exec.note(w, exec.e_no_table());', '                return exec.unsupported();'),
+    ('ref: a column that is not there is a refusal', 'src/refs.cho', '                    exec.note(w, exec.e_no_column());', '                    return exec.unsupported();'),
+    ('ref: with no column named, the first is referenced', 'src/refs.cho', '                        if row.col_pk(contents(w.cur)[6..6 + tdl], c) == 1 {', '                        if c == 0 {'),
+    ('ref: what `on delete` says is not kept', 'src/refs.cho', 'byte_of(kids[nodes[6 * node + 2] + 1]);', 'byte_of(0);'),
+    ('ref: a table that is referenced is dropped', 'src/execc.cho', '    if by != 0 {\n        if by < 0 {\n            return by;\n        }\n        return exec.unsupported();\n    }\n    let rf = refs.forget', '    let rf = refs.forget'),
+    ('ref: a table dropped leaves its references', 'src/execc.cho', '    let rf = refs.forget(p, w, nroot, w.tid);\n    if rf < 0 {\n        return rf;\n    }\n    nroot = rf;\n', ''),
+    ('ref: a table that is referenced is truncated', 'src/execd.cho', '    if by != 0 {\n        if by < 0 {\n            return by;\n        }\n        return exec.unsupported();\n    }\n    var nroot = root;', '    var nroot = root;'),
+    ('ref: a table that is referenced is renamed', 'src/execd.cho', '    if r1 != 0 || r2 != 0 {', '    if r1 != 0 {'),
+    ('ref: a table that references is renamed', 'src/execd.cho', '    if r1 != 0 || r2 != 0 {', '    if r2 != 0 {'),
+    ('ref: a row of a table that is referenced is erased', 'src/execw.cho', '    if by != 0 {\n        if by < 0 {\n            return by;\n        }\n        return exec.unsupported();\n    }\n    let at = 3 + w.nlen;', '    let at = 3 + w.nlen;'),
+    ("ref: an insert's reference that found nothing is forgotten", 'src/execw.cho', '    if refs.failed(w) {\n        return exec.e_ref();\n    }\n    w.root = nroot;\n    return 0;\n}', '    w.root = nroot;\n    return 0;\n}'),
+    ("ref: an update's reference that found nothing is forgotten", 'src/execw.cho', '    if refs.failed(w) {\n        return exec.e_ref();\n    }\n    if moves {', '    if moves {'),
+    ('ref: a key that changes is not looked for', 'src/execw.cho', '    if moves {\n        let gn = refs.gone(p, w, nroot, false);', '    if false {\n        let gn = refs.gone(p, w, nroot, false);'),
+    ('ref: a row deleted is not looked for', 'src/execw.cho', '    let gn = refs.gone(p, w, nroot, true);\n    if gn != 0 {\n        return gn;\n    }\n', ''),
+    ("ref: an update's new row is not looked up", 'src/execw.cho', '                    let rs = refs.row_stored(p, w, root, contents(w.nrow)[0..ra]);\n                    if rs < 0 {\n                        return rs;\n                    }\n', ''),
+    ("log: a reference's line says it is a check", 'src/tables.cho', 'at = lit(out, at, "ref ");', 'at = lit(out, at, "check ");'),
     # ---- a check that is an expression (docs/m3-engine.md 6bz), judged by tests/engine_check.py against PostgreSQL; the schema's lines by tests/engine_log.py
     ('check: a check that is null fails', 'src/checks.cho', '        if contents(w.ws)[b + 1] == 0 && contents(w.ws)[b + 2] == 0 {\n            return exec.e_check();', '        if contents(w.ws)[b + 1] != 2 && contents(w.ws)[b + 2] == 0 {\n            return exec.e_check();'),
     ('check: a check that raises is 23514', 'src/checks.cho', '            return contents(w.ws)[b + 2] - 1;', '            return exec.e_check();'),
@@ -1788,7 +1829,7 @@ ENGINE = [
     ('check: a check with a name on a column is one without', 'src/stmt.cho', '                if ca == 3 {\n                    name = st[9];\n                }\n', ''),
     ('check: a check with a name on the table is one without', 'src/stmt.cho', '            if ca == 3 {\n                name = st[9];\n            }\n', ''),
     ("check: a column's second check is its first again", 'src/stmt.cho', '                r = check_link(nodes, kids, tmp, st, name, st[2], col);\n                if r < 0 {\n                    return parse.fail(st, p, 0 - r);\n                }\n', ''),
-    ('check: the checks are in the order they were written, backwards', 'src/stmt.cho', '    if st[13] >= 0 {\n        nodes[6 * st[13] + 4] = id;\n    } else {\n        st[11] = id;\n    }\n    st[13] = id;', '    nodes[6 * id + 4] = st[11];\n    st[11] = id;\n    st[13] = id;'),
+    ('check: the checks are in the order they were written, backwards', 'src/stmt.cho', '    if st[13] >= 0 {\n        nodes[6 * st[13] + 4] = id;\n    } else {\n        st[11] = id;\n    }\n    st[13] = id;\n    return 0;', '    nodes[6 * id + 4] = st[11];\n    st[11] = id;\n    st[13] = id;\n    return 0;'),
     ('check: an expression names only the first column it names', 'src/lower.cho', '        } else if !same_name(sql, toks, sc[10], col) {\n            sc[11] = 1;\n        }', '        }'),
     ('check: a column added may have a check that is an expression', 'src/execc.cho', '            } else if c0 != 0 {\n                return exec.unsupported();\n            }', '            }'),
     ('check: a column added may have a second check', 'src/execc.cho', '        if nodes[6 * ch + 1] != 0 - 2 {\n            return exec.unsupported();\n        }\n', ''),
@@ -2460,8 +2501,8 @@ ENGINE = [
      '        if int_of(ent[marks_at(ent, i)]) / 8 == 1 {',
      '        if int_of(ent[marks_at(ent, i)]) / 8 == 2 {'),
     ("identity: a table's counter is read as a table", 'src/tables.cho',
-     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 {',
-     '            } else if int_of(key2[4]) == 3 || int_of(key2[4]) == 4 {'),
+     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 || int_of(key2[4]) == 11 {',
+     '            } else if int_of(key2[4]) == 3 || int_of(key2[4]) == 4 || int_of(key2[4]) == 11 {'),
     ('identity: every row of an insert draws the same value', 'src/execw.cho',
      '                    exec.put_i64(contents(w.nrow), ra + 1, last + r);',
      '                    exec.put_i64(contents(w.nrow), ra + 1, last);'),
@@ -2571,8 +2612,8 @@ ENGINE = [
      '        if nodes[6 * stmt + 3] == 1 {\n            // IF NOT EXISTS: a notice',
      '        if nodes[6 * stmt + 3] == 2 {\n            // IF NOT EXISTS: a notice'),
     ('sequence: a sequence is read as a table', 'src/tables.cho',
-     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 {',
-     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 4 {'),
+     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 || int_of(key2[4]) == 11 {',
+     '            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 4 || int_of(key2[4]) == 11 {'),
     ('sequence: an error before the rows is answered beside a draw', 'src/execw.cho',
      '        if exec.draw_id(w) != 0 || ic >= 0 && exec.params_inner_bound(w) {',
      '        if ic >= 0 && exec.params_inner_bound(w) {'),
@@ -2934,7 +2975,7 @@ ENGINE = [
     ('log: the head is written whole', 'src/facts.cho',
      'nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..hk2], head);', 'nw = btree.put(p, contents(w.sc), root, contents(w.key)[0..hk2], head[0..40]);'),
     ('log: the head is no table of the schema', 'src/tables.cho',
-     '} else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 {', '} else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 {'),
+     '} else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 || int_of(key2[4]) == 11 {', '} else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 11 {'),
     ('log: the head a client is given counts one commit too few', 'src/facts.cho',
      '            n = commit.be(contents(w.cur), 0, 8) + 1;\n            exec.copy(contents(w.cur), 8, 32, ident, 0);',
      '            n = commit.be(contents(w.cur), 0, 8);\n            exec.copy(contents(w.cur), 8, 32, ident, 0);'),
@@ -3236,6 +3277,9 @@ ENGINE = [
 
 # The engine's server (docs/m3-engine.md 6al): the messages and one connection. Judged by tests/engine_wire.py, which holds the server against the test program.
 WIRE = [
+    ('side: a reference stored is put on a branch that moved', 'src/merge.cho', '                        if cur != base {\n                            out = conflict();\n                        }\n', ''),
+    ('side: one that stores a reference is held to the rule of its level', 'src/refs.cho', '    return alone(p, w);\n}', '    if false {\n        return alone(p, w);\n    }\n    return 0;\n}'),
+    ('side: one that takes a row that may be referenced is held to the rule of its level', 'src/refs.cho', '    var status = alone(p, w);', '    var status = 0;\n    if false {\n        status = alone(p, w);\n    }'),
     # side by side, rows (docs/m3-engine.md 6bw): held to tests/engine_sidebyside.py
     ('side: rows: a counter both drew from is no conflict', 'src/merge.cho',
      'if exec.seq_last(p, w, base, id) != exec.seq_last(p, w, cur, id) {',
@@ -3895,10 +3939,10 @@ EXPORT = [
      'status = put_kept(io, pg, w, root, 7);',
      'status = put_kept(io, pg, w, root, 8);'),
     ('export: tables late in the alphabet are not dumped', 'proxy/logexport.cho',
-     'if int_of(at[4]) > 4 && int_of(at[4]) != 9 {',
-     "if int_of(at[4]) > 4 && int_of(at[4]) != 9 && int_of(at[4]) < 'n' {"),
+     'if int_of(at[4]) > 11 {',
+     "if int_of(at[4]) > 11 && int_of(at[4]) < 'n' {"),
     ('export: a check of the catalog is dumped as a table', 'proxy/logexport.cho',
-     'if int_of(at[4]) > 4 && int_of(at[4]) != 9 {',
+     'if int_of(at[4]) > 11 {',
      'if int_of(at[4]) > 4 {'),
     ('export: a file with no log exports an empty one', 'proxy/logexport.cho',
      'status = no_log();',
@@ -3959,7 +4003,7 @@ def run_export(cancho):
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in EXPORT if not only or only in m[0]]
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "regex.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
-            "checks.cho", "execw.cho", "execc.cho", "execd.cho", "facts.cho", "token.cho", "ir.cho")
+            "checks.cho", "refs.cho", "execw.cho", "execc.cho", "execd.cho", "facts.cho", "token.cho", "ir.cho")
     survivors = []
     for label, rel, old, new in table:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4008,7 +4052,7 @@ def run_wire(cancho):
             return 1
         table = table[k::n]
     srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "regex.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho",
-            "checks.cho", "execw.cho", "execc.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
+            "checks.cho", "refs.cho", "execw.cho", "execc.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "wire.cho", "login.cho", "token.cho", "revoke.cho", "ir.cho")
     # the server and what only it needs: TLS (docs/m3-engine.md 6bq), which is a package of the compiler's repository
     served = ("serve.cho", "merge.cho", "tlsio.cho", "tlsid.cho")
 
@@ -4061,7 +4105,7 @@ def run_engine(cancho):
     import threading
     only = os.environ.get("MUTANT_ONLY")
     table = [m for m in ENGINE if not only or only in m[0]]
-    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "regex.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho", "checks.cho", "execw.cho", "execc.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
+    srcs = ("lex.cho", "parse.cho", "stmt.cho", "lower.cho", "state.cho", "commit.cho", "build.cho", "time.cho", "row.cho", "regex.cho", "eval.cho", "pager.cho", "btree.cho", "pstore.cho", "tables.cho", "index.cho", "exec.cho", "via.cho", "uniq.cho", "execs.cho", "checks.cho", "refs.cho", "execw.cho", "execc.cho", "execd.cho", "answer.cho", "drive.cho", "facts.cho", "session.cho", "token.cho", "ir.cho")
 
     def one(mutant):
         label, rel, old, new = mutant

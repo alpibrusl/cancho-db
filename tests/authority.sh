@@ -28,7 +28,7 @@ done
 echo "L3a verifier authority ok: $got"
 
 # the export tool (docs/m3-engine.md 6av): the page file it is named, to read, and the console; it can write no file, and has no clock
-out=$("$CANCHO" authority proxy/logexport.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/regex.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/checks.cho src/execw.cho src/execc.cho src/execd.cho src/facts.cho src/token.cho src/ir.cho --std)
+out=$("$CANCHO" authority proxy/logexport.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/regex.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/checks.cho src/refs.cho src/execw.cho src/execc.cho src/execd.cho src/facts.cho src/token.cho src/ir.cho --std)
 got=$(performs_of "$out")
 want='args err_write file_read fs_read("") heap io_write '
 [ "$got" = "$want" ] || { echo "export tool authority changed: performs [$got], expected [$want]" >&2; exit 1; }
@@ -54,7 +54,7 @@ echo "proxy authority ok: $got (network unbounded)"
 # the engine's server (docs/m3-engine.md 6al, 6bq): it listens and never dials, reads and writes the files it is named, and has the clock; with the TLS package in it
 # (TLS_PKG: its files, from scripts/check.sh) it still runs no foreign code and no other program. Skipped when the package's files are not named.
 if [ -n "${TLS_PKG:-}" ]; then
-    out=$("$CANCHO" authority --std proxy/engine.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/regex.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/checks.cho src/execw.cho src/execc.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/wire.cho src/serve.cho src/login.cho src/token.cho src/revoke.cho src/ir.cho src/merge.cho src/tlsio.cho src/tlsid.cho $TLS_PKG)
+    out=$("$CANCHO" authority --std proxy/engine.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/regex.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/checks.cho src/refs.cho src/execw.cho src/execc.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/wire.cho src/serve.cho src/login.cho src/token.cho src/revoke.cho src/ir.cho src/merge.cho src/tlsio.cho src/tlsid.cho $TLS_PKG)
     got=$(performs_of "$out")
     want='args clock conn_accept conn_read conn_write dir_read err_write file_read file_write fs_read("") fs_write("") heap net_in("") poll '
     [ "$got" = "$want" ] || { echo "server authority changed: performs [$got], expected [$want]" >&2; exit 1; }

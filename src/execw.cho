@@ -13,6 +13,7 @@ import cdb.parse;
 import cdb.lower;
 import cdb.exec;
 import cdb.checks;
+import cdb.refs;
 import cdb.via;
 import cdb.uniq;
 
@@ -139,6 +140,10 @@ pub fn insert[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     let nck = checks.load(p, w, root);
     if nck < 0 {
         return nck;
+    }
+    let nrf = refs.load(p, w, root);
+    if nrf < 0 {
+        return nrf;
     }
     var at = 3 + w.nlen;
     if at + 4 > len(e) {
@@ -422,6 +427,11 @@ fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int, 
                 return nw;
             }
             nroot = nw;
+            // its references are looked up now; one that finds nothing is the statement's error at its end (6ca)
+            let rs = refs.row_stored(p, w, root, contents(w.cur)[0..rl]);
+            if rs < 0 {
+                return rs;
+            }
             let cr = exec.change(w, contents(w.cur)[0..0], false, contents(w.cur)[0..rl], true);
             if cr < 0 {
                 return cr;
@@ -433,6 +443,9 @@ fn store_rows[&q, &z](p: &!z pager.Pager, w: &!q exec.Work, root: int, nr: int, 
             w.count = w.count + 1;
         }
         r = r + 1;
+    }
+    if refs.failed(w) {
+        return exec.e_ref();
     }
     w.root = nroot;
     return 0;
@@ -461,6 +474,10 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     let nck = checks.load(p, w, root);
     if nck < 0 {
         return nck;
+    }
+    let nrf = refs.load(p, w, root);
+    if nrf < 0 {
+        return nrf;
     }
     var at = 3 + w.nlen;
     if at + 4 > len(e) {
@@ -629,6 +646,10 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
                     }
                 }
                 if !bad && !exec.same(contents(w.cur), 0, rl, contents(w.nrow), 0, ra) {
+                    let rs = refs.row_stored(p, w, root, contents(w.nrow)[0..ra]);
+                    if rs < 0 {
+                        return rs;
+                    }
                     let okl = w.klen;
                     var moved = false;
                     var kl = okl;
@@ -726,6 +747,16 @@ pub fn update[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     }
     if w.code != 0 {
         return exec.verdict(w);
+    }
+    // a reference that found no key, and a key that went while it was referenced: the statement's error if nothing else was (6ca)
+    if refs.failed(w) {
+        return exec.e_ref();
+    }
+    if moves {
+        let gn = refs.gone(p, w, nroot, false);
+        if gn != 0 {
+            return gn;
+        }
     }
     w.root = nroot;
     return 0;
@@ -833,6 +864,10 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if r0 != 0 {
         return r0;
     }
+    let nrf = refs.load(p, w, root);
+    if nrf < 0 {
+        return nrf;
+    }
     let at = 3 + w.nlen;
     if at >= len(e) {
         return exec.malformed();
@@ -894,6 +929,17 @@ pub fn delete[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
     if w.code != 0 {
         return exec.verdict(w);
     }
+    // a row that went while it was referenced (6ca)
+    let was = refs.referenced(w);
+    let gn = refs.gone(p, w, nroot, true);
+    if gn != 0 {
+        return gn;
+    }
+    if was {
+        // rows of other tables may have gone with these, 6ca: the tree is the one that leaves. (Within a statement a page it wrote is written again in
+        // place, so this is the same root nearly always; it is taken all the same, and no mutant can tell.)
+        nroot = w.root;
+    }
     w.root = nroot;
     return 0;
 }
@@ -936,6 +982,14 @@ pub fn erase[&q, &z, &x, &k](p: &!z pager.Pager, w: &!q exec.Work, root: int, e:
     let r0 = exec.bind_table(p, w, root, e, 1);
     if r0 != 0 {
         return r0;
+    }
+    // (a row of a table that is referenced is not erased: what references it would be left with nothing, 6ca)
+    let by = refs.any(p, w, root, w.tid, false);
+    if by != 0 {
+        if by < 0 {
+            return by;
+        }
+        return exec.unsupported();
     }
     let at = 3 + w.nlen;
     if at + 1 >= len(e) || int_of(e[at]) != 1 {
