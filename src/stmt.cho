@@ -954,17 +954,14 @@ fn reference[&s, &t, &n, &k, &g, &x](sql: &s [byte], toks: &t [int], pos: int, e
             } else if parse.kw(sql, toks, p + 2, end, "set") && parse.kw(sql, toks, p + 3, end, "null") {
                 action = 2;
                 p = p + 4;
-            } else if parse.kw(sql, toks, p + 2, end, "restrict") {
-                p = p + 3;
             } else if parse.kw(sql, toks, p + 2, end, "no") && parse.kw(sql, toks, p + 3, end, "action") {
                 p = p + 4;
             } else {
+                // (`restrict` among them: PostgreSQL 16 says 23503 of the row it holds and 18 says 23001, so which is the answer is a version's, docs/m3-engine.md 6ca)
                 return parse.fail(st, p + 2, parse.e_unsupported_statement());
             }
         } else if parse.kw(sql, toks, p, end, "on") && parse.kw(sql, toks, p + 1, end, "update") {
-            if parse.kw(sql, toks, p + 2, end, "restrict") {
-                p = p + 3;
-            } else if parse.kw(sql, toks, p + 2, end, "no") && parse.kw(sql, toks, p + 3, end, "action") {
+            if parse.kw(sql, toks, p + 2, end, "no") && parse.kw(sql, toks, p + 3, end, "action") {
                 p = p + 4;
             } else {
                 return parse.fail(st, p + 2, parse.e_unsupported_statement());

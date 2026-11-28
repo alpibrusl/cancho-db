@@ -1885,7 +1885,7 @@ FIXED += [
 # a column that references another table's key (docs/m3-engine.md 6ca)
 FIXED += [
     ("create table fp1 (id integer primary key, u integer unique, n integer)", "ddl"),
-    ("create table fq1 (k integer primary key, r integer references fp1 (id), s integer references fp1 on delete restrict on update no action)", "ddl"),
+    ("create table fq1 (k integer primary key, r integer references fp1 (id), s integer references fp1 on delete no action on update no action)", "ddl"),
     ("create table fq7 (r integer primary key references fp1 (id) on delete no action, v text)", "ddl"),
     ("create table fq8 (k integer primary key, r integer references nope (id))", "ddl"),             # 42P01
     ("create table fq8 (k integer primary key, r integer references fp1 (zz))", "ddl"),              # 42703
@@ -2061,6 +2061,8 @@ UNSUP = [
     ("create table fzc (k integer primary key references fzc (k))", None),                           # itself
     ("create table fzc (k integer primary key, r integer references fz (k) references fw (wk))", None),
     ("create table fzc (k integer primary key, r integer references fz (k) on update cascade)", None),
+    ("create table fzc (k integer primary key, r integer references fz (k) on delete restrict)", None),   # PostgreSQL 16 says 23503 of the row it holds, 18 says 23001
+    ("create table fzc (k integer primary key, r integer references fz (k) on update restrict)", None),
     ("create table fzc (k integer primary key, r integer references fz (k) on delete set default)", None),
     ("create table fzc (k integer primary key, r integer, foreign key (r) references fz (k))", None),
     ("alter table fz add column q integer references fw (wk)", None),

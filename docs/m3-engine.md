@@ -3814,7 +3814,9 @@ own table's key. None is of two columns, none names its own table, none says `on
   references nothing with a reference that says nothing is 23503. *A row held by one of its references and taken by another*
   (PostgreSQL's answer is by the order it comes to them, which is no order it promises): **refused**.
 - *Refused:* a reference of several columns; one to a column that is not the whole primary key (PostgreSQL also takes a unique
-  one); one to the table itself; a second reference on a column; `on update` other than nothing; types that are not the same
+  one); one to the table itself; a second reference on a column; `on update` other than nothing; `restrict`, on delete or on
+  update (*corrected in place:* it was read as nothing, which is PostgreSQL 16's answer, 23503; CI's PostgreSQL 18.7 says 23001
+  of the same statement, so which is right is a version's); types that are not the same
   (PostgreSQL takes what compares); a reference on a column added to a table; renaming either table; `drop table` and `truncate` of
   a table that is referenced (PostgreSQL's 2BP01 and 0A000).
 
