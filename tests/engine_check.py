@@ -894,6 +894,18 @@ def compare(pg, stmts, eng, must):
         err, _, rows, _ = pg.query("select jsonb_build_array(%s)::text, to_jsonb(x)::text from %s x" % (key, name))
         return None if err else {r[0]: r[1] for r in rows}
 
+    def snapshots(names):
+        """The rows of the statement's table, by (table, key); of several tables (`a+b`) where a statement may change rows of others, 6ca: None if the first is not there."""
+        out = None
+        for n, name in enumerate(names.split("+")):
+            one = snapshot(name)
+            if one is None and n == 0:
+                return None
+            out = out or {}
+            for k, v in (one or {}).items():
+                out[(name.encode(), k)] = v
+        return out
+
     counts = {}
     fails = 0
     refused_answered = 0
@@ -1011,7 +1023,7 @@ def compare(pg, stmts, eng, must):
         if rowsddl:
             how = "write"
             tname = re.match(r"(?:(?:alter|drop) table (?:if exists )?|truncate (?:table )?)(\w+)", sql).group(1)
-        before = snapshot(tname) if how == "write" and pre != "E" else None
+        before = snapshots(tname) if how == "write" and pre != "E" else None
         err, oids, rows, tag = pg.query(sql)
         if err is None:
             answered += 1
@@ -1075,11 +1087,11 @@ def compare(pg, stmts, eng, must):
         if rowsddl:
             count("agree-ddl")
         if how == "write" and before is not None:
-            after = snapshot(tname) or {}
+            after = snapshots(tname) or {}
             want = set()
-            for k in set(before) | set(after):
-                if before.get(k) != after.get(k):
-                    want.add((tname.encode(), k, before.get(k), after.get(k)))
+            for t, k in set(before) | set(after):
+                if before.get((t, k)) != after.get((t, k)):
+                    want.add((t, k, before.get((t, k)), after.get((t, k))))
             renamed = re.match(r"alter table \w+ rename to (\w+)$", sql)
             if renamed:
                 # a table renamed (6ar): its rows left the table of the old name (above: it is not there any more) and are rows of the table of the new one
@@ -1742,7 +1754,10 @@ DEP_SETUP = ["create table fz (k integer primary key, n integer)", "insert into 
              "create table fuc (k integer primary key, u integer unique)", "create sequence fue_u_key",
              "create table fts (k integer primary key, at timestamptz, d timestamp)", "insert into fts values (1, '2026-11-27 10:00:00+00', '2026-11-27 10:00:00')",
              "create table fsr (id bigserial primary key, e text)", "insert into fsr (e) values ('a')",
-             "create table fzk (k integer primary key, n integer check (n between 0 and 9) check (n <> 5), m integer check (10 / m > 0))", "insert into fzk values (1, 1, 1)"]
+             "create table fzk (k integer primary key, n integer check (n between 0 and 9) check (n <> 5), m integer check (10 / m > 0))", "insert into fzk values (1, 1, 1)",
+             "create table fzpa (id integer primary key)", "insert into fzpa values (1), (2), (3)",
+             "create table fzqa (k integer primary key, a integer references fzpa (id) on delete cascade, b integer references fzpa (id) on delete set null)", "insert into fzqa values (1, 1, 2)",
+             "create table fzra (k integer primary key, a integer references fzpa (id) on delete cascade, b integer references fzpa (id))", "insert into fzra values (1, 3, 3)"]
 DEP = [
     # the cheaper condition is computed first, wherever it is written: the row with k = 2 never reaches the division
     ("select k from fz where k > 2 and 10 / (k - 2) > 0", None),
@@ -1867,6 +1882,103 @@ FIXED += [
     ("insert into fc3 values (5, 0, 5, 9)", "write"),
 ]
 
+# a column that references another table's key (docs/m3-engine.md 6ca)
+FIXED += [
+    ("create table fp1 (id integer primary key, u integer unique, n integer)", "ddl"),
+    ("create table fq1 (k integer primary key, r integer references fp1 (id), s integer references fp1 on delete restrict on update no action)", "ddl"),
+    ("create table fq7 (r integer primary key references fp1 (id) on delete no action, v text)", "ddl"),
+    ("create table fq8 (k integer primary key, r integer references nope (id))", "ddl"),             # 42P01
+    ("create table fq8 (k integer primary key, r integer references fp1 (zz))", "ddl"),              # 42703
+    ("insert into fp1 values (1, 1, 1), (2, 2, 2), (3, 3, 3), (4, 4, 4)", "write"),
+    ("insert into fq1 values (1, 9, null)", "write"),                    # no such key
+    ("insert into fq1 values (1, null, null), (2, 1, 2), (3, 2, 2)", "write"),   # a null references nothing
+    ("insert into fq1 values (4, 1, 9)", "write"),                       # the second reference
+    ("insert into fq1 values (1, 1, 1), (5, 9, 1)", "write"),            # a key that is taken comes first, whichever row it is
+    ("insert into fq1 values (6, 9, 1), (1, 1, 1)", "write"),
+    ("insert into fq1 values (7, 9, 1), (8, 1, 1)", "write"),            # the reference of the first row is the statement's error, at its end
+    ("insert into fq1 values (9, 9, 1) on conflict do nothing", "write"),
+    ("insert into fq1 values (1, 9, 1) on conflict do nothing", "write"),    # a row left out references nothing
+    ("update fq1 set r = 7 where k = 2", "write"),
+    ("update fq1 set r = 3 where k = 2", "write"),
+    ("update fq1 set r = null, s = 3 where k = 3", "write"),
+    ("update fq1 set s = s + 10", "write"),
+    ("update fq1 set k = k + 100 where k = 1", "write"),
+    ("insert into fq7 values (4, 'four')", "write"),
+    ("insert into fq7 values (5, 'five')", "write"),
+    ("select k, r, s from fq1 order by k", "order"),
+    # a row that is referenced stays, and keeps its key
+    ("delete from fp1 where id = 3", "write"),
+    ("delete from fp1 where id = 4", "write"),
+    ("delete from fp1 where id = 1", "write"),                           # nothing references it
+    ("delete from fp1", "write"),
+    ("update fp1 set id = 30 where id = 3", "write"),
+    ("update fp1 set id = id + 10", "write"),
+    ("update fp1 set n = n + 1", "write"),                               # (no key changed)
+    ("update fp1 set id = 1 where id = 1", "write"),
+    ("begin", "t"), ("delete from fq1 where k = 2", "write"), ("delete from fp1 where id = 3", "write"), ("delete from fp1 where id = 2", "write"), ("rollback", "t"),
+    ("begin", "t"), ("insert into fp1 values (9, 9, 9)", "write"), ("insert into fq1 values (20, 9, 9)", "write"), ("commit", "t"),
+    ("select id from fp1 order by id", "order"), ("select k, r, s from fq1 order by k", "order"),
+    # once what references it is gone, so may it be
+    ("delete from fq1 where r = 3 or s = 3", "write"),
+    ("delete from fp1 where id = 3", "write"),
+    ("delete from fq7", "write"), ("drop table fq7", "ddl"),
+    ("delete from fp1 where id = 4", "write"),
+    ("delete from fq1", "write"), ("drop table fq1", "ddl"),
+    ("delete from fp1", "write"),
+    ("drop table fp1", "ddl"),
+    # with no column named, the key is referenced, wherever it is among the columns
+    ("create table fp3 (n integer, id integer primary key)", "ddl"),
+    ("create table fq9 (k integer primary key, r integer references fp3)", "ddl"),
+    ("insert into fp3 values (7, 1)", "write"),
+    ("insert into fq9 values (1, 7)", "write"), ("insert into fq9 values (2, 1)", "write"),
+    # `on delete` says nothing of a key that changes
+    ("create table fp2 (id text primary key)", "ddl"),
+    ("create table fq4 (k integer primary key, r text references fp2 (id) on delete cascade, s text references fp2 (id) on delete set null)", "ddl"),
+    ("insert into fp2 values ('a'), ('b'), ('c')", "write"),
+    ("insert into fq4 values (1, 'a', 'b'), (2, 'zz', 'a')", "write"),
+    ("insert into fq4 values (1, 'a', 'b')", "write"),
+    ("delete from fp2 where id = 'c'", "write"),
+    ("update fp2 set id = 'x' where id = 'a'", "write"),
+    ("select * from fp2 order by id", "order"),
+    # `cascade` and `set null` (the second piece): the rows that reference a row that goes go with it, and the rows that reference those; or their column is made null
+    ("create table fp5 (id integer primary key, v integer)", "ddl"),
+    ("create table fq5 (k integer primary key, r integer references fp5 (id) on delete cascade, n integer references fp5 on delete set null, s integer references fp5 (id), "
+     "check (n is not null or k < 100))", "ddl"),
+    ("create table fq6 (k integer primary key, r integer references fq5 (k) on delete cascade, w text)", "ddl"),
+    ("create table fq0 (r integer primary key references fp5 (id) on delete set null, t integer not null references fp5 (id) on delete set null, u integer unique references fp5 on delete set null)", "ddl"),
+    ("create index fq5n on fq5 (n)", "ddl"),
+    ("insert into fp5 values (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7), (8, 8), (9, 9)", "write"),
+    ("insert into fq5 values (10, 1, 2, null), (11, 1, null, null), (12, 2, 1, null), (13, null, 4, null), (150, 6, 7, null), (16, 8, 8, null), (17, null, null, 3)", "write"),
+    ("insert into fq6 values (100, 10, 'a'), (101, 11, 'b'), (102, 12, 'c'), (103, null, 'd'), (104, 16, 'e')", "write"),
+    ("delete from fp5 where id = 1", "write"),                           # two rows go, and the rows that reference them; another's column is null
+    ("select * from fq5 order by k", "order"), ("select * from fq6 order by k", "order"),
+    ("select k from fq5 where n is null order by k", "order"), ("select k from fq5 where n = 2", "order"),
+    ("delete from fp5 where id = 3", "write"),                           # still referenced, by one that says nothing
+    ("delete from fp5 where id = 4 returning id, v", "write"),
+    ("delete from fp5 where id = 7", "write"),                           # the row with its column null fails its table's check
+    ("delete from fp5 where id = 6", "write"),
+    ("delete from fp5 where id > 7 returning id", "write"),
+    ("insert into fq0 values (2, 2, 2)", "write"),
+    ("insert into fp5 values (20, 20), (21, 21), (22, 22)", "write"),
+    ("insert into fq0 values (20, 21, 22), (21, 21, null)", "write"),
+    ("delete from fp5 where id = 22", "write"),                          # a unique column made null
+    ("delete from fp5 where id = 20", "write"),                          # a key cannot be null
+    ("delete from fp5 where id = 21", "write"),                          # nor a column that may not be
+    # a column that may not be null, and nothing else of the row references the one that goes
+    ("create table fq11 (k integer primary key, t integer not null references fp5 (id) on delete set null)", "ddl"),
+    ("insert into fp5 values (23, 23)", "write"), ("insert into fq11 values (1, 23)", "write"),
+    ("delete from fp5 where id = 23", "write"),
+    ("delete from fq11", "write"), ("delete from fp5 where id = 23", "write"),
+    # a row that goes with the one it references is referenced in turn by a reference that says nothing
+    ("create table fq12 (k integer primary key, r integer references fq5 (k))", "ddl"),
+    ("insert into fp5 values (24, 24)", "write"), ("insert into fq5 values (24, 24, null, null)", "write"), ("insert into fq12 values (1, 24)", "write"),
+    ("delete from fp5 where id = 24", "write"),
+    ("delete from fq12", "write"), ("delete from fp5 where id = 24", "write"),
+    ("begin", "t"), ("delete from fq0", "write"), ("delete from fp5 where id > 19", "write"), ("rollback", "t"),
+    ("delete from fp5", "write"),
+    ("select * from fp5 order by id", "order"), ("select * from fq5 order by k", "order"), ("select * from fq6 order by k", "order"), ("select * from fq0 order by r", "order"),
+]
+
 UNSUP = [
     ("insert into fsr (id, e) values (9, 'z')", None),                   # a value given to a serial column: PostgreSQL takes it (and its counter does not move); the engine's is an identity column
     ("create table fsr2 (a serial, b bigserial, k integer primary key)", None),   # two counters in a table
@@ -1941,6 +2053,23 @@ UNSUP = [
     ("alter table fz add column q integer constraint qq check (q between 0 and 9)", None),
     ("truncate fzs", "42809"), ("truncate fuu", "42809"),                                             # a name that is a sequence's, an index's: not a table for PostgreSQL either,
     ("alter table fuu rename to fuu2", None), ("alter table fzs rename to fzs2", None),               # which says so (42809) or renames the thing: neither is here
+    # a reference (6ca): what the engine does not take or do, PostgreSQL's outcome beside it
+    ("create table fzc (k integer primary key, r integer references fu (u))", None),                 # a column that is unique and not the key
+    ("create table fzc (k integer primary key, r integer references fz (n))", "42830"),              # one that is neither
+    ("create table fzc (k integer primary key, r bigint references fz (k))", None),                  # two types that compare
+    ("create table fzc (k integer primary key, r text references fz (k))", "42804"),
+    ("create table fzc (k integer primary key references fzc (k))", None),                           # itself
+    ("create table fzc (k integer primary key, r integer references fz (k) references fw (wk))", None),
+    ("create table fzc (k integer primary key, r integer references fz (k) on update cascade)", None),
+    ("create table fzc (k integer primary key, r integer references fz (k) on delete set default)", None),
+    ("create table fzc (k integer primary key, r integer, foreign key (r) references fz (k))", None),
+    ("alter table fz add column q integer references fw (wk)", None),
+    ("delete from fzpa where id = 3", None),                                                          # a row that goes with one reference and is held by another: PostgreSQL's answer is by which it comes to first
+    ("drop table fzpa", "2BP01"),
+    ("truncate fzpa", "0A000"),
+    ("!erase delete from fzpa where id = 3", "42601"),                                                # an erase of a row of a table that is referenced (the test program's own line: no statement of PostgreSQL's)
+    ("alter table fzpa rename to fzpa2", None),
+    ("alter table fzqa rename to fzqa2", None),
     ("alter table fzk rename to fzk2", None),                                                         # the expression names its table
     ("insert into fzk values (5, 20, 0)", "22012"),                                                   # outside its range, and a check raises: fzk_m_check is first for PostgreSQL
     ("update fzk set n = 20, m = 0", "22012"),
@@ -2951,9 +3080,10 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         feng = run_engine(os.path.join(d, "fixed.db"), lines(f[0] for f in FIXED))
     def ftable(sql, how):
-        m = re.match(r"(?:insert into|update|delete from) (frn\d?|ffv|ftr|fid\d*|f[ksonmrcef]\d?|fq2)\b", sql)
+        m = re.match(r"(?:insert into|update|delete from) (frn\d?|ffv|ftr|fid\d*|fc\d+|fp\d|fq\d|f[ksonmrcef]\d?)\b", sql)
         if m:
-            return m.group(1)
+            # (a delete from a table that is referenced may take rows of the tables that reference it: 6ca)
+            return {"fp5": "fp5+fq5+fq6+fq0+fq11+fq12"}.get(m.group(1), m.group(1))
         return "fwide" if " fwide" in sql and how == "write" else "fq" if " fq" in (sql + " ").replace(" fq ", " fq") and how == "write" else ("fy" if " fy" in sql else "fp" if " fp" in sql else "fx")
     fstmts = [(sql, how, ftable(sql, how)) for sql, how in FIXED]
     fcounts, ffails, _, _ = compare(pg, fstmts, feng, True)

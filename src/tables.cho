@@ -17,6 +17,7 @@ import std.crypto;
 //     0x00000000 0x03 then a name -> the sequence of that name (`sequence_key`): its number (`u32`, from the tables' numbers; its counter is `counter_key` of it) and its least value (8 bytes)
 //     0x00000000 0x04            -> the head of the log (`head_key`, docs/m3-engine.md 6ah): the number of the branch's last commit (8 bytes), its id and its `state` (32 bytes each)
 //     0x00000000 0x09 then a table's number and a name -> the check of that name on that table (`check_key`, docs/m3-engine.md 6bz): an expression every row of the table is held to
+//     0x00000000 0x0a then a table's number and a column -> the reference of that column to another table's key (`ref_key`, 6ca); 0x0b: the same, by the table referenced (`refd_key`)
 //
 // and under the number 0xFFFFFFFE, which is no table's, the log (docs/m3-engine.md 6as):
 //
@@ -417,6 +418,35 @@ fn small[&o](out: &!o [byte], at: int, v: int) -> [] int {
     return n + 1;
 }
 
+// The key of the reference of column `col` of the table numbered `id` (docs/m3-engine.md 6ca), into `out` (at least 11 bytes): 11, its length. The column is two
+// hexadecimal digits, so that the key reads as a check's does. With `col` below 0: what the keys of all the table's references begin with (9 bytes). The value:
+// what `on delete` says (one byte: 0 nothing, 1 `cascade`, 2 `set null`), the number of the table referenced (`u32`), its name.
+pub fn ref_key[&o](id: int, col: int, out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, 0, 4);
+    out[4] = byte_of(10);
+    build.put_be(out, 5, id, 4);
+    if col < 0 {
+        return 9;
+    }
+    out[9] = byte_of(hexd(col / 16));
+    out[10] = byte_of(hexd(col % 16));
+    return 11;
+}
+
+// The same reference as the table referenced finds it: under that table's number (`to`), the referencing table's number and the column. With `id` below 0: what
+// the keys of all the references to the table begin with (9 bytes). The value: the name of the referencing table.
+pub fn refd_key[&o](to: int, id: int, col: int, out: &!o [byte]) -> [] int {
+    build.put_be(out, 0, 0, 4);
+    out[4] = byte_of(11);
+    build.put_be(out, 5, to, 4);
+    if id < 0 {
+        return 9;
+    }
+    build.put_be(out, 9, id, 4);
+    out[13] = byte_of(col);
+    return 14;
+}
+
 // The key of the check `name` of the table numbered `id`, into `out`: its length, or -1. With an empty name: what the keys of all the table's checks begin with. A table's checks are
 // so read in the order of their names, which is the order PostgreSQL tests them in (docs/m3-engine.md 6bz).
 pub fn check_key[&n, &o](id: int, name: &n [byte], out: &!o [byte]) -> [] int {
@@ -496,7 +526,7 @@ pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], r
             let nv = r % 1024;
             if nk < 5 || commit.be(key2, 0, 4) != 0 {
                 more = false;
-            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 {
+            } else if int_of(key2[4]) == 2 || int_of(key2[4]) == 3 || int_of(key2[4]) == 4 || int_of(key2[4]) == 11 {
                 // a table's counter (`counter_key`), a sequence (`sequence_key`), the head of the log (`head_key`): no line
                 var i = 0;
                 while i < nk {
@@ -504,16 +534,22 @@ pub fn schema_text[&q, &s, &k, &j, &e, &o](p: &!q pager.Pager, sc: &!s [byte], r
                     i = i + 1;
                 }
                 kl = nk;
-            } else if int_of(key2[4]) == 9 {
-                // a check (`check_key`): for the schema that is hashed, a line `check NUMBER NAME HASH` (the table's number in hex, the SHA-256 of the check's value: 6bz)
-                if nk < 10 || !check_ok(ent[0..nv]) {
+            } else if int_of(key2[4]) == 9 || int_of(key2[4]) == 10 {
+                // a check (`check_key`): for the schema that is hashed, a line `check NUMBER NAME HASH` (the table's number in hex, the SHA-256 of the check's value: 6bz).
+                // A reference (`ref_key`, 6ca): the same line with `ref`, the column's number where the name is
+                let isref = int_of(key2[4]) == 10;
+                if nk < 10 || !isref && !check_ok(ent[0..nv]) || isref && (nk != 11 || nv < 6) {
                     return btree.err_bad();
                 }
                 if typed {
                     if at + 6 + 9 + (nk - 9) + 1 + 64 + 1 > len(out) {
                         return btree.err_big();
                     }
-                    at = lit(out, at, "check ");
+                    if isref {
+                        at = lit(out, at, "ref ");
+                    } else {
+                        at = lit(out, at, "check ");
+                    }
                     var i = 5;
                     while i < 9 {
                         out[at] = byte_of(hexd(int_of(key2[i]) / 16));

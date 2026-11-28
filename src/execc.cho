@@ -15,6 +15,7 @@ import cdb.exec;
 import cdb.via;
 import cdb.uniq;
 import cdb.checks;
+import cdb.refs;
 
 // The statements of the engine that define (docs/m3-engine.md 6g, 6x): CREATE TABLE, CREATE SEQUENCE, DROP TABLE, ALTER TABLE ... ADD COLUMN. Split from src/execw.cho
 // (the statements that write rows), which had come to 1,866 lines; the two answer the same way.
@@ -440,6 +441,11 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
     if pc < 0 {
         return pc;
     }
+    // and its references (6ca): each held to the table it names
+    let pr = refs.prepare(p, w, root, sql, toks, nodes, kids, stmt, e[4..4 + nl], nc);
+    if pr < 0 {
+        return pr;
+    }
     let g = tables.find(p, contents(w.sc), root, e[4..4 + nl], contents(w.key), contents(w.cur));
     if g >= 0 {
         exec.note(w, exec.e_table_exists());
@@ -480,6 +486,10 @@ pub fn create_table[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
         return exec.tree_err(nw);
     }
     nw = checks.store(p, w, nw, tables.id_of(contents(w.ent)));
+    if nw < 0 {
+        return nw;
+    }
+    nw = refs.store(p, w, nw, tables.id_of(contents(w.ent)), e[4..4 + nl]);
     if nw < 0 {
         return nw;
     }
@@ -696,6 +706,19 @@ pub fn drop_table[&q, &z, &x](p: &!z pager.Pager, w: &!q exec.Work, root: int, e
         return fr;
     }
     nroot = fr;
+    // and its references; a table that is referenced stays (PostgreSQL's 2BP01: not an error the engine has)
+    let by = refs.any(p, w, nroot, w.tid, false);
+    if by != 0 {
+        if by < 0 {
+            return by;
+        }
+        return exec.unsupported();
+    }
+    let rf = refs.forget(p, w, nroot, w.tid);
+    if rf < 0 {
+        return rf;
+    }
+    nroot = rf;
     // the table's entry in the catalog is a key of the tree like any other: its history is kept, so the table is there AS OF before
     let ekl = tables.entry_key(e[4..4 + nl], contents(w.key));
     let rm = exec.remember(p, w, nroot, contents(w.key), ekl);

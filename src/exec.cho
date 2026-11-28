@@ -356,6 +356,11 @@ pub fn e_check() -> [] int {
     return 19;
 }
 
+// A reference to a key that is not there, or a key that goes while it is referenced (docs/m3-engine.md 6ca).
+pub fn e_ref() -> [] int {
+    return 21;
+}
+
 // A statement in a transaction that has failed (PostgreSQL: 25P02, until the transaction is ended).
 pub fn e_aborted() -> [] int {
     return 18;
@@ -421,6 +426,9 @@ pub fn sqlstate(code: int) -> [] &static [byte] {
     }
     if code == 20 {
         return "22008";
+    }
+    if code == 21 {
+        return "23503";
     }
     return "XX000";
 }

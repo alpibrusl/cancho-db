@@ -14,6 +14,7 @@ import cdb.exec;
 import cdb.execw;
 import cdb.execc;
 import cdb.checks;
+import cdb.refs;
 
 // Statements that change what a table is, or empties it, and tell the log each row they touch (docs/m3-engine.md 6ao, 6ar). The engine's own forms: no IR.
 
@@ -49,6 +50,14 @@ pub fn truncate_table[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, 
     }
     if r0 != 0 {
         return r0;
+    }
+    // a table that is referenced is not emptied this way (PostgreSQL's 0A000, whether or not a row references one of its rows)
+    let by = refs.any(p, w, root, w.tid, false);
+    if by != 0 {
+        if by < 0 {
+            return by;
+        }
+        return exec.unsupported();
     }
     var nroot = root;
     exec.scan_start(w);
@@ -106,6 +115,18 @@ pub fn rename_table[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, ro
     if nck != 0 {
         if nck < 0 {
             return nck;
+        }
+        return exec.unsupported();
+    }
+    // nor is a table renamed that references another or is referenced: each side keeps the other's name (6ca)
+    let r1 = refs.any(p, w, root, w.tid, true);
+    let r2 = refs.any(p, w, root, w.tid, false);
+    if r1 != 0 || r2 != 0 {
+        if r1 < 0 {
+            return r1;
+        }
+        if r2 < 0 {
+            return r2;
         }
         return exec.unsupported();
     }

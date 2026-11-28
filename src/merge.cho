@@ -85,7 +85,13 @@ pub fn onto[&q, &z, &d](p: &!z pager.Pager, w: &!q exec.Work, base: int, mine: i
                     tl = exec.copy(next, 0, r / 1024, tk, 0);
                     let nl = name_len(tk);
                     let k = tk[1 + nl..tl];
-                    if pass == 0 {
+                    if nl == 0 && tl == 1 {
+                        // a key of no table (src/refs.cho): the transaction counted on a row it did not write, or took one others may count on. It is put
+                        // on the branch only if nobody committed meanwhile, which is the rule of `serializable` (6ca)
+                        if cur != base {
+                            out = conflict();
+                        }
+                    } else if pass == 0 {
                         // what the branch holds there now is what it held when the transaction began: nobody else wrote the row
                         let s = same(p, w, base, cur, k);
                         if s < 0 {

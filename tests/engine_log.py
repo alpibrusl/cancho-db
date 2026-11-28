@@ -102,9 +102,11 @@ FIXED = [
 MANY = ["many_tables_in_one_commit_%02d" % i for i in range(40)]
 # a table with checks (docs/m3-engine.md 6bz): what the catalog keeps of them is no table, and the export tool's live dump has its rows and nothing else of it
 FIXED += ["create table chkd (k integer primary key, v integer check (v > 0), constraint chkd_named check (k < 1000))", "insert into chkd values (1, 5), (2, 6)",
-          "insert into chkd values (3, 0)", "update chkd set v = v + 1 where k = 2"]
+          "insert into chkd values (3, 0)", "update chkd set v = v + 1 where k = 2",
+          # and one that references it (6ca): its two keys of the catalog are no table either
+          "create table refd (k integer primary key, r integer references chkd (k) on delete cascade)", "insert into refd values (1, 1), (2, null)", "delete from chkd where k = 1"]
 FIXED += ["create table %s (k integer primary key)" % t for t in MANY] + ["begin"] + ["insert into %s values (%d)" % (t, i) for i, t in enumerate(MANY)] + ["commit"]
-TABLES = ["acct", "note", "pair", "rnd", "gone", "chkd"] + MANY
+TABLES = ["acct", "note", "pair", "rnd", "gone", "chkd", "refd"] + MANY
 
 
 def random_history(rng, n):
@@ -540,6 +542,16 @@ def definitions(work):
           "a name given is the line's; two checks are two lines, in the order of their names",
           ck[0] == [] and ck[6] == [] and [[c.split()[0] for c in x] for x in ck[1:6]] == [["d8_v_check"], ["d8_v_check"], ["d8_v_check"], ["c1"], ["d8_check", "d8_v_check"]]
           and hashes[1] != hashes[2] and hashes[2] == hashes[3] == hashes[4] and hashes[5][1] == hashes[2][0] and all(len(h) == 64 for x in hashes for h in x), ck)
+    # and a reference (6ca): a line for the column that references, another when what it says of a delete is another, none once the table is dropped
+    rf = []
+    for made in ("r integer", "r integer references d9 (k)", "r integer references d9 (k) on delete cascade", "r integer references d9"):
+        out = run(path, WHO + ["create table d9 (k integer primary key)", "create table d10 (k integer primary key, %s)" % made, "!schema", "drop table d10", "!schema", "drop table d9"])
+        ms = [bytes.fromhex(l.split()[1]).decode() for l in out if l.startswith("M ")]
+        rf.append([[l for l in m.split("\n") if l.startswith("ref ")] for m in ms])
+    check("a table with no reference has no such line; a reference is a line of the schema, another when it says `cascade`, the same whether or not the key's column is named; "
+          "the line goes with the table", [len(x[0]) for x in rf] == [0, 1, 1, 1] and all(x[1] == [] for x in rf) and rf[1][0][0].split()[2:] != rf[2][0][0].split()[2:]
+          and rf[1][0][0].split()[2:] == rf[3][0][0].split()[2:], rf)
+
 
 
 def archiving(work, path):
