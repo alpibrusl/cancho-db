@@ -87,16 +87,19 @@ echo "== times and their texts (docs/m3-engine.md 6bp): read and written as Post
 "$CANCHO" build --std proxy/timecheck.cho src/time.cho -o build/timecheck
 quiet 2 python3 tests/time_check.py build/timecheck
 echo "== the engine's expression evaluator against PostgreSQL (docs/m3-engine.md, M3d): it may refuse; when it answers, the type, every row's value or the SQLSTATE are PostgreSQL's"
-"$CANCHO" build --std proxy/evalcheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/eval.cho -o build/evalcheck
+"$CANCHO" build --std proxy/evalcheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/regex.cho src/eval.cho -o build/evalcheck
 quiet 4 python3 tests/eval_check.py build/evalcheck 4000 1
 quiet 4 python3 tests/eval_check.py build/evalcheck 4000 2
 echo "== the engine's statements against PostgreSQL (docs/m3-engine.md 6g, 6h): create, insert, update, delete, select; the changes; what must be answered, what must be refused, what must be gone from the file"
-"$CANCHO" build --std proxy/enginecheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/execw.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/token.cho src/ir.cho -o build/enginecheck
+"$CANCHO" build --std proxy/enginecheck.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/regex.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/checks.cho src/execw.cho src/execc.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/token.cho src/ir.cho -o build/enginecheck
 # the export tool (docs/m3-engine.md 6av): the log out of a page file, for tests/engine_log.py and tests/engine_wire.py below
-"$CANCHO" build --std proxy/logexport.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/execw.cho src/execd.cho src/facts.cho src/token.cho src/ir.cho -o build/logexport
+"$CANCHO" build --std proxy/logexport.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/regex.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/checks.cho src/execw.cho src/execc.cho src/execd.cho src/facts.cho src/token.cho src/ir.cho -o build/logexport
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 1
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 2
 quiet 4 python3 tests/engine_check.py build/enginecheck 3000 3
+echo "== the pattern operators and the lengths of a text against PostgreSQL (docs/m3-engine.md 6by): the rows ~ and !~ choose, and what is outside the subset refused"
+quiet 2 python3 tests/regex_check.py build/enginecheck 400 1
+quiet 2 python3 tests/regex_check.py build/enginecheck 400 2
 echo "== the first user's schema and queries on the engine (docs/m3-engine.md 6w): how many of cancho-hooks' statements are answered, and none differently from PostgreSQL"
 quiet 20 python3 tests/hooks_check.py build/enginecheck
 echo "== the engine's statements across a crash at every durable step (gate 2 at the level of SQL): the tables after a restart are those of a commit, and the file takes writes again"
@@ -140,7 +143,7 @@ quiet 3 python3 tests/erase_l3a_e2e.py build/proxy "python3 tools/l3a.py" build/
 echo "== a log the engine made, read by the three L3a verifiers (docs/m3-engine.md 6ah): 3 seeds of 2,000 statements over two processes, and what must not pass"
 for seed in 1 2 3; do quiet 2 python3 tests/engine_log.py build/enginecheck 2000 $seed "python3 tools/l3a.py" build/l3averify "python3 tests/third/l3a_third.py"; done
 echo "== the engine's server (docs/m3-engine.md 6al): PostgreSQL's protocol over a socket, held against the test program; kill, dropped connections, garbage, psql"
-"$CANCHO" build --std proxy/engine.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/execw.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/wire.cho src/serve.cho src/login.cho src/token.cho src/revoke.cho src/ir.cho src/merge.cho src/tlsio.cho src/tlsid.cho $TLS_PKG -o build/engine
+"$CANCHO" build --std proxy/engine.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/state.cho src/commit.cho src/build.cho src/time.cho src/row.cho src/regex.cho src/eval.cho src/pager.cho src/btree.cho src/pstore.cho src/tables.cho src/index.cho src/exec.cho src/via.cho src/uniq.cho src/execs.cho src/checks.cho src/execw.cho src/execc.cho src/execd.cho src/answer.cho src/drive.cho src/facts.cho src/session.cho src/wire.cho src/serve.cho src/login.cho src/token.cho src/revoke.cho src/ir.cho src/merge.cho src/tlsio.cho src/tlsid.cho $TLS_PKG -o build/engine
 for seed in 1 2 3; do quiet 2 python3 tests/engine_wire.py build/engine build/enginecheck 1500 $seed "python3 tools/l3a.py" build/l3averify "python3 tests/third/l3a_third.py"; done
 echo "== the engine's server under load for a minute (docs/m3-engine.md 6az): money never made or lost, the journal, a copy of the log kept up beside it, kills;"
 echo "   and beside those (6bg) definitions, erases and reads as of a commit, with the log archived and the history trimmed"

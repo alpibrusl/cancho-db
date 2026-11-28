@@ -3632,8 +3632,136 @@ at most 34, all three 45. **They are needed together.** What they are, counted i
   refuses both (`engine-unsupported`), and the test says so (`UNSUP`). Three mutants of the parser. *Measured after it:* still 2 of
   49, as the table above said it would be: the tables it unlocks have checks and references too.
 
+- *The pattern operators and the lengths* (6by) and *a check that is an expression* (6bz). *Measured after them:* **18 of 49** as the
+  migrations are written (from 2), and none of the 50 checks is refused; what is left is 15 `syntax` (the references), 13 for a table one
+  of those did not make, 2 `reserved-word`, 1 `unsupported-statement`. 25 of the 134 queries run on that schema.
+
 *What is not planned:* its advisory lock is one statement; the engine has no lock to give, and a plain transaction already has the
 database to itself, so what it is for is to be read before anything is built.
+
+## 6by. The pattern operators and the lengths of a text
+
+*The first piece of the checks of 6bx: 17 of the sibling's 50 use `~` and 12 a length, so a check cannot be an expression until an
+expression can say these.*
+
+**What is added.** `a ~ b` and `a !~ b` (text and a pattern: whether the text has a match, and not), and `length(t)`,
+`char_length(t)` (characters) and `octet_length(t)` (bytes) of a text. A null on either side is null.
+
+**The pattern is a subset of PostgreSQL's, and what is outside it is refused, never read some other way (choice).**
+
+| in | out (`engine-unsupported`) |
+|---|---|
+| a character; `.`; `\` before a character that is no letter or digit | `\` before a letter or a digit (`\d`, `\w`, `\m`, a back reference) |
+| a bracket expression: characters, ranges, `^` for all but, `\` as outside | `[.x.]`, `[=x=]`, a class by a name not on the list |
+| the classes `alpha digit alnum upper lower space punct xdigit cntrl blank` | `print`, `graph` |
+| `*`, `+`, `?`, `{m}`, `{m,}`, `{m,n}` (to 255, as PostgreSQL) after one of the above | a quantifier after a quantifier (`a+?` is PostgreSQL's non-greedy), a group, an alternation |
+| `^` first, `$` last | an anchor anywhere else; `(?i)` and the other openings |
+
+Why this and no more: it is what the sibling's patterns are (measured below), and with no group and no alternation a pattern is a
+row of atoms, each a set of characters and how many times it may come. That has a match without any search. The classes are
+ASCII's because the engine's collation is C (D-M3-5), and a database of PostgreSQL made with `lc_ctype 'C'` agrees; `cntrl` is the one
+class PostgreSQL does not ask the locale for (it is U+0000 to U+001F and U+007F to U+009F), and it is the same here.
+
+**How a match is found (`src/regex.cho`).** `compile` reads the pattern once into at most 64 atoms (more: refused) and is also
+what says a pattern is outside the subset. `matches` keeps, for the atoms read so far, the places of the text (in characters) where
+a match of them may end. An atom that may come `lo` to `hi` times moves a place on to every place from `lo` characters further to
+`hi`, or to as far as the characters it takes run: a stretch, so all the places are moved in one pass over the text. The cost is
+atoms by characters whatever the pattern; there is no step limit to run out and no pattern that is slow. *(Corrected in place: the
+first matcher written for this section tried and gave back, with a memo; a text of 500 `a` and `^a*a*a*a*b$` ran out of its four
+million steps and was refused. It was replaced before it was merged; the measure that found it is the one below.)*
+
+**Where it is in the pipeline.** The parser has two operators more, at the level of `||` (PostgreSQL's "any other operator"); the
+IR's operator codes are a closed list (0 to 17, which the verifiers hold it to), so the lowering writes them as calls,
+`textregexeq(a, b)` and `textregexne(a, b)`, which are PostgreSQL's own names for them, and the evaluator computes those two and the
+three lengths. A pattern that is a constant and outside the subset refuses the statement whatever the rows; one from a column
+refuses it at the first row whose pattern is.
+
+**Measured.**
+
+- *Against PostgreSQL 16* (`tests/regex_check.py`, a database with `lc_collate 'C' lc_ctype 'C'`): 56 fixed patterns and 400 random
+  ones of the subset, each with `~` and `!~` over 53 texts (ASCII of every kind, control characters, letters beyond ASCII, the empty
+  text, a null): the rows chosen are PostgreSQL's, for seeds 1 to 5 (4,479 to 5,875 rows chosen by `~`, by seed). The three lengths
+  of every text are PostgreSQL's. 32 patterns outside the subset, of every kind in the table above: each refused.
+- *The sibling's patterns:* 14 distinct, 14 read (13 before `cntrl` was a class: the measure is what added it).
+- *The cost:* a text of 500 characters against `a*a*a*a*a*a*a*a*b`, which fails only after every way of sharing the text among eight
+  atoms is ruled out: 51 microseconds a statement, the statement's own cost included (200 in a row through `build/enginecheck`); 39 for
+  `^[a-z0-9_-]{1,40}$`.
+
+**What is not here.** `~*`, `!~*`, `similar to`, `regexp_replace` and the rest of the family: refused, as before. The lengths of a
+`bytea`. And a pattern with a group or an alternation, which is most patterns written anywhere: when a client has one, it is a
+different matcher, and this section says so now.
+
+## 6bz. A check that is an expression
+
+*The largest of the three that 6bx found: 50 checks in the sibling's schema, 48 written on a column and 2 on the table, one of them
+named; 9 of the 48 name other columns than their own. Their operators are the comparisons, `and or not`, `in`, `between`, `is null`,
+`%`, the pattern operators and the lengths (6by). A range of an integer column (6x) is all the engine had.*
+
+**What PostgreSQL does** (read from `src/backend/catalog/heap.c`, `AddRelationNewConstraints`, and `executor/execMain.c`,
+`ExecRelCheck`, version 16; each line below is held to it by the differential).
+
+- A check written on a column and one written on the table are the same thing: an expression over the columns of the row, which
+  must be a boolean. A row is taken if it is true *or null*.
+- A check with no name is given one: the table's name, the name of the column if the expression names exactly one column
+  (wherever the check was written), and `check`, joined by `_`; if that is taken, the same with 1, 2, ... after it. Names are
+  given in the order the checks are written.
+- A row is tested for its nulls first (23502), then against the checks **in the order of their names**, and the first that is
+  false is the error (23514). An expression that raises (a division by zero) is that error, when its turn comes. Only then is the
+  row's key looked at (23505).
+- The expression may not have a subquery, an aggregate, a parameter, or a column of another table.
+
+**Design.**
+
+- *Where a check is kept.* Under the catalog, `0x00000000 0x09`, the table's number, the check's name: so a table's checks are
+  read in one walk, in the order of their names, which is the order they are tested in. The value is the expression as the engine
+  runs every expression: its IR (`docs/spec/ir.md`, an `Expr`), with what the IR does not say about its constants beside it (the
+  notes of 6e). Not its text: the text would be parsed and lowered again at every statement that writes.
+- *What is hashed.* The schema a commit says (6bl) gets a line for each check: the table's number, the name, and the SHA-256 of
+  the value. A table with no such check has the lines it had, so no commit made before this says another schema.
+- *When it is tested.* A row an `insert` is about to store and the row an `update` would leave, after the nulls and the range and
+  before the key: the checks of the table, loaded once for the statement, each evaluated with the row bound. `on conflict do
+  nothing` tests them before it looks at the key, as it does the nulls (6z).
+- *What is refused when the table is made* (`engine-unsupported` unless said): an expression the evaluator does not compute; one
+  with a parameter, `now()` or a subquery (the parser's and the lowering's own refusals); one whose type is not known to be a
+  boolean before any row (PostgreSQL's 42804 for the ones it also rejects); a name longer than 63 bytes, which PostgreSQL cuts; a
+  name given twice, or given after PostgreSQL made it for an earlier check (its 42710, which is not an error the engine has). A
+  column that is not the table's is 42703.
+- *The range of 6x stays what it is*: a check that is `c between lo and hi` of an integer column and two literals is still two
+  integers beside the column, tested without the evaluator, and it takes the name PostgreSQL would give it, so that the names of the
+  others are PostgreSQL's. It has no place in the order of names, so a row that is outside a range *and* makes a check raise
+  another error than 23514 is `engine-ambiguous-error`, as two different errors are everywhere (6x).
+- *What a table with such a check cannot do yet:* be renamed (the expression names its table; refused), or get a column with such
+  a check by `alter table add column` (each row there would have to be tested; refused, as before). `drop table` takes its checks
+  with it. `alter table ... add constraint / drop constraint` is the next piece and is why the names are PostgreSQL's from the start.
+
+**Test (first).** `tests/engine_check.py`: the random history makes tables with checks of several columns, named and not, on
+the column and on the table, with patterns, lengths and arithmetic that can raise, and writes rows that pass, fail and raise; the
+fixed statements pin each rule above (the null that passes, the order of names by an error that depends on it, the name given
+twice, what is refused). The log's test (`tests/engine_log.py`) holds the schema line. Mutants for each rule.
+
+**Built.** The parser takes `[constraint name] check (...)` on a column, any number of them, and on the table (`src/stmt.cho`: the checks of
+a statement are a chain off its root, in the order written; the first unnamed one of a column is still also the column's own, which
+is what 6x read). `src/checks.cho` is the rest: `prepare` (lowered by `lower.check` over the one table, typed with no row bound,
+named), `store`, `load`, `hold`. `tables.schema_text` writes the lines. `insert` and `update` load the table's checks and hold each
+row (`src/execw.cho`); `drop table` removes them; `rename` and `add column` refuse as designed.
+
+**Measured.**
+
+- *Against PostgreSQL 16.15* (`tests/engine_check.py`): 36 seeds of 3,000 statements, three tables in ten with one to three checks
+  drawn from 37 forms (on a column or the table, named or not, joined by `and`/`or`; one in 25 is one PostgreSQL refuses): no
+  disagreement. 92 fixed statements pin the rules: the null that passes, the check before the key, the order of the names in both
+  directions (by an error that depends on it), the name made of the column the expression names, the numbers after a name, a name
+  given, a range beside a check. 23 statements refused on purpose, PostgreSQL's outcome beside each.
+- *The schema* (`tests/engine_log.py`): a table with no check or with a range has no line; a check is a line by its name; another
+  expression is another hash, the same one the same; a table dropped takes its lines.
+- *38 mutants* (29 of the rules, 5 of the schema's lines, 3 of the parser's mark, 1 of the export tool), all killed. **What they
+  found:** a condition that refused a constant that raises, which the evaluator had refused already; a row bound again after its
+  checks, which nothing read; and two older mutants that had passed only because the engine refused `not between` and a range of
+  another column, which are now checks: each has its fixed statements. One mutant was dropped as no change of behaviour (a row
+  that failed its check being stored in a tree the statement's error throws away).
+- *Found on the way, older than this:* `truncate` and `rename` of a name that is a sequence's or an index's said 42P01; PostgreSQL
+  says 42809 or does it. Seen once a table could fail to be made for its check and leave its name to something else. Refused now.
+- *The sibling's schema:* none of its 50 checks is refused (6bx).
 
 ## 7. Taking over, safely
 

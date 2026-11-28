@@ -1,0 +1,431 @@
+edition 9;
+module cdb.regex;
+
+// The pattern of `~` (docs/m3-engine.md 6by): a subset of PostgreSQL's regular expressions, matched without recursion. What is in it: a character, `.`, a bracket
+// expression (ranges, `^` for all but, and the classes `[:alpha:]` and its kin, which are ASCII's: the engine's collation is C), `\` before a character that is no
+// letter or digit (that character), the quantifiers `*`, `+`, `?`, `{m}`, `{m,}`, `{m,n}` after one of those, `^` at the very start and `$` at the very end. What is
+// not, and is refused rather than read some other way: a group, an alternation, `\` before a letter or a digit, a quantifier after a quantifier, an anchor anywhere
+// else, `[.` and `[=`.
+
+// What `compile` answers when the pattern is outside the subset, or is no pattern.
+pub fn unsupported() -> [] int {
+    return 0 - 1;
+}
+
+// The ints a compiled pattern takes: three, and five for each of at most `max_atoms()` atoms.
+pub fn max_atoms() -> [] int {
+    return 64;
+}
+
+pub fn room() -> [] int {
+    return 3 + 5 * max_atoms();
+}
+
+fn is_alnum(c: int) -> [] bool {
+    return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z';
+}
+
+// The character at `at` of `s[0..n]`: its code point and how many bytes it is. A byte that begins no well-formed sequence is one character of its own value.
+fn char_at[&s](s: &s [byte], at: int, n: int) -> [] (int, int) {
+    let c = int_of(s[at]);
+    var need = 0;
+    var cp = c;
+    if c >= 192 && c < 224 {
+        need = 1;
+        cp = c - 192;
+    } else if c >= 224 && c < 240 {
+        need = 2;
+        cp = c - 224;
+    } else if c >= 240 && c < 248 {
+        need = 3;
+        cp = c - 240;
+    }
+    if need == 0 || at + need > n - 1 {
+        return (c, 1);
+    }
+    var k = 1;
+    while k <= need {
+        let d = int_of(s[at + k]);
+        if d < 128 || d >= 192 {
+            return (c, 1);
+        }
+        cp = cp * 64 + d - 128;
+        k = k + 1;
+    }
+    return (cp, need + 1);
+}
+
+// Whether the character `c` (below 160: every class but `cntrl` is ASCII's) is of the class named `p[a..b]` (`alpha`, `digit`, ...): 1, 0, or `unsupported()` for a name that is none.
+fn in_named[&p](p: &p [byte], a: int, b: int, c: int) -> [] int {
+    let n = b - a;
+    let lower = c >= 'a' && c <= 'z';
+    let upper = c >= 'A' && c <= 'Z';
+    let digit = c >= '0' && c <= '9';
+    var yes = false;
+    var known = true;
+    if n == 5 && int_of(p[a]) == 'a' && int_of(p[a + 1]) == 'l' && int_of(p[a + 2]) == 'p' {
+        yes = lower || upper;
+    } else if n == 5 && int_of(p[a]) == 'd' {
+        yes = digit;
+    } else if n == 5 && int_of(p[a]) == 'a' && int_of(p[a + 2]) == 'n' {
+        yes = lower || upper || digit;
+    } else if n == 5 && int_of(p[a]) == 'u' {
+        yes = upper;
+    } else if n == 5 && int_of(p[a]) == 'l' {
+        yes = lower;
+    } else if n == 5 && int_of(p[a]) == 's' {
+        yes = c == ' ' || c >= 9 && c <= 13;
+    } else if n == 5 && int_of(p[a]) == 'p' && int_of(p[a + 1]) == 'u' {
+        yes = c > 32 && c < 127 && !lower && !upper && !digit;
+    } else if n == 6 && int_of(p[a]) == 'x' {
+        yes = digit || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F';
+    } else if n == 5 && int_of(p[a]) == 'c' {
+        // (the one class PostgreSQL does not ask the locale for: it is these code points, the second run of them beyond ASCII)
+        yes = c < 32 || c >= 127 && c <= 159;
+    } else if n == 5 && int_of(p[a]) == 'b' {
+        yes = c == ' ' || c == 9;
+    } else {
+        known = false;
+    }
+    if !known {
+        return unsupported();
+    }
+    if yes {
+        return 1;
+    }
+    return 0;
+}
+
+// The names `in_named` knows, spelled out: whether `p[a..b]` is exactly one of them.
+fn named_ok[&p](p: &p [byte], a: int, b: int) -> [] bool {
+    let names = "alpha digit alnum upper lower space punct xdigit cntrl blank";
+    var s = 0;
+    while s < len(names) {
+        var e = s;
+        while e < len(names) && int_of(names[e]) != ' ' {
+            e = e + 1;
+        }
+        if e - s == b - a {
+            var same = true;
+            var k = 0;
+            while k < e - s {
+                if int_of(names[s + k]) != int_of(p[a + k]) {
+                    same = false;
+                }
+                k = k + 1;
+            }
+            if same {
+                return true;
+            }
+        }
+        s = e + 1;
+    }
+    return false;
+}
+
+// Whether the character `c` is in the bracket expression whose inside is `p[a..b]`: 1, 0, or `unsupported()` (which `compile` has ruled out by walking it the same way).
+fn in_class[&p](p: &p [byte], a: int, b: int, c: int) -> [] int {
+    var k = a;
+    var found = 0;
+    while k < b {
+        if int_of(p[k]) == '[' && k + 1 < b && int_of(p[k + 1]) == ':' {
+            var e = k + 2;
+            while e + 1 < b && !(int_of(p[e]) == ':' && int_of(p[e + 1]) == ']') {
+                e = e + 1;
+            }
+            if e + 1 >= b || !named_ok(p, k + 2, e) {
+                return unsupported();
+            }
+            if c < 160 && in_named(p, k + 2, e, c) == 1 {
+                found = 1;
+            }
+            k = e + 2;
+        } else if int_of(p[k]) == '[' && k + 1 < b && (int_of(p[k + 1]) == '.' || int_of(p[k + 1]) == '=') {
+            return unsupported();
+        } else {
+            if int_of(p[k]) == '\\' {
+                if k + 1 >= b || is_alnum(int_of(p[k + 1])) {
+                    return unsupported();
+                }
+                k = k + 1;
+            }
+            let (lo, ll) = char_at(p, k, b);
+            k = k + ll;
+            var hi = lo;
+            if k + 1 < b && int_of(p[k]) == '-' {
+                k = k + 1;
+                if int_of(p[k]) == '\\' {
+                    if k + 1 >= b || is_alnum(int_of(p[k + 1])) {
+                        return unsupported();
+                    }
+                    k = k + 1;
+                }
+                if int_of(p[k]) == '[' {
+                    return unsupported();
+                }
+                let (h, hl) = char_at(p, k, b);
+                hi = h;
+                k = k + hl;
+                if hi < lo {
+                    return unsupported();
+                }
+            }
+            if c >= lo && c <= hi {
+                found = 1;
+            }
+        }
+    }
+    return found;
+}
+
+// A number of at most three digits at `p[at..]`: (the number or -1, where it ends).
+fn number[&p](p: &p [byte], at: int) -> [] (int, int) {
+    var v = 0;
+    var k = at;
+    while k < len(p) && int_of(p[k]) >= '0' && int_of(p[k]) <= '9' && k - at < 4 {
+        v = v * 10 + int_of(p[k]) - '0';
+        k = k + 1;
+    }
+    if k == at || k - at > 3 {
+        return (0 - 1, k);
+    }
+    return (v, k);
+}
+
+// The pattern `p` into `out` (`room()` ints): how many atoms, or `unsupported()`. `out[0]` the atoms, `out[1]` whether it begins with `^`, `out[2]` whether it ends
+// with `$`; an atom is its kind (0 a character, 1 any, 2 a bracket expression, 3 one that says all but), two ints (the character; or where the expression's inside
+// begins and ends in `p`), and how few and how many times it may come (-1: any number).
+pub fn compile[&p, &o](p: &p [byte], out: &!o [int]) -> [] int {
+    let n = len(p);
+    var i = 0;
+    var atoms = 0;
+    out[1] = 0;
+    out[2] = 0;
+    if n > 0 && int_of(p[0]) == '^' {
+        out[1] = 1;
+        i = 1;
+    }
+    while i < n {
+        let c = int_of(p[i]);
+        if c == '$' && i == n - 1 {
+            out[2] = 1;
+            i = i + 1;
+        } else {
+            if atoms == max_atoms() {
+                return unsupported();
+            }
+            let o = 3 + 5 * atoms;
+            if c == '(' || c == ')' || c == '|' || c == '^' || c == '$' || c == '*' || c == '+' || c == '?' || c == '{' || c == '}' {
+                return unsupported();
+            }
+            if c == '\\' {
+                if i + 1 >= n || is_alnum(int_of(p[i + 1])) {
+                    return unsupported();
+                }
+                let (cp, l) = char_at(p, i + 1, n);
+                out[o] = 0;
+                out[o + 1] = cp;
+                out[o + 2] = 0;
+                i = i + 1 + l;
+            } else if c == '.' {
+                out[o] = 1;
+                out[o + 1] = 0;
+                out[o + 2] = 0;
+                i = i + 1;
+            } else if c == '[' {
+                var k = i + 1;
+                var kind = 2;
+                if k < n && int_of(p[k]) == '^' {
+                    kind = 3;
+                    k = k + 1;
+                }
+                let a = k;
+                // a `]` that comes first is a character; after that the first `]` outside a class's name ends the expression
+                if k < n && int_of(p[k]) == ']' {
+                    k = k + 1;
+                }
+                var open = true;
+                while open && k < n {
+                    if int_of(p[k]) == '[' && k + 1 < n && int_of(p[k + 1]) == ':' {
+                        k = k + 2;
+                        while k + 1 < n && !(int_of(p[k]) == ':' && int_of(p[k + 1]) == ']') {
+                            k = k + 1;
+                        }
+                        k = k + 2;
+                    } else if int_of(p[k]) == '\\' {
+                        k = k + 2;
+                    } else if int_of(p[k]) == ']' {
+                        open = false;
+                    } else {
+                        k = k + 1;
+                    }
+                }
+                if open || k > n || k == a {
+                    return unsupported();
+                }
+                // the expression is walked once now, so that what is wrong with it is said here and not at a row
+                if in_class(p, a, k, 0) < 0 {
+                    return unsupported();
+                }
+                out[o] = kind;
+                out[o + 1] = a;
+                out[o + 2] = k;
+                i = k + 1;
+            } else {
+                let (cp, l) = char_at(p, i, n);
+                out[o] = 0;
+                out[o + 1] = cp;
+                out[o + 2] = 0;
+                i = i + l;
+            }
+            var lo = 1;
+            var hi = 1;
+            if i < n && int_of(p[i]) == '*' {
+                lo = 0;
+                hi = 0 - 1;
+                i = i + 1;
+            } else if i < n && int_of(p[i]) == '+' {
+                hi = 0 - 1;
+                i = i + 1;
+            } else if i < n && int_of(p[i]) == '?' {
+                lo = 0;
+                i = i + 1;
+            } else if i < n && int_of(p[i]) == '{' {
+                let (m, e) = number(p, i + 1);
+                if m < 0 || m > 255 || e >= n {
+                    return unsupported();
+                }
+                lo = m;
+                hi = m;
+                i = e;
+                if int_of(p[i]) == ',' {
+                    hi = 0 - 1;
+                    i = i + 1;
+                    if i < n && int_of(p[i]) != '}' {
+                        let (m2, e2) = number(p, i);
+                        if m2 < m || m2 > 255 {
+                            return unsupported();
+                        }
+                        hi = m2;
+                        i = e2;
+                    }
+                }
+                if i >= n || int_of(p[i]) != '}' {
+                    return unsupported();
+                }
+                i = i + 1;
+            }
+            // (a quantifier after a quantifier, `a+?` or `a**`, is another expression or none: what comes next is read as an atom, and a quantifier is no atom)
+            out[o + 3] = lo;
+            out[o + 4] = hi;
+            atoms = atoms + 1;
+        }
+    }
+    out[0] = atoms;
+    return atoms;
+}
+
+// Whether atom `o` of `prog` takes the character `c`: 1, 0.
+fn takes[&p, &g](p: &p [byte], prog: &g [int], o: int, c: int) -> [] bool {
+    if prog[o] == 0 {
+        return c == prog[o + 1];
+    }
+    if prog[o] == 1 {
+        return true;
+    }
+    let m = in_class(p, prog[o + 1], prog[o + 2], c) == 1;
+    if prog[o] == 3 {
+        return !m;
+    }
+    return m;
+}
+
+// Whether the text `s` has a match of the pattern `p`, compiled into `prog`: 1 or 0. No search and nothing given back: the places of the text (counted in
+// characters) where a match of the atoms so far may end are kept, and an atom moves them on. From a place, an atom that may come `lo` to `hi` times ends at every
+// place from `lo` on to `hi` or to as far as the characters it takes run, whichever is nearer: a stretch, so an atom is one pass over the text, and the whole is
+// atoms by characters, whatever the pattern.
+pub fn matches[&p, &g, &s](p: &p [byte], prog: &g [int], s: &s [byte]) -> [] int {
+    let n = prog[0];
+    let sl = len(s);
+    var found = 0;
+    region r {
+        let cps = alloc_slice[r](sl + 1, 0);
+        var m = 0;
+        var at = 0;
+        while at < sl {
+            let (cp, l) = char_at(s, at, sl);
+            cps[m] = cp;
+            m = m + 1;
+            at = at + l;
+        }
+        // `ends[q]`: a match of the atoms so far may end before character q. With no `^` it may begin anywhere.
+        let ends = alloc_slice[r](m + 1, 0);
+        let run = alloc_slice[r](m + 2, 0);
+        let edge = alloc_slice[r](m + 3, 0);
+        var q = 0;
+        while q <= m {
+            if q == 0 || prog[1] == 0 {
+                ends[q] = 1;
+            }
+            q = q + 1;
+        }
+        var i = 0;
+        while i < n {
+            let o = 3 + 5 * i;
+            // how many characters from q on the atom takes, one after another
+            run[m] = 0;
+            q = m - 1;
+            while q >= 0 {
+                if takes(p, prog, o, cps[q]) {
+                    run[q] = run[q + 1] + 1;
+                } else {
+                    run[q] = 0;
+                }
+                q = q - 1;
+            }
+            q = 0;
+            while q <= m + 1 {
+                edge[q] = 0;
+                q = q + 1;
+            }
+            q = 0;
+            while q <= m {
+                if ends[q] == 1 {
+                    var hi = run[q];
+                    if prog[o + 4] >= 0 && prog[o + 4] < hi {
+                        hi = prog[o + 4];
+                    }
+                    if hi >= prog[o + 3] {
+                        edge[q + prog[o + 3]] = edge[q + prog[o + 3]] + 1;
+                        edge[q + hi + 1] = edge[q + hi + 1] - 1;
+                    }
+                }
+                q = q + 1;
+            }
+            var open = 0;
+            q = 0;
+            while q <= m {
+                open = open + edge[q];
+                if open > 0 {
+                    ends[q] = 1;
+                } else {
+                    ends[q] = 0;
+                }
+                q = q + 1;
+            }
+            i = i + 1;
+        }
+        if prog[2] == 1 {
+            found = ends[m];
+        } else {
+            q = 0;
+            while q <= m {
+                if ends[q] == 1 {
+                    found = 1;
+                }
+                q = q + 1;
+            }
+        }
+    }
+    return found;
+}

@@ -491,6 +491,14 @@ fn emit_col[&s, &t, &m, &o, &c](sql: &s [byte], toks: &t [int], tab: int, col: i
     if r < 0 {
         return r;
     }
+    if sc[9] == 1 {
+        // (`check`: which column the expression names, if it names one)
+        if sc[10] < 0 {
+            sc[10] = col;
+        } else if !same_name(sql, toks, sc[10], col) {
+            sc[11] = 1;
+        }
+    }
     return wname_tok(sql, toks, col, out, sc);
 }
 
@@ -753,6 +761,22 @@ fn visit[&s, &t, &n, &k, &m, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [
         }
         if step == 0 {
             sc[4] = 0;
+            if data == 25 || data == 26 {
+                // `~` and `!~` are calls of PostgreSQL's own functions for them (docs/m3-engine.md 6by): the IR's operators are a closed list, its calls are not
+                r = w8(out, sc, 4);
+                if r >= 0 && data == 25 {
+                    r = wname_lit(out, sc, "textregexeq");
+                } else if r >= 0 {
+                    r = wname_lit(out, sc, "textregexne");
+                }
+                if r >= 0 {
+                    r = w32(out, sc, 2);
+                }
+                if r < 0 {
+                    return r;
+                }
+                return kids[first];
+            }
             r = w8(out, sc, 5);
             if r >= 0 {
                 r = w8(out, sc, ir_op(data));
@@ -982,7 +1006,38 @@ pub fn literal[&s, &t, &n, &k, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes
     if len(sc) > 8 {
         sc[8] = 0;
     }
+    sc[7] = 0;
+    sc[9] = 0;
     let r0 = emit_expr(sql, toks, nodes, kids, root, "", rs, out, sc);
+    if r0 < 0 {
+        return r0;
+    }
+    return sc[0];
+}
+
+// One expression over the columns of one table (a check, docs/m3-engine.md 6bz), lowered alone as `literal` lowers one: `schema` is that table's line and nothing else
+// (the table may not be made yet), `tab` the token of its name. The number of bytes written, or `0 - code`. `sc[10]` is then the token of the column the expression
+// names (-1: it names none) and `sc[11]` whether it names another too: what PostgreSQL makes the check's name of.
+pub fn check[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], nodes: &n [int], kids: &k [int], root: int, tab: int, schema: &m [byte], rs: &!r [int], out: &!o [byte], sc: &!c [int]) -> [] int {
+    sc[0] = 0;
+    sc[1] = 0;
+    sc[2] = 1;
+    sc[3] = 0;
+    sc[4] = 0;
+    sc[5] = 0;
+    sc[7] = 0;
+    if len(sc) > 8 {
+        sc[8] = 0;
+    }
+    sc[16] = 0 - 1;
+    sc[17] = tab;
+    sc[18] = 0;
+    sc[120] = 0 - 1;
+    sc[9] = 1;
+    sc[10] = 0 - 1;
+    sc[11] = 0;
+    let r0 = emit_expr(sql, toks, nodes, kids, root, schema, rs, out, sc);
+    sc[9] = 0;
     if r0 < 0 {
         return r0;
     }
@@ -1806,6 +1861,7 @@ fn lower_as[&s, &t, &n, &k, &m, &r, &o, &c](sql: &s [byte], toks: &t [int], node
     if plain {
         sc[7] = 1;
     }
+    sc[9] = 0;
     sc[0] = 0;
     sc[1] = 0;
     sc[2] = 0;

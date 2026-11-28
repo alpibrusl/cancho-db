@@ -12,8 +12,23 @@ import cdb.parse;
 import cdb.lower;
 import cdb.exec;
 import cdb.execw;
+import cdb.execc;
+import cdb.checks;
 
 // Statements that change what a table is, or empties it, and tell the log each row they touch (docs/m3-engine.md 6ao, 6ar). The engine's own forms: no IR.
+
+// What a statement of this file answers when its table is not found: PostgreSQL's 42P01, unless an index or a sequence has the name (then PostgreSQL says the name is
+// of the wrong kind, or takes the statement for it: neither is here, so it is refused). Found by the differential once a table could fail to be made for its check (6bz).
+fn no_table[&q, &z, &n](p: &!z pager.Pager, w: &!q exec.Work, root: int, name: &n [byte]) -> [file_read] int {
+    let ikl = tables.index_key(name, contents(w.key));
+    let g1 = btree.get(p, contents(w.sc), root, contents(w.key)[0..ikl], contents(w.cur));
+    let skl = tables.sequence_key(name, contents(w.key));
+    let g2 = btree.get(p, contents(w.sc), root, contents(w.key)[0..skl], contents(w.cur));
+    if g1 >= 0 || g2 >= 0 {
+        return exec.unsupported();
+    }
+    return exec.e_no_table();
+}
 
 // TRUNCATE (docs/m3-engine.md 6ao): every row of the table is removed, and is a row deleted (a fact of the commit, as for a table dropped, 6ai). The table stays, and its
 // counter goes on from where it was (PostgreSQL's default, CONTINUE IDENTITY).
@@ -29,6 +44,9 @@ pub fn truncate_table[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, 
     build.put_be(contents(w.nrow), 0, nl, 2);
     exec.copy(contents(w.nrow), 0, 2 + nl, contents(w.lit), 0);
     let r0 = exec.bind_table(p, w, root, contents(w.lit)[0..2 + nl], 0);
+    if r0 == exec.e_no_table() {
+        return no_table(p, w, root, contents(w.lit)[2..2 + nl]);
+    }
     if r0 != 0 {
         return r0;
     }
@@ -71,14 +89,25 @@ pub fn rename_table[&q, &z, &s, &t, &n](p: &!z pager.Pager, w: &!q exec.Work, ro
     // the old name from 0 of `lit`, the new one from 300, each after its length
     let ol = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.lit)[2..258], 0);
     let nl = lower.name_text(sql, toks, nodes[6 * stmt + 4], contents(w.lit)[302..558], 0);
-    if ol < 0 || nl < 0 || !execw.name_ok(contents(w.lit), 302, nl) {
+    if ol < 0 || nl < 0 || !execc.name_ok(contents(w.lit), 302, nl) {
         return exec.unsupported();
     }
     build.put_be(contents(w.lit), 0, ol, 2);
     build.put_be(contents(w.lit), 300, nl, 2);
     let r0 = exec.bind_table(p, w, root, contents(w.lit)[0..2 + ol], 0);
+    if r0 == exec.e_no_table() {
+        return no_table(p, w, root, contents(w.lit)[2..2 + ol]);
+    }
     if r0 != 0 {
         return r0;
+    }
+    // a check that is an expression names its table (docs/m3-engine.md 6bz): a table that has one keeps its name
+    let nck = checks.load(p, w, root);
+    if nck != 0 {
+        if nck < 0 {
+            return nck;
+        }
+        return exec.unsupported();
     }
     // the new name is free: no table, no index and no sequence has it
     var there = false;
@@ -258,7 +287,7 @@ pub fn create_index[&q, &z, &x, &s, &t, &n, &k](p: &!z pager.Pager, w: &!q exec.
         return exec.unsupported();
     }
     let il = lower.name_text(sql, toks, nodes[6 * stmt + 1], contents(w.nrow)[0..256], 0);
-    if il < 0 || !execw.name_ok(contents(w.nrow), 0, il) {
+    if il < 0 || !execc.name_ok(contents(w.nrow), 0, il) {
         return exec.unsupported();
     }
     // the name is free: no index has it, and no table
