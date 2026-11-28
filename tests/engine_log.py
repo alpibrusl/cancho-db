@@ -100,8 +100,11 @@ FIXED = [
 ]
 # a transaction over many tables: its record names each (an effect a table) and is longer than one value of the tree holds, so it is kept in parts (6as)
 MANY = ["many_tables_in_one_commit_%02d" % i for i in range(40)]
+# a table with checks (docs/m3-engine.md 6bz): what the catalog keeps of them is no table, and the export tool's live dump has its rows and nothing else of it
+FIXED += ["create table chkd (k integer primary key, v integer check (v > 0), constraint chkd_named check (k < 1000))", "insert into chkd values (1, 5), (2, 6)",
+          "insert into chkd values (3, 0)", "update chkd set v = v + 1 where k = 2"]
 FIXED += ["create table %s (k integer primary key)" % t for t in MANY] + ["begin"] + ["insert into %s values (%d)" % (t, i) for i, t in enumerate(MANY)] + ["commit"]
-TABLES = ["acct", "note", "pair", "rnd", "gone"] + MANY
+TABLES = ["acct", "note", "pair", "rnd", "gone", "chkd"] + MANY
 
 
 def random_history(rng, n):
