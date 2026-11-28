@@ -562,7 +562,10 @@ def archiving(work, path):
     facts = ("\n".join(["CHODBDL2"] + lines) + "\n").encode()
     kept = sorted(KEPT[1])
     toks = export(path, "tokens")[1]
-    cut = n * 5 // 6
+    # the copy ends before a commit that has facts: an archive that took the facts of the commit after each it took out would otherwise leave the
+    # same count (the first commit, the log's head, has none), and only the commit at the cut would tell
+    has = set(int(l.split("\t")[0]) // 10000000 for l in lines)
+    cut = min(c for c in range(n * 5 // 6, n) if c in has)
 
     def usage():
         return {l.split()[1]: int(l.split()[2]) for l in export(path, "usage")[1].decode().strip().split("\n")}
