@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cancho-db: every write signed, every commit checkable</title>
-<meta name="description" content="A Postgres-compatible proxy whose commit path is verifiable: every transaction is a signed, hash-chained commit that records who wrote, under which capability and which statements, and independent verifiers re-check the log.">
+<meta name="description" content="A database that speaks PostgreSQL's protocol, with its own storage engine: every transaction is a signed, hash-chained commit that records who wrote, under which capability and which statements, and independent verifiers re-check the log.">
 <link rel="canonical" href="https://alpibrusl.github.io/cancho-db/">
 <meta name="robots" content="index, follow">
 <meta property="og:site_name" content="cancho-db">
 <meta property="og:type" content="website">
 <meta property="og:title" content="cancho-db: every write signed, every commit checkable">
-<meta property="og:description" content="The database you can let agents write to: a signed, hash-chained commit for every transaction, checked by three independent verifiers.">
+<meta property="og:description" content="The database you can let agents write to: its own engine behind PostgreSQL's protocol, a signed, hash-chained commit for every transaction, checked by three independent verifiers.">
 <meta property="og:url" content="https://alpibrusl.github.io/cancho-db/">
 <meta name="twitter:card" content="summary">
 <script type="application/ld+json">
@@ -19,7 +19,7 @@
   "@type": "SoftwareApplication",
   "name": "cancho-db",
   "url": "https://alpibrusl.github.io/cancho-db/",
-  "description": "A proxy in front of PostgreSQL that turns every transaction into a signed, hash-chained commit, checks each statement against a capability token before the database sees it, and has verifiers that re-check the log, the authority and the row changes.",
+  "description": "A database with its own storage engine behind PostgreSQL's wire protocol, and a proxy for a stock PostgreSQL, that turn every transaction into a signed, hash-chained commit, check each statement against a capability token, and have verifiers that re-check the log, the authority and the row changes.",
   "applicationCategory": "DeveloperApplication",
   "programmingLanguage": "cancho",
   "license": "https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12",
@@ -111,7 +111,7 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; justify-conten
 <header class="top"><div class="wrap">
   <a class="brand" href=".">cancho-db</a>
   <nav aria-label="Site">
-    <a href="#watch">A real run</a><a class="opt" href="#how">How it works</a><a class="opt" href="#why">What it gives you</a><a class="opt" href="#results">Measured</a><a href="#try">Try it</a>
+    <a href="#watch">A real run</a><a class="opt" href="#how">How it works</a><a class="opt" href="#why">What it gives you</a><a class="opt" href="#status">Where it is</a><a href="#try">Try it</a>
     <a class="opt" href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">Claims</a><a href="https://github.com/alpibrusl/cancho-db">GitHub</a>
   </nav>
 </div></header>
@@ -119,37 +119,44 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; justify-conten
 <main id="main">
 <div class="wrap hero">
   <h1>Every write signed. Every commit checkable.</h1>
-  <p class="sub">cancho-db sits in front of PostgreSQL and turns every transaction into a signed, hash-chained commit that records who wrote, under which capability, and what the statements did. Independent verifiers re-check the log, what each token allowed, and the row changes.</p>
+  <p class="sub">cancho-db is a database with its own storage engine behind PostgreSQL's protocol. Every transaction is a signed, hash-chained commit that records who wrote, under which capability, and what the statements did, and independent verifiers re-check the log, what each token allowed, and the rows.</p>
   <div class="cta"><a class="btn primary" href="#try">Try it</a><a class="btn" href="#how">See how it works</a></div>
 </div>
 
 <div class="wrap" id="watch" style="padding-bottom:2.5rem">
-  <div class="term" role="group" aria-label="A recorded session: writes through the proxy, a refused statement, an erasure, and the log verified">
+  <div class="term" role="group" aria-label="A recorded session: psql against the engine with no PostgreSQL running, a check and a reference refusing rows, a read-only token refused, a cascading delete, and the log verified">
     <div class="bar"><i></i><i></i><i></i> a real run, replayed <button id="replay" type="button" hidden>&#8635; replay</button></div>
-    <pre id="screen" tabindex="0"><span class="d"># a write goes through the proxy; each transaction is one signed commit</span>
-<span class="a">$ PGPASSWORD=$ADMIN psql -h 127.0.0.1 -p 5440 -U agent -d main -c "insert into people values ('ana@example.org', 'Ana Quintero')"</span>
-<span>INSERT 0 1</span>
-<span class="a">$ PGPASSWORD=$ADMIN psql -h 127.0.0.1 -p 5440 -U agent -d main -c "insert into people values ('luis@example.org', 'Luis Vega')"</span>
-<span>INSERT 0 1</span>
-<span class="d"># a token that can only read: the proxy refuses the statement, and PostgreSQL never sees it</span>
-<span class="a">$ PGPASSWORD=$READER psql -h 127.0.0.1 -p 5440 -U agent -d main -c "delete from people"</span>
-<span class="b">ERROR:  effect-denied: the statement was not run</span>
-<span class="a">$ psql -h 127.0.0.1 -p 5532 -U postgres -d site_demo -At -c "select count(*) from people"   # straight to PostgreSQL: nothing was deleted</span>
-<span>2</span>
-<span class="d"># erase a person: the row, the capture's copies of it, and every statement that names her</span>
-<span class="a">$ PGPASSWORD=$ADMIN psql -h 127.0.0.1 -p 5440 -U agent -d main -c "select cancho_erase('people', '[\"ana@example.org\"]')"</span>
-<span>erased: 1 row(s) deleted, 2 delta row(s) scrubbed</span>
-<span class="a">$ grep -c ana@example.org log/log log/tokens log/stmts</span>
-<span>log/log:0</span>
-<span>log/tokens:0</span>
-<span>log/stmts:0</span>
-<span class="a">$ grep -c luis@example.org log/stmts   # another subject's statement is still there</span>
-<span>1</span>
-<span class="d"># then anyone can check the log, with nothing but the log directory and the root key</span>
-<span class="a">$ verify log/log --root $ROOT --tokens log/tokens --stmts log/stmts</span>
-<span class="g">ok commits=3 branches=1 level=2+ir</span></pre>
+    <pre id="screen" tabindex="0"><span class="d"># no PostgreSQL on this machine: psql talks to the engine</span>
+<span class="a">$ pgrep -c postgres</span>
+<span>0</span>
+<span class="a">$ build/engine pages 5450 signing.key root.pub &amp;</span>
+<span>listening</span>
+<span class="a">$ psql -c "create table people (email text primary key check (email ~ '^[^@ ]+@[^@ ]+$'), name text not null)"</span>
+<span>CREATE TABLE</span>
+<span class="a">$ psql -c "create table visits (k integer primary key, who text not null references people (email) on delete cascade)"</span>
+<span>CREATE TABLE</span>
+<span class="a">$ psql -c "insert into people values ('ana@example.org', 'Ana Quintero'), ('luis@example.org', 'Luis Vega')"</span>
+<span>INSERT 0 2</span>
+<span class="a">$ psql -c "insert into people values ('not an email', 'Nobody')"</span>
+<span class="b">ERROR:  cancho-db: error 23514</span>
+<span class="a">$ psql -c "insert into visits values (1, 'ana@example.org'), (2, 'luis@example.org')"</span>
+<span>INSERT 0 2</span>
+<span class="a">$ psql -c "insert into visits values (3, 'eve@example.org')"</span>
+<span class="b">ERROR:  cancho-db: error 23503</span>
+<span class="d"># a token that may only read: the statement is refused before it runs</span>
+<span class="a">$ PGPASSWORD=$READER psql -c "delete from people"</span>
+<span class="b">ERROR:  cancho-db: refused effect-denied</span>
+<span class="d"># a person goes, and her visits with her</span>
+<span class="a">$ psql -c "delete from people where email = 'ana@example.org'"</span>
+<span>DELETE 1</span>
+<span class="a">$ psql -At -c "select who from visits"</span>
+<span>luis@example.org</span>
+<span class="d"># the log is in the page file: read it out, and anyone can check it with the root key alone</span>
+<span class="a">$ build/logexport pages log &gt; log; build/logexport pages tokens &gt; tokens; build/logexport pages stmts &gt; stmts</span>
+<span class="a">$ python3 tools/verify.py log --root $(cat root.pub) --tokens tokens --stmts stmts</span>
+<span class="g">ok commits=5 branches=1 level=2+ir</span></pre>
   </div>
-  <p class="caption">Recorded from real runs of the proxy, <code>psql</code> and the verifier on one machine, trimmed to what fits here (the file names are shortened; the proxy ran on port 5440 in front of PostgreSQL on 5532). It is not a live session. <code>$ADMIN</code> and <code>$READER</code> are capability tokens made with <code>tools/mint.py</code>: the first may read, write and call <code>cancho_erase</code>, the second may only read.</p>
+  <p class="caption">Recorded from one real run of the engine, <code>psql</code> and the verifier on one machine (28 Nov 2026), trimmed: the connection flags of each <code>psql</code> line (<code>-h 127.0.0.1 -p 5450 -U agent -d main</code>, and the password) are left out. It is not a live session. The password is a capability token made with <code>tools/mint.py</code> for test keys; <code>$READER</code>'s grants only reads.</p>
 </div>
 
 <section class="alt" id="why"><div class="wrap">
@@ -157,67 +164,77 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; justify-conten
   <p class="lead">Not a promise that the database behaved: a log that a stranger can check, and a list of what that check does not cover.</p>
   <div class="cards">
     <div class="card"><div class="ic">&#128279;</div><h3>Signed, chained commits</h3><p>Every transaction is one commit in an append-only log, signed with Ed25519 and chained by SHA-256. A verifier needs only those two functions to say whether the log is intact, in order and not cut short (L1).</p></div>
-    <div class="card"><div class="ic">&#128273;</div><h3>Authority, checked twice</h3><p>A capability token can only narrow. The proxy checks each statement against it before PostgreSQL sees it, and a verifier re-derives what the recorded statements do and compares it with what the commit says (L2).</p></div>
-    <div class="card"><div class="ic">&#9202;</div><h3>Replayable data</h3><p>Triggers capture every row change. A verifier replays them and checks that the tables hold exactly what the log says they should (L3a).</p></div>
-    <div class="card"><div class="ic">&#127807;</div><h3>Branches, <code>AS OF</code> and merge</h3><p><code>cancho_fork</code> gives an agent its own branch; <code>AS OF</code> reads a table as a commit left it; <code>cancho_merge</code> is a checked three-way merge, or nothing if there is a conflict.</p></div>
-    <div class="card"><div class="ic">&#128683;</div><h3>Erasure that still verifies</h3><p><code>cancho_erase</code> deletes a person's rows and what the capture kept of them, and rewrites the statements that name them. Hashes and commitments stay, so the log still verifies.</p></div>
-    <div class="card"><div class="ic">&#128209;</div><h3>Honest about its limits</h3><p>Every claim has a row saying what it rests on and what it does <em>not</em> show. A refusal always carries a rule tag.</p></div>
+    <div class="card"><div class="ic">&#128273;</div><h3>Authority, checked twice</h3><p>A capability token can only narrow. Each statement is checked against it before it runs, and a verifier re-derives what the recorded statements do and compares it with what the commit says (L2).</p></div>
+    <div class="card"><div class="ic">&#9202;</div><h3>Replayable data</h3><p>Each commit carries the row changes it made. A verifier replays them and checks that the tables hold exactly what the log says they should (L3a).</p></div>
+    <div class="card"><div class="ic">&#127807;</div><h3>History you can read</h3><p><code>AS OF</code> reads a table as a commit left it, a fork gives an agent its own branch, and transactions can run side by side, the loser refused rather than merged wrongly.</p></div>
+    <div class="card"><div class="ic">&#128683;</div><h3>Erasure that still verifies</h3><p>An erase removes a row and every past version of it from the file. Salted hashes and commitments stay, so the log still verifies.</p></div>
+    <div class="card"><div class="ic">&#128209;</div><h3>Honest about its limits</h3><p>Every claim has a row saying what it rests on and what it does <em>not</em> show. A statement outside what it does is refused with a rule tag, never run some other way.</p></div>
   </div>
 </div></section>
 
 <section id="how"><div class="wrap">
   <h2>How it works</h2>
-  <p class="lead">A proxy in front of an ordinary PostgreSQL. Agents connect with a token as the password; whatever the proxy writes, the verifiers check.</p>
+  <p class="lead">One server, no PostgreSQL behind it. Clients connect with a token as the password; whatever the engine commits, the verifiers check.</p>
   <div class="diagram">
-  <svg viewBox="0 0 760 340" role="img" aria-label="Flow: a client sends a statement to the guard, which lowers it to an intermediate form and checks it against the token; a statement that is not allowed is refused with a rule tag and never reaches PostgreSQL; an allowed one runs in PostgreSQL, where triggers capture the row changes; the proxy writes a signed commit to the log directory; verifiers read the log directory and compare the tables.">
+  <svg viewBox="0 0 760 340" role="img" aria-label="Flow: a client sends a statement to the engine's server, which checks the token, lowers the statement and checks its effects; a statement that is not allowed is refused with a rule tag and never runs; an allowed one runs on the page file, where the rows and the signed log are kept together; the export tool reads the log out of the page file for the verifiers, which compare it with the tables.">
     <defs>
       <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker>
       <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker>
       <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker>
     </defs>
     <rect class="box" x="10" y="30" width="130" height="64" rx="10"/><text x="75" y="58" text-anchor="middle">A client</text><text class="sm" x="75" y="78" text-anchor="middle">psql, a driver</text>
-    <rect class="boxa" x="190" y="30" width="170" height="64" rx="10"/><text x="275" y="58" text-anchor="middle">The guard</text><text class="sm" x="275" y="78" text-anchor="middle">lower to IR, check token</text>
-    <rect class="box" x="410" y="30" width="150" height="64" rx="10"/><text x="485" y="58" text-anchor="middle">PostgreSQL</text><text class="sm" x="485" y="78" text-anchor="middle">tables and triggers</text>
+    <rect class="boxa" x="190" y="30" width="170" height="64" rx="10"/><text x="275" y="58" text-anchor="middle">The server</text><text class="sm" x="275" y="78" text-anchor="middle">token, effects, executor</text>
+    <rect class="boxa" x="410" y="30" width="150" height="64" rx="10"/><text x="485" y="58" text-anchor="middle">The page file</text><text class="sm" x="485" y="78" text-anchor="middle">rows, history, the log</text>
     <path class="arrow" d="M140 62H188"/><path class="arrow" d="M360 62H408"/>
-    <rect class="boxa" x="250" y="150" width="170" height="64" rx="10"/><text x="335" y="178" text-anchor="middle">Log directory</text><text class="sm" x="335" y="198" text-anchor="middle">log, tokens, statements</text>
-    <path class="arrow" d="M330 94V148"/>
-    <text class="sm" x="340" y="126">a signed commit</text>
-    <rect class="ok" x="470" y="150" width="190" height="64" rx="10"/><text x="565" y="178" text-anchor="middle">Verifiers (three)</text><text class="sm" x="565" y="198" text-anchor="middle">L1 · L2 · L3a</text>
-    <path class="arrow" d="M420 182H468"/>
-    <path class="arrow good" d="M520 150V98"/>
-    <text class="smg" x="530" y="126">compare the tables</text>
+    <rect class="box" x="410" y="150" width="150" height="64" rx="10"/><text x="485" y="178" text-anchor="middle">logexport</text><text class="sm" x="485" y="198" text-anchor="middle">reads, never writes</text>
+    <path class="arrow" d="M485 94V148"/>
+    <rect class="ok" x="590" y="150" width="160" height="64" rx="10"/><text x="670" y="178" text-anchor="middle">Verifiers (three)</text><text class="sm" x="670" y="198" text-anchor="middle">L1 · L2 · L3a</text>
+    <path class="arrow" d="M560 182H588"/>
+    <path class="arrow good" d="M640 150V98H562"/>
+    <text class="smg" x="648" y="126">compare the tables</text>
     <path class="arrow bad" d="M215 94V262"/>
     <text class="smb" x="132" y="140">not allowed</text>
-    <rect class="no" x="40" y="264" width="320" height="58" rx="10"/><text x="200" y="288" text-anchor="middle">Refused, with a rule tag</text><text class="sm" x="200" y="308" text-anchor="middle">PostgreSQL never sees the statement</text>
+    <rect class="no" x="40" y="264" width="320" height="58" rx="10"/><text x="200" y="288" text-anchor="middle">Refused, with a rule tag</text><text class="sm" x="200" y="308" text-anchor="middle">the statement never runs</text>
   </svg>
   </div>
-  <p class="fine">The three verifiers are one in cancho, one in Python and one in Go that a separate agent session wrote from the specs alone; they must agree on every golden vector. What that does and does not show is in <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">claims.md</a>.</p>
+  <p class="fine">The three verifiers are one in cancho, one in Python and one in Go that a separate agent session wrote from the specs alone; they must agree on every golden vector. The same log is written by a proxy that sits in front of a stock PostgreSQL instead (the first form, still kept). What that does and does not show is in <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">claims.md</a>.</p>
 </div></section>
 
-<section class="alt" id="results"><div class="wrap">
+<section class="alt" id="status"><div class="wrap">
+  <h2>Where it is</h2>
+  <p class="lead">Each step is done when a test says so, not on a date.</p>
+  <ul class="small">
+    <li><strong>The specs and three verifiers: built.</strong> The commit and log format, capability tokens, the statement IR and the row facts, with golden vectors.</li>
+    <li><strong>The proxy in front of PostgreSQL: built.</strong> psql and five drivers; branches, <code>AS OF</code>, merge, replay, erasure.</li>
+    <li><strong>The engine: built and served.</strong> A crash-tested copy-on-write B+tree with the log inside it, and PostgreSQL's protocol, simple and extended. It serves TLS, clients from other machines with a login, up to 128 connections, and transactions side by side. SQL with joins, aggregates, indexes, times, <code>returning</code>, <code>check</code> constraints and references with <code>cascade</code>. Each statement is answered as PostgreSQL answers it or refused with a rule tag.</li>
+    <li><strong>Real clients on it: started.</strong> <code>cancho-hooks</code> runs on the engine and passes 43 checks across the 11 scenarios of its own history test. <code>cancho-ota</code> applies 45 of its 49 migration statements as written; 55 of its 134 queries run so far.</li>
+  </ul>
+</div></section>
+
+<section id="results"><div class="wrap">
   <h2>Measured, not promised</h2>
   <div class="nums">
     <div class="num"><b><span data-n="vectors">467</span></b><span>golden vectors, one tampered or refused case for each rule</span></div>
     <div class="num"><b>3</b><span>verifiers that agree on every one</span></div>
-    <div class="num"><b><span data-n="mutants">1,903</span></b><span>deliberate faults, each of which must make a check fail</span></div>
+    <div class="num"><b><span data-n="mutants">1,903</span></b><span>deliberate faults, each of which must make a test fail</span></div>
     <div class="num"><b><span data-n="claims">226</span></b><span>claims, each with what it rests on and what it does not show</span></div>
   </div>
-  <p class="fine">These counts are written into this page by <code>scripts/site.py</code> from the repository, and <code>scripts/check.sh</code> fails if they are stale. A count says how much is checked, not that nothing is missing; the next section says what is.</p>
+  <p class="fine">These counts are written into this page by <code>scripts/site.py</code> from the repository, and <code>scripts/check.sh</code> fails if they are stale. The engine is held to PostgreSQL by random histories and fixed statements on every change, to crash and failing-<code>fsync</code> tests, and to a soak under kills. A count says how much is checked, not that nothing is missing; the next section says what is.</p>
 </div></section>
 
-<section id="print"><div class="wrap">
+<section class="alt" id="print"><div class="wrap">
   <h2>What it is not, yet</h2>
   <ul class="small">
-    <li><strong>A proxy, not a database.</strong> It runs in front of PostgreSQL, which still stores the data; its own storage engine (M3) is being built and tested against PostgreSQL statement by statement, and nothing is served from it yet. The upstream role must be allowed to create triggers and event triggers, and every table needs a primary key.</li>
-    <li><strong>A SQL subset.</strong> No subqueries, CTEs, set operations or window functions, and a closed set of DDL. A statement outside it is refused with a rule tag, never run.</li>
+    <li><strong>A SQL subset.</strong> No subqueries in <code>from</code>, CTEs, set operations or window functions; no <code>on conflict do update</code>. A statement outside the subset is refused with a rule tag, never run some other way.</li>
+    <li><strong>Not a way to move a database off PostgreSQL yet.</strong> The engine serves a database it was given from the start; the shadow run that would take one over from PostgreSQL is designed and not built, and neither is merge on the engine.</li>
+    <li><strong>Not fast.</strong> Every commit is signed: on the test disk a commit's file writes cost about 0.6 ms and its signature 3.8 ms.</li>
     <li><strong>Values bound by a client are not recorded</strong> (L3b is not built), and snapshots are not built.</li>
-    <li><strong>Erasure has edges.</strong> It is by table and key; a subject who appears in other statements only in other forms, or by a number, is found by an offline tool, not by the key. PostgreSQL's own storage and any copy made outside the system are not wiped.</li>
-    <li><strong>One commit at a time, loopback clients only,</strong> and every commit costs a signature: the proxy is much slower per statement than PostgreSQL alone. The measurements are in <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/m1-commit-path.md">m1-commit-path.md</a>.</li>
+    <li><strong>Erasure has edges.</strong> It is by table and key; a copy made outside the system, or a backup, is not wiped.</li>
     <li><strong>A working name.</strong> The claims page lists every claim and what each one leaves out.</li>
   </ul>
 </div></section>
 
-<section class="alt" id="try"><div class="wrap">
+<section id="try"><div class="wrap">
   <h2>Try it</h2>
   <p class="lead">Check a log first: you need the <a href="https://github.com/alpibrusl/cancho">cancho</a> compiler, or just Python, and nothing else.</p>
 <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho-db &amp;&amp; cd cancho-db
@@ -226,18 +243,19 @@ cancho build --std src/commit.cho src/verify.cho -o verify    # or: python3 tool
 ok commits=3 branches=1
 ./verify vectors/seq_skips.log
 reject rule=seq-gap record=1</code></pre>
-  <p class="lead">Then put the proxy in front of a PostgreSQL you can throw away:</p>
-<pre class="code" tabindex="0"><code>proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres ./log ./signing.key
-PGPASSWORD=$(python3 tools/mint.py password) psql -h 127.0.0.1 -p 5440 -U agent -d main -c 'select 1'
-build/verify log/log --root $ROOT --tokens log/tokens --stmts log/stmts</code></pre>
-  <p class="fine">The README has the build line for the proxy, the arguments, and what <code>tools/mint.py</code> mints. The gates are run by <code>sh scripts/check.sh</code>, against a real PostgreSQL.</p>
+  <p class="lead">Then run the engine and talk to it with psql:</p>
+<pre class="code" tabindex="0"><code>sh scripts/check.sh checks                      # builds build/engine and build/logexport, and runs the tests
+build/engine pages 5450 signing.key root.pub    # page file, port, the log's signing seed, the token root
+PGPASSWORD=$(python3 tools/mint.py password --effects 'r:*,w:*,d:*,c:*,n:*') psql -h 127.0.0.1 -p 5450 -U agent -d main</code></pre>
+  <p class="fine">The README has the options (<code>tls=</code>, <code>places=</code>), how to read the log out and verify it, and the proxy for a stock PostgreSQL. <code>tools/mint.py</code> makes tokens for test keys only.</p>
 </div></section>
 
-<section id="docs"><div class="wrap">
+<section class="alt" id="docs"><div class="wrap">
   <h2>Go deeper</h2>
   <div class="tg">
     <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/design.md">Design</a>
     <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/claims.md">Claims</a>
+    <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/m3-engine.md">The engine</a>
     <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/commit.md">Commit format (L1)</a>
     <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/token.md">Tokens (L2)</a>
     <a href="https://github.com/alpibrusl/cancho-db/blob/main/docs/spec/ir.md">Statement IR</a>

@@ -1,44 +1,123 @@
 # cancho-db
 
-A Postgres-compatible database whose commit path is verifiable: every write becomes a signed, hash-chained commit that
-records who wrote, under which capability, and running which code. *The database you can let agents write to.*
-Working name. The design is [`docs/design.md`](docs/design.md).
+A database that speaks PostgreSQL's protocol and whose every write is checkable: each transaction is a signed, hash-chained
+commit that records who wrote, under which capability, and what the statements did, and independent verifiers re-check the
+log, the authority and the rows. *The database you can let agents write to.* Working name. The design is
+[`docs/design.md`](docs/design.md); what is claimed, what each claim rests on and what it does not show is
+[`docs/claims.md`](docs/claims.md).
+
+It comes in two forms that write the same log:
+
+- **The engine** (M3): its own storage and SQL executor, served over PostgreSQL's wire protocol with no PostgreSQL anywhere.
+  This is where the work is now.
+- **The proxy** (M1, M2): a guard in front of a stock PostgreSQL, which still stores the data.
 
 ## Status
 
-**M0 (spec and verifier): built.**
+| Milestone | State |
+|---|---|
+| M0 Spec and verifier | **Built.** Four specs, 467 golden vectors, three verifiers (cancho, Python, Go) that agree on every one. |
+| M1 The proxy | **Built.** psql and five drivers connect with a capability token as the password; every statement is checked before PostgreSQL sees it. |
+| M2 Branches and replay | **Built.** Row-change capture, branches, `AS OF`, a checked merge, the replay verifier (L3a), erasure. |
+| M3 The engine | **Mostly built and served.** What is not: the shadow run that moves an existing PostgreSQL database onto it, and merge on the engine. |
+| M4 PostgreSQL removed | **Started, client by client.** One sibling project runs on the engine; a second is being measured. |
 
-- [`docs/spec/commit.md`](docs/spec/commit.md): the byte-level commit and log format and **L1 (integrity)**
-  verification, written so a verifier needs only SHA-256 and Ed25519.
-- [`docs/spec/token.md`](docs/spec/token.md): capability tokens (a chain of signed blocks that can only narrow) and
-  **L2 (authority)**: was each commit allowed by the token it presented?
-- [`docs/spec/ir.md`](docs/spec/ir.md): the **statement IR** (the bound form of a SQL subset) and effect inference,
-  so that L2 can check that a commit's recorded effects are *what its statements do*, not only what the server says.
-- [`docs/spec/state.md`](docs/spec/state.md): the facts a commit changed, `changes` (a Merkle root over them) and `state` (a chain of changes).
-- [`vectors/`](vectors): 467 golden vectors, valid chains and one tampered, malformed or denied case for each rule.
-- Three verifiers that must agree on every one: [`src/`](src) in cancho (no C, no foreign call),
-  [`tools/verify.py`](tools/verify.py) in Python, and [`verifiers/go/`](verifiers/go) in Go, written from the specs alone
-  by a separate agent session (see its README and [`docs/claims.md`](docs/claims.md) for what that does and does not show).
+### The engine
 
-**M1 (the proxy in front of PostgreSQL): built** ([`docs/m1-proxy.md`](docs/m1-proxy.md), [`docs/m1-commit-path.md`](docs/m1-commit-path.md)).
-psql, psycopg 2 and 3, pg8000, asyncpg and node-postgres connect with a capability token as the password. Every statement is parsed,
-lowered to the IR and its effects checked against the token before PostgreSQL sees it; a refusal has a rule tag and never reaches the database. Every
-transaction is one signed, hash-chained commit, made durable before PostgreSQL commits (a two-phase commit, settled by recovery after a crash). Simple and extended protocol; only loopback clients are served.
-The SQL is a subset (no subqueries, CTEs, set operations or window functions; a closed set of DDL): [`docs/claims.md`](docs/claims.md) lists what is refused.
+A page file holding a copy-on-write B+tree and two superblocks, crash-tested at every durable step, with a provoked failing
+`fsync` (the server refuses and ends; what it acknowledged is there after a restart). Its server speaks PostgreSQL's
+protocol, simple and extended, to psql and to `cancho-pg`'s client:
 
-**M2 (row changes, branches, `AS OF`, merge, the replay verifier L3a): built** ([`docs/m2-branches.md`](docs/m2-branches.md)).
-Built: **row-delta capture** (triggers installed by the proxy; every commit carries the real `changes` and `state`), and **branches**:
-`select cancho_fork('name')` copies the data into a schema of its own and starts a new chain in the log; a connection chooses its branch by the database name.
-**`AS OF`**: `select ... from t as of '<commit id>'` reads a table as a commit left it (on any branch; the commit is named in the statement, so the log records which past was read, and a token must grant it).
-**`cancho_merge`**: `select cancho_merge('<source>')` merges a branch into the connection's branch (a three-way merge by key against the common ancestor read `AS OF`): one commit with two parents, or nothing if there is a conflict.
-**L3a (delta replay)** ([`docs/spec/l3a.md`](docs/spec/l3a.md)): given the delta store the database keeps, a verifier checks that each commit's `changes` and `state` are what the stored row changes give, that the changes fit together, and (given a dump of the tables) that the tables hold exactly what they say; in cancho (`proxy/l3averify.cho`), in Python (`tools/l3a.py`) and as a third reading by a separate agent session (`tests/third/`), on 72 golden cases.
-**Erasure** (`select cancho_erase('<table>', '<key>')`, [`docs/m2g-erasure.md`](docs/m2g-erasure.md)): salted row hashes and key commitments, statement constants kept as erasable payloads, the proxy rewriting its own statement store, and L3a over erased rows; what it does not reach is in the claims (C128 to C143).
-Not built: recording of bound values (L3b) and snapshots. Without `--stmts`, L2
-checks only the commit's *recorded* effect set against its token; with it, the recorded set is shown to equal what the
-statements infer. That the store holds what was actually executed is L3's (see [`docs/claims.md`](docs/claims.md)), which says what is claimed, what each claim rests on, and what is *not*
-claimed.
+- **The log is in the page file.** Every commit that changed rows is signed and chained with what it wrote, and the
+  three verifiers read it through `logexport`, the export tool. A client logs in with a capability token, and the log
+  records who wrote and which statements ran.
+- **SQL**, each statement answered as PostgreSQL answers it (16 here, 18 in CI) or refused with a rule tag:
+  - `create table`, `insert`, `update`, `delete`, `select` with joins, aggregates, `group by`, `having`, `order by`,
+    `limit`, `distinct`, `case`, `cast`, `like`, `in`, a scalar subquery;
+  - `returning`, `on conflict do nothing`, `truncate`, `alter table add column` and `rename`;
+  - indexes, unique ones too, used by `select`, `update` and `delete`;
+  - identity columns, `serial` and sequences;
+  - `timestamp`, `timestamptz` and `now()`;
+  - `check` constraints of any expression it computes, including `~`, `!~` and `length`;
+  - references to another table's key, with `on delete cascade` and `set null`.
+- **History**: `AS OF` a commit, a fork, and an erase that removes a row and every past version of it from the file,
+  while the log still verifies.
+- **Connections**: up to 128 at once. Clients from other machines are served through TLS (the server ends it itself)
+  with a login. Reads go on beside a transaction. Transactions can run side by side at `serializable` or `repeatable
+  read`, a loser is refused `40001`.
+- **Operations**: a copy of the page file taken while the server runs, the log's oldest part archived out of the file, a
+  soak of ten minutes under kills (52,292 commits through 18 kills, its invariants held throughout).
 
-## Use
+How it is held to that: a differential against PostgreSQL (random histories of 3,000 statements on several seeds, over a
+thousand fixed statements, and a list of what is refused on purpose with PostgreSQL's answer beside it), the crash and
+fault tests, and about 1,900 mutants. Each mutant is a deliberate fault that some test must catch.
+
+**Its clients.** [`cancho-hooks`](https://github.com/alpibrusl/cancho-hooks) runs on it: its own history test passes 43
+checks across its 11 scenarios. Seven statements that make PostgreSQL roles were cut from a copy of the test; nothing else
+was changed. `cancho-ota` is being measured ([`docs/m3-engine.md`](docs/m3-engine.md) 6bx):
+
+- its 49 migration statements: 45 run as written;
+- its 134 queries: 55 run on that schema, which says a statement was answered, not yet that its answer is right.
+
+Running its own test suite against the engine is the next measure.
+
+**What the engine does not do yet:**
+- subqueries in `from` or `exists`, CTEs, set operations, window functions;
+- `on conflict do update`, a statement with `with` that writes;
+- a reference of several columns, `on update` actions;
+- merge;
+- taking over a database PostgreSQL holds (the shadow run, M3j).
+
+It is not a speed project: a commit's file writes cost about 0.6 ms on the test disk, its signature 3.8 ms.
+
+### The proxy
+
+psql, psycopg 2 and 3, pg8000, asyncpg and node-postgres connect with a capability token as the password. Every statement
+is parsed, lowered to the statement IR and its effects checked against the token before PostgreSQL sees it; a refusal has a
+rule tag and never reaches the database. Every transaction is one commit, made durable before PostgreSQL commits (a
+two-phase commit, settled by recovery after a crash). Triggers capture every row change, so each commit carries its real
+`changes` and `state`. Branches are `cancho_fork`, `AS OF` reads a table as a commit left it, `cancho_merge` is a three-way
+merge by key (nothing if there is a conflict), and `cancho_erase` removes a person's rows, the capture's copies and the
+statements that name them while the log still verifies. Loopback clients only, one commit at a time, the same SQL subset.
+
+### The specs and the verifiers
+
+- [`docs/spec/commit.md`](docs/spec/commit.md): the commit and log format and **L1 (integrity)**, needing only SHA-256 and Ed25519.
+- [`docs/spec/token.md`](docs/spec/token.md): capability tokens (signed blocks that can only narrow) and **L2 (authority)**.
+- [`docs/spec/ir.md`](docs/spec/ir.md): the **statement IR** and effect inference, so L2 checks that a commit's effects are what its statements do.
+- [`docs/spec/state.md`](docs/spec/state.md) and [`docs/spec/l3a.md`](docs/spec/l3a.md): the facts a commit changed, and **L3a**, the replay of them against the tables.
+- Three verifiers that must agree on every vector:
+  - [`src/`](src) in cancho;
+  - [`tools/verify.py`](tools/verify.py) in Python;
+  - [`verifiers/go/`](verifiers/go) in Go, written from the specs alone by a separate agent session.
+
+Not built: recording of the values a client binds (L3b), and snapshots.
+
+## Run the engine
+
+`sh scripts/check.sh checks` builds it as `build/engine`, with the export tool as `build/logexport` (the build lines are in
+the script; the server needs the compiler's TLS package). Then:
+
+```console
+$ build/engine pages 5450 signing.key root.pub        # page file, port, the log's signing seed, the root that signs tokens (hex files)
+listening
+$ PGPASSWORD=$(python3 tools/mint.py password --effects 'r:*,w:*,d:*,c:*,n:*') psql -h 127.0.0.1 -p 5450 -U agent -d main
+```
+
+Trailing options: `tls=DIRECTORY` (a `chain.pem` and `key.pem`), `places=N` (connections at once). Without a root file
+there is no login; without a signing key nothing is recorded. The rest are in [`proxy/engine.cho`](proxy/engine.cho).
+
+The log, read out of the page file and verified:
+
+```console
+$ build/logexport pages log > log; build/logexport pages tokens > tokens; build/logexport pages stmts > stmts
+$ python3 tools/verify.py log --root $(cat root.pub) --tokens tokens --stmts stmts
+ok commits=5 branches=1 level=2+ir
+```
+
+`tools/mint.py` makes tokens for the test keys only: their keys are derived from fixed strings.
+
+## Verify a log
 
 ```console
 $ cancho build --std src/commit.cho src/verify.cho -o verify
@@ -50,46 +129,25 @@ $ ./verify vectors/truncated_tail_pinned.log --expect eace04f4...671d   # the la
 reject rule=expected-missing record=-1
 ```
 
-Exit status 0 for `ok`, 1 for `reject`, 2 for a usage error or a file that cannot be read. `python3 tools/verify.py`
-takes the same arguments and prints the same lines. A log is *not* shown to be complete by verifying: pass `--expect`
-the last commit id you were given, or a removed tail goes unnoticed ([spec §5](docs/spec/commit.md)).
+The exit status is 0 for `ok`, 1 for `reject`, and 2 for a usage error or a file that cannot be read. `python3
+tools/verify.py` takes the same arguments.
 
-L2 is switched on by naming the root key and the token store (and, optionally, the signed revocation list and, for the
-statement IR, `--stmts`):
+A log is *not* shown to be complete by verifying it. Pass `--expect` with the last commit id you were given, or a removed
+tail goes unnoticed ([spec §5](docs/spec/commit.md)). L2 needs `--root` and `--tokens`. With `--stmts`, the recorded
+effects are shown to be what the statements do: a server that hides a write passes without it and is refused with it
+(`vectors/ir_gap_*`).
 
-```console
-$ ./verify vectors/l2_ok_basic.log --root $ROOT --tokens vectors/l2_ok_basic.tokens
-ok commits=3 branches=1 level=2
-$ ./verify vectors/l2_effect_denied_ddl.log --root $ROOT --tokens vectors/l2_effect_denied_ddl.tokens
-reject rule=effect-denied record=0
-```
-
-(`$ROOT` is the key in the vector's `.args` file; the vectors' keys are derived from fixed strings, for testing only.)
-
-With the statement store, a server that hides what it did is refused (`ir_gap_*` is this case, with and without it):
+## The proxy, by hand
 
 ```console
-$ ./verify vectors/ir_gap_hidden_write_passes_l2_alone.log --root $ROOT --tokens vectors/ir_gap_hidden_write_passes_l2_alone.tokens
-ok commits=1 branches=1 level=2
-$ ./verify vectors/ir_gap_hidden_write_is_refused_with_statements.log --root $ROOT \
-    --tokens vectors/ir_gap_hidden_write_is_refused_with_statements.tokens --stmts vectors/ir_gap_hidden_write_is_refused_with_statements.stmts
-reject rule=effects-mismatch record=0
-```
-
-## The proxy
-
-```console
-$ cancho build --std proxy/proxy.cho src/commit.cho src/token.cho src/login.cho src/lex.cho src/parse.cho src/stmt.cho src/lower.cho src/ir.cho src/guard.cho src/snapshot.cho src/build.cho src/store.cho src/l1.cho src/upstream.cho src/shared.cho src/commitpath.cho src/catalog.cho src/extended.cho src/capture_sql.cho src/state.cho src/fork.cho src/forkpath.cho src/erase.cho src/asof.cho -o proxy
-$ proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres ./log ./signing.key   # listen port, upstream host and port, first branch, root key, upstream role, database, log directory, signing key (32 bytes)
+$ proxy 5440 127.0.0.1 5432 main $ROOT postgres postgres ./log ./signing.key   # listen port, upstream, first branch, root key, role, database, log directory, signing key
 $ PGPASSWORD=$(python3 tools/mint.py password) psql -h 127.0.0.1 -p 5440 -U agent -d main -c 'select 1'
-$ PGPASSWORD=... psql -h 127.0.0.1 -p 5440 -U agent -d main -c "select cancho_fork('feature')"
-$ PGPASSWORD=... psql -h 127.0.0.1 -p 5440 -U agent -d feature      # the database name is the branch
+$ PGPASSWORD=... psql -h 127.0.0.1 -p 5440 -U agent -d main -c "select cancho_fork('feature')"   # the database name is the branch
 ```
 
-The password is `base64url(token ‖ the last key's seed)`; `tools/mint.py` makes one for the test keys. The upstream role must be allowed to create triggers and event
-triggers (the row-change capture is installed at start), and every table needs a primary key. The log directory holds the log, the tokens and the statements, which the verifiers read:
-`build/verify log --root $ROOT --tokens ./log/tokens --stmts ./log/stmts`. The gates are `tests/proxy_e2e.py`, `tests/ext_e2e.py`, `tests/drivers_e2e.py`, `tests/changes_e2e.py` and
-`tests/fork_e2e.py`, `tests/asof_e2e.py` and `tests/merge_e2e.py`, against a real PostgreSQL and the stock clients.
+The upstream role must be allowed to create triggers and event triggers, and every table needs a primary key. The build
+line is in `scripts/check.sh`. Its documents are [`docs/m1-proxy.md`](docs/m1-proxy.md),
+[`docs/m1-commit-path.md`](docs/m1-commit-path.md) and [`docs/m2-branches.md`](docs/m2-branches.md).
 
 ## Test
 
@@ -97,18 +155,28 @@ triggers (the row-change capture is installed at start), and every table needs a
 $ CANCHO=/path/to/cancho sh scripts/check.sh
 ```
 
-Runs what CI runs: formatting, vectors regenerate byte for byte, all three verifiers on every vector, the command lines,
-the authority report, the attenuation property over thousands of random tokens, 4,500 differentially fuzzed inputs (the
-verifiers agree and none crashes), the parser, lowering and row-capture differentials against PostgreSQL, the proxy and fork end to end, and about 700 mutants (every one must make a check fail; the proxy
-ones take about an hour). Needs `python3` with `cryptography`, the cancho compiler at the revision in [`cancho.toml`](cancho.toml), `go`, `strace`, `psql` and a PostgreSQL 16 server (the script starts a throwaway one).
+This runs what CI runs:
 
-The script takes a part to run alone: `checks` (everything but the mutants) or `mutants-a` to `mutants-f` (a shard of the mutants, after building what they are
-held against). CI runs the seven as seven jobs at once; with no argument it runs everything, as CI's jobs do together.
+- formatting, and the vectors regenerated byte for byte;
+- the three verifiers on every vector, and fuzzed inputs that none may crash on;
+- the differentials of the parser, the lowering, the evaluator and the engine against PostgreSQL;
+- the crash, fault, wire, TLS, side-by-side and soak tests;
+- the end-to-end tests of the proxy;
+- every mutant.
+
+It needs:
+- `python3` with `cryptography`;
+- the cancho compiler at the revision in [`cancho.toml`](cancho.toml), and its repository, for the TLS package;
+- `go`, `strace` and `psql`;
+- a PostgreSQL server (16 here; CI runs 18). The script starts a throwaway one.
+
+`checks` runs everything but the mutants; `mutants-a` to `mutants-f` run a shard of them each. CI runs the seven at once.
 
 ## Landing page
 
-`docs/index.html`, one self-contained page in the style of the other cancho projects (`cancho-stats`, `cancho-ml`, `cancho-table`). GitHub Pages serves it with Settings > Pages > Source set to "Deploy from a branch", branch `main`, folder `/docs`.
-The counts in it (vectors, mutants, claims) are written by `python3 scripts/site.py` and checked by `scripts/check.sh`; the replayed session is a recording of real runs, not generated.
+`docs/index.html`, one self-contained page, served by GitHub Pages from branch `main`, folder `/docs`. Its counts (vectors,
+mutants, claims) are written by `python3 scripts/site.py` and checked by `scripts/check.sh`. The replayed session in it is a
+recording of a real run of the engine, trimmed; it is not generated.
 
 ## Licence
 
